@@ -1,0 +1,14 @@
+# build/reflaxe-cpp.hxml — shared reflaxe.CPP configuration.
+#
+# Include this from any hxml that targets C++.  Paths are relative to the REPOSITORY ROOT:
+# every script cds there first, and every hxml here assumes it.
+#
+# The two -p lines are not optional. reflaxe.CPP ships its standard library under std/ and its
+# core-type overrides under std/cxx/_std, and declares them in haxelib.json's "reflaxe.stdPaths".
+# That declaration is only consumed by `haxelib run reflaxe` (which flattens a release build);
+# a plain `-lib reflaxe.cpp` against a source checkout does NOT pick it up, and you get
+# "Type not found : cxx.Compiler". Verified 2026-08-08 — see PROGRESS.md [M0-VERIFY] #1.
+
+-lib reflaxe.cpp
+-p vendor/reflaxe.CPP/std
+-p vendor/reflaxe.CPP/std/cxx/_std

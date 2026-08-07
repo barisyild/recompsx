@@ -10,7 +10,7 @@ verbatim rather than from this summary.
 
 ```
 core/   Runtime.hx CpuState.hx Scheduler.hx TimeBase.hx Irq.hx Log.hx Hash.hx Fatal.hx
-mem/    RawBytes(shim) Memory.hx IoDispatch.hx
+mem/    RawMem(shim) Memory.hx IoDispatch.hx
 kernel/ Kernel.hx KEvents.hx KHeap.hx KFiles.hx KPads.hx ExeLoader.hx OverlayMgr.hx
 gpu/    Gpu.hx Raster.hx Scanout.hx
 gte/    Gte.hx UnrTable.hx
@@ -28,7 +28,7 @@ Address map (physical, after `p = a & 0x1FFFFFFF`; KSEG2 detected on unmasked `(
 |---|---|---|---|
 | 0x00000000–0x007FFFFF | 8MB window | RAM 2MB ×4 mirrors | `ram.get*(p & 0x1FFFFF)` |
 | 0x1F000000–0x1F7FFFFF | 8MB | Expansion 1 | reads 0xFF bytes, writes ignored, log-once |
-| 0x1F800000–0x1F8003FF | 1KB | Scratchpad | `scratch` RawBytes; no DMA; never executable |
+| 0x1F800000–0x1F8003FF | 1KB | Scratchpad | `scratch` RawMem; no DMA; never executable |
 | 0x1F801000–0x1F803FFF | 12KB | I/O + Exp2 | `IoDispatch` (0x1F802041 POST logged) |
 | 0x1FC00000–0x1FC7FFFF | 512KB | BIOS window | HLE stub region (§3.6); writes ignored+log |
 | KSEG2 0xFFFE0130 | 4B | Cache control | store/readback; semantics ignored (no I-cache) |
@@ -43,8 +43,15 @@ read32`, `write8/16/32`, `lwl/lwr` (return merged reg value) / `swl/swr` (RMW) i
 exactly per tool spec Appendix A.3; bulk ops for DMA/kernel: `dmaRead32/dmaWrite32/copyRamToRam/
 readBytesToRam/fillRam`. 16/32-bit accesses assumed aligned (debug builds assert).
 
-**RawBytes endianness seam**: LE contract at every get16/get32; per-target impls per backend spec
-§4. VRAM, SPU RAM, sector buffers and the BIOS stub region are all RawBytes instances → hashing
+**All of these are `static` methods on `Memory`, and the buffers are `static` fields** — the
+emitted call is `Memory.read32(a)` — there is no `mem` parameter, and generated functions take
+only `ctx`. This is forced by an upstream limitation, not preference: inlined *instance* methods
+collide in reflaxe.CPP (see `docs/specs/backend.md` §4 and PROGRESS.md [M0-VERIFY] #12), and the
+memory accessors must inline or the whole performance model collapses. There is exactly one
+machine being emulated, so a singleton is the honest model anyway.
+
+**RawMem endianness seam**: LE contract at every get16/get32; per-target impls per backend spec
+§4. VRAM, SPU RAM, sector buffers and the BIOS stub region are all RawMem instances → hashing
 and savestates see identical bytes on every platform. Entire 2MB RAM zero-filled at boot
 (deterministic), then the kernel area stamped.
 
@@ -104,7 +111,7 @@ advance `ctx.cycles += 64` per iteration and pump.
 ## 3. Kernel HLE
 
 The recompiler routes calls targeting the 0xA0/0xB0/0xC0 stubs (function number in t1) and
-`syscall` to `Kernel.a0/b0/c0/sys(ctx, mem, t1)`; args a0–a3 (+stack), result v0.
+`syscall` to `Kernel.a0/b0/c0/sys(ctx, t1)`; args a0–a3 (+stack), result v0.
 
 ### 3.1 P0 — boot-critical
 
@@ -184,7 +191,7 @@ functions.
 
 ## 4. GPU
 
-VRAM `vram:RawBytes` 1024×512×u16. **Instant-draw model**: GP0 packets rasterize synchronously at
+VRAM `vram:RawMem` 1024×512×u16. **Instant-draw model**: GP0 packets rasterize synchronously at
 submission; GPUSTAT always reports ready; DrawSync returns immediately. Determinism: output
 depends only on the packet stream and state.
 
@@ -278,7 +285,7 @@ list).
 
 ## 6. SPU
 
-`spuram:RawBytes` 512KB (capture buffers 0x000–0xFFF implemented — cheap, and streamers IRQ on
+`spuram:RawMem` 512KB (capture buffers 0x000–0xFFF implemented — cheap, and streamers IRQ on
 them). Batched catch-up: one stereo frame per 768-cycle tick since the last catch-up; forced at
 SPU register access, DMA4, CD sector feed, VBLANK, and the SPU_BATCH event every 32 ticks.
 

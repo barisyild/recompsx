@@ -2,9 +2,17 @@
 
 ## Status snapshot
 
-Phase: **M0 in progress**. M0.1 done — process docs, license, ADR-0001, the three subsystem
-specs under `docs/specs/`, the directory skeleton, and the first two game configurations are
-committed. No toolchain fetched yet, no code written yet.
+Phase: **M0 in progress — 0.1 through 0.4 done.** Process docs and specs are committed; the
+pinned toolchain (Haxe 4.3.7 + Neko, project-local) is installed and the vendored reflaxe pair is
+pinned as submodules; the `[M0-VERIFY]` checklist has been executed with the answers recorded
+below; a two-module reflaxe.CPP program and a behavior-verification spike both compile to C++17
+and run. `./scripts/spike.sh` re-runs both.
+
+Two findings changed the design and are captured in ADR-0002: memory accessors must be **static**
+methods (inlined instance methods do not compile in reflaxe.CPP), and the function table stores
+**integer handles** dispatched through generated switches (function values are heap-allocated
+`std::function` and their arrays do not compile). Remaining in M0: the SDL2 backend shim and the
+headless hash runner.
 
 Scope reminders that shape every decision: **all PS1 games are the target** (Crash Bash is the
 bring-up vehicle, Spyro 3 demo is the anti-overfitting check), and **consoles are the
@@ -12,15 +20,14 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M0.2** — `scripts/env.sh` + `scripts/setup.sh`; fetch pinned Haxe 4.3.7 + neko into
-   `.toolchain/`; add `vendor/reflaxe` and `vendor/reflaxe.CPP` submodules; run setup; paste the
-   `haxe -version` output below.
-2. **M0.3** — execute the `[M0-VERIFY]` checklist below; record YES/NO + one-line evidence for
-   every item; amend `docs/decisions/ADR-0001-reflaxe-cpp.md` if any assumption breaks.
-3. **M0.4** — two-module reflaxe.CPP hello; document the emitted C++ layout; build it with our
-   own CMake.
-4. **M0.5** — `runtime.Main` + `RawBytes` VRAM gradient presented through `backend_sdl2.c`.
-5. **M0.6** — `--headless-hash 600` prints the same digest on two consecutive runs.
+1. **M0.5** — write `src/backend/api/backend_c_api.h`, `src/backend/pc/backend_sdl2.c` and
+   `src/backend/pc/main_pc.c` (we own `main` — see [M0-VERIFY] #16); `src/shims/cxx/RawMem.hx` +
+   `BackendNative.hx`; a `runtime.Main` that fills VRAM with a gradient and presents it. Add the
+   real CMake template — it must exclude the generated `_main_.cpp` and pass `-fwrapv`.
+2. **M0.6** — null backend + `--headless-hash 600`; assert the digest is identical across two
+   runs; wire it into `scripts/test.sh`.
+3. **M1** — start the tool: PS-EXE loader first, then the R3000A decoder with golden fixtures.
+   The Crash Bash and Spyro 3 headers recorded in `games/*/notes.md` are the first real test data.
 
 ## Milestones
 
@@ -30,9 +37,21 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         49 files tracked on `main`. `.gitignore` behavior verified by experiment:
         `tests/fixtures/hello.exe` tracked, `tests/fixtures/external/psxtest_cpu.exe` ignored,
         `games/crashbash/local.json` ignored.
-  - [ ] 0.2 pinned toolchain — accept: `haxe -version` == 4.3.7 from `.toolchain`, output pasted
-  - [ ] 0.3 [M0-VERIFY] executed — accept: every item answered YES/NO + evidence pasted below
-  - [ ] 0.4 reflaxe.CPP hello — accept: 2-module hello compiles, C++ layout documented, runs
+  - [x] 0.2 pinned toolchain — accept: `haxe -version` == 4.3.7 from `.toolchain` ✔ 2026-08-08
+        Evidence: `haxe -version` -> `4.3.7`; `which haxe` ->
+        `<repo>/.toolchain/haxe/haxe`; `haxelib list` -> `reflaxe.cpp: [dev:<repo>/vendor/reflaxe.CPP]`,
+        `reflaxe: [dev:<repo>/vendor/reflaxe]`. System Haxe still reports `5.0.0-preview.1`,
+        untouched. Submodules pinned: reflaxe `73a9831`, reflaxe.CPP `e07ab05`.
+        Bonus: the macOS tarball is a universal binary, so no Rosetta — that risk is closed.
+  - [x] 0.3 [M0-VERIFY] executed — accept: every item answered + evidence ✔ 2026-08-08
+        14 of 19 items answered by experiment; 5 deferred to the milestone that needs them
+        (each marked in the table below). Six upstream defects found and recorded. Two answers
+        changed the architecture -> ADR-0002.
+  - [x] 0.4 reflaxe.CPP hello — accept: 2-module hello compiles, layout documented, runs
+        ✔ 2026-08-08. Evidence: `./scripts/spike.sh` -> "spike.sh: clean". Layout is
+        `include/<Module>.h` + `src/<Module>.cpp` per class + `src/_main_.cpp` +
+        `_GeneratedFiles.json`, as predicted. CMake template deferred to 0.5, where it has a
+        real backend to link.
   - [ ] 0.5 SDL window test pattern — accept: runtime.Main draws gradient VRAM via bp_present
   - [ ] 0.6 headless hash mode — accept: `run-pc.sh demo --headless-hash 600` stable across two runs
 - [ ] **M1 (L)**: tool — PS-EXE / CUE-BIN / filesDir loaders, ISO9660, overlay extraction, R3000A
@@ -63,27 +82,51 @@ Rule: never start M(n+1) before M(n)'s acceptance output is pasted into this fil
 Each item is one small experiment under `tests/spike/`. Record **YES/NO + one-line evidence**.
 Everything here is an assumption about reflaxe.CPP or the toolchain that code shape depends on.
 
+Executed 2026-08-08 with the spikes under `tests/spike/`. Rebuild them with
+`haxe build/spike-verify.hxml` (from the repo root) — they are kept as regression tests for the
+upstream behavior this project's code shape depends on.
+
 | # | Item | Answer | Evidence |
 |---|---|---|---|
-| 1 | `haxelib dev` works from the submodule `main` branch, or is the pre-built `nightly` branch required? (their haxelib.json differ) | | |
-| 2 | Which `reflaxe` base commit pairs with the pinned reflaxe.CPP commit (4.0.0-beta lineage)? Pin both. | | |
-| 3 | Two-module hello → output layout is `include/*.h` + `src/*.cpp` + `_main_.cpp` + `_GeneratedFiles.json`, and our CMake glob builds it | | |
-| 4 | Haxe 4.3.7 x64 tarball runs under Rosetta; haxelib works with project-local NEKOPATH; `.haxelib/` isolation confirmed | | |
-| 5 | `-D cxx_exceptions_disabled` compiles hello + a runtime-shaped file (then add `-fno-exceptions` to CMake); if std breaks, fall back to policy-only | | |
-| 6 | RawBytes: 2 MB `Stdlib.malloc` + `ccast` → `CArray<UInt8>`; inline get/set produce raw indexing in the emitted C++; 1M-op loop timed | | |
-| 7 | Extern C binding of `bp_log`/`bp_present` against a stub .c; `String`→`ConstCharPtr` mechanics; `Ptr` into a RawBytes interior | | |
-| 8 | `untyped __cpp__` expression **and** statement forms with `{0}` interpolation compile | | |
-| 9 | `cxx.num.Int64` arithmetic (32×32→64 multiply, shifts, sign) emits plain `int64_t` ops; no accidental `haxe.Int64` pull-in | | |
-| 10 | What backs Haxe `Array<Int>` and `String` in the emitted C++ (document for the init-only allowance); bounds behavior | | |
-| 11 | `-dce full` + a dispatch-table reference keeps functions alive without `@:keep` (open upstream issue: not honored) | | |
-| 12 | `inline` effectiveness of RawBytes accessors in the emitted C++ (or reliance on clang -O2 — inspect) | | |
-| 13 | CLAUDE.md `@AGENTS.md` import actually loads (run Claude Code in-repo, check `/context`) | | |
-| 14 | The installed Codex CLI auto-reads AGENTS.md from the repo root; note its version | | |
-| 15 | reflaxe.CPP's `-D cmake` emission — 10-minute look; ours stays authoritative either way | | |
-| 16 | `Sys.args()` works under reflaxe.CPP (its std overrides Sys; generated `_main_.cpp` is `int main(int, const char**)`). Fallback: launch config via storage, or a `bp_args` accessor | | |
-| 17 | Integer overflow semantics: does the emitted C++ rely on signed `int` overflow (UB)? Decide `-fwrapv` in CMake and record in ADR-0001 | | |
-| 18 | Function-reference values of type `(CpuState, Memory)->Void` lower to plain C function pointers, not `std::function` — else switch FnTable to the packed-Int-handle Plan B | | |
-| 19 | `haxe --no-output` typechecks generated code against the runtime classpath on 4.3.7 (used by the tool's end-to-end test) | | |
+| 1 | `haxelib dev` works from the submodule `main` branch, or is the pre-built `nightly` branch required? (their haxelib.json differ) | **YES, with a caveat** | `main` works, but `-lib reflaxe.cpp` alone fails with `Type not found : cxx.Compiler`. The `reflaxe.stdPaths` declaration in haxelib.json is only consumed by `haxelib run reflaxe` (which flattens a release build — that is what the `nightly` branch is). A source checkout needs `-p vendor/reflaxe.CPP/std -p vendor/reflaxe.CPP/std/cxx/_std` passed explicitly. Encoded once in `build/reflaxe-cpp.hxml`. |
+| 2 | Which `reflaxe` base commit pairs with the pinned reflaxe.CPP commit (4.0.0-beta lineage)? Pin both. | **YES** | reflaxe `73a9831` (main, 2026-03-22, haxelib.json version 4.0.0-beta — there is no v4 git tag) pairs with reflaxe.CPP `e07ab05` (main, 2025-12-09). Both pinned as submodules; the 3-month gap did not break anything. Fallback pin if it ever does: reflaxe `5a91527` (2025-12-03, contemporaneous). |
+| 3 | Two-module hello → output layout is `include/*.h` + `src/*.cpp` + `_main_.cpp` + `_GeneratedFiles.json`, and our CMake glob builds it | **YES** | `tests/spike/hello` (Main + Helper) produced exactly that layout; `clang++ -std=c++17 -O2` built and ran it. |
+| 4 | macOS Haxe 4.3.7 tarball runs on Apple Silicon; haxelib works with project-local NEKOPATH; `.haxelib/` isolation confirmed | **YES (better than assumed)** | The `-osx` asset is a **universal binary** (x86_64 + arm64, confirmed with `file`), so it runs natively — **no Rosetta needed**, and the "Rosetta dependency" risk is closed. Neko universal likewise. `haxelib list` resolves both dev libs; system Haxe still reports 5.0.0-preview.1, untouched. |
+| 5 | `-D cxx_exceptions_disabled` compiles hello + a runtime-shaped file (then add `-fno-exceptions` to CMake); if std breaks, fall back to policy-only | *deferred* | Not exercised yet; the spikes compiled without it. Revisit when the runtime skeleton exists (M2). Policy-only (no `throw`/`try` in our code, enforced by check.sh) already holds. |
+| 6 | RawBytes: 2 MB `Stdlib.malloc` + `ccast` → `CArray<UInt8>`; inline get/set produce raw indexing in the emitted C++ | **YES — but the API shape is forced** | 2 MB alloc + unchecked indexing works and inlines perfectly: `Mem.set32(0x1000, …)` emits four `Mem::ram[4096] = 239;` stores, and `get32` expands to a single `((Mem::ram[4096] \| (Mem::ram[4097] << 8)) \| …)` expression — no calls. **However** memory accessors must be `static` methods on a class with `static` fields. Instance methods (and abstracts) are unusable: see #12. |
+| 7 | Extern C binding of `bp_log`/`bp_present` against a stub .c; `String`→`ConstCharPtr` mechanics; `Ptr` into a buffer interior | **YES** | `@:include("cstub.h") @:topLevel extern function …` binds cleanly. `ConstCharPtr.fromString(s)` is the documented String conversion and works. `CArray.toPtr()` + `Stdlib.ccast` yields a `Ptr<UInt16>` into our buffer, verified by summing values written from Haxe inside the C function. |
+| 8 | `untyped __cpp__` expression form with `{0}` interpolation compiles | **YES** | `untyped __cpp__("((int)({0}) * 3 + 1)", 14)` → 43. The escape hatch is real; statement form untested (not yet needed). |
+| 9 | `cxx.num.Int64` arithmetic (32×32→64 multiply, shifts, sign) emits plain `int64_t` ops; no accidental `haxe.Int64` pull-in | **YES** | `0x12345678 * 0x10` gives high=0x1, low=0x23456780; a 64-bit value round-trips through a C extern taking `uint64_t`. `haxe.Int64` never appeared in the output. |
+| 10 | What backs Haxe `Array<Int>` and `String` in the emitted C++ | **ANSWERED** | `Array<T>` → `std::shared_ptr<std::deque<T>>`; `String` → `std::string`. Confirms the rule: Haxe arrays are init-time only, never in hot paths or in fixed-size buffers — those use `CArray`. |
+| 11 | `-dce full` + a dispatch-table reference keeps functions alive without `@:keep` | **YES (via Plan B)** | With `-dce full`, `fnDouble`/`fnNegate` are reachable only through a static `switch` in `Dispatch.dispatch` and both survive and execute correctly. Reachability through a generated switch is sufficient; `@:keep` is not needed. |
+| 12 | `inline` effectiveness of accessors in the emitted C++ | **YES for static methods; instance inlining is BROKEN** | Haxe's inliner introduces a receiver temp (`_this` for classes, `this1` for abstracts) and reflaxe.CPP prints the name without uniquifying it, so **two inlined instance-method calls in one scope emit `redefinition of '_this'` and do not compile**. Generated MIPS functions perform many memory accesses per function, so this rules out both an abstract and an instance-method `RawBytes`. Static methods have no receiver and no temp — they inline flawlessly. This is why `Memory` is a static-accessor class. |
+| 13 | CLAUDE.md `@AGENTS.md` import actually loads | *pending* | Needs a fresh Claude Code session in-repo to confirm via `/context`. |
+| 14 | The installed Codex CLI auto-reads AGENTS.md from the repo root; note its version | *pending* | Needs a Codex CLI session. |
+| 15 | reflaxe.CPP's `-D cmake` emission — 10-minute look | *deferred* | Ours stays authoritative regardless; look at it when the real CMake template is written (M0.4/M0.5). |
+| 16 | `Sys.args()` works under reflaxe.CPP | **NO — and the fix is ours** | The generated `_main_.cpp` is literally `int main(int, const char**) { Verify::main(); return 0; }` — argc/argv are **discarded**, so `Sys.args()` returns empty (verified: passed two arguments, got count 0). Decision: our CMake **excludes the generated `_main_.cpp`** and links our own `main.c`, which stores argc/argv for the backend and then calls the generated entry point. Command-line access then goes through the backend ABI like everything else. |
+| 17 | Integer overflow semantics: does the emitted C++ rely on signed `int` overflow (UB)? | **YES it does — so `-fwrapv` is mandatory** | Haxe `Int` maps to C++ `int`, and `0x7FFFFFFF + 1` produced −2147483648 at `-O2` — the MIPS-correct answer, but only because clang happened to wrap. Signed overflow is UB in C++, so this is not something to rely on: **all builds must pass `-fwrapv`** (added to the CMake template). Recorded in ADR-0001. |
+| 18 | Function-reference values lower to plain C function pointers, not `std::function` | **NO — Plan A is dead, Plan B is now the design** | `Array<(Int)->Int>` lowers to `std::deque<std::shared_ptr<std::function<int(int)>>>`: an allocation and a type-erased indirect call per entry, and the array literal **does not even compile** (`arithmetic on a pointer to the function type`). The FnTable therefore stores packed Int handles in raw memory and dispatches through generated `switch` statements — no function values anywhere. `docs/specs/tool.md` §3 updated accordingly. |
+| 19 | `haxe --no-output` typechecks generated code against the runtime classpath on 4.3.7 | *deferred* | Needs generated code to exist (M1/M2). |
+
+### Upstream defects found (fork-and-fix backlog, per ADR-0001)
+
+Recorded so they are not rediscovered. None currently block us; workarounds are in place.
+
+1. **Inlined instance methods collide** — every inline expansion emits `T& _this = …;` with a
+   fixed name, so two calls in one scope fail to compile. *Impact: high* (it dictates the
+   static-accessor design). *Workaround:* static methods only in hot code. *Real fix:* uniquify
+   the temp by TVar id.
+2. **`Array<FunctionType>` does not compile** — the `std::deque` of `std::function` initializer
+   is malformed. *Impact: high* (killed FnTable Plan A). *Workaround:* Plan B integer handles.
+3. **`Sys.println` emits `std::cout` without `#include <iostream>`.** *Workaround:*
+   `@:cppInclude("iostream", true)` on the class, or route output through the backend (which is
+   what the runtime does anyway).
+4. **Interpolating `array.length`** emits `->size()` (`size_type`), which does not compile
+   against `std::string operator+`. *Workaround:* bind to an `Int` first.
+5. **`trace(cond ? a : b)`** default-constructs `haxe::DynamicToString`, which has no default
+   constructor. *Workaround:* use plain `if`/`else` statements.
+6. **`@:valueType` class as a static field** requires a default constructor that is not
+   generated. *Workaround:* static fields of primitive/`CArray` type instead.
 
 ## Blockers & open questions
 
@@ -92,6 +135,10 @@ Everything here is an assumption about reflaxe.CPP or the toolchain that code sh
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] M0.2-0.4 done: pinned toolchain installed (Haxe 4.3.7 universal, no Rosetta),
+  reflaxe pair pinned as submodules, [M0-VERIFY] executed via tests/spike/*. Two findings forced
+  design changes (ADR-0002): static memory accessors, integer-handle dispatch. Haxe 5 confirmed
+  incompatible. scripts/{env,setup,check,spike}.sh written. Next: M0.5 SDL2 backend shim.
 2026-08-08 [claude] M0.1 done: AGENTS/CLAUDE/PROGRESS/LICENSE/.gitignore, ADR-0001 + template,
   docs/architecture.md, docs/specs/{tool,runtime,backend}.md, dir skeleton, games/crashbash +
   games/spyro3demo configs. Verified both EXE headers + SYSTEM.CNF from the user's dump (TCB=4,

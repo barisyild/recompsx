@@ -30,3 +30,6 @@ build/*.local.hxml
 
 # OS noise
 .DS_Store
+
+# Spike outputs live under out/ (already ignored); this catches stray local builds.
+tests/spike/*/out/

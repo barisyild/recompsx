@@ -6,7 +6,7 @@ console target matrix.
 The runtime is platform-agnostic. Everything platform-specific lives behind two seams:
 
 1. **`backend_c_api.h`** — a flat C ABI implemented once per platform, outside Haxe.
-2. **`src/shims/<target>/`** — `RawBytes` (raw memory + byte order), `I64`, and the externs that
+2. **`src/shims/<target>/`** — `RawMem` (raw memory + byte order), `I64`, and the externs that
    bind the C ABI. This is where target-specific Haxe lives; the runtime never has `#if` for a
    platform.
 
@@ -21,14 +21,14 @@ shim directory. No runtime code changes.
 | **PS2** | ps2dev (PS2SDK, ee-gcc) | R5900 (MIPS) | LE | 32 MB | GS for present, SPU2 via audsrv, libpad, libmc. C++17 needs a current ps2dev toolchain — verify GCC version early |
 | **PSP** | pspdev (PSPSDK) | Allegrex (MIPS) | LE | 32/64 MB | sceGu present, sceAudio, sceCtrl |
 | **Dreamcast** | KallistiOS | SH-4 | LE | 16 MB | Tightest memory budget; binary-search FnTable mandatory |
-| **GameCube / Wii** | devkitPPC + libogc | PowerPC | **BE** | 24 / 88 MB | The only current target needing the byteswap path in `RawBytes` |
+| **GameCube / Wii** | devkitPPC + libogc | PowerPC | **BE** | 24 / 88 MB | The only current target needing the byteswap path in `RawMem` |
 | **Switch** | devkitA64 + libnx | ARM64 | LE | ample | |
 | **JVM family** | Haxe JVM target | — | — | ample | No C ABI at all: `JvmBackend` implements the same Haxe interface directly |
 
 Consequences captured in the design:
 
 - **Byte order is a shim concern, never a backend concern.** Backends always receive host-order
-  data and stay dumb blitters. Only `src/shims/*/RawBytes` knows about endianness.
+  data and stay dumb blitters. Only `src/shims/*/RawMem` knows about endianness.
 - **Memory budget matters.** Runtime state is fixed: 2 MB emulated RAM + 1 MB VRAM + 512 KB SPU
   RAM + 1 KB scratchpad ≈ 3.5 MB. The variable is generated code size (a PS1 game with ~500 K
   instructions is expected to compile to roughly 8–15 MB of machine code) plus the dispatch
@@ -95,6 +95,18 @@ void bp_fatal(const char* msg);       /* logs, tears down, exits; never returns 
 #endif
 ```
 
+### 1.1 Entry point: we own `main`, not the generator
+
+reflaxe.CPP emits `_main_.cpp` containing `int main(int, const char**) { … }` which **discards
+argc/argv** — so `Sys.args()` always returns empty (verified, PROGRESS.md [M0-VERIFY] #16).
+
+Every build therefore **excludes the generated `_main_.cpp`** from its source list and links
+`src/backend/<platform>/main_<platform>.c` instead, which stores argc/argv, calls `bp_init`, and
+then calls the generated entry point. Command-line access is a backend concern like everything
+else, and console platforms — which have no argv at all — supply their launch parameters the same
+way. Two consequences for the CMake template: the generated-source glob must filter out
+`_main_.cpp`, and each backend directory owns exactly one `main_*.c`.
+
 ## 2. PC implementation — `src/backend/pc/backend_sdl2.c`
 
 Single file, the only one that touches SDL2. `SDL_Init(VIDEO|AUDIO|GAMECONTROLLER)`; 960×720
@@ -124,27 +136,40 @@ extern function bp_present(vram: cxx.Ptr<cxx.num.UInt16>, sx: Int, sy: Int, sw: 
 // ... one extern per bp_* function; CxxBackend implements Backend via inline wrappers.
 ```
 
-`String`→`cxx.ConstCharPtr` and RawBytes-interior→`cxx.Ptr` conversion mechanics are `[M0-VERIFY]`
+`String`→`cxx.ConstCharPtr` and RawMem-interior→`cxx.Ptr` conversion mechanics are `[M0-VERIFY]`
 items with a confirmed fallback: `untyped __cpp__`. `JvmBackend implements Backend` in pure Haxe
 lands at M8 and involves no C at all.
 
-## 4. RawBytes / I64 shims (the portability seam)
+## 4. RawMem / I64 shims (the portability seam)
+
+**Accessors are `static` methods on classes with `static` fields — never instance methods, never
+an abstract.** Verified 2026-08-08 (PROGRESS.md [M0-VERIFY] #12): Haxe's inliner introduces a
+receiver temporary for instance-method inlining, and reflaxe.CPP prints its name (`_this`, or
+`this1` for abstracts) without uniquifying it, so **two inlined instance-method calls in the same
+scope fail to compile**. Generated code performs several memory accesses per function, so this
+would be fatal. Static methods have no receiver and inline flawlessly: `Mem.set32(0x1000, v)`
+emits four direct `Mem::ram[4096] = …;` stores with no call.
 
 ```haxe
-// src/shims/cxx/RawBytes.hx — emulated RAM 2MB, VRAM 1MB, SPU RAM 512KB, scratchpad.
-abstract RawBytes(cxx.CArray<cxx.num.UInt8>) {
-  public static function alloc(size: Int): RawBytes;   // Stdlib.malloc + ccast + memset 0
-  public inline function get8(a: Int): Int;            // this[a]
-  public inline function set8(a: Int, v: Int): Void;
-  // Endian-NEUTRAL byte-composed 16/32 accessors: correct on LE hosts and on BE hosts
-  // (GameCube/Wii) with zero backend involvement. Per-target unaligned-load fast path
-  // added later behind a define, once measured.
-  public inline function get16(a: Int): Int;  public inline function get32(a: Int): Int;
-  public inline function set16(a: Int, v: Int): Void;  public inline function set32(a: Int, v: Int): Void;
-  public function u16Ptr(offsetBytes: Int): cxx.Ptr<cxx.num.UInt16>;  // for bp_present/bp_audio
+// src/shims/cxx/RawMem.hx — one such class per buffer, or one class with several static
+// CArray fields (RAM 2MB, VRAM 1MB, SPU RAM 512KB, scratchpad 1KB).
+class RawMem {
+  public static var ram: cxx.CArray<cxx.num.UInt8>;      // Stdlib.malloc + ccast, zero-filled
+  public static function alloc(size: Int): Void;
+
+  public static inline function get8(a: Int): Int          return ram[a];
+  public static inline function set8(a: Int, v: Int): Void  ram[a] = v & 0xFF;
+  // Endian-NEUTRAL byte-composed 16/32 accessors: identical bytes on LE hosts and on BE hosts
+  // (GameCube/Wii) with zero backend involvement. Per-target unaligned-load fast path added
+  // later behind a define, once measured.
+  public static inline function get16(a: Int): Int         return get8(a) | (get8(a + 1) << 8);
+  public static inline function get32(a: Int): Int;
+  public static inline function set16(a: Int, v: Int): Void;
+  public static inline function set32(a: Int, v: Int): Void;
+  public static inline function u16Ptr(off: Int): cxx.Ptr<cxx.num.UInt16>;  // bp_present/bp_audio
 }
-// src/shims/jvm/RawBytes.hx — same API over ByteBuffer.order(LITTLE_ENDIAN).
-// src/shims/*/I64.hx — abstract over cxx.num.Int64 (native int64_t) / haxe.Int64 on JVM.
+// src/shims/jvm/RawMem.hx — same static API over ByteBuffer.order(LITTLE_ENDIAN).
+// src/shims/*/I64.hx — over cxx.num.Int64 (native int64_t) / haxe.Int64 on JVM.
 //   Used ONLY in GTE MAC accumulators, mult/div hi:lo, and the cycle accumulator.
 ```
 
@@ -160,7 +185,7 @@ Applies to `src/runtime`, `src/shims`, `shared/`, and all generated code. Enforc
 2. No `Dynamic`/`Any`/reflection/anonymous structures.
 3. No closures in hot paths (they lower to `std::function`).
 4. 64-bit math only via `I64`.
-5. Memory via `RawBytes`; Haxe `Array` only for init-time fixed-capacity storage; no
+5. Memory via `RawMem`; Haxe `Array` only for init-time fixed-capacity storage; no
    `haxe.io.Bytes` or `StringBuf` in the runtime.
 6. No `throw`/`try`; unrecoverable conditions go to `bp_fatal`.
 7. All allocation happens during init; zero allocation after boot (debug builds assert).
@@ -180,5 +205,5 @@ trampoline holding the matching setjmp anchor, which clears the token and resume
 
 The JVM's 64 KB bytecode-per-method limit means large recompiled functions may need splitting.
 The emitter must be able to support a `-D split-threshold=N` mode later (splitting a function's
-basic-block switch into part-trampolines); the block structure must not preclude it. `RawBytes`
+basic-block switch into part-trampolines); the block structure must not preclude it. `RawMem`
 over a little-endian `ByteBuffer`; `I64` over `haxe.Int64`. No other blockers identified.

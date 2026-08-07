@@ -1,0 +1,7 @@
+# Run from the repository root:  haxe build/spike-hello.hxml
+# Two-module smoke test: proves the pinned reflaxe.CPP pair emits the expected file layout.
+build/reflaxe-cpp.hxml
+-cp tests/spike/hello
+-D mainClass=Main
+-main Main
+-D cpp-output=out/_spike/hello

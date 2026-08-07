@@ -62,7 +62,7 @@ class DiscReader {  // cooked view: locates user-data offset per track mode/subh
 }
 ```
 
-`ByteBuf` = thin abstract: `haxe.io.Bytes` on tool targets, `RawBytes` on runtime targets
+`ByteBuf` = thin abstract: `haxe.io.Bytes` on tool targets, `RawMem` on runtime targets
 (single `#if` seam) — keeps `haxe.io.Bytes` out of the runtime.
 
 **ISO9660** (`shared/psxdisc/IsoFs.hx`) — PVD @ LBA 16 (`"CD001"`); directory extents walked
@@ -161,8 +161,8 @@ re-analyzes in-process.
   `hi, lo, pc` (virtual: written only before `Runtime.call`/`Kernel.*`/traps), `cycles`,
   `nextEvent` (wrap-safe subtraction compares).
 - **Sanctioned runtime API surface** (generated code touches nothing else):
-  `mem.read8s/8u/16s/16u/32`, `mem.write8/16/32`, `mem.lwl/lwr` (return merged value) /
-  `mem.swl/swr` (RMW); `Runtime.call/pump/mfc0/mtc0/rfe`; `Kernel.syscall/brk`;
+  `Memory.read8s/8u/16s/16u/32`, `Memory.write8/16/32`, `Memory.lwl/lwr` (return merged value) /
+  `Memory.swl/swr` (RMW); `Runtime.call/pump/mfc0/mtc0/rfe`; `Kernel.syscall/brk`;
   `Ops.mult/multu/div/divu` (hi:lo writers — single tested impl of MIPS edge cases:
   `div rs,0 → hi=rs, lo=(rs>=0?-1:1)`; `div 0x80000000,-1 → hi=0, lo=0x80000000` (C++ UB —
   special-cased); `divu rs,0 → hi=rs, lo=0xFFFFFFFF`);
@@ -171,7 +171,7 @@ re-analyzes in-process.
   + compile-time win); everything else emits `while(true) switch(bb)` with dense block indices
   in address order, original VA as comment per case.
 - **Cycles & pump**: flat 1 cycle/instruction, `ctx.cycles += N` immediately before every
-  control transfer; `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx, mem);` at exactly
+  control transfer; `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);` at exactly
   (a) function entry, (b) after the increment on every back-edge (target VA ≤ source block
   start, incl. switch edges). Straight-line code carries no pump. The pump contract guarantees
   forward progress (idle `b .` loops become pump-driven time advancement).
@@ -179,12 +179,23 @@ re-analyzes in-process.
   lines per file; stable split points; overlay boundaries force separate shard sets under
   `out/<game>/hx/ovl_<id>/`. Names: class `Fns_<seq>_<startVA>`, function `f_<VA8hex>` always
   (symbols only in comments — stable diffs).
-- **FnTable** (generated): v1 flat table over 2MB/4-byte granularity (512K entries); console
-  alternative (sorted VA array + binary search) behind the same API via `-D` define.
-  Registration is loop-friendly per-shard `register()` code, never one giant literal.
-  `[M0-VERIFY]` function-reference values must lower to plain C function pointers (no closure
-  alloc); **fallback Plan B** (same API): shards emit `dispatch(localIdx, ctx, mem)` switches,
-  table stores packed Int handles `(shardId<<20)|localIdx` — zero function-pointer values.
+- **FnTable** (generated): stores **packed Int handles**, never function values. Each shard emits
+  `static function dispatch(localIdx:Int, ctx:CpuState):Void` — a `switch` over its own
+  functions — and the address→handle table holds `(shardId << 20) | localIdx` in raw memory. A
+  top-level generated `switch` routes a handle to the owning shard's `dispatch`.
+
+  This is not a stylistic choice. Verified 2026-08-08 (PROGRESS.md [M0-VERIFY] #18): reflaxe.CPP
+  lowers `Array<(CpuState)->Void>` to `std::deque<std::shared_ptr<std::function<void(CpuState)>>>`
+  — a heap allocation and a type-erased indirect call per entry — and the array literal does not
+  even compile. Storing function values is therefore impossible as well as undesirable.
+
+  Handle-table layout: v1 flat table over 2MB at 4-byte granularity (512K entries × 4 bytes =
+  2 MB of `Int`s, in a `CArray` like everything else); the console default (`-D fntable=binary`)
+  is a sorted VA array + binary search behind the same API, costing ~8 bytes per discovered
+  function. Registration is loop-friendly per-shard code, never one giant literal.
+
+  Reachability is safe without `@:keep` (which upstream does not honor): functions referenced
+  only from a shard's `dispatch` switch survive `-dce full` — verified in the same spike.
 - Also generated: `GameInfo.hx` (initial pc/gp/sp, load ranges, memfill, exe payload reference),
   `Overlays.hx` (per overlay: id, VA range, source sectors/file extent, FNV-1a content hash,
   entries) — consumed by runtime CD-tracking activation + hash-fallback.
@@ -335,27 +346,27 @@ arithmetic — if it emits plain C++ `int`, force `-fwrapv` in CMake and record 
 | | div/divu | `Ops.div(ctx, RS, RT);` — edge table in §3 |
 | | mfhi/mflo | `RD = ctx.hi;` / `RD = ctx.lo;` |
 | | mthi/mtlo | `ctx.hi = RS;` / `ctx.lo = RS;` |
-| Load | lb/lbu/lh/lhu/lw | `RT = mem.read8s(A);` etc. |
-| | lwl/lwr | `RT = mem.lwl(A, RT);` / `RT = mem.lwr(A, RT);` |
-| Store | sb/sh/sw | `mem.write8(A, RT);` etc. |
-| | swl/swr | `mem.swl(A, RT);` / `mem.swr(A, RT);` |
+| Load | lb/lbu/lh/lhu/lw | `RT = Memory.read8s(A);` etc. |
+| | lwl/lwr | `RT = Memory.lwl(A, RT);` / `RT = Memory.lwr(A, RT);` |
+| Store | sb/sh/sw | `Memory.write8(A, RT);` etc. |
+| | swl/swr | `Memory.swl(A, RT);` / `Memory.swr(A, RT);` |
 | Branch | beq/bne | cond `RS == RT` / `RS != RT` — always latched into `var cN` BEFORE the delay slot |
 | | blez/bgtz/bltz/bgez | `RS <= 0` / `RS > 0` / `RS < 0` / `RS >= 0` |
 | | bltzal/bgezal | cond computed from RS **before** link; then `ctx.ra = RET;` **unconditionally** (hardware links even when not taken; `rs == ra` compares the pre-link value — both properties fall out of this ordering) |
 | Jump | j (intra-fn) | `<slot>; ctx.cycles += n; bb = <idx>; continue;` |
 | | j (tail call) | `<slot>; ctx.cycles += n; <call as jal>; return;` |
-| | jal (static) | `ctx.ra = RET; <slot>; Fns_XX.f_<target>(ctx, mem);` (ra always written — cheap, preserves fidelity) |
-| | jal (dynamic) | `ctx.ra = RET; <slot>; ctx.pc = T; Runtime.call(ctx, mem, T);` |
-| | jalr rd,rs | `var tK = RS; ctx.<rd> = RET; <slot>; ctx.pc = tK; Runtime.call(ctx, mem, tK);` (target latched before link — handles `jalr ra, ra`) |
+| | jal (static) | `ctx.ra = RET; <slot>; Fns_XX.f_<target>(ctx);` (ra always written — cheap, preserves fidelity) |
+| | jal (dynamic) | `ctx.ra = RET; <slot>; ctx.pc = T; Runtime.call(ctx, T);` |
+| | jalr rd,rs | `var tK = RS; ctx.<rd> = RET; <slot>; ctx.pc = tK; Runtime.call(ctx, tK);` (target latched before link — handles `jalr ra, ra`) |
 | | jr ra | `<slot>; return;` (computed-ra tricks out of scope v1; escape = nativeReplacements) |
-| | jr rX (table) | `var tK = RX; <slot>; ctx.cycles += n; switch (tK) { case 0x...: bb = i; continue; ... default: ctx.pc = tK; Runtime.call(ctx, mem, tK); return; }` |
-| | jr rX (unrecovered) | `var tK = RX; <slot>; ctx.pc = tK; Runtime.call(ctx, mem, tK); return;` |
-| System | syscall/break | `ctx.pc = ADDR; Kernel.syscall(ctx, mem, CODE20);` then continue in-line (no delay slot; Psy-Q div-zero break guards return) |
+| | jr rX (table) | `var tK = RX; <slot>; ctx.cycles += n; switch (tK) { case 0x...: bb = i; continue; ... default: ctx.pc = tK; Runtime.call(ctx, tK); return; }` |
+| | jr rX (unrecovered) | `var tK = RX; <slot>; ctx.pc = tK; Runtime.call(ctx, tK); return;` |
+| System | syscall/break | `ctx.pc = ADDR; Kernel.syscall(ctx, CODE20);` then continue in-line (no delay slot; Psy-Q div-zero break guards return) |
 | COP0 | mfc0/mtc0 | `RT = Runtime.mfc0(ctx, N);` / `Runtime.mtc0(ctx, N, RT);` |
 | | rfe | `Runtime.rfe(ctx);` |
 | COP2 | mfc2/mtc2 | `RT = Gte.getData(ctx, N);` / `Gte.setData(ctx, N, RT);` |
 | | cfc2/ctc2 | `RT = Gte.getCtrl(ctx, N);` / `Gte.setCtrl(ctx, N, RT);` |
-| | lwc2/swc2 | `Gte.setData(ctx, N, mem.read32(A));` / `mem.write32(A, Gte.getData(ctx, N));` |
+| | lwc2/swc2 | `Gte.setData(ctx, N, Memory.read32(A));` / `Memory.write32(A, Gte.getData(ctx, N));` |
 | | cop2 imm25 | `Gte.execute(ctx, IMM25);` |
 
 ## A.3 lwl/lwr/swl/swr exact merges
@@ -396,13 +407,13 @@ Exact generated output:
 
 ```haxe
 /** f_80010000 (sym: sum_n) — base, 0x80010000..0x8001003f */
-public static function f_80010000(ctx:CpuState, mem:Memory):Void {
-  if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx, mem);
+public static function f_80010000(ctx:CpuState):Void {
+  if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);
   var bb = 0;
   while (true) switch (bb) {
     case 0: // 0x80010000
       ctx.sp = ctx.sp + -24;
-      mem.write32(ctx.sp + 20, ctx.ra);
+      Memory.write32(ctx.sp + 20, ctx.ra);
       ctx.v0 = 0;
       ctx.t0 = 0;
       ctx.cycles += 4;
@@ -418,8 +429,8 @@ public static function f_80010000(ctx:CpuState, mem:Memory):Void {
       ctx.ra = 0x80010028;       // link written before delay slot
       // delay: nop
       ctx.cycles += 3;
-      Fns_00_80010000.f_80010040(ctx, mem);
-      ctx.ra = mem.read32(ctx.sp + 20);
+      Fns_00_80010000.f_80010040(ctx);
+      ctx.ra = Memory.read32(ctx.sp + 20);
       // jr ra — delay: addiu sp, sp, 0x18
       ctx.sp = ctx.sp + 24;
       ctx.cycles += 3;
@@ -429,7 +440,7 @@ public static function f_80010000(ctx:CpuState, mem:Memory):Void {
       // b 0x80010010 — delay: addiu t0, t0, 1
       ctx.t0 = ctx.t0 + 1;
       ctx.cycles += 3;
-      if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx, mem);  // back-edge pump
+      if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);  // back-edge pump
       bb = 1; continue;
     default: return; // unreachable; keeps switch total
   }

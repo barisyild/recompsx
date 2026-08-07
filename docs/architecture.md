@@ -36,7 +36,7 @@ RUN TIME (portable subset: reflaxe.CPP C++17 now, JVM later)
       GPU sw-raster, GTE, SPU, CD, MDEC, DMA, timers, SIO)
   src/runtime ──Backend interface──► src/shims/cxx externs ──► backend_c_api.h (flat C ABI)
       ──► backend_sdl2.c (PC)  |  backend_gc.c (GameCube, later)  |  JvmBackend (pure Haxe, later)
-  byte-order & raw-memory seam = src/shims/{cxx,jvm}/RawBytes — NEVER in backends
+  byte-order & raw-memory seam = src/shims/{cxx,jvm}/RawMem — NEVER in backends
 ```
 
 - The recompiler tool has zero console constraints and may use the full Haxe language.
@@ -50,7 +50,7 @@ RUN TIME (portable subset: reflaxe.CPP C++17 now, JVM later)
 ## Execution model
 
 - **No instruction fetch.** Each MIPS function becomes a static Haxe function
-  `(ctx:CpuState, mem:Memory)->Void`. `jal` to a known target is a direct static call;
+  `(ctx:CpuState)->Void`. `jal` to a known target is a direct static call;
   `jr $ra` is a return; indirect calls go through a generated address→function table.
 - **No goto in Haxe**, so intra-function control flow is a basic-block state machine:
   `while (true) switch (bb) { ... bb = N; continue; }`. Simple linear functions emit a flat body.
@@ -136,7 +136,7 @@ shared/psxdisc/   disc model (CUE/ISO9660/sector math) — portable subset, shar
 src/runtime/      portable integer-only core (see docs/specs/runtime.md)
 src/backend/api/  backend_c_api.h — the platform ABI (see docs/specs/backend.md)
 src/backend/pc/   backend_sdl2.c — the only file that touches SDL2
-src/shims/cxx/    RawBytes, I64, backend externs in reflaxe.CPP form
+src/shims/cxx/    RawMem, I64, backend externs in reflaxe.CPP form
 src/shims/jvm/    same API in pure Haxe/JVM (M8)
 games/<id>/       game.json, syms.txt, notes.md; local.json is gitignored
 out/              all generated artifacts — gitignored

@@ -1,0 +1,6 @@
+[submodule "vendor/reflaxe"]
+	path = vendor/reflaxe
+	url = https://github.com/SomeRanDev/reflaxe.git
+[submodule "vendor/reflaxe.CPP"]
+	path = vendor/reflaxe.CPP
+	url = https://github.com/SomeRanDev/reflaxe.CPP.git

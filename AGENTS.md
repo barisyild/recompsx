@@ -36,12 +36,15 @@ src/runtime — that is what the backend ABI and src/shims exist to prevent.
     ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)
     ./scripts/build-pc.sh crashbash # cmake+ninja
     ./scripts/run-pc.sh crashbash [--headless-hash 600]
-    ./scripts/test.sh               # tool tests (interp) + runtime tests (native)
+    ./scripts/test.sh               # tool tests (interp) + runtime tests (native)   [from M1]
+    ./scripts/spike.sh              # reflaxe.CPP behavior regression — run after pin changes
     ./scripts/check.sh              # discipline gate — run before EVERY commit
+
+Commands marked [from M1] arrive with the milestone that needs them; setup/env/spike/check work now.
 
 ## Directory map
 tools/recomp (tool) · shared/psxdisc (disc model, portable) · src/runtime (core) ·
-src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,jvm} (RawBytes/I64/externs) ·
+src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,jvm} (RawMem/I64/externs) ·
 games/<id> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
 docs/{architecture.md,specs,decisions} · vendor/{reflaxe,reflaxe.CPP} (pinned submodules) ·
 build/ (hxml) · scripts/
