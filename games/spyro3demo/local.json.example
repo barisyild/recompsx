@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to local.json (gitignored). Same disc as Crash Bash — point at the same dump. See docs/specs/tool.md section 1.1.",
+
+  "filesDir": "/absolute/path/to/extracted/disc/root (must contain SYSTEM.CNF)",
+
+  "_alternatives": {
+    "cue": "/absolute/path/to/Crash Bash (USA).cue",
+    "iso": "/absolute/path/to/single-track-image.bin"
+  }
+}

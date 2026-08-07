@@ -1,0 +1,32 @@
+# Generated artifacts — never committed
+out/
+
+# Pinned toolchain + project-local haxelib repo
+.toolchain/
+.haxelib/
+
+# Machine-local dump paths (user-supplied game images)
+games/*/local.json
+
+# Game/BIOS media — must never enter this repository
+*.bin
+*.cue
+*.img
+*.iso
+*.exe
+*.psexe
+*.mcd
+
+# Exception: homebrew fixtures we author and build ourselves (PSn00bSDK, MIT) ARE committed.
+# They are the only executables allowed in this repository — see LICENSE content policy.
+!tests/fixtures/**/*.exe
+
+# Externally fetched test executables (unclear license — fetched, never committed).
+# Listed after the exception so it still wins for this directory.
+tests/fixtures/external/
+
+# Local build overrides
+build/*.local.hxml
+
+# OS noise
+.DS_Store

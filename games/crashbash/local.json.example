@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to local.json (gitignored) and set exactly ONE input key to an absolute path on your machine. See docs/specs/tool.md section 1.1 for what each mode supports.",
+
+  "cue": "/absolute/path/to/Crash Bash (USA).cue",
+
+  "_alternatives": {
+    "iso": "/absolute/path/to/single-track-image.bin",
+    "filesDir": "/absolute/path/to/extracted/disc/root (must contain SYSTEM.CNF)",
+    "exeFile": "/absolute/path/to/a/bare/PS-EXE (homebrew only, no disc)"
+  }
+}

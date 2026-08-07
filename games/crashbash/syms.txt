@@ -1,0 +1,9 @@
+# Symbol table for Crash Bash (SCUS-94570).
+# Format: <hex address> <name> [func|obj]
+#   - "func" marks a discovery seed (the analyzer will treat the address as a function entry).
+#   - Symbols only affect naming in comments and seeding; they never change generated semantics.
+# Addresses are original PS1 virtual addresses. Lines starting with '#' are comments.
+#
+# Populated during M1/M6 as functions are identified. Keep sorted by address.
+
+0x8002E7B0 entry_point func

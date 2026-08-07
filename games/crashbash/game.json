@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "crashbash-scus94570",
+  "title": "Crash Bash",
+  "region": "NTSC-U",
+  "exePath": "\\SCUS_945.70;1",
+  "exeSha256": "fd5727a18feb2a2d5a6359a55966f0266284d1e50f64ee9b8a127a97091bd516",
+
+  "overlays": [],
+  "functionHints": [],
+  "jumpTableHints": [],
+  "nativeReplacements": [],
+  "setjmpFns": [],
+  "longjmpFns": [],
+
+  "symsFile": "syms.txt",
+  "mapFile": null
+}

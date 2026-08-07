@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "spyro3-demo-scus94570disc",
+  "title": "Spyro: Year of the Dragon (demo, bundled on the Crash Bash disc)",
+  "region": "NTSC-U",
+  "exePath": "\\SPYRO3\\SPYRO3.EXE;1",
+  "exeSha256": "56473545d46de5620ac4e52bed43401e7b978f2bdc85f473cfc87176eb7fd89e",
+
+  "overlays": [],
+  "functionHints": [],
+  "jumpTableHints": [],
+  "nativeReplacements": [],
+  "setjmpFns": [],
+  "longjmpFns": [],
+
+  "symsFile": null,
+  "mapFile": null
+}

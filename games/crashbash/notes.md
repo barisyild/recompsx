@@ -1,0 +1,74 @@
+# Crash Bash (NTSC-U, SCUS-94570) — bring-up notes
+
+Clean-room observations recorded by this project. No game code or data lives in this repository;
+everything below is a measurement taken from the user's own dump, or a plan for taking one.
+
+## Dump shape
+
+The reference dump on the development machine is an **extracted-files directory**, not a BIN/CUE
+(see `docs/specs/tool.md` §1.1 for how that input mode works and its LBA caveat). Layout:
+
+```
+SYSTEM.CNF
+SCUS_945.70              432,128 bytes   boot executable
+BASHY.                31,752,000 bytes   (name has an empty ISO9660 extension)
+CRASHBSH/CRASHBSH.DAT 73,220,096 bytes   main data archive
+SPYRO3/SPYRO3.EXE        372,736 bytes   bundled Spyro 3 demo — see games/spyro3demo/
+SPYRO3/WAD.WAD        16,797,696 bytes
+SPYRO3/SPEECH.STR     32,249,856 bytes
+```
+
+Rebuilt BIN/CUE images also exist on this machine (produced by the sibling `crash-bash-editor`
+project). Prefer a real BIN/CUE for *running*; `filesDir` is fine for `analyze`/`gen`.
+
+## SYSTEM.CNF
+
+```
+BOOT = cdrom:\SCUS_945.70;1
+TCB = 4
+EVENT = 16
+STACK = 801FFF00
+```
+
+Load-bearing for the runtime: the kernel HLE must size its TCB array to 4 and its EvCB array to
+16, and honor `STACK = 0x801FFF00` as the initial SP — note this differs from the value in the
+EXE header (0x801FFFF0); the BIOS prefers SYSTEM.CNF. See `docs/specs/runtime.md` §1.
+
+## PS-EXE header (SCUS_945.70), verified 2026-08-08
+
+| Field | Value |
+|---|---|
+| magic | `PS-X EXE` |
+| initialPc | `0x8002E7B0` |
+| initialGp | `0x00000000` |
+| loadAddr | `0x80010000` |
+| fileSize | `0x00069000` (430,080) → text/data occupies `0x80010000`–`0x80078FFF` |
+| dataAddr/dataSize | 0 / 0 |
+| memfillAddr/Size | 0 / 0 (no BSS zerofill requested by the header) |
+| spBase / spOffset | `0x801FFFF0` / 0 (overridden by SYSTEM.CNF `STACK`) |
+| region marker | "Sony Computer Entert…" |
+
+File size on disc (432,128) = 0x800 header + 0x69000 payload — exact, so the dump is not
+truncated. Entry point sits at payload offset `0x1E7B0`, inside the loaded range, as expected.
+
+sha256 `fd5727a18feb2a2d5a6359a55966f0266284d1e50f64ee9b8a127a97091bd516` — recorded in
+`game.json` as `exeSha256`; a mismatch means a different revision and is a hard error.
+
+## Open questions (answered during M1/M6, recorded here as they resolve)
+
+- **Overlays**: where the game's overlay loader lives, which file(s) overlays come from
+  (`BASHY.` and `CRASHBSH.DAT` are the candidates by size), their load addresses, and whether
+  they are stored compressed. Method: `recompsx extract` for the file list, then trace CD-read
+  call sites (LIBCD `CdRead`/`CdReadFile` cross-references) in the disassembly. If compressed,
+  capture the decompressed regions once with a debugger and use `memdump` overlay sources.
+- **Audio**: whether music is sequenced through SPU registers, XA streams, CDDA, or a mix.
+- **FMV**: MDEC usage and where the STR data lives.
+- **Multitap**: which path the game uses (kernel `InitPad` buffers vs raw SIO0) — both are
+  implemented, but the 4-player arming behavior needs verifying against the real game.
+
+## Prior art on this machine
+
+The sibling project `crash-bash-editor` (the user's own work) contains extensive format
+documentation for this game's data files. It is a legitimate reference for *data* formats and
+disc rebuilding. It says nothing about executable code layout, which is what recompsx needs — do
+not assume overlap.
