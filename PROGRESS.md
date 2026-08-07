@@ -26,6 +26,10 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 - [ ] **M0 (M): toolchain + walking skeleton + docs**
   - [x] 0.1 process docs committed — accept: files exist on main ✔ 2026-08-08
+        Evidence: commit `de6e264` "M0.1: process docs, specs, license and repo skeleton",
+        49 files tracked on `main`. `.gitignore` behavior verified by experiment:
+        `tests/fixtures/hello.exe` tracked, `tests/fixtures/external/psxtest_cpu.exe` ignored,
+        `games/crashbash/local.json` ignored.
   - [ ] 0.2 pinned toolchain — accept: `haxe -version` == 4.3.7 from `.toolchain`, output pasted
   - [ ] 0.3 [M0-VERIFY] executed — accept: every item answered YES/NO + evidence pasted below
   - [ ] 0.4 reflaxe.CPP hello — accept: 2-module hello compiles, C++ layout documented, runs
