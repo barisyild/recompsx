@@ -1,0 +1,23 @@
+diff --git a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+index 5a2e9ac..4724e83 100644
+--- a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
++++ b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+@@ -328,7 +328,17 @@ private class OptimizerTexpr {
+ 					{ el = r.concat(tail); continue; }
+ 				}
+ 				case TContinue: {
+-					{ acc = []; el = tail; continue; }
++					// recompsx: `continue` ends the block. Everything BEFORE it must be kept,
++					// and everything AFTER it is unreachable. This cleared `acc` — the statements
++					// already collected, which are the ones before — and kept walking the tail,
++					// exactly backwards. `acc` is built by prepending and reversed by the caller,
++					// so the fix is to prepend the `continue` like any other side effect and stop.
++					//
++					// The damage was invisible in ordinary code and total in ours: every
++					// recompiled function is a `while(true) switch(bb)` state machine whose cases
++					// end in `bb = N; continue;`, so this deleted the body of nearly every basic
++					// block. 1119 of one shard's 1296 cases compiled to a bare `break`.
++					{ acc = [head].concat(acc); el = []; continue; }
+ 				}
+ 				case _: {
+ 					{ acc = [head].concat(acc); el = tail; continue; }

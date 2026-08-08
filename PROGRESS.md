@@ -138,12 +138,16 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
       | Haxe typecheck | 0.95 s |
       | Haxe → JavaScript | 3.7 s, 6.9 MB — **runs** |
       | Haxe → C++ | 63 s, 19 files, 2.1 MB |
-      | clang -O2 | 7.7 s, **340 KB binary** |
+      | clang -O2 | 9 s, **2.1 MB binary** |
 
-      Every threshold in the original plan is met with room to spare, and the binary size is the
-      number that matters for the console targets: 340 KB of code against a 32 MB machine, with
+      Every threshold in the original plan is met with room to spare. The binary size is the
+      number that matters for the console targets: 2.1 MB of code against a 32 MB machine, with
       3.5 MB of emulated hardware state and ~7 KB of dispatch table. The memory budget in
       `docs/specs/backend.md` §0 holds.
+
+      **Correction:** this table first recorded a 340 KB binary. That figure was measuring a
+      program with 86% of its basic-block bodies deleted by upstream defect 9 (below) — a
+      compiler bug flattering a benchmark. 2.1 MB is the honest number.
 
   - [x] **The recompiled game runs on JavaScript.** `build/game-js.hxml` compiles out/gen in
         **4.5 s** with `-D analyzer-optimize` and `node` executes it. It gets through Crash Bash's
@@ -166,82 +170,33 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         `syscall 0` are not on the P0 list in docs/specs/runtime.md §7.3.1, and Crash Bash calls
         them before anything else.
 
-  - [ ] **M1.5 open item — the C++ build mis-dispatches; narrowed, not yet found.** The C++
-        binary fails on its first call with `dispatch to shard 4 slot 14, which does not exist`,
-        while the identical generated Haxe runs correctly on JavaScript. Adding
-        `-D analyzer-optimize` changes nothing, so it is not an artefact of un-optimised output.
+  - [x] **The C++ build now matches JavaScript, and the cause was upstream defect 9.**
+        `Fns_04_8002c97c::dispatch` missed `case 14` on the first dispatch. Chasing it down
+        found something far larger: **86% of the switch-case bodies in the generated C++ were
+        empty** — 1119 of shard 4's 1296 `case` blocks compiled to a bare `break;` while
+        JavaScript kept the statements.
 
-        What has been ruled out, each by reading the emitted C++ or the generated data:
+        One line in `RemovePureExpressionsImpl.blockElement`:
 
-        | Suspect | Verdict |
-        |---|---|
-        | The handle is wrong | No. Entry `0x8002e7b0` is index 395 of 861, handle 4194318 = shard 4, slot 14 — exactly right. |
-        | The address array is mis-sorted | No. `ADDRS` is ascending as both signed and unsigned, so the binary search is valid either way. |
-        | `FnTable::lookup` | Correct C++ binary search. |
-        | `FnTable::dispatch` | Correct: `handle & 1048575`, `static_cast<unsigned int>(handle) >> 20`, `case 0`..`case 8` all present. |
-        | `Fns_04::dispatch` | Correct: 91 flat cases, `case 14` present between 13 and 15, `default` last. |
-        | The shard is short a slot | No. Shard 4 has 91 handles, max slot 90. |
+            case TContinue: { acc = []; el = tail; continue; }
 
-        Which leaves a contradiction worth stating plainly: the message can only come from
-        `Fns_04::dispatch`'s default arm, whose shard number is a literal `4` — and that arm is
-        reached with `slot == 14` while `case 14:` sits eight lines above it in the same flat
-        switch. Valid C++ cannot do that, so either the value being switched on is not the value
-        being printed, or the two `Runtime.badHandle` call sites are not distinguishable from the
-        message alone and the real one is elsewhere.
+        `continue` ends a block: everything *before* it must be kept and everything *after* it is
+        unreachable. This cleared `acc` — the statements already collected, which are the ones
+        before — and then walked the tail anyway. Exactly backwards, and the same shape as
+        defect 8's inverted return, sixty lines away in the same file.
 
-        **The split has been made.** `Runtime.badHandle` now takes a `where` string, so the two
-        arms name themselves. The C++ run says:
+        Invisible in ordinary code, total in ours: every recompiled function is a
+        `while(true) switch(bb)` state machine whose cases end in `bb = N; continue;`, so this
+        deleted the body of nearly every basic block. The dispatch symptom followed from it — with
+        the arms gutted, clang folded a 91-case switch into a 13-comparison tree with no jump
+        table, and `case 14` was not in the compiled code at all.
 
-            Fns_04_8002c97c dispatch fell through for shard 4 slot 14, which should exist.
+        Fixed in `vendor/patches/0004-reflaxe-continue-deletes-preceding.patch`. Empty case blocks
+        in shard 4: 1119 → **0**. The C++ build now produces the same startup sequence as
+        JavaScript, call for call, and waits for the same VBlank.
 
-        So it is the shard's own switch, not the table's. And that switch was then checked by
-        parsing the emitted C++ rather than by eye: **91 cases, exactly 0..90, no duplicates, no
-        gaps, one switch in the function, `default` last, and `case 14:` calls
-        `Fns_04_8002c97c::entry_point(ctx)`, which has exactly one definition.** There is nothing
-        wrong with the switch.
-
-        Which forces the conclusion the whole chase was for: **the value being switched on is not
-        the value being printed.** A correct switch cannot miss a present label, so `slot` at the
-        `default` arm holds something outside 0..90, while the `slot` handed to `badHandle`
-        prints as 14. Either reflaxe is passing a stale copy of the argument into the
-        four-argument call, or the switch subject and the printed expression have been separated
-        by the compiler's own copy propagation.
-
-        **The counter settled it: `on dispatch #1`.** The very first call the program makes
-        falls through. `entry_point` never runs, which also explains why the C++ build prints
-        none of the kernel warnings the JavaScript build prints — it never gets that far.
-
-        Checked since, and all clean: exactly one definition of `Fns_04_8002c97c::dispatch`,
-        the header declares `(int slot, std::shared_ptr<core::CpuState>)` matching the definition,
-        `FnTable.cpp` does include that header, and clang's own LLVM IR for the function contains
-        a genuine `switch` — so the label is not being lost between C++ and machine code either.
-
-        Going below the source found it, and it is far worse than the symptom suggested.
-
-        **86% of the switch-case bodies in the generated C++ are empty.** In shard 4 alone,
-        1119 of 1296 `case` blocks compile down to a bare `break;`. The generated Haxe has the
-        real instructions in them:
-
-            case 0: // 0x8002e7b0
-                ctx.v0 = 0x80070000;
-                ctx.v0 = (ctx.v0 + -5648) | 0;
-
-        and the emitted C++ for the same case is `case 0: { break; }`. JavaScript keeps them.
-        This is the sibling of upstream defect 8 — statements deleted from a branch body — but in
-        switch cases rather than `if` bodies, so the fix in patch 0002 does not cover it.
-
-        The dispatch failure was only the first visible consequence: with most bodies gone, clang
-        sees a 91-case switch whose arms are largely indistinguishable, folds it to a 13-comparison
-        tree with no jump table, and `case 14` is simply not in the compiled code — the branch
-        goes 13, then 15, then default. That is why `entry saw 14` and the switch still missed it.
-
-        **Open question to settle first:** whether `-D analyzer-optimize`, made mandatory in this
-        same session, causes or merely exposes this. The dispatch failure predates the flag, so
-        the deletion probably does too, but that has not been measured — build the game C++ with
-        and without it and count empty case blocks. Whichever way it lands, the answer is a spike:
-        a function with a `while(true) switch(bb)` whose cases assign to a field, compiled both
-        ways, digest-compared. That shape is the core of every recompiled function, so nothing
-        about the C++ target can be trusted until it is fixed.
+        Reduced to `tests/spike/bbswitch/` — a four-block state machine assigning to fields — so
+        `scripts/spike.sh` reports if upstream fixes it.
 
 ## [M0-VERIFY] checklist
 
