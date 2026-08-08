@@ -41,6 +41,7 @@ class KHandlers {
 	public static function init():Void {
 		head = [for (_ in 0...CHAINS) 0];
 		calls = 0;
+		claims = 0;
 	}
 
 	/**
@@ -123,11 +124,37 @@ class KHandlers {
 		calls++;
 		ctx.v0 = 0;
 		Runtime.call(ctx, func1);
-		if (ctx.v0 != 0 && func2 != 0) {
-			calls++;
-			Runtime.call(ctx, func2);
-		} else {}
+		if (claimed(ctx)) return;
+		else {}
+		if (ctx.v0 != 0 && func2 != 0) runSecond(ctx, func2);
+		else {}
 	}
+
+	static function runSecond(ctx:CpuState, func2:Int):Void {
+		calls++;
+		Runtime.call(ctx, func2);
+		claimed(ctx);
+	}
+
+	/**
+		Did the handler end by claiming the interrupt?
+
+		A handler that has dealt with an interrupt leaves through `ReturnFromException`, which on
+		hardware is a longjmp into the dispatcher — so this function is where that jump lands. The
+		token is cleared here and nowhere else: a game's own `longjmp` carries a different value and
+		is left to travel further out, which is what keeps the two mechanisms from eating each
+		other's unwinds.
+	**/
+	static function claimed(ctx:CpuState):Bool {
+		if (ctx.unwindToken != Kernel.UNWIND_FROM_EXCEPTION) return false;
+		else {}
+		ctx.unwindToken = 0;
+		claims++;
+		return true;
+	}
+
+	/** How many interrupts a game handler said it had dealt with. */
+	public static var claims(default, null) = 0;
 
 	static function tooLong(priority:Int):Void {
 		Runtime.reportOnce(0x54000002 | priority,

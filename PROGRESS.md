@@ -52,38 +52,35 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **CD interrupts are delivered and libcd's handler runs. `CdInit` still fails, and the gap is
-   now measured to be *inside* the handler's conversation with `CdSync`.**
+2. **libcd's handler runs on every CD interrupt and still does not satisfy `CdSync`. The next
+   probe is a register trace, not another hypothesis.**
 
-   The address-less `no function at this address` diagnostic was hiding the cause. Naming the
-   addresses found six distinct unresolved call targets — libcd reaches parts of itself through
-   function-pointer tables the analysis cannot read, and every such call was a silent black hole.
-   `gen --seed` now exists (the CLI form of a functionHint), and the exact command lives in
-   `games/crashbash/notes.md`.
+   Measured state: `I_MASK` = `0x08d` (libcd unmasks cdrom+dma itself, once its black-holed
+   functions are seeded), `irqs` > `frames` so CD interrupts really are delivered, and
+   `handlers` ≈ 1.1 × `frames` so libcd's own chain element is installed and called. `CdInit`
+   runs its full `CdlNop`/`CdlReset`/`CdlGetTN` sequence and then reports `Init failed`.
 
-   Seeding five of them changed the machine's whole posture, all measured:
+   `ReturnFromException` is now an unwind rather than a return, which OpenBIOS
+   (`kernel/handlers.c`, MIT) settles beyond doubt: the dispatcher holds a `JmpBuf` whose `ra` is
+   `returnFromException` and whose `sp` is a dedicated exception stack, so a handler that claims
+   an interrupt jumps back through it and its frame is abandoned. Treating that as an ordinary
+   return let the recompiled handler run on into code unreachable on hardware.
 
-   | | before | after |
-   |---|---|---|
-   | I_MASK | `0x001` vblank only | **`0x08d` vblank+cdrom+dma+sio0 — written by libcd itself** |
-   | irqs vs frames | equal (vblank only) | **irqs > frames: CD deliveries happen** |
-   | handlers vs frames | equal (one element) | **~1.12×: libcd's chain element is installed and runs** |
-   | libcd init | GetTN timeout | full `CdlNop`/`CdlReset`/`CdlGetTN` sequence, then `CdInit: Init failed` |
+   **It is correct and it changed nothing: `claims` is 0.** libcd's handler returns normally
+   rather than through `ReturnFromException`, so this path is not the one it uses. Fifth
+   hypothesis, fifth elimination — and the third fix that stands on hardware behaviour alone.
 
-   So the earlier hypothesis was right in mechanism — the CD enable *was* behind a black-holed
-   indirect call — and the remaining failure is one layer deeper: the handler runs but `CdSync`
-   never learns the answer arrived. Candidates, each checkable against OpenBIOS's MIT source:
+   Enough guessing. The question is no longer *whether* the handler is called but **what it reads
+   and what it gets**, and that is directly observable: trace every CD register access made while
+   inside `Irq.dispatch` — address, index, value — and compare it against what psx-spx says libcd
+   would expect. One run answers it. Candidate faults it would expose immediately:
 
-   - **The chain element convention.** func1 at +8 first, func2 at +4 on `v0 != 0` — and on
-     retail, a claiming handler exits via `ReturnFromException`, which never returns. Ours is a
-     no-op, so the recompiled handler *continues into code that is unreachable on hardware*.
-     RFE should drive the unwind token instead. OpenBIOS `kernel/handlers.c` is the contract.
-   - **`B0(19h) HookEntryInt`.** The game installed a hook we store and never invoke; libetc's
-     callback dispatch may ride it. Same file answers what the kernel does with it.
-
-   - Sixth black hole `0x8003b224`: **do not seed it** — it lies inside another function's
-     extent and seeding truncates the host (§6.2 multi-entry duplication is unimplemented in the
-     tool; that is the real fix). Regression verified and reverted.
+   - `read1803` on index 1 returns the *level* (1–5). The hardware returns interrupt **flags**
+     there, and libcd may be testing bits rather than comparing a number.
+   - The response FIFO may be drained by the handler before `pendingInt` has been delivered, or
+     the handler may ack before reading, leaving `CdSync` with nothing.
+   - `statusRegister` bit 5 claims "response waiting" from `responseRead < responseCount`, which
+     is true only after delivery — a handler polling it earlier sees a permanently empty mailbox.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map

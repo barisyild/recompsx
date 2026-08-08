@@ -100,7 +100,7 @@ class Kernel {
 		else if (fn == 0x0E) ctx.v0 = KThreads.openTh(ctx, ctx.a0, ctx.a1, ctx.a2);
 		else if (fn == 0x0F) ctx.v0 = KThreads.closeTh(ctx, ctx.a0);
 		else if (fn == 0x10) ctx.v0 = KThreads.changeTh(ctx, ctx.a0);
-		else if (fn == 0x17) ctx.v0 = returnFromException();
+		else if (fn == 0x17) ctx.v0 = returnFromException(ctx);
 		else if (fn == 0x18) ctx.v0 = resetEntryInt();
 		else if (fn == 0x38) exitGame(ctx);
 		else if (fn == 0x3B) ctx.v0 = putcB0(ctx);
@@ -274,10 +274,33 @@ class Kernel {
 		return 0;
 	}
 
-	/** `ReturnFromException` — a marker. Under HLE the handler simply returned to its caller. */
-	static function returnFromException():Int {
+	/**
+		`ReturnFromException` — which never returns.
+
+		On hardware this is a **longjmp**, not a return. OpenBIOS makes it explicit
+		(`kernel/handlers.c`, MIT, Copyright (c) 2019 PCSX-Redux authors): the exception dispatcher
+		holds a `JmpBuf` whose `ra` is `returnFromException` and whose `sp` is a dedicated exception
+		stack, and a handler that has claimed an interrupt jumps back through it. Its own frame is
+		abandoned.
+
+		Treating it as an ordinary return — which is what this did — leaves the recompiled handler
+		running on into code that is unreachable on a real machine. The instructions after the call
+		exist in the binary, so they translate and they execute, and the further they run the less
+		the failure looks like anything to do with exceptions.
+
+		So it raises the unwind instead. Frames peel back to `KHandlers.callElement`, which is the
+		anchor this jump lands on, exactly as the dispatcher's `JmpBuf` is on hardware.
+	**/
+	static function returnFromException(ctx:CpuState):Int {
+		ctx.unwindToken = UNWIND_FROM_EXCEPTION;
 		return 0;
 	}
+
+	/**
+		The token value that means "a handler claimed its interrupt", as distinct from a game's own
+		`longjmp`. `KHandlers` clears this one; anything else it lets travel further out.
+	**/
+	public static inline var UNWIND_FROM_EXCEPTION = 0x52464558;   // 'RFEX'
 
 	static function resetEntryInt():Int {
 		hookEntryInt = 0;
@@ -536,6 +559,7 @@ class Kernel {
 			+ " | events " + core.Scheduler.fired
 			+ " | irqs " + core.Irq.delivered
 			+ " | handlers " + KHandlers.calls
+			+ " | claims " + KHandlers.claims
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
