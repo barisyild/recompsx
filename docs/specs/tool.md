@@ -207,6 +207,54 @@ re-analyzes in-process.
   for the single successor instruction); hi/lo latency invisible; i-cache invisible (stale-cache
   self-patching games out of scope v1); misaligned access raises no AdEL/AdES.
 
+## 3.1 Why memory stays a flat 2 MB array
+
+A recurring and reasonable question: instead of routing every load and store through a 2 MB byte
+array, could analysis recover *variables* — infer that a given address holds an int or a struct
+field and emit a real Haxe variable for it? That is decompilation rather than recompilation, and
+the distinction decides what this project can promise.
+
+**Most accesses already avoid memory.** The 32 MIPS registers are Haxe fields on `CpuState`, not
+array slots. Compiled MIPS keeps locals, parameters and loop counters in registers, so the bulk
+of a function's data traffic is plain variable access with no array indexing at all. The flat
+array carries what genuinely lives in memory: the stack, globals, heap, and anything the hardware
+touches.
+
+**The array cannot be removed, because other things write to it.**
+
+- **DMA writes behind the CPU's back.** The GPU reads display lists from RAM, the SPU streams
+  samples out of it, the CD controller writes sectors into it. Promoting an address to a variable
+  is only sound if nothing else can touch those bytes, and DMA destinations are computed at run
+  time from register values.
+- **Addresses escape constantly.** `addiu $a0, $sp, 0x10` hands a stack slot's address to a
+  callee; structures are passed by pointer; `memcpy` moves bytes with no type at all. Proving
+  non-escape across the whole program is not decidable in general, and PS1 code is not written to
+  make it easy.
+- **Bytes are type-punned by design.** `lwl`/`lwr` read a word from an unaligned address; the same
+  bytes are read as `u8`, `u16` and `u32` by different code paths; bitfields are packed by hand.
+  Any "type" recovered is a guess about one access, not a property of the storage.
+- **Overlays rewrite regions wholesale**, code and data together.
+
+A promotion that is wrong once in a million accesses produces a hang or corrupted save that is
+almost impossible to trace back — against a project whose entire claim is bit-exactness.
+
+**What is cheap, and what is available later.** `Memory.read32(a)` is not an interpreter step: it
+inlines to a bounds-free index into the array, and on the C++ side at `-O2` it is a handful of
+instructions. Two optimisations are open when measurement asks for them, in increasing order of
+ambition:
+
+1. **A per-target wide-load fast path.** The byte-composed accessors are endian-neutral, which is
+   what makes a big-endian console work with no backend involvement, but on a little-endian host a
+   single 32-bit load is correct and faster. Guarded by a define, verified by the digest.
+2. **Stack-slot promotion.** Where a function's frame provably never has its address taken — no
+   `addiu rX, sp, N` reaching an escape, no computed `sp`-relative access — its slots can become
+   Haxe locals. This is a local, decidable test, unlike whole-program pointer analysis, and it is
+   where the remaining win actually is. It belongs after correctness, with the cross-target digest
+   proving it changed nothing.
+
+Recovering names and structures for readability is a separate goal, valuable for modding and for
+people reading the output, and it does not require changing how memory is modelled.
+
 ## 4. Per-game config schema
 
 `games/<game>/game.json` (committed, schemaVersion 1): `id`, `title`, `region`, `exePath`

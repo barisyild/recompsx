@@ -170,6 +170,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] M1 started: Vaddr, PsxExe loader (full header validation + warnings), mips.Op
+  (exhaustive enum abstract) and mips.Instr written; decoder + golden tests are the next step.
+  Added docs/specs/tool.md §3.1: why memory stays a flat array and what may be promoted later
+  (registers already are variables; stack-slot promotion is the future win). Paused at user
+  request.
+
 2026-08-08 [claude] M0 COMPLETE. Backend ABI + SDL2 + our own main; shim/{RawBuf,RawMem,IntMath,
   Backend}; runtime/{Main,core.Hash,gpu.Vram}; CMake template; scripts/{build-pc,run-pc,test}.sh.
   Found reflaxe.CPP silently deleting `if` statements (guard clauses run the WRONG path) -> added
