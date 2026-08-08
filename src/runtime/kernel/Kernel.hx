@@ -259,8 +259,18 @@ class Kernel {
 		return 0;
 	}
 
+	/**
+		`_96_init` — arm the CD.
+
+		It does not only register a device: on hardware it installs the CD BIOS handlers *and*
+		unmasks the CD line, because the handlers it installs are the ones that will be called.
+		A game never touches I_MASK for the CD itself, which is why leaving that out looked like a
+		controller that answered into a disconnected wire — nineteen interrupts raised, none
+		delivered, and libcd reporting `NoIntr` about a command it had understood perfectly.
+	**/
 	static function cdDeviceInit():Int {
-		noteOnce(0xA0054, "A0(54h) _96_init — CD device registered, but there is no disc layer");
+		Irq.unmask(Irq.CDROM);
+		noteOnce(0xA0054, "A0(54h) _96_init — CD device registered and its interrupt unmasked");
 		return 0;
 	}
 
@@ -381,8 +391,10 @@ class Kernel {
 		missing, because a game calling them is doing normal setup, not asking for anything: the
 		work only begins when it opens a `bu00:` file, and that is where the honest failure is.
 	**/
+	/** `_bu_init` — the same for the memory card, which lives on the serial port. */
 	static function buInit():Int {
-		noteOnce(0xA0070, "A0(70h) _bu_init — memory card device registered, but there is no card layer");
+		Irq.unmask(Irq.SIO0);
+		noteOnce(0xA0070, "A0(70h) _bu_init — memory card device registered, SIO0 unmasked");
 		return 0;
 	}
 
@@ -483,7 +495,8 @@ class Kernel {
 			+ " | handlers " + KHandlers.calls
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c"
-			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec");
+			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
+			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
 	}
 
 	// ---- syscall / break -------------------------------------------------------------------------

@@ -92,8 +92,41 @@ class Irq {
 		stat = stat & v;
 	}
 
+	/**
+		Enables one line without disturbing the others.
+
+		For the kernel's device initialisers, which arm a source on the game's behalf. A game that
+		calls `_96_init` never writes I_MASK for the CD itself and would be within its rights to
+		read the register back and find its own bits untouched.
+	**/
+	public static function unmask(bit:Int):Void {
+		mask |= 1 << bit;
+	}
+
 	public static function writeMask(v:Int):Void {
 		mask = v;
+		Runtime.noteOnce(0x5A100000 | (v & 0x7FF), "I_MASK set to " + hex(v)
+			+ " — lines now enabled: " + names(v));
+	}
+
+	/** Which sources the game is listening to, by name, because a bitmask is not a diagnosis. */
+	static function names(v:Int):String {
+		var out = "";
+		if ((v & (1 << VBLANK)) != 0) out += "vblank ";
+		if ((v & (1 << GPU)) != 0) out += "gpu ";
+		if ((v & (1 << CDROM)) != 0) out += "cdrom ";
+		if ((v & (1 << DMA)) != 0) out += "dma ";
+		if ((v & (1 << TIMER0)) != 0) out += "timer0 ";
+		if ((v & (1 << TIMER1)) != 0) out += "timer1 ";
+		if ((v & (1 << TIMER2)) != 0) out += "timer2 ";
+		if ((v & (1 << SIO0)) != 0) out += "sio0 ";
+		if ((v & (1 << SPU)) != 0) out += "spu ";
+		return out == "" ? "(none)" : out;
+	}
+
+	static function hex(v:Int):String {
+		final d = "0123456789abcdef";
+		return "0x" + d.charAt((v >> 8) & 0xF) + d.charAt((v >> 4) & 0xF) + d.charAt(v & 0xF);
 	}
 
 	/** What the game would see in CAUSE: the controller's line, folded into IP bit 10. */

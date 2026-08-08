@@ -52,32 +52,31 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD-ROM controller answers, but libcd does not see its interrupts.**
+2. **The CD-ROM controller answers; libcd still sees no interrupt. Two of three candidates are
+   eliminated by measurement.**
 
-   `cd/Cdrom.hx` implements the four registers, the parameter and response FIFOs, the INT levels
-   and the one-outstanding-interrupt queue, and the commands a boot needs: `Getstat`, `Setloc`,
-   `Setmode`, `SeekL`, `ReadN`/`ReadS`, `Pause`, `Init`, `GetTN`, `GetTD`, `GetID`, `Test 20h`,
-   `ReadTOC`. Sector reads come from the mounted image through `Iso9660.rawSector`.
+   `cd/Cdrom.hx` implements the four registers, both FIFOs, the INT levels, the
+   one-outstanding-interrupt queue, and the boot commands. Crash Bash initialises libcd
+   (`tty: CD_init:addr=8006de94`) and issues 15–17 commands, where before it issued none.
 
-   Crash Bash now gets much further. It initialises libcd — `tty: CD_init:addr=8006de94` — and
-   issues **17 commands**. Then it stops with its own diagnosis:
+   | Candidate | Verdict |
+   |---|---|
+   | `irqEnable` never set, so every interrupt is dropped | **Eliminated.** Counters say 19 raised, 1 dropped. |
+   | The game never unmasks the CD line in I_MASK | **Was true, and fixed — but not the cause.** |
+   | The response is raised synchronously inside the register write | **Prime suspect. Untested.** |
 
-       tty: CD timeout: CD_cw:(CdlGetTN) Sync=NoIntr, Ready=NoIntr
+   The middle one is worth keeping even though it changed nothing: I_MASK was only ever written
+   `0x001`, vblank alone, because a game does *not* unmask the CD itself — `_96_init` does it on
+   the game's behalf while installing the CD BIOS handlers. That is real hardware behaviour and
+   the kernel was wrong without it.
 
-   **`NoIntr` is the symptom to chase, not `GetTN`.** Implementing `GetTN` changed nothing, which
-   is the informative part: libcd is not failing to understand the answer, it is not seeing an
-   interrupt at all. Candidates, in the order worth testing:
+   **What is left is the timing.** Every command answers inside the register write that issued it.
+   Hardware always takes cycles, and libcd very likely arms its wait *after* writing the command —
+   so the interrupt has already fired and been seen by nobody. The scheduler is already there and
+   `queue`/`schedule` already exist for the second answer; the fix is to route the *first* answer
+   through them too, so `respond` becomes a deferral rather than an immediate raise.
 
-   - `raise()` gates on `(irqEnable & currentInt) != 0`, and `irqEnable` is only written on
-     index 1 of 1F801802. If libcd sets it through a path this does not cover, every interrupt is
-     silently dropped.
-   - The response is raised synchronously inside the register write rather than after `ACK`
-     cycles. Hardware always takes time; libcd may arm its wait *after* writing the command, and
-     an interrupt that has already fired is one it never waits for.
-   - `read1803` returns `currentInt | 0xE0` on index 1. If libcd reads the level from a different
-     index or expects the flags rather than the level, it sees nothing it recognises.
-
-   The first two are one experiment each. Do them before adding another command.
+   That is one change to one function, and it is the next thing to do.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map

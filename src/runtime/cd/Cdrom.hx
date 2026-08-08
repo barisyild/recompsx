@@ -110,6 +110,8 @@ class Cdrom {
 		sectorReady = false;
 		sectorsDelivered = 0;
 		commands = 0;
+		raised = 0;
+		swallowed = 0;
 	}
 
 	// ---- the four registers ----------------------------------------------------------------------
@@ -480,9 +482,25 @@ class Cdrom {
 	}
 
 	static function raise():Void {
-		if ((irqEnable & currentInt) != 0) Irq.raiseLine(Irq.CDROM);
-		else {}
+		if ((irqEnable & currentInt) != 0) fire();
+		else dropped();
 	}
+
+	static function fire():Void {
+		raised++;
+		Irq.raiseLine(Irq.CDROM);
+	}
+
+	/** An answer nobody will hear. Worth counting: it is the difference between a controller that
+		is silent and one that is shouting into a disconnected wire. */
+	static function dropped():Void {
+		swallowed++;
+		Runtime.reportOnce(0x67000000,
+			"CD interrupt dropped: level " + currentInt + " but irqEnable is " + irqEnable);
+	}
+
+	public static var raised(default, null) = 0;
+	public static var swallowed(default, null) = 0;
 
 	static inline function fromBcd(v:Int):Int {
 		return ((v >> 4) & 0xF) * 10 + (v & 0xF);
