@@ -296,7 +296,12 @@ class Cdrom {
 		if ((v & 0x07) == 0) return;
 		else {}
 		currentInt = 0;
-		if (queuedInt != 0) releaseQueued();
+		// The queued second answer goes through the scheduler like the first, and for the same
+		// reason: releasing it here delivers it *inside* the driver's acknowledging write, before
+		// that driver has finished handling the answer it was acknowledging. The first response
+		// was moved off this path days ago; this one was left behind, so every two-interrupt
+		// command — Init, Reset, SeekL, GetID — handed its completion to a library still mid-ack.
+		if (queuedInt != 0) schedule(now, ACK);
 		else {}
 	}
 
