@@ -60,10 +60,68 @@ class Backend {
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int return -1;
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int return -1;
 
-	public static function fileOpen(slot:Int, path:String):Int return -1;
-	public static function fileSize(slot:Int):Int return -1;
-	public static function fileRead(slot:Int, offset:Int, buf:RawBuf, len:Int):Int return -1;
-	public static function fileClose(slot:Int):Void {}
+	// ---- file slots ---------------------------------------------------------------------------
+	//
+	// How the runtime reaches the game's own bytes: the executable payload now, disc sectors
+	// later. The C++ side of this is the backend's `bp_file_*`, deliberately a dumb byte server
+	// so that all CUE and ISO9660 logic stays in portable Haxe (shared/psxdisc) and a console
+	// port has nothing to reimplement but reads.
+	//
+	// Here the whole file is read once into a RawBuf rather than kept as a handle. A PS-EXE is a
+	// megabyte and this is the development target, so the simplicity is worth more than the
+	// memory — and it keeps the slot array typed, with no Dynamic anywhere.
+
+	static final SLOTS = 8;
+	static var slots:Array<Null<RawBuf>> = [for (_ in 0...SLOTS) null];
+
+	public static function fileOpen(slot:Int, path:String):Int {
+		if (slot < 0 || slot >= SLOTS) return -1;
+		else {}
+		final size = statSize(path);
+		if (size < 0) return -1;
+		else {}
+		final buf = new RawBuf(size);
+		readInto(path, buf);
+		slots[slot] = buf;
+		return 0;
+	}
+
+	public static function fileSize(slot:Int):Int {
+		if (slot < 0 || slot >= SLOTS) return -1;
+		else {}
+		final b = slots[slot];
+		return b == null ? -1 : b.u8.length;
+	}
+
+	public static function fileRead(slot:Int, offset:Int, buf:RawBuf, len:Int):Int {
+		if (slot < 0 || slot >= SLOTS) return -1;
+		else {}
+		final src = slots[slot];
+		if (src == null) return -1;
+		else {}
+		// A short read at the end is not an error — it is what a byte server does.
+		var n = len;
+		if (offset + n > src.u8.length) n = src.u8.length - offset;
+		else {}
+		if (n <= 0) return 0;
+		else {}
+		buf.u8.set(src.u8.subarray(offset, offset + n), 0);
+		return n;
+	}
+
+	public static function fileClose(slot:Int):Void {
+		if (slot >= 0 && slot < SLOTS) slots[slot] = null;
+		else {}
+	}
+
+	/** -1 if the path does not exist, rather than throwing: the caller reports, we do not. */
+	static function statSize(path:String):Int {
+		return js.Syntax.code("(function(p){ try { return require('fs').statSync(p).size|0; } catch (e) { return -1; } })({0})", path);
+	}
+
+	static function readInto(path:String, buf:RawBuf):Void {
+		js.Syntax.code("{0}.u8.set(require('fs').readFileSync({1}))", buf, path);
+	}
 
 	/** No pacing headless: this target runs as fast as it can and is never watched live. */
 	public static function paceFrame(targetUs:Int):Void {}
