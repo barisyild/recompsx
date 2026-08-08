@@ -204,12 +204,29 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    *Workarounds, all verified:* add `else {}`; extract the body into a function call; or invert
    a guard into `if (!c) {} else { ... }`. `scripts/spike.sh` reports when upstream fixes it.
 
+   **Related, and the one that cost the most time so far: `inline` on a multi-statement function
+   is unsafe.** Writing `core.Ops.div`/`divu` took four attempts, each correct on JavaScript and
+   wrong on C++ — a ternary inside a branch, guard clauses ending in `return`, an
+   `if / else if / else` chain with two-statement bodies, and finally a one-statement-per-branch
+   version whose helper was `inline`. Only removing the `inline` made both targets agree.
+
+   Practical rule for `src/runtime`: reserve `inline` for single-expression accessors with each
+   parameter used once (`RawMem.get8` is the shape that is safe). Anything with a body gets a
+   plain call — the C++ compiler inlines it anyway, and none of this is a hot path in the sense
+   that would justify the risk.
+
 ## Blockers & open questions
 
 - None blocking. Known unknowns are tracked as `[M0-VERIFY]` items above and as the open
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] core.Ops (mult/div, hardware edge cases) + tests/conformance/Mul.hx. The test
+  earned itself immediately: four successive formulations of div/divu were correct on JS and
+  wrong on C++, and the last culprit was `inline` on a two-statement helper. Both targets now
+  agree (b5a873d9). Added the resulting rule to upstream defect 8: in runtime code, `inline` is
+  only for single-expression accessors. Conformance now covers Arith, Mem and Mul.
 
 2026-08-08 [claude] First generated code. runtime/{core.CpuState, core.Ops, mem.Memory} written,
   then codegen.Emitter + `recompsx emit`. Emitting Crash Bash's real entry point reads correctly:

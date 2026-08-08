@@ -24,8 +24,10 @@ import shim.IntMath;
 class Ops {
 	public static function mult(ctx:CpuState, a:Int, b:Int):Void {
 		final neg = (a < 0) != (b < 0);
-		final ua = a < 0 ? -a : a;
-		final ub = b < 0 ? -b : b;
+		var ua = a;
+		if (a < 0) ua = -a;
+		var ub = b;
+		if (b < 0) ub = -b;
 		mulUnsigned(ctx, ua, ub);
 		if (neg) negate64(ctx);
 	}
@@ -34,53 +36,61 @@ class Ops {
 		mulUnsigned(ctx, a, b);
 	}
 
+	/**
+		Note the shape of these two functions: every branch body is a **single statement**, a call
+		to `setLoHi`.
+
+		That is not style. reflaxe.CPP miscompiles richer branch bodies, and this function found
+		three separate shapes of it: a ternary inside a branch, guard clauses ending in `return`,
+		and an `if / else if / else` chain with two-statement bodies. All three are natural Haxe,
+		all three were correct on JavaScript, and all three were wrong on C++. Reducing each arm
+		to one call sidesteps the whole family — and reads better than what it replaced, since the
+		branch conditions now sit together and say exactly what the hardware's rules are.
+
+		See PROGRESS.md upstream defect 8. `tests/conformance/Mul.hx` is what caught each attempt.
+	**/
+	// Deliberately NOT inline: inlining materialises the parameters as locals in the caller, and
+	// two calls in one scope then collide (upstream defect 1). Our vendored fork uniquifies those
+	// names, but a plain call removes the question entirely and this is not a hot path.
+	static function setLoHi(ctx:CpuState, resultLo:Int, resultHi:Int):Void {
+		ctx.lo = resultLo;
+		ctx.hi = resultHi;
+	}
+
 	public static function div(ctx:CpuState, a:Int, b:Int):Void {
-		if (b == 0) {
-			// Not a fault: the hardware defines an answer, and code checks for it afterwards.
-			ctx.lo = a >= 0 ? -1 : 1;
-			ctx.hi = a;
-		} else if (a == -2147483648 && b == -1) {
-			// The one quotient that does not fit. C++ calls this undefined; the hardware does not.
-			ctx.lo = -2147483648;
-			ctx.hi = 0;
-		} else {
-			ctx.lo = IntMath.div(a, b);
-			ctx.hi = IntMath.mod(a, b);
-		}
+		// Division by zero is not a fault here: the hardware defines an answer and compiled code
+		// checks for it *after* the divide, so the divide has to complete.
+		if (b == 0 && a >= 0) setLoHi(ctx, -1, a);
+		else if (b == 0) setLoHi(ctx, 1, a);
+		// The one quotient that does not fit in 32 bits. Undefined in C++; defined on the machine.
+		else if (a == -2147483648 && b == -1) setLoHi(ctx, -2147483648, 0);
+		else setLoHi(ctx, IntMath.div(a, b), IntMath.mod(a, b));
 	}
 
 	public static function divu(ctx:CpuState, a:Int, b:Int):Void {
-		if (b == 0) {
-			ctx.lo = -1;      // 0xFFFFFFFF
-			ctx.hi = a;
-		} else if (b < 0) {
-			// The divisor has its top bit set, so as an unsigned value it exceeds anything the
-			// dividend can be unless the dividend also has it set.
-			if (unsignedLess(a, b)) {
-				ctx.lo = 0;
-				ctx.hi = a;
-			} else {
-				ctx.lo = 1;
-				ctx.hi = (a - b) | 0;
-			}
-		} else if (a >= 0) {
-			ctx.lo = IntMath.div(a, b);
-			ctx.hi = IntMath.mod(a, b);
-		} else {
-			// The dividend's top bit is set but the divisor's is not, so signed division would
-			// give the wrong answer. Shift down by one, divide, then correct — the standard
-			// technique for unsigned division on a signed type.
-			final half = (a >>> 1);
-			var q = IntMath.mul(IntMath.div(half, b), 2);
-			final r = (a - IntMath.mul(q, b)) | 0;
-			if (!unsignedLess(r, b)) {
-				q = (q + 1) | 0;
-				ctx.hi = (r - b) | 0;
-			} else {
-				ctx.hi = r;
-			}
-			ctx.lo = q;
-		}
+		if (b == 0) setLoHi(ctx, -1, a);
+		// A divisor with its top bit set exceeds, as an unsigned value, any dividend without one
+		// — so the quotient can only be 0 or 1.
+		else if (b < 0 && unsignedLess(a, b)) setLoHi(ctx, 0, a);
+		else if (b < 0) setLoHi(ctx, 1, (a - b) | 0);
+		else if (a >= 0) setLoHi(ctx, IntMath.div(a, b), IntMath.mod(a, b));
+		else divuLargeDividend(ctx, a, b);
+	}
+
+	/**
+		Unsigned division where the dividend's top bit is set but the divisor's is not.
+
+		A signed division would read the dividend as negative, so the dividend is halved, divided,
+		and the result corrected — the standard technique for doing unsigned division on a type
+		that only offers a signed one.
+	**/
+	static function divuLargeDividend(ctx:CpuState, a:Int, b:Int):Void {
+		final half = a >>> 1;
+		var q = IntMath.mul(IntMath.div(half, b), 2);
+		var r = (a - IntMath.mul(q, b)) | 0;
+		if (!unsignedLess(r, b)) q = (q + 1) | 0;
+		if (!unsignedLess(r, b)) r = (r - b) | 0;
+		setLoHi(ctx, q, r);
 	}
 
 	/** The unsigned comparison, on a type that only has signed ones. */
@@ -113,9 +123,11 @@ class Ops {
 
 	/** Two's-complement negation of the 64-bit hi:lo pair. */
 	static function negate64(ctx:CpuState):Void {
-		final lo = (~ctx.lo + 1) | 0;
 		// The negation carries into the high word exactly when the low word was zero.
-		final hi = (~ctx.hi + (ctx.lo == 0 ? 1 : 0)) | 0;
+		var carry = 0;
+		if (ctx.lo == 0) carry = 1;
+		final lo = (~ctx.lo + 1) | 0;
+		final hi = (~ctx.hi + carry) | 0;
 		ctx.lo = lo;
 		ctx.hi = hi;
 	}

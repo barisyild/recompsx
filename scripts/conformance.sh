@@ -6,6 +6,9 @@
 # runs it, and compares digests. Adding a test is dropping in a file — no build wiring, no
 # registration list. That is the point: a testing discipline with per-test overhead does not last.
 #
+# src/runtime is on the classpath, so a conformance test can exercise the emulator itself and not
+# only the shims — which is where most of the arithmetic worth checking lives.
+#
 # What a mismatch means, in order of likelihood:
 #   1. arithmetic that needs `| 0` or IntMath (ADR-0004)
 #   2. a target-specific path in a shim behaving differently from its counterpart
@@ -55,7 +58,7 @@ for name in "${TESTS[@]}"; do
 
   # ---- JavaScript ----
   js_log="$OUT/$name.js.log"
-  if ! haxe -cp tests/conformance -cp src/shims/js -main "$name" \
+  if ! haxe -cp tests/conformance -cp src/runtime -cp src/shims/js -main "$name" \
             -js "$OUT/$name.js" >"$js_log" 2>&1; then
     bad "$name" "JS build failed — see $js_log"; FAILED=1; continue
   fi
@@ -66,7 +69,7 @@ for name in "${TESTS[@]}"; do
   cpp_dir="$OUT/$name.cpp"
   cpp_log="$OUT/$name.cpp.log"
   rm -rf "$cpp_dir"
-  if ! haxe build/reflaxe-cpp.hxml -cp tests/conformance -cp src/shims/cxx \
+  if ! haxe build/reflaxe-cpp.hxml -cp tests/conformance -cp src/runtime -cp src/shims/cxx \
             -D "mainClass=$name" -main "$name" \
             -D "cpp-output=$cpp_dir" >"$cpp_log" 2>&1; then
     bad "$name" "C++ generation failed — see $cpp_log"; FAILED=1; continue
