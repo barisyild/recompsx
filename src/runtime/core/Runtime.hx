@@ -52,10 +52,17 @@ class Runtime {
 		}
 	}
 
-	/** A handle that named a shard or slot that does not exist — a generator bug, not a game one. */
-	public static function badHandle(ctx:CpuState, shard:Int, slot:Int):Void {
-		Backend.fatal("recompsx: dispatch to shard " + shard + " slot " + slot
-			+ ", which does not exist. This is a code-generation defect.");
+	/**
+		A handle that named a shard or slot that does not exist — a generator bug, not a game one.
+
+		`where` names the switch that fell through: `"table"` for the shard selector, or the
+		shard's own class name. The two were indistinguishable from their message until a C++-only
+		failure made the difference the whole question — a diagnostic that cannot say *which* of
+		two call sites produced it is only half a diagnostic.
+	**/
+	public static function badHandle(ctx:CpuState, where:String, shard:Int, slot:Int):Void {
+		Backend.fatal("recompsx: " + where + " dispatch fell through for shard " + shard
+			+ " slot " + slot + ", which should exist. This is a code-generation defect.");
 	}
 
 	// ---- COP0 ------------------------------------------------------------------------------------

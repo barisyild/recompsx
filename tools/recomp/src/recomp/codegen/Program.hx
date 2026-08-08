@@ -74,7 +74,7 @@ class Program {
 		for (i in 0...shard.functions.length) {
 			buf.add('\t\t\tcase $i: ${shard.functions[i].name}(ctx);\n');
 		}
-		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, ${shard.index}, slot);\n');
+		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, "${shard.className}", ${shard.index}, slot);\n');
 		buf.add('\t\t}\n');
 		buf.add('\t}\n');
 		buf.add('}\n');
@@ -136,7 +136,7 @@ class Program {
 		for (s in shards.shards) {
 			buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, ctx);\n');
 		}
-		buf.add("			default: Runtime.badHandle(ctx, handle >>> 20, slot);
+		buf.add("			default: Runtime.badHandle(ctx, \"table\", handle >>> 20, slot);
 		}
 	}
 

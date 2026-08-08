@@ -189,9 +189,29 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         being printed, or the two `Runtime.badHandle` call sites are not distinguishable from the
         message alone and the real one is elsewhere.
 
-        **Next step, and it is a small one:** give the two call sites different text — the shard
-        arm says which shard by literal, the table arm says `table`. One regeneration and one
-        build then splits the hypothesis in half, and whichever side it lands on is a spike.
+        **The split has been made.** `Runtime.badHandle` now takes a `where` string, so the two
+        arms name themselves. The C++ run says:
+
+            Fns_04_8002c97c dispatch fell through for shard 4 slot 14, which should exist.
+
+        So it is the shard's own switch, not the table's. And that switch was then checked by
+        parsing the emitted C++ rather than by eye: **91 cases, exactly 0..90, no duplicates, no
+        gaps, one switch in the function, `default` last, and `case 14:` calls
+        `Fns_04_8002c97c::entry_point(ctx)`, which has exactly one definition.** There is nothing
+        wrong with the switch.
+
+        Which forces the conclusion the whole chase was for: **the value being switched on is not
+        the value being printed.** A correct switch cannot miss a present label, so `slot` at the
+        `default` arm holds something outside 0..90, while the `slot` handed to `badHandle`
+        prints as 14. Either reflaxe is passing a stale copy of the argument into the
+        four-argument call, or the switch subject and the printed expression have been separated
+        by the compiler's own copy propagation.
+
+        **Next step:** print `slot` a second way at the fall-through — its hex, and a call
+        counter — to show directly that the two disagree. That turns this from an inference into
+        a reproducible two-line spike, which is what an upstream bug report needs. Note also that
+        `entry_point` reaching its body at all would mean the game *did* dispatch once, so the
+        fall-through may be a *later* dispatch from inside it — the counter settles that too.
 
 ## [M0-VERIFY] checklist
 
