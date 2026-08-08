@@ -17,15 +17,31 @@ cd "$ROOT"
 source "$ROOT/scripts/env.sh"
 
 FRAMES="${FRAMES:-300}"
+CXXFLAGS=(-std=c++17 -O2 -fwrapv)   # see ADR-0004
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
-say "1/3 reflaxe.CPP behaviour spikes"
+say "1/4 reflaxe.CPP behaviour spikes"
 ./scripts/spike.sh >/dev/null || fail "spikes broke — upstream behaviour changed, read scripts/spike.sh output"
 say "    ok"
 
-say "2/3 JavaScript build + headless digest"
+say "2/4 arithmetic conformance on both targets"
+mkdir -p out/_conf
+haxe build/conf-arith-js.hxml
+CONF_JS="$(node out/_conf/arith.js | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
+rm -rf out/_conf/cpp
+haxe build/conf-arith-cpp.hxml
+SDL_FLAGS="$(pkg-config --cflags --libs sdl2 2>/dev/null || echo '-I/opt/homebrew/include/SDL2 -L/opt/homebrew/lib -lSDL2')"
+# shellcheck disable=SC2086
+(cd out/_conf/cpp && clang++ "${CXXFLAGS[@]}" -Iinclude -I"$ROOT/src/backend/api" \
+   src/*.cpp "$ROOT/src/backend/pc/backend_sdl2.c" -o arith $SDL_FLAGS 2>/dev/null)
+CONF_CPP="$(out/_conf/cpp/arith | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
+say "    js=$CONF_JS  cpp=$CONF_CPP"
+[ -n "$CONF_JS" ] && [ "$CONF_JS" = "$CONF_CPP" ] || fail "targets disagree on basic integer arithmetic (js=$CONF_JS cpp=$CONF_CPP).
+  Look for a bare + - or * on Ints that should be wrapped with | 0 or routed through IntMath (ADR-0004)."
+
+say "3/4 JavaScript build + headless digest"
 mkdir -p out/_demo/js
 haxe build/js-demo.hxml
 JS_OUT="$(node out/_demo/js/demo.js --headless-hash "$FRAMES")"
@@ -37,7 +53,7 @@ say "    js digest = $JS_DIGEST"
 JS_AGAIN="$(node out/_demo/js/demo.js --headless-hash "$FRAMES" | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
 [ "$JS_DIGEST" = "$JS_AGAIN" ] || fail "the JS build is not deterministic: $JS_DIGEST vs $JS_AGAIN"
 
-say "3/3 C++ build + cross-target comparison"
+say "4/4 C++ build + cross-target comparison"
 rm -rf out/_demo/cpp
 haxe build/pc-demo.hxml
 ./scripts/build-pc.sh _demo >/dev/null

@@ -170,6 +170,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] Integer semantics settled (ADR-0004) after a suggestion to use haxe.Int64
+  led to measuring it. Two findings: haxe.Int64 allocates per value on BOTH our targets (no
+  native override for js or reflaxe.CPP) — 41ms vs 7ms hand-rolled hi/lo on the GTE workload;
+  and far worse, JS does NOT wrap Int + / -, so every addu/subu would have diverged. Fix is
+  `| 0` on overflowing results (free on C++). tests/conformance/Arith.hx now guards all of it
+  on both targets (f975e3f9) as step 2 of test.sh.
+
 2026-08-08 [claude] JS memory fast path: RawBuf now carries u8/u16/i32 views over one
   ArrayBuffer; aligned wide accesses use them (endianness measured at startup, not assumed).
   Motivated by a performance question; measured first: byte-composed get32 = 596 Mops/s,

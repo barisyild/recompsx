@@ -27,8 +27,11 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
 1. Portable subset in src/runtime, src/shims, shared/, generated code: NO Float/Single, no
    Dynamic, no reflection, no anon structs, no closures in hot paths, no exceptions, no
    allocation after init, I64 abstract for 64-bit. `scripts/check.sh` enforces what grep can.
-   Arithmetic: never `a / b` on Ints (yields Float) and never `a * b` where the product can
-   exceed 31 bits (loses low bits on JS) — use `IntMath.div` / `IntMath.mul`.
+   Arithmetic (ADR-0004): wrap every overflowing result with `| 0` — JS does NOT wrap `+`/`-`,
+   C++ does, and the hardware does; `| 0` costs nothing on C++. Never `a / b` on Ints (yields
+   Float) and never bare `a * b` past 31 bits — use `IntMath.div` / `IntMath.mul`. 64-bit values
+   are hi/lo Int pairs via `shim.I64`, never `haxe.Int64` (it allocates per value on both our
+   targets — measured 6x slower on the GTE workload).
    Control flow: no guard clauses (`if (c) { ...; return; }`), no ternaries or nested branches
    inside loop bodies — reflaxe.CPP silently DELETES these. See PROGRESS.md upstream defect 8;
    `scripts/spike.sh` reports if upstream ever fixes it.

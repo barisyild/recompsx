@@ -370,19 +370,27 @@ Formatter: GNU-style, ABI reg names, hex immediates, symbol substitution on targ
 
 Metavariables: `RS/RT/RD` = `ctx.<abiName>` (r0 reads = literal 0; pure writes to r0 emit
 nothing; loads to r0 still perform the read — I/O side effects — result dropped); `S16/U16/SA`
-folded literals; `A` = `RS + S16`; `RET` = site VA + 8. Haxe Int is 32-bit signed; `>>>`
-logical; variable shifts masked `& 31`. `[M0-VERIFY]` wrapping semantics of reflaxe.CPP int
+folded literals; `A` = `(RS + S16) | 0`; `RET` = site VA + 8. Haxe Int is 32-bit signed; `>>>`
+logical; variable shifts masked `& 31`.
+
+**Every result that can overflow is wrapped with `| 0`** (ADR-0004). JavaScript's `+` and `-` do
+not wrap — `0x7FFFFFFF + 1` is `2147483648` there and `-2147483648` on C++ and on the hardware —
+so without this the two targets disagree the first time a game adds two large numbers. `| 0` is
+folded away by C++ at `-O2`. Shifts already wrap on both targets and are left bare; bitwise
+operations cannot leave the range. Multiplication goes through `IntMath.mul`, division through
+`IntMath.div`; `tests/conformance/Arith.hx` holds all of this to the same digest on every
+target. `[M0-VERIFY]` wrapping semantics of reflaxe.CPP int
 arithmetic — if it emits plain C++ `int`, force `-fwrapv` in CMake and record it in ADR-0001.
 
 | Group | Instr | Emitted Haxe |
 |---|---|---|
-| ALU-imm | addi/addiu | `RT = RS + S16;` (non-trapping by policy) |
+| ALU-imm | addi/addiu | `RT = (RS + S16) \| 0;` (non-trapping by policy; `\| 0` per ADR-0004) |
 | | slti | `RT = RS < S16 ? 1 : 0;` |
 | | sltiu | `RT = (RS ^ 0x80000000) < K ? 1 : 0;` — `K = S16 ^ 0x80000000` folded (imm sign-extends then compares unsigned) |
 | | andi/ori/xori | `RT = RS & U16;` / `\|` / `^` |
 | | lui | `RT = <IMM16<<16 folded literal>;` |
-| ALU-reg | add/addu | `RD = RS + RT;` |
-| | sub/subu | `RD = RS - RT;` |
+| ALU-reg | add/addu | `RD = (RS + RT) \| 0;` |
+| | sub/subu | `RD = (RS - RT) \| 0;` |
 | | and/or/xor | `RD = RS & RT;` etc. |
 | | nor | `RD = ~(RS \| RT);` |
 | | slt | `RD = RS < RT ? 1 : 0;` |
