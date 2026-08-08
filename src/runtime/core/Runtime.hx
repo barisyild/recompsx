@@ -62,6 +62,7 @@ class Runtime {
 		mem.Memory.init();
 		Irq.init();
 		gpu.Gpu.init();
+		cd.Cdrom.init();
 		kernel.Kernel.init();
 		Scheduler.init(ctx);
 	}

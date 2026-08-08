@@ -198,6 +198,26 @@ class Iso9660 {
 
 	// ---- reading -----------------------------------------------------------------------------
 
+	/**
+		One sector's user data, for the CD-ROM controller.
+
+		The controller reads by absolute sector, not by file — libcd seeks to an LBA it worked out
+		itself and streams from there, so it needs the disc as a flat array of sectors rather than
+		as a filesystem. Same layout arithmetic, different caller.
+	**/
+	public static function rawSector(lba:Int, dst:RawBuf):Bool {
+		if (!mounted) return false;
+		else {}
+		return Backend.fileRead(slot, lba * sectorSize + userOffset, dst, USER_BYTES) == USER_BYTES;
+	}
+
+	/** How many sectors the image holds — the disc's length, for `GetTD`. */
+	public static function totalSectors():Int {
+		if (!mounted) return 0;
+		else {}
+		return Std.int(Backend.fileSize(slot) / sectorSize);
+	}
+
 	/** Reads one sector's user data into the scratch buffer. */
 	static function readSector(lba:Int):Bool {
 		return Backend.fileRead(slot, lba * sectorSize + userOffset, sector, USER_BYTES)

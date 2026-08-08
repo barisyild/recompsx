@@ -213,9 +213,15 @@ class Memory {
 
 	static function slowRead8(p:Int):Int {
 		if (isScratch(p)) return RawMem.get8(scratch, p - SCRATCH_BASE);
+		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
+		// a 32-bit word would read three neighbours that mean something else entirely.
+		else if (isCdrom(p)) return cd.Cdrom.read8(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
 		else return unmapped8();
 	}
+
+	static inline function isCdrom(p:Int):Bool
+		return p >= 0x1F801800 && p <= 0x1F801803;
 
 	static function unmapped8():Int {
 		unmappedAccesses++;
@@ -224,6 +230,7 @@ class Memory {
 
 	static function slowRead16(p:Int):Int {
 		if (isScratch(p)) return RawMem.get16(scratch, p - SCRATCH_BASE);
+		else if (isCdrom(p)) return cd.Cdrom.read8(p) | (cd.Cdrom.read8(p + 1) << 8);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
 		else return unmapped8();
 	}
@@ -236,6 +243,7 @@ class Memory {
 
 	static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch, p - SCRATCH_BASE, v);
+		else if (isCdrom(p)) cd.Cdrom.write8(p, v, cycleHint);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFF, 0xFF);
 		else unmappedAccesses++;
 	}

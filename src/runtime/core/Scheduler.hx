@@ -45,9 +45,21 @@ class Scheduler {
 	}
 
 	public static function schedule(ctx:CpuState, slot:Int, atCycle:Int):Void {
+		scheduleAt(slot, atCycle);
+		recomputeNext(ctx);
+	}
+
+	/**
+		The same, for a device that has no CpuState.
+
+		`nextEvent` is not recomputed here, so a deadline set this way is picked up at the next
+		pump rather than immediately. That is exactly right: a device arming itself from inside its
+		own handler is already inside a pump, and one that arms itself from a register write has
+		until the next one to be noticed.
+	**/
+	public static function scheduleAt(slot:Int, atCycle:Int):Void {
 		due[slot] = atCycle;
 		active[slot] = true;
-		recomputeNext(ctx);
 	}
 
 	public static function cancel(ctx:CpuState, slot:Int):Void {
@@ -117,6 +129,7 @@ class Scheduler {
 		active[slot] = false;
 		if (slot == VBLANK_START) onVblankStart(ctx);
 		else if (slot == VBLANK_END) onVblankEnd(ctx);
+		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
 		else unimplemented(ctx, slot);
 	}
 

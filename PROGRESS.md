@@ -52,39 +52,33 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD-ROM registers are next**, and that is a sharper answer than "the disc".
+2. **The CD-ROM controller answers, but libcd does not see its interrupts.**
 
-   `cdrom:` now works in both shapes. A directory of extracted files needs no ISO9660 at all. A
-   disc image is mounted by `cd/Iso9660.hx`, which finds its own sector layout by looking for the
-   volume descriptor where each candidate would put it — verified against a real Crash Bash BIN:
+   `cd/Cdrom.hx` implements the four registers, the parameter and response FIFOs, the INT levels
+   and the one-outstanding-interrupt queue, and the commands a boot needs: `Getstat`, `Setloc`,
+   `Setmode`, `SeekL`, `ReadN`/`ReadS`, `Pause`, `Init`, `GetTN`, `GetTD`, `GetID`, `Test 20h`,
+   `ReadTOC`. Sector reads come from the mounted image through `Iso9660.rawSector`.
 
-       mounted a disc image: 2352-byte sectors, user data at +24, root directory at LBA 22
+   Crash Bash now gets much further. It initialises libcd — `tty: CD_init:addr=8006de94` — and
+   issues **17 commands**. Then it stops with its own diagnosis:
 
-   2352-byte raw sectors with user data at +24 is Mode 2 Form 1, which is what a PlayStation disc
-   is, and nothing had to be told that.
+       tty: CD timeout: CD_cw:(CdlGetTN) Sync=NoIntr, Ready=NoIntr
 
-   It made no difference to the game, which is the finding. Crash Bash never calls the kernel's
-   file API — it touches **0x1F801800**, the CD-ROM index register, because Psy-Q's libcd drives
-   the hardware directly. Almost every commercial PS1 game does.
+   **`NoIntr` is the symptom to chase, not `GetTN`.** Implementing `GetTN` changed nothing, which
+   is the informative part: libcd is not failing to understand the answer, it is not seeing an
+   interrupt at all. Candidates, in the order worth testing:
 
-   So the file layer was necessary but not sufficient: it is what libcd's sector reads will be
-   answered *from*, once the register-level device exists. That device — the command and response
-   FIFOs, the INT levels, `Setloc`/`ReadN`/`GetTN`, and the sector cadence — is the actual
-   blocker, and it now has a working filesystem underneath it instead of nothing.
+   - `raise()` gates on `(irqEnable & currentInt) != 0`, and `irqEnable` is only written on
+     index 1 of 1F801802. If libcd sets it through a path this does not cover, every interrupt is
+     silently dropped.
+   - The response is raised synchronously inside the register write rather than after `ACK`
+     cycles. Hardware always takes time; libcd may arm its wait *after* writing the command, and
+     an interrupt that has already fired is one it never waits for.
+   - `read1803` returns `currentInt | 0xE0` on index 1. If libcd reads the level from a different
+     index or expects the flags rather than the level, it sees nothing it recognises.
 
+   The first two are one experiment each. Do them before adding another command.
 
-2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
-   and sets pc/gp/sp, so every load returns 0 and any kernel argument arriving via memory is
-   meaningless (`InitHeap` reporting a zero-length heap is how this surfaced). The C++ shim
-   already has `fileOpen`/`fileRead` over the backend's `bp_file_*`; the JavaScript shim returns
-   -1 and needs a real implementation. Then an `ExeLoader` copying `LOAD_SIZE` bytes from offset
-   0x800 to `LOAD_ADDR`, with the path taken from `Backend.arg`.
-
-   Everything below is guesswork until this lands — the *sequence* of kernel calls is trustworthy
-   because it comes from recompiled code, but no value read out of RAM is.
-
-2. **M2 kernel HLE**, in the order Crash Bash asks for it: `A0(49h) GPU_cw` next, which needs the
-   GPU register file behind it. Names come from psx-spx, never from memory (golden rule 6).
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
    import. The PS-EXE path works; the disc path is untouched, and overlays need it.
