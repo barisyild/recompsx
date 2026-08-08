@@ -153,12 +153,13 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         **4.5 s** with `-D analyzer-optimize` and `node` executes it. It gets through Crash Bash's
         real startup, in this order:
 
-            A0(39h) InitHeap        the kernel heap the game asks for at boot
-            A0(49h)                 (unimplemented; identify during M2)
-            syscall 0               EnterCriticalSection
-            A0(44h) FlushCache      immediately after a code copy — an overlay landing
+            A0(39h)                 the kernel heap the game asks for at boot
+            A0(49h)                 identify against psx-spx before implementing
+            syscall a0=1            a critical section opening
+            A0(44h)                 immediately after a code copy — an overlay landing
+            syscall a0=2            and closing again
             mfc0/mtc0 COP0 r12      the status register: interrupts being set up
-            GTE control 24..30      the projection constants: OFX, OFY, H, DQA, DQB, ZSF3, ZSF4
+            GTE control 24..30      the projection constants
 
         and then spins. The spin is *correct behaviour for what exists*: having enabled
         interrupts and configured the GTE, the game waits for VBlank, and there is no scheduler
@@ -166,9 +167,19 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         point, through the dispatch table, the memory map, and the emitted arithmetic.
 
         That list is also the M2 work order, written by the game itself in the order it needs
-        things. It is worth more than any checklist I could have drawn up: `A0(49h)` and
-        `syscall 0` are not on the P0 list in docs/specs/runtime.md §7.3.1, and Crash Bash calls
-        them before anything else.
+        things — worth more than any checklist drawn up in advance.
+
+        Two entries were wrong when first recorded here, both because the diagnostic was.
+        `Kernel.syscall` reported the instruction's 20-bit code field, which compilers emit as 0
+        essentially always; the function is selected by **$a0**. So every syscall printed
+        `syscall 0`, and because `reportOnce` keys on what it prints, the *second* distinct call
+        was suppressed entirely — a diagnostic that could not distinguish anything was also
+        hiding something. It now reports `$a0`, and the game turns out to open and close a
+        critical section around its early setup (`a0=1` then `a0=2`).
+
+        The A0 function numbers above are deliberately not named yet: naming them from memory is
+        exactly what golden rule 6 forbids. They get names when each is implemented against
+        psx-spx.
 
   - [x] **The C++ build now matches JavaScript, and the cause was upstream defect 9.**
         `Fns_04_8002c97c::dispatch` missed `case 14` on the first dispatch. Chasing it down

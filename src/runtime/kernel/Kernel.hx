@@ -25,9 +25,17 @@ class Kernel {
 		// The kernel returns to $ra, exactly as a called function would.
 	}
 
-	/** `syscall`. Code 0 is a general entry; 1 and 2 are Enter/ExitCriticalSection. */
+	/**
+		`syscall`.
+
+		The function is selected by **$a0**, not by the instruction's 20-bit code field — compilers
+		emit that field as 0 essentially always. Reporting the code field therefore said "syscall 0"
+		for every call the game made, which is a diagnostic that cannot distinguish anything.
+		Both are reported now, with the one that decides the behaviour first.
+	**/
 	public static function syscall(ctx:CpuState, code:Int):Void {
-		Runtime.reportOnce(0x51000000 | code, "syscall " + code);
+		Runtime.reportOnce(0x51000000 | (ctx.a0 & 0xFFFF),
+			"syscall a0=" + ctx.a0 + (code != 0 ? " (code " + code + ")" : ""));
 	}
 
 	/** `break`. Psy-Q emits `break 0x400` after a divide as its divide-by-zero check. */
