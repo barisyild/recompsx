@@ -23,6 +23,16 @@ class Runtime {
 	/** How many distinct unimplemented things have been reported, so a run can be judged. */
 	public static var reportedGaps(default, null) = 0;
 
+	/**
+		How many times the generated table has dispatched.
+
+		This exists to answer one question that nothing else could: when a dispatch fails, was it
+		the *first* one — meaning the switch itself is wrong — or a later one from inside a
+		function that did run? Those two have the same error message and completely different
+		causes. One integer settles it.
+	**/
+	public static var dispatches = 0;
+
 	static final reported:Map<Int, Bool> = new Map();
 
 	/**
@@ -62,7 +72,8 @@ class Runtime {
 	**/
 	public static function badHandle(ctx:CpuState, where:String, shard:Int, slot:Int):Void {
 		Backend.fatal("recompsx: " + where + " dispatch fell through for shard " + shard
-			+ " slot " + slot + ", which should exist. This is a code-generation defect.");
+			+ " slot " + slot + " on dispatch #" + dispatches
+			+ ", which should exist. This is a code-generation defect.");
 	}
 
 	// ---- COP0 ------------------------------------------------------------------------------------

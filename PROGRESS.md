@@ -207,11 +207,21 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         four-argument call, or the switch subject and the printed expression have been separated
         by the compiler's own copy propagation.
 
-        **Next step:** print `slot` a second way at the fall-through — its hex, and a call
-        counter — to show directly that the two disagree. That turns this from an inference into
-        a reproducible two-line spike, which is what an upstream bug report needs. Note also that
-        `entry_point` reaching its body at all would mean the game *did* dispatch once, so the
-        fall-through may be a *later* dispatch from inside it — the counter settles that too.
+        **The counter settled it: `on dispatch #1`.** The very first call the program makes
+        falls through. `entry_point` never runs, which also explains why the C++ build prints
+        none of the kernel warnings the JavaScript build prints — it never gets that far.
+
+        Checked since, and all clean: exactly one definition of `Fns_04_8002c97c::dispatch`,
+        the header declares `(int slot, std::shared_ptr<core::CpuState>)` matching the definition,
+        `FnTable.cpp` does include that header, and clang's own LLVM IR for the function contains
+        a genuine `switch` — so the label is not being lost between C++ and machine code either.
+
+        Everything from the Haxe source down to the IR is correct, the first dispatch still
+        misses a present label, and the same generated Haxe is right on JavaScript. The next
+        probe has to go below the source: single-step the failing call in a debugger, or dump the
+        jump table clang emitted for that switch. This is now a genuine compiler-or-ABI question
+        rather than anything the generator controls, and it is the last thing standing between
+        M1.5 and a C++ build that behaves like the JavaScript one.
 
 ## [M0-VERIFY] checklist
 

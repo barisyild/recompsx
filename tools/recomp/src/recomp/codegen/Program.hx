@@ -130,6 +130,7 @@ class Program {
 
 	/** Routes a handle to the shard that owns it. */
 	public static function dispatch(handle:Int, ctx:CpuState):Void {
+		Runtime.dispatches++;
 		final slot = handle & 0xFFFFF;
 		switch (handle >>> 20) {
 ");
