@@ -172,12 +172,25 @@ class Memory {
 	static function ioRead32(p:Int):Int {
 		if (p == 0x1F801070) return core.Irq.readStat();
 		else if (p == 0x1F801074) return core.Irq.readMask();
+		else if (p == 0x1F801810) return gpu.Gpu.readData();
+		else if (p == 0x1F801814) return gpu.Gpu.readStatus(cycleHint);
 		else return ioUnknownRead(p);
 	}
+
+	/**
+		The current cycle count, for registers whose value depends on the clock.
+
+		GPUSTAT's beam-parity bit is the reason: it has to be computed from the line the beam is on,
+		and a memory read has no `ctx` to ask. The pump keeps this in step, which is enough because
+		nothing between two pump points can observe the beam moving anyway.
+	**/
+	public static var cycleHint:Int = 0;
 
 	static function ioWrite32(p:Int, v:Int):Void {
 		if (p == 0x1F801070) core.Irq.writeStat(v);
 		else if (p == 0x1F801074) core.Irq.writeMask(v);
+		else if (p == 0x1F801810) gpu.Gpu.writeGp0(v);
+		else if (p == 0x1F801814) gpu.Gpu.writeGp1(v);
 		else ioUnknownWrite(p, v);
 	}
 

@@ -64,6 +64,16 @@ class Irq {
 		lets a game that was inside a critical section still see the vblank it missed.
 	**/
 	public static function raise(ctx:CpuState, bit:Int):Void {
+		raiseLine(bit);
+	}
+
+	/**
+		The same, for a device that has no reason to hold a CpuState.
+
+		Raising a line is a property of the machine, not of the CPU — the GPU does not know or care
+		what the processor is doing when its interrupt goes high.
+	**/
+	public static function raiseLine(bit:Int):Void {
 		stat |= 1 << bit;
 	}
 

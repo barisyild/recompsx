@@ -47,6 +47,7 @@ class GenMain {
 			+ " | handler calls " + kernel.KHandlers.calls
 			+ " | kernel events delivered " + kernel.KEvents.delivered
 			+ " (" + kernel.KEvents.callbacks + " callbacks)"
+			+ " | gpu words " + gpu.Gpu.wordsReceived + "/" + gpu.Gpu.commandsReceived + "cmd"
 			+ " | cycles " + ctx.cycles);
 		shim.Backend.log(shim.Backend.LOG_INFO,
 			"distinct unimplemented things reached: " + Runtime.reportedGaps);

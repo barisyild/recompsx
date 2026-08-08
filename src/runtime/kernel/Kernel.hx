@@ -481,7 +481,8 @@ class Kernel {
 			+ " | events " + core.Scheduler.fired
 			+ " | irqs " + core.Irq.delivered
 			+ " | handlers " + KHandlers.calls
-			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb");
+			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
+			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c");
 	}
 
 	// ---- syscall / break -------------------------------------------------------------------------

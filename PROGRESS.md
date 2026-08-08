@@ -47,9 +47,19 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    - `qsort`/`bsearch`/`lsearch` take a comparison callback, which means calling back into
      recompiled code from a sort — possible, but no game seen so far calls them.
 
-   **The GPU is next**, and the game says so itself through the TTY the kernel now provides:
-   `ResetGraph` initialises, then `GPU timeout` and `VSync: timeout` because GPUSTAT reads zero.
-   The first piece is the register file, not the rasteriser.
+   **The GPU register file is in**, and `GPU timeout` is gone — `ResetGraph` completes. GPUSTAT is
+   assembled on every read from the state the commands set plus the beam position, rather than
+   stored, so a game polling it sees something that moves without an event having to fire. Bits 26
+   and 28 read ready always, which is the truthful answer for a model where drawing is instant.
+
+2. **The disc is next.** With the GPU answering, Crash Bash runs to frame 30,000 — over eight
+   minutes of emulated time, 30,000 interrupts, 30,000 handler calls — and submits **29 GPU words
+   in all**. It is not drawing because it has nothing to draw: no `cdrom:` file can be opened, so
+   no assets arrive. That makes ISO9660 and the CD-ROM registers the binding constraint, not the
+   rasteriser.
+
+   Which is a useful thing to have learned cheaply. Building the rasteriser first would have
+   produced a correct triangle filler with nothing to fill.
 
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`

@@ -61,6 +61,7 @@ class Runtime {
 		TimeBase.setRegion(false);
 		mem.Memory.init();
 		Irq.init();
+		gpu.Gpu.init();
 		kernel.Kernel.init();
 		Scheduler.init(ctx);
 	}
@@ -154,6 +155,8 @@ class Runtime {
 		vblank.
 	**/
 	public static function pump(ctx:CpuState):Void {
+		// Registers whose value follows the clock read it from here; see Memory.cycleHint.
+		mem.Memory.cycleHint = ctx.cycles;
 		Scheduler.runDue(ctx);
 		Irq.dispatch(ctx);
 	}
