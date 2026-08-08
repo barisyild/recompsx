@@ -153,13 +153,20 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         **4.5 s** with `-D analyzer-optimize` and `node` executes it. It gets through Crash Bash's
         real startup, in this order:
 
-            A0(39h)                 the kernel heap the game asks for at boot
-            A0(49h)                 identify against psx-spx before implementing
-            syscall a0=1            a critical section opening
-            A0(44h)                 immediately after a code copy — an overlay landing
-            syscall a0=2            and closing again
+            A0(39h) InitHeap        the kernel heap the game asks for at boot
+            A0(49h) GPU_cw          a GP0 command word — the GPU being set up
+            SYS(01h) Enter…         a critical section opening
+            A0(44h) FlushCache      immediately after a code copy — an overlay landing
+            SYS(02h) Exit…          and closing again
             mfc0/mtc0 COP0 r12      the status register: interrupts being set up
             GTE control 24..30      the projection constants
+
+        Names verified against psx-spx "BIOS Function Summary", not written from memory. The
+        first three are now implemented: `FlushCache` is a genuine no-op under static
+        recompilation — there is no instruction fetch to invalidate — and the critical-section
+        pair became a depth counter, which makes nesting work the way the hardware's single flag
+        never had to. `InitHeap` and `GPU_cw` are next, and both need real subsystems behind
+        them rather than a stub.
 
         and then spins. The spin is *correct behaviour for what exists*: having enabled
         interrupts and configured the GTE, the game waits for VBlank, and there is no scheduler

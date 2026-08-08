@@ -117,6 +117,19 @@ class Runtime {
 		Backend.log(Backend.LOG_WARN, "unimplemented: " + what);
 	}
 
+	/**
+		Reports something the runtime *does* handle, once.
+
+		Separate from `reportOnce` so the gap count stays honest: a bring-up session judges a run
+		by how many distinct unimplemented things it hit, and a handled call must not inflate that
+		number just because it is worth seeing in the log.
+	**/
+	public static function noteOnce(key:Int, what:String):Void {
+		if (reported.exists(key)) return;
+		reported.set(key, true);
+		Backend.log(Backend.LOG_INFO, "handled: " + what);
+	}
+
 	public static function trap(ctx:CpuState, what:String):Void {
 		Backend.fatal("recompsx: " + what + " at pc=" + hex(ctx.pc));
 	}
