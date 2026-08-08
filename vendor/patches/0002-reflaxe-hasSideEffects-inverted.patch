@@ -1,0 +1,69 @@
+From 26ad7c7d840ddd609817fab56d0f1428f5f76afa Mon Sep 17 00:00:00 2001
+From: barisyild <25794892+barisyild@users.noreply.github.com>
+Date: Sat, 8 Aug 2026 05:21:13 +0300
+Subject: [PATCH] Fix inverted return in hasSideEffects, which was deleting
+ if-statement bodies
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`hasSideEffects` returns true to mean "has side effects" in every branch but
+one. The composite branch — covering TBlock, TIf, TVar, TSwitch and the rest —
+computed a local named `isPure` and returned it unnegated, inverting the
+function's meaning for exactly those expressions.
+
+The consequence is severe and silent. `blockElement` uses the result to decide
+whether an `if` with no `else` can be replaced by its condition alone:
+
+    case TIf(e1, e2, null) if(!hasSideEffects(e2)):
+        return blockElement(acc, [e1].concat(tail));
+
+With the inverted result, a body full of assignments and calls was reported as
+side-effect free, so the body was dropped and only the condition survived. No
+error, no warning: the compiled program simply takes the other path.
+
+It also explains the shape of the symptom. A single-statement body is not a
+TBlock and never reaches the inverted branch, so `if (c) one();` survived while
+`if (c) { two(); statements(); }` did not — which reads like a size limit and
+is really a type dispatch.
+
+Found while recompiling a PlayStation game to Haxe: guard clauses of the form
+`if (cond) { ...; return; }` compiled to their fall-through path, so functions
+did the opposite of what they read as.
+---
+ .../implementations/RemovePureExpressionsImpl.hx    | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+index ee39c97..5a49716 100644
+--- a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
++++ b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+@@ -209,13 +209,24 @@ private class OptimizerTexpr {
+ 				TSwitch(_), TArrayDecl(_), TBlock(_),
+ 				TObjectDecl(_), TVar(_):
+ 			{
++				// recompsx: this returned `isPure`, inverting the function's own meaning.
++				//
++				// Every other branch of `hasSideEffects` returns true to mean "has side
++				// effects". This one computed purity and returned it unnegated, so a block
++				// containing assignments and calls was reported as side-effect *free* — and
++				// `blockElement` below then replaced `if (cond) { ...body... }` with just
++				// `cond`, silently deleting the body. That is the single most damaging defect
++				// we have hit: no error, no warning, and the program takes the other path.
++				//
++				// It also explains why a one-statement body survived: that is not a TBlock and
++				// never reaches this branch.
+ 				var isPure = true;
+ 				TypedExprTools.iter(expr, function(subExpr) {
+ 					if(hasSideEffects(subExpr)) {
+ 						isPure = false;
+ 					}
+ 				});
+-				return isPure;
++				return !isPure;
+ 			}
+ 			case _: {
+ 				return false;
+-- 
+2.50.1 (Apple Git-155)
+
