@@ -183,3 +183,20 @@ somewhere else, and the profile names it: `f_8003ebf8` calls `f_800320ec`, which
 counter, on every iteration of a tight loop. **That** is the wait to understand next — it is a
 timer poll, not a CD poll, and the two have been conflated all along because the CD's error
 messages are the loudest thing in the log.
+
+
+## The stalled loop waits on a word nothing writes (2026-08-08)
+
+`f_8003ebf8` opens by reading `[0x8006DBBC]` and branching on it being under 2. A write watch on
+that address, with the writer's return address from `Memory.raHint`, caught **nothing at all** —
+across a full run, no code ever stores to it.
+
+So the value stays whatever the executable image put there, the branch always goes the same way,
+and whatever sets that state never runs. That is the shape of code the analysis has not reached:
+either a function still missing from the program (the earlier black holes were found exactly this
+way, by naming what the runtime could not dispatch), or a subsystem whose absence means its
+initialiser is never called.
+
+Next: find the writer statically rather than at runtime — search the disassembly for stores to
+`0x8006DBBC`, and see which function they live in and whether that function is in the emitted
+program at all.
