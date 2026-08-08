@@ -239,6 +239,21 @@ class Memory {
 		else return unmapped8();
 	}
 
+	static function cdWordWrite(p:Int, v:Int):Void {
+		cd.Cdrom.write8(p, v & 0xFF, cycleHint);
+		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint);
+		cd.Cdrom.write8(p + 2, (v >>> 16) & 0xFF, cycleHint);
+		cd.Cdrom.write8(p + 3, (v >>> 24) & 0xFF, cycleHint);
+	}
+
+	/** A word read of the CD page: four byte registers, little-endian, each with its own effect. */
+	static function cdWord(p:Int):Int {
+		return cd.Cdrom.read8(p)
+			| (cd.Cdrom.read8(p + 1) << 8)
+			| (cd.Cdrom.read8(p + 2) << 16)
+			| (cd.Cdrom.read8(p + 3) << 24);
+	}
+
 	static inline function isCdrom(p:Int):Bool
 		return p >= 0x1F801800 && p <= 0x1F801803;
 
@@ -269,6 +284,10 @@ class Memory {
 		if (isScratch(p)) return RawMem.get32(scratch, p - SCRATCH_BASE);
 		else if (isSio(p)) return sio.Sio0.read32(p);
 		else if (isTimer(p)) return timers.Timers.read(p, cycleHint);
+		// The CD's four registers were reachable by byte and halfword but not by word, so a
+		// 32-bit read of the status register fell through to the unknown-I/O path and answered
+		// zero — a drive that reports nothing, to a driver that reads it that way.
+		else if (isCdrom(p)) return cdWord(p);
 		else if (isIo(p)) return ioRead32(p);
 		else return unmapped8();
 	}
@@ -305,6 +324,7 @@ class Memory {
 	static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch, p - SCRATCH_BASE, v);
 		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
+		else if (isCdrom(p)) cdWordWrite(p, v);
 		else if (isIo(p)) ioWrite32(p, v);
 		else unmappedAccesses++;
 	}
