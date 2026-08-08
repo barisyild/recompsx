@@ -197,6 +197,19 @@ either a function still missing from the program (the earlier black holes were f
 way, by naming what the runtime could not dispatch), or a subsystem whose absence means its
 initialiser is never called.
 
-Next: find the writer statically rather than at runtime — search the disassembly for stores to
-`0x8006DBBC`, and see which function they live in and whether that function is in the emitted
-program at all.
+Searched, statically, two ways. In the **emitted program** the address is read twenty times and
+written zero times. In the **raw executable** there is not a single `sb`/`sh`/`sw` anywhere with
+displacement `0xDBBC`, which is how `lui $at, 0x8007` + `sw $v0, -9284($at)` would encode.
+
+Two readings, and they are not equally likely:
+
+1. **The writer lives in an overlay** — code loaded from the disc that is not in the main
+   executable at all. Crash Bash uses overlays, and this would close the loop back to the CD: the
+   state is set by code the game has not been able to load.
+2. **The address is held in a register** and stored through with a small or zero displacement, in
+   which case this scan was too narrow to see it. A scan that resolves `lui`/`addiu` pairs into
+   absolute addresses would catch it; the tool's jump-table recovery already does exactly that
+   kind of constant folding and could be pointed at stores.
+
+Reading 2 is worth ruling out first because it costs one scan and would be embarrassing to miss.
+If it comes back empty, reading 1 stands, and the boot screen is behind the disc after all.
