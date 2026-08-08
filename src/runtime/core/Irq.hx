@@ -46,6 +46,10 @@ class Irq {
 	/** True while a game handler is running. Delivery is closed then; see `dispatch`. */
 	static var inHandler = false;
 
+	/** Whether interrupt dispatch is on the stack — the difference between a driver's own poll
+		and a handler's read of the same register. */
+	public static inline function dispatching():Bool return inHandler;
+
 	/** Registers saved around a handler. Allocated once — nothing allocates after init. */
 	static var saved:CpuState;
 

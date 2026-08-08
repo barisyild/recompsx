@@ -52,40 +52,42 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The machine runs past frame 120,000 with pad and exception-hook paths live. The CD's
-   `Init failed` survives six eliminations and is now a *located* question.**
+2. **libcd sees its interrupts. `NoIntr` was a misleading message, and the fault is in the
+   response content or ordering — not in delivery.**
 
-   Solved this session, each a real bug on its own terms:
+   The poll trace (reads of `1F801800..1F801803` from outside interrupt dispatch, with the
+   caller's `ra`) settles three sessions of hypotheses in twenty lines:
 
-   | Bug | Effect |
-   |---|---|
-   | Sweep seeded prologues, not entries | libpad's handler unreachable — GCC schedules loads before `addiu sp` |
-   | `reportOnce` built its message before the dedup check | 25% of ticks in `StringAdd`; ~1000× slowdown read as a hang |
-   | Timers clamped a wrapped `elapsed` to zero | every counter froze at the first 2^31 wrap; libpad's ACK timeout could never expire |
-   | SIO0 absent | pad probe polled a dead port |
-   | `HookEntryInt` stored and never invoked | the exception epilogue a library installs never ran |
+       cdpoll r 1F801803.idx1 from ra=8003193C int=0
+       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=3
+       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=0
+       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=3
+       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=2
+       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=0
 
-   **What is now known about the CD, by measurement rather than hypothesis.** Exactly one chain
-   element is ever installed — `0x8006d984`, libpad's (`f1=0x8003b1bc`, `f2=0x8003b224`, which
-   dereferences the SIO0 base). **libcd never calls `SysEnqIntRP` at all**, and
-   `KEvents.delivered` is 0, so it uses neither of the kernel's two published mechanisms. The
-   exception hook now runs once per interrupt (70k entries) and `CdInit` still fails, which
-   eliminates the third.
+   **libcd polls the flag register directly** — it installs no chain element, opens no event, and
+   does not use the exception hook, so this is its door — and it *reads INT3 and INT2 at the
+   right moments and acknowledges them*. Delivery works. Every "why does the interrupt not
+   arrive" question from the last three sessions was aimed at a mechanism that was already
+   functioning.
 
-   So libcd reaches the CD by a route this kernel has not identified. The remaining candidates,
-   in the order worth testing:
+   The sequence also repeats verbatim, which is one command being retried forever. So the
+   remaining fault is in what the controller *says*, not that it says it. Two concrete suspects:
 
-   - It polls `1F801800`'s status bits directly from `CdSync` without an interrupt at all, in
-     which case the bug is in what those bits report rather than in delivery.
-   - It patches the A0/B0 table entry for a CD function and expects its own code called through
-     `KTables`' stubs.
-   - Its wait state lives in memory a BIOS handler would have written, and no such handler exists
-     under HLE — the possibility named two sessions ago and still not excluded.
+   - **Two INT3s per command.** `CdlNop` (Getstat) should answer INT3 once. The trace shows
+     `3, 0, 3, 2` for what may be a single command, which would mean `respond` and `queue` both
+     firing where only one should.
+   - **The status byte.** Everything answers with `status`, which is `ST_MOTOR` alone (0x02).
+     psx-spx defines a shell-open latch that a fresh drive reports until the first `Getstat`
+     clears it; libcd's Init checks the byte and may be rejecting a drive that never claims to
+     have been opened, or expecting a bit this controller never sets.
 
-   The decisive instrument is the same one that has worked twice: trace every read of
-   `1F801800..1F801803` *outside* interrupt dispatch, with the caller's `ra`. Whoever polls the
-   controller from ordinary code is `CdSync`, and its address makes the rest a disassembly
-   question.
+   Next step is small and bounded: extend the existing `cd#` trace to log every response byte
+   handed back, and read one full `CdlNop` exchange end to end. The instrument already exists.
+
+   Diagnostic paths added this session and worth keeping: `Memory.raHint` (the caller's return
+   address, stored by the same pump line that carries `cycleHint`, so any register can name who
+   touched it) and `Irq.dispatching()` (which separates a driver's poll from a handler's read).
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map

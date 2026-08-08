@@ -153,6 +153,25 @@ class Cdrom {
 
 	// ---- the four registers ----------------------------------------------------------------------
 
+	/**
+		Who reads these registers from ordinary code.
+
+		A handler reading the controller is expected. Anything reading it *outside* interrupt
+		dispatch is a driver polling — and since libcd installs no chain element, opens no event
+		and does not carry the exception hook, polling is the only door left. The caller's return
+		address names the function, which turns the rest into a disassembly question.
+	**/
+	static var pollTrace = 20;
+
+	public static function readPolled(addr:Int, ra:Int):Int {
+		if (pollTrace > 0 && !Irq.dispatching()) {
+			pollTrace--;
+			Runtime.note("cdpoll r " + StringTools.hex(addr, 8) + ".idx" + index
+				+ " from ra=" + StringTools.hex(ra, 8) + " int=" + currentInt);
+		} else {}
+		return read8(addr);
+	}
+
 	public static function read8(addr:Int):Int {
 		final reg = addr & 3;
 		if (reg == 0) return statusRegister();

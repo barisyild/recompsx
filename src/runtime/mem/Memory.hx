@@ -186,6 +186,9 @@ class Memory {
 	**/
 	public static var cycleHint:Int = 0;
 
+	/** The interrupted function's return address, for diagnostics that need to name a caller. */
+	public static var raHint:Int = 0;
+
 	static function ioWrite32(p:Int, v:Int):Void {
 		if (p == 0x1F801070) core.Irq.writeStat(v);
 		else if (p == 0x1F801074) core.Irq.writeMask(v);
@@ -230,7 +233,7 @@ class Memory {
 		if (isScratch(p)) return RawMem.get8(scratch, p - SCRATCH_BASE);
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
 		// a 32-bit word would read three neighbours that mean something else entirely.
-		else if (isCdrom(p)) return cd.Cdrom.read8(p);
+		else if (isCdrom(p)) return cd.Cdrom.readPolled(p, raHint);
 		else if (isSio(p)) return sio.Sio0.read8(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
 		else return unmapped8();
