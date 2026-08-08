@@ -6,6 +6,7 @@ import recomp.analysis.Confidence;
 import recomp.analysis.Coverage;
 import recomp.analysis.Discovery;
 import recomp.analysis.Image;
+import recomp.codegen.Emitter;
 import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
@@ -43,6 +44,7 @@ class Main {
 				case "info": Sys.exit(cmdInfo(rest));
 				case "dis": Sys.exit(cmdDis(rest));
 				case "analyze": Sys.exit(cmdAnalyze(rest));
+				case "emit": Sys.exit(cmdEmit(rest));
 				case "help" | "-h" | "--help": usage(); Sys.exit(EXIT_OK);
 				case _:
 					Sys.stderr().writeString('unknown command "$command"\n\n');
@@ -157,6 +159,51 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 
 		Sys.print(new Coverage(image, discovery).render());
+		return EXIT_OK;
+	}
+
+	static function cmdEmit(args:Array<String>):Int {
+		final path = args.length > 0 ? args[0] : null;
+		if (path == null) {
+			Sys.stderr().writeString("emit: expected a file\n");
+			return EXIT_USAGE;
+		}
+		var at = -1;
+		var i = 1;
+		while (i < args.length) {
+			switch (args[i]) {
+				case "--at" if (i + 1 < args.length): at = parseAddr(args[i + 1]); i++;
+				case other:
+					Sys.stderr().writeString('emit: unexpected argument "$other"\n');
+					return EXIT_USAGE;
+			}
+			i++;
+		}
+
+		final exe = loadExe(path);
+		final image = Image.ofExe(nameOf(path), exe);
+		final discovery = new Discovery(image);
+		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
+		discovery.run();
+
+		if (at < 0) at = exe.initialPc;
+		final fn = discovery.functions.get(recomp.Vaddr.canonRam(at));
+		if (fn == null) {
+			Sys.stderr().writeString('error: no function starts at ${Vaddr.hex(at)}. '
+				+ 'Use `analyze --functions` to list them.\n');
+			return EXIT_ANALYSIS;
+		}
+
+		// The original, so the two can be read side by side.
+		Sys.println("// original:");
+		var a = fn.entry;
+		while (a < fn.endAddr && image.containsWord(a)) {
+			Sys.println("//   " + recomp.mips.Disasm.line(
+				recomp.mips.Decoder.decode(a, image.readWord(a))));
+			a += 4;
+		}
+		Sys.println("");
+		Sys.print(new Emitter(image, discovery).emitFunction(fn));
 		return EXIT_OK;
 	}
 

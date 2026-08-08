@@ -211,6 +211,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] First generated code. runtime/{core.CpuState, core.Ops, mem.Memory} written,
+  then codegen.Emitter + `recompsx emit`. Emitting Crash Bash's real entry point reads correctly:
+  BSS-clear loop closes on itself, branch conditions latch before their delay slots, jal writes
+  the link before the slot, and the closing `jr $t2` comes out as `Kernel.call(ctx, 0xa0, ...)`
+  — A0(51h), Load and Exec, exactly what an entry point should end with.
+
 2026-08-08 [claude] Jump-table + BIOS-call recovery. Unreached code fell 25.0%->19.3% (Crash Bash)
   and 26.1%->5.2% (Spyro); unresolved computed jumps 55->1 and ->8. The big surprise was that most
   of them were kernel calls through a vector register, not switches. 150 tool tests green.
