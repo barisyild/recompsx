@@ -114,8 +114,11 @@ The runtime names each miss (`no function at 0x...`); feeding them back closes t
       --seed 0x8003b1bc --seed 0x800403b4 --seed 0x8003b224
 
 One of these carries libcd's own `I_MASK |= cdrom|dma` write — without it the CD line never
-unmasks and every controller interrupt sits undelivered. `0x8003b224` is the CD interrupt
-handler itself (chain element func2): the sweep used to seed its *prologue* at `0x8003b22c`,
+unmasks and every controller interrupt sits undelivered. `0x8003b224` is the **pad/SIO** interrupt
+handler, not the CD one — it dereferences `[0x8006D99C]`, which the image holds as `0x1F801040`,
+the SIO0 base, and reads `JOY_CTRL` at +10. The chain element `0x8006d984`
+(f1=`0x8003b1bc`, f2=`0x8003b224`) is libpad's. libcd's handler has not been identified yet.
+It is a chain element func2: the sweep used to seed its *prologue* at `0x8003b22c`,
 eight bytes past the true entry, because GCC schedules two loads ahead of the stack adjust —
 fixed in the sweep, and the explicit seed is kept as documentation of what the address is.
 

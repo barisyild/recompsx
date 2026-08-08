@@ -64,12 +64,40 @@ class Timers {
 		reading or not, which is exactly how the hardware's flag behaves.
 	**/
 	static function value(t:Int, cycles:Int):Int {
+		// `>>>`, not a divide, and no sign check anywhere.
+		//
+		// The cycle counter wraps past 2^31 about once a minute of emulated time, so `cycles -
+		// anchor` is routinely negative even though no time has run backwards — it is a wrapped
+		// difference, and ADR-0004 says to read it as one. A guard that clamped it to zero
+		// "defensively" froze every counter permanently the first time the clock wrapped, which
+		// is how libpad came to wait on a timeout that could never expire.
+		//
+		// A logical shift is the whole fix: it treats the difference as the unsigned quantity it
+		// is, and because 2^32 divides exactly by both dividers and by the 65536 wrap, the answer
+		// stays congruent across as many wraps as the machine cares to do.
 		final elapsed = (cycles - anchor[t]) | 0;
-		final ticks = (base[t] + IntMath.div(elapsed < 0 ? 0 : elapsed, divider(t))) | 0;
+		final ticks = (base[t] + (elapsed >>> dividerShift(t))) | 0;
 		final wrapAt = wrapPoint(t);
-		if (ticks >= wrapAt) markWrapped(t);
+		if (ticks >= wrapAt || ticks < 0) markWrapped(t);
 		else {}
-		return IntMath.mod(ticks, wrapAt);
+		return unsignedMod(ticks, wrapAt);
+	}
+
+	/**
+		`v mod m`, reading `v` as the unsigned 32-bit quantity it is.
+
+		A shift of zero leaves the top bit in place, so an elapsed count past 2^31 arrives here as
+		a negative Int and an ordinary `%` hands back a negative counter — which a game reads as a
+		clock that has run backwards. Halving first makes the value provably non-negative, and the
+		low bit is carried across by hand: `u = 2*(u>>>1) + (u&1)`, so the same identity holds
+		under the modulus. Every intermediate stays well inside 32 bits because `m` is at most
+		65536.
+	**/
+	static function unsignedMod(v:Int, m:Int):Int {
+		if (v >= 0) return IntMath.mod(v, m);
+		else {}
+		final half = IntMath.mod(v >>> 1, m);
+		return IntMath.mod(IntMath.mul(half, 2) + (v & 1), m);
 	}
 
 	static function wrapPoint(t:Int):Int {
@@ -92,18 +120,17 @@ class Timers {
 		runtime does not carve up yet — they run at system clock for now, and say so once, because
 		a game timing against them would run fast and that must be traceable to a line in a log.
 	**/
-	static function divider(t:Int):Int {
+	static function dividerShift(t:Int):Int {
 		final src = (mode[t] >> 8) & 3;
-		if (t == 2) return src >= 2 ? 8 : 1;
-		else if (src == 1 || (t == 1 && src == 3)) return unusualSource(t);
-		else if (t == 0 && src == 3) return unusualSource(t);
-		else return 1;
+		if (t == 2) return src >= 2 ? 3 : 0;               // sysclk/8 or sysclk
+		else if (src == 1 || src == 3) return unusualSource(t);
+		else return 0;
 	}
 
 	static function unusualSource(t:Int):Int {
 		Runtime.reportOnce(0x68000000 | t, "timer " + t
 			+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
-		return 1;
+		return 0;
 	}
 
 	static function readMode(t:Int, cycles:Int):Int {

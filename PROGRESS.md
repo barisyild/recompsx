@@ -80,6 +80,12 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    reached: `CD_init` (the game is doing something for those 120k frames — the next session's
    first question), drawing (`gpu 1w`), and the SPU (whose whole register page it read once).
 
+   **Correction to yesterday's attribution.** `0x8003b224` is libpad's SIO handler, not libcd's:
+   it dereferences `[0x8006D99C]`, which the image holds as `0x1F801040` — the SIO0 base — and
+   reads `JOY_CTRL` at +10. So the chain element `0x8006d984` belongs to the pad library, and
+   **libcd's own interrupt handler has still not been located.** That is now the CD question:
+   not why the handler fails, but which function is the handler.
+
    Method note, recorded because it cost hours: the stall was diagnosed **twice wrongly** — first
    as a generation regression, then as host-load noise — and both wrong diagnoses were "confirmed"
    by A/B runs that varied two things at once or compared stale copies. What actually worked:
