@@ -288,6 +288,7 @@ class Memory {
 		// 32-bit read of the status register fell through to the unknown-I/O path and answered
 		// zero — a drive that reports nothing, to a driver that reads it that way.
 		else if (isCdrom(p)) return cdWord(p);
+		else if (dma.Dma.contains(p)) return dma.Dma.read(p);
 		else if (isIo(p)) return ioRead32(p);
 		else return unmapped8();
 	}
@@ -325,6 +326,7 @@ class Memory {
 		if (isScratch(p)) RawMem.set32(scratch, p - SCRATCH_BASE, v);
 		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
 		else if (isCdrom(p)) cdWordWrite(p, v);
+		else if (dma.Dma.contains(p)) dma.Dma.write(p, v);
 		else if (isIo(p)) ioWrite32(p, v);
 		else unmappedAccesses++;
 	}

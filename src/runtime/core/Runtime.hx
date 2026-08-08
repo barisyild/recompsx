@@ -66,6 +66,7 @@ class Runtime {
 		cd.Cdrom.init();
 		sio.Sio0.init();
 		timers.Timers.init();
+		dma.Dma.init();
 		kernel.Kernel.init();
 		Scheduler.init(ctx);
 	}

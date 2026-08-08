@@ -574,6 +574,7 @@ class Kernel {
 			+ " | handlers " + KHandlers.calls
 			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
+			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
 			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
