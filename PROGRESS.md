@@ -23,12 +23,31 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **Command-line arguments do not reach Haxe on C++.** `Backend.argCount()` returns 0 under
-   reflaxe.CPP, so the C++ build cannot be told where the image is and still runs on empty
-   memory while JavaScript loads it. This is exactly [M0-VERIFY] item 16, now answered NO by
-   observation. The fallback the plan already named is a `bp_args`-style backend accessor —
-   argv belongs to the C `main` anyway, so routing it through the backend ABI is arguably where
-   it should have been from the start.
+1. **M2 kernel HLE**, in the order Crash Bash asks for it. With the image loaded, both targets
+   now produce an identical 35-line trace, and it reads as a startup sequence rather than a
+   handful of calls. Names from psx-spx:
+
+   | Call | Name | What it means for us |
+   |---|---|---|
+   | `A0(39h)` | InitHeap | done |
+   | `A0(44h)` | FlushCache | done — and marks where an overlay lands |
+   | `SYS(01h/02h)` | Enter/ExitCriticalSection | done |
+   | `B0(19h)` | HookEntryInt | the game installs its own exception hook |
+   | `B0(35h)` | write | file I/O, before any disc layer exists |
+   | `A0(70h/72h)` | _bu_init / _96_remove | memory card and CD device setup |
+   | `B0(08h/0Ah/0Bh/0Ch)` | OpenEvent / WaitEvent / TestEvent / EnableEvent | **the event system** |
+   | `B0(5Bh)` | ChangeClearPAD | pad handling |
+   | `B0(4Ah/4Bh)` | InitCARD2 / StartCARD2 | memory card |
+   | `C0(0Ah)` | ChangeClearRCnt | what the kernel's timer/vblank handlers acknowledge |
+   | `C0(02h/03h)` | SysEnqIntRP / SysDeqIntRP | interrupt handler priority chains |
+   | `A0(49h)` | GPU_cw | a GP0 command word |
+
+   The shape of the work is now obvious and it is not a list of independent stubs: the event
+   system (`OpenEvent`/`WaitEvent`), the interrupt chains (`SysEnqIntRP`) and `ChangeClearRCnt`
+   are one mechanism, and `WaitEvent` is where the game is trying to wait for VBlank. So the
+   scheduler and the event model have to arrive together — implementing `WaitEvent` without
+   something to deliver an event would just move the hang.
+
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
    and sets pc/gp/sp, so every load returns 0 and any kernel argument arriving via memory is
@@ -188,8 +207,19 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         `B0(19h)`, `A0(72h)`, `B0(35h)`. That is the difference between running on the game's own
         data and running on a memory full of nothing.
 
-        JavaScript only, for now: see item 1 above — arguments do not reach Haxe on C++, so that
-        build still has no way to be told where the image is.
+        **Both targets, and byte-identical.** An earlier note here claimed arguments do not reach
+        Haxe under reflaxe.CPP and marked [M0-VERIFY] 16 answered NO. That was wrong, and the
+        mistake is worth keeping: the C++ build had been compiled with an ad-hoc `clang++` line
+        over `cpp/src/*.cpp`, which pulls in reflaxe's `_main_.cpp` — the one whose `main`
+        discards argv — and never links `main_pc.cpp`, which is the file that exists precisely to
+        capture it. The architecture was right and the build command was not. Diagnosing a
+        bypassed build path as a platform limitation is an easy way to design around a problem
+        that is not there.
+
+        Fixed properly instead: `main_pc.cpp` now takes its entry class as a compile definition,
+        CMake reads that class out of the `_main_.cpp` it excludes (so nothing is told twice), and
+        `build-pc.sh --null` builds against the null backend with no SDL2 dependency. Running both
+        targets on the real executable gives the same 35 lines, in the same order.
 
         Names verified against psx-spx "BIOS Function Summary", not written from memory. The
         first three are now implemented: `FlushCache` is a genuine no-op under static

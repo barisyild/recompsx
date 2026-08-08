@@ -38,14 +38,39 @@ endif()
 # backend supplies main instead (docs/specs/backend.md §1.1).
 file(GLOB_RECURSE GEN_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/*.cpp")
 list(FILTER GEN_SRC EXCLUDE REGEX "_main_\\.cpp$")
+
+# Which class holds the entry point. Read out of the file being excluded rather than passed in:
+# the Haxe build already knows it, and anything told to the build twice eventually disagrees.
+# reflaxe.CPP emits exactly `<Class>::main();`, and a FATAL_ERROR here is the right failure —
+# if that ever changes, the build should stop, not silently link the wrong entry.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/_main_.cpp" GEN_MAIN_SRC)
+string(REGEX MATCH "([A-Za-z_][A-Za-z0-9_]*)::main\\(\\)" _ "${GEN_MAIN_SRC}")
+set(RECOMPSX_MAIN "${CMAKE_MATCH_1}")
+if(NOT RECOMPSX_MAIN)
+  message(FATAL_ERROR "could not find the entry class in cpp/src/_main_.cpp")
+endif()
+message(STATUS "recompsx entry class: ${RECOMPSX_MAIN}")
 if(GEN_SRC STREQUAL "")
   message(FATAL_ERROR "no generated sources under ${CMAKE_CURRENT_SOURCE_DIR}/cpp/src — run the Haxe build first")
 endif()
 set_source_files_properties(${GEN_SRC} PROPERTIES COMPILE_OPTIONS "${RECOMPSX_GEN_FLAGS}")
 
-set(BACKEND_SRC
-  "${RECOMPSX_ROOT}/src/backend/pc/backend_sdl2.c"
-  "${RECOMPSX_ROOT}/src/backend/pc/main_pc.cpp")
+# Which backend answers the ABI. `null` is not a lesser build — it is how a run is made
+# reproducible: no window, no audio device, no host clock reaching emulated state, so a headless
+# digest means the same thing on a build machine as on a desk.
+if(NOT DEFINED RECOMPSX_BACKEND)
+  set(RECOMPSX_BACKEND "pc")
+endif()
+
+if(RECOMPSX_BACKEND STREQUAL "null")
+  set(BACKEND_SRC
+    "${RECOMPSX_ROOT}/src/backend/null/backend_null.c"
+    "${RECOMPSX_ROOT}/src/backend/pc/main_pc.cpp")
+else()
+  set(BACKEND_SRC
+    "${RECOMPSX_ROOT}/src/backend/pc/backend_sdl2.c"
+    "${RECOMPSX_ROOT}/src/backend/pc/main_pc.cpp")
+endif()
 
 add_executable(recompsx ${GEN_SRC} ${BACKEND_SRC})
 
@@ -55,13 +80,19 @@ target_include_directories(recompsx PRIVATE
 
 target_compile_options(recompsx PRIVATE ${RECOMPSX_FLAGS})
 
-find_package(SDL2 REQUIRED)
-if(TARGET SDL2::SDL2)
-  target_link_libraries(recompsx PRIVATE SDL2::SDL2)
-else()
-  # Older SDL2 CMake packages export variables instead of a target.
-  target_include_directories(recompsx PRIVATE ${SDL2_INCLUDE_DIRS})
-  target_link_libraries(recompsx PRIVATE ${SDL2_LIBRARIES})
+target_compile_definitions(recompsx PRIVATE
+  RECOMPSX_MAIN_HEADER=\"${RECOMPSX_MAIN}.h\"
+  RECOMPSX_MAIN_CLASS=${RECOMPSX_MAIN})
+
+if(NOT RECOMPSX_BACKEND STREQUAL "null")
+  find_package(SDL2 REQUIRED)
+  if(TARGET SDL2::SDL2)
+    target_link_libraries(recompsx PRIVATE SDL2::SDL2)
+  else()
+    # Older SDL2 CMake packages export variables instead of a target.
+    target_include_directories(recompsx PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(recompsx PRIVATE ${SDL2_LIBRARIES})
+  endif()
 endif()
 
 # Forward-compat: Linux and Windows need no changes here beyond however SDL2 is discovered.
