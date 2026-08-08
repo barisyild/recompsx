@@ -24,6 +24,12 @@ class GenMain {
 				"no image path given — running on empty memory, values read from RAM are not real");
 		}
 
+		// The disc, if one was named. Either shape: a BIN/CUE or ISO image, or a directory of
+		// files already extracted from one. The image is tried first because it is the stricter
+		// test — it either has a volume descriptor or it does not.
+		if (shim.Backend.argCount() >= 2) mountDisc(shim.Backend.arg(1));
+		else {}
+
 		ctx.pc = GameInfo.ENTRY_POINT;
 		ctx.gp = GameInfo.INITIAL_GP;
 		ctx.sp = GameInfo.INITIAL_SP;
@@ -51,6 +57,11 @@ class GenMain {
 			+ " | cycles " + ctx.cycles);
 		shim.Backend.log(shim.Backend.LOG_INFO,
 			"distinct unimplemented things reached: " + Runtime.reportedGaps);
+	}
+
+	static function mountDisc(path:String):Void {
+		if (!kernel.KFiles.mountImage(path)) kernel.KFiles.mountDirectory(path);
+		else {}
 	}
 
 	static function hex(v:Int):String {

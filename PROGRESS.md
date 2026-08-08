@@ -52,14 +52,25 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The disc is next.** With the GPU answering, Crash Bash runs to frame 30,000 — over eight
-   minutes of emulated time, 30,000 interrupts, 30,000 handler calls — and submits **29 GPU words
-   in all**. It is not drawing because it has nothing to draw: no `cdrom:` file can be opened, so
-   no assets arrive. That makes ISO9660 and the CD-ROM registers the binding constraint, not the
-   rasteriser.
+2. **The CD-ROM registers are next**, and that is a sharper answer than "the disc".
 
-   Which is a useful thing to have learned cheaply. Building the rasteriser first would have
-   produced a correct triangle filler with nothing to fill.
+   `cdrom:` now works in both shapes. A directory of extracted files needs no ISO9660 at all. A
+   disc image is mounted by `cd/Iso9660.hx`, which finds its own sector layout by looking for the
+   volume descriptor where each candidate would put it — verified against a real Crash Bash BIN:
+
+       mounted a disc image: 2352-byte sectors, user data at +24, root directory at LBA 22
+
+   2352-byte raw sectors with user data at +24 is Mode 2 Form 1, which is what a PlayStation disc
+   is, and nothing had to be told that.
+
+   It made no difference to the game, which is the finding. Crash Bash never calls the kernel's
+   file API — it touches **0x1F801800**, the CD-ROM index register, because Psy-Q's libcd drives
+   the hardware directly. Almost every commercial PS1 game does.
+
+   So the file layer was necessary but not sufficient: it is what libcd's sector reads will be
+   answered *from*, once the register-level device exists. That device — the command and response
+   FIFOs, the INT levels, `Setloc`/`ReadN`/`GetTN`, and the sector cadence — is the actual
+   blocker, and it now has a working filesystem underneath it instead of nothing.
 
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
