@@ -166,37 +166,32 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         `syscall 0` are not on the P0 list in docs/specs/runtime.md §7.3.1, and Crash Bash calls
         them before anything else.
 
-  - [ ] **M1.5 open item — the C++ build dispatches wrongly.** Running the C++ binary of the
-        recompiled game fails immediately: `dispatch to shard 4 slot 14, which does not exist`,
-        although the generated C++ visibly contains `case 14` among shard 4's 91 cases and
-        `FnTable::dispatch` visibly contains `case 4`. The identical generated Haxe runs correctly
-        on JavaScript and gets well into Crash Bash's initialisation — `A0(39h)` InitHeap,
-        `A0(44h)` FlushCache, `syscall 0`, COP0 status access, GTE control writes.
+  - [ ] **M1.5 open item — the C++ build mis-dispatches; narrowed, not yet found.** The C++
+        binary fails on its first call with `dispatch to shard 4 slot 14, which does not exist`,
+        while the identical generated Haxe runs correctly on JavaScript. Adding
+        `-D analyzer-optimize` changes nothing, so it is not an artefact of un-optimised output.
 
-        So this is another reflaxe.CPP miscompilation, and which side is right is not in question.
-        Suspect the 91-case switch or the call into it. Next: shrink `MAX_FUNCTIONS` until the
-        C++ build agrees with JS, which will say whether switch size is the trigger, then reduce
-        it to a spike.
+        What has been ruled out, each by reading the emitted C++ or the generated data:
 
-      This is the clearest vindication so far of developing on JavaScript (ADR-0003). A
-      C++-only project would be completely blocked at this milestone; instead the JS build runs
-      the recompiled game today and the compiler problem is a parallel task.
-- [ ] **M2 (L)**: codegen v1 + runtime skeleton + kernel-HLE TTY — accept: PSn00bSDK hello.exe
-      prints through HLE putchar; amidog psxtest_cpu passes with a committed exclusion list
-- [ ] **M3 (M)**: GTE integer-exact — accept: amidog psxtest_gte pass recorded
-- [ ] **M4 (L)**: GPU software raster + DMA + timers — accept: PSn00bSDK gpu demos
-      framebuffer-hash match recorded; determinism double-run test green
-- [ ] **M5 (L)**: SPU + CD streaming + MDEC + pads/multitap — accept: integration fixture with a
-      stable audio ring over 60 s headless; pad-state fixture green
-- [ ] **M6 (XL)**: Crash Bash — 6a title screen · 6b menus + overlay switch into one minigame ·
-      6c 4-player ≥15 min stable + audio + memcard save + FMV — accept per sub-item: a logged
-      session with hash/screenshot evidence
-- [ ] **M7 (M)**: polish — input remap, integer scaling, pacing/fast-forward, PAL variant if needed
-- [ ] **M8 (M)**: portability proofs — JVM headless parity hash on the M4 demos; a console
-      build-investigation memo (PS2 first) in `docs/specs/`
+        | Suspect | Verdict |
+        |---|---|
+        | The handle is wrong | No. Entry `0x8002e7b0` is index 395 of 861, handle 4194318 = shard 4, slot 14 — exactly right. |
+        | The address array is mis-sorted | No. `ADDRS` is ascending as both signed and unsigned, so the binary search is valid either way. |
+        | `FnTable::lookup` | Correct C++ binary search. |
+        | `FnTable::dispatch` | Correct: `handle & 1048575`, `static_cast<unsigned int>(handle) >> 20`, `case 0`..`case 8` all present. |
+        | `Fns_04::dispatch` | Correct: 91 flat cases, `case 14` present between 13 and 15, `default` last. |
+        | The shard is short a slot | No. Shard 4 has 91 handles, max slot 90. |
 
-Effort tags: S < 1 day, M = days, L = 1–2 weeks, XL = multi-week.
-Rule: never start M(n+1) before M(n)'s acceptance output is pasted into this file.
+        Which leaves a contradiction worth stating plainly: the message can only come from
+        `Fns_04::dispatch`'s default arm, whose shard number is a literal `4` — and that arm is
+        reached with `slot == 14` while `case 14:` sits eight lines above it in the same flat
+        switch. Valid C++ cannot do that, so either the value being switched on is not the value
+        being printed, or the two `Runtime.badHandle` call sites are not distinguishable from the
+        message alone and the real one is elsewhere.
+
+        **Next step, and it is a small one:** give the two call sites different text — the shard
+        arm says which shard by literal, the table arm says `table`. One regeneration and one
+        build then splits the hypothesis in half, and whichever side it lands on is a spike.
 
 ## [M0-VERIFY] checklist
 
