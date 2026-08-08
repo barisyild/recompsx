@@ -49,7 +49,29 @@ fi
 # --- 3. no exceptions in the runtime ----------------------------------------------------------
 # Unrecoverable conditions go to Fatal.raise -> bp_fatal. See docs/specs/backend.md §5 rule 6.
 if [ -d src/runtime ]; then
-  hits="$(grep -rnE '^[^/]*\b(throw|try)\b' src/runtime --include='*.hx' 2>/dev/null \
+  # Comments are stripped before matching. The original form skipped lines beginning with `/`,
+  # which does not describe a doc comment's body — the word "try" in an ordinary English sentence
+  # inside `/** */` tripped it, and a check that fires on prose is one people learn to ignore.
+  #
+  # awk strips, grep matches. Keeping the regex in grep is deliberate: awk's `\<` word boundaries
+  # are a GNU extension and silently match nothing on the BSD awk macOS ships, which turned this
+  # from a check that cried wolf into one that saw nothing at all.
+  hits="$(find src/runtime -name '*.hx' -print0 2>/dev/null \
+          | xargs -0 awk '
+              { line = $0
+                if (inblock) {
+                  if (line !~ /\*\//) next
+                  sub(/^.*\*\//, "", line); inblock = 0
+                }
+                sub(/\/\/.*/, "", line)
+                # Whole /* ... */ pairs on one line go first. Without this a single-line doc
+                # comment opened a block that its own closing never shut, and everything after
+                # it in the file was skipped — the check went silent instead of noisy.
+                while (line ~ /\/\*.*\*\//) sub(/\/\*.*\*\//, "", line)
+                if (line ~ /\/\*/) { sub(/\/\*.*/, "", line); inblock = 1 }
+                print FILENAME ":" FNR ":" line }
+            ' \
+          | grep -E '(^|[^A-Za-z0-9_])(throw|try)([^A-Za-z0-9_]|$)' \
           | grep -v 'portable-ok' || true)"
   if [ -n "$hits" ]; then
     fail "throw/try in src/runtime:"; echo "$hits" >&2
