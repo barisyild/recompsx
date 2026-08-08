@@ -572,7 +572,7 @@ class Kernel {
 	static function heartbeat(ctx:CpuState):Void {
 		// Late, not at the first pixel: the opening clear arrives thousands of frames before the
 		// rest of the display list, and a census taken at the clear describes only the clear.
-		if (vramDump && !dumped && vblankCount >= 60000) takeFrame();
+		if (vramDump && !dumped && vblankCount >= 200000) takeFrame();
 		else {}
 		if (vblankCount % 60 != 0) return;
 		else {}

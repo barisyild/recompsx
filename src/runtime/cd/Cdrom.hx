@@ -309,7 +309,12 @@ class Cdrom {
 		// that driver has finished handling the answer it was acknowledging. The first response
 		// was moved off this path days ago; this one was left behind, so every two-interrupt
 		// command — Init, Reset, SeekL, GetID — handed its completion to a library still mid-ack.
-		if (queuedInt != 0) schedule(now, ACK);
+		// Released here, not scheduled. A driver that acknowledges one answer and immediately looks
+		// for the next is asking whether the *pair* has arrived, and libcd looks exactly twice
+		// before moving on — a queued interrupt fifty thousand cycles out is one it never sees.
+		// Deferring this was symmetric with the first answer and wrong for the second: the first
+		// must not beat the driver's wait, the second must not miss it.
+		if (queuedInt != 0) releaseQueued();
 		else {}
 	}
 
@@ -350,6 +355,7 @@ class Cdrom {
 		else if (cmd == 0x19) test();
 		else if (cmd == 0x1A) getId(cycles);
 		else if (cmd == 0x1E) readToc(cycles);
+		else if (cmd == 0x1C) resetCommand();
 		else unknownCommand(cmd);
 		paramCount = 0;
 	}
@@ -489,6 +495,26 @@ class Cdrom {
 
 	static inline function toBcd(v:Int):Int {
 		return Std.int(v / 10) * 16 + (v % 10);
+	}
+
+	/**
+		`Reset` (1Ch) — the drive back to how it powered on.
+
+		It was missing from the table entirely, so it fell through to the unknown-command path and
+		answered INT5. libcd opens `CdInit` with it, read the error, and started over — which is
+		what `CD timeout: CD_cw:(CdlReset)` was reporting all along, in a library's words rather
+		than ours.
+
+		Mode and read state reset; the two answers are the usual pair, the second queued behind the
+		acknowledgement.
+	**/
+	static function resetCommand():Void {
+		mode = 0;
+		reading = false;
+		sectorReady = false;
+		status = ST_MOTOR;
+		queue(INT2_DONE, status, 1);
+		ackWith1(status);
 	}
 
 	static function readToc(cycles:Int):Void {
