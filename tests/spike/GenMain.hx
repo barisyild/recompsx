@@ -37,6 +37,16 @@ class GenMain {
 		if (!FnTable.call(GameInfo.ENTRY_POINT, ctx)) {
 			shim.Backend.log(shim.Backend.LOG_ERROR, "entry point is not in the table");
 		}
+		// What the machine actually did, not just what it could not do. Every one of these is
+		// deterministic, so two runs — or two targets — that disagree here have diverged.
+		shim.Backend.log(shim.Backend.LOG_INFO,
+			"frames " + kernel.Kernel.vblankCount
+			+ " | events fired " + core.Scheduler.fired
+			+ " | irqs delivered " + core.Irq.delivered
+			+ " | handler calls " + kernel.KHandlers.calls
+			+ " | kernel events delivered " + kernel.KEvents.delivered
+			+ " (" + kernel.KEvents.callbacks + " callbacks)"
+			+ " | cycles " + ctx.cycles);
 		shim.Backend.log(shim.Backend.LOG_INFO,
 			"distinct unimplemented things reached: " + Runtime.reportedGaps);
 	}

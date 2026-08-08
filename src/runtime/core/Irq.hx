@@ -101,9 +101,9 @@ class Irq {
 	/**
 		Whether an interrupt may be delivered right now.
 
-		Four conditions, and each one is a different kind of "no":
-		the controller has nothing (`pending`); the game is inside a critical section
-		(`critDepth`); the CPU is not listening (SR); or we are already inside a handler.
+		Three conditions, and each is a different kind of "no": the controller has nothing
+		(`pending`); the CPU is not listening (SR — which is also how a critical section says so,
+		because that is all one is); or we are already inside a handler.
 
 		That last one is not an optimisation. Without it a handler's own back-edges would pump,
 		deliver again, and recurse until the host stack died — with a cause that looks like
@@ -111,7 +111,6 @@ class Irq {
 	**/
 	public static function deliverable(ctx:CpuState):Bool {
 		return pending()
-			&& ctx.critDepth == 0
 			&& !inHandler
 			&& (ctx.sr & SR_IEC) != 0
 			&& (ctx.sr & SR_IM_HW) != 0;
@@ -124,7 +123,7 @@ class Irq {
 		code gets re-entered and only a pump point guarantees the CPU state is consistent.
 	**/
 	public static function dispatch(ctx:CpuState):Void {
-		if (!deliverable(ctx)) return;
+		if (!deliverable(ctx)) return blocked(ctx);
 		else {}
 		inHandler = true;
 		delivered++;
@@ -133,6 +132,26 @@ class Irq {
 		Kernel.onInterrupt(ctx);
 		restoreRegisters(ctx);
 		inHandler = false;
+	}
+
+	/**
+		Says why an interrupt that is waiting is not being delivered.
+
+		Once per reason, not once per pump. "Nothing is happening" is the least useful thing a
+		bring-up log can say, and the four reasons are genuinely different problems: a game that
+		never unmasked the line, one still inside a critical section, one that never enabled
+		interrupts in SR, and a bug of ours.
+	**/
+	static function blocked(ctx:CpuState):Void {
+		if (!pending()) return;
+		else {}
+		if ((ctx.sr & SR_IEC) == 0) Runtime.reportOnce(0x5A000002,
+			"interrupt pending but SR.IEc is clear — the CPU is not listening");
+		else if ((ctx.sr & SR_IM_HW) == 0) Runtime.reportOnce(0x5A000003,
+			"interrupt pending but SR bit 10 is clear — the hardware line is masked off");
+		else if (inHandler) Runtime.reportOnce(0x5A000004,
+			"interrupt pending while already inside a handler");
+		else {}
 	}
 
 	// A handler is an ordinary recompiled function and will use registers freely. On hardware the

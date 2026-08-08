@@ -195,6 +195,11 @@ class Runtime {
 		Backend.log(Backend.LOG_INFO, "handled: " + what);
 	}
 
+	/** An ordinary progress line — not a gap, not once-only. */
+	public static function note(what:String):Void {
+		Backend.log(Backend.LOG_INFO, what);
+	}
+
 	public static function trap(ctx:CpuState, what:String):Void {
 		Backend.fatal("recompsx: " + what + " at pc=" + hex(ctx.pc));
 	}

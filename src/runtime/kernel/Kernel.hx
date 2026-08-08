@@ -136,6 +136,7 @@ class Kernel {
 	**/
 	static function vblank(ctx:CpuState):Void {
 		vblankCount++;
+		heartbeat(ctx);
 		KEvents.deliver(ctx, KEvents.CLASS_VBLANK, SPEC_INTERRUPTED);
 		KEvents.deliver(ctx, CLASS_RCNT3, SPEC_INTERRUPTED);
 		Irq.writeStat(~(1 << Irq.VBLANK));
@@ -149,6 +150,23 @@ class Kernel {
 
 	/** Frames elapsed. Deterministic, and the first number a bring-up session watches. */
 	public static var vblankCount(default, null) = 0;
+
+	/**
+		A line per emulated second, because a game's main loop never returns.
+
+		Without it a bring-up run is silent once the startup log stops, and silence looks the same
+		whether the machine is running a hundred frames a second or wedged in a spin. Every number
+		here is deterministic, so two runs that disagree have diverged.
+	**/
+	static function heartbeat(ctx:CpuState):Void {
+		if (vblankCount % 60 != 0) return;
+		else {}
+		core.Runtime.note("frame " + vblankCount
+			+ " | events " + core.Scheduler.fired
+			+ " | irqs " + core.Irq.delivered
+			+ " | handlers " + KHandlers.calls
+			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb");
+	}
 
 	// ---- syscall / break -------------------------------------------------------------------------
 
@@ -168,26 +186,29 @@ class Kernel {
 	/**
 		`EnterCriticalSection` / `ExitCriticalSection`.
 
-		psx-spx describes these as clearing and setting SR bits 2 and 10, which looks wrong until
-		you notice they run *inside* a syscall exception: there, bit 2 is IEp, the value that
-		becomes IEc when the handler returns. Under HLE no exception is taken, so the equivalent
-		is to drive IEc directly — and to keep our own depth counter, which is what actually gates
-		delivery and lets nesting work the way the hardware's single flag never had to.
+		**Not a nesting counter.** psx-spx is unambiguous: SYS(01h) clears SR bits and SYS(02h)
+		sets them. There is no depth anywhere, and the return value is what makes that workable —
+		Enter reports whether interrupts *were* on, so the caller can decide whether its own Exit
+		should happen at all. Psy-Q code is written to that idiom.
+
+		This started life as a counter here, on the reasoning that nesting ought to work properly.
+		It cost an afternoon: Crash Bash enters four times, is told "were enabled" only on the
+		first, exits once — and on real hardware that single exit turns interrupts back on, while
+		the counter sat at three and delivered nothing for the rest of the run. Improving on the
+		hardware is a bug whenever a game can tell, and the game could.
+
+		The bit numbers psx-spx gives, 2 and 10, look wrong until you notice the BIOS runs this
+		*inside* a syscall exception, where bit 2 is IEp — the value that becomes IEc on return.
+		No exception is taken under HLE, so the equivalent is to drive IEc itself.
 	**/
 	static function enterCritical(ctx:CpuState):Void {
-		ctx.v0 = ctx.critDepth == 0 ? 1 : 0;
-		ctx.critDepth++;
+		ctx.v0 = (ctx.sr & Irq.SR_IEC) != 0 ? 1 : 0;
 		ctx.sr = ctx.sr & ~(Irq.SR_IEC | Irq.SR_IM_HW);
 		noteOnce(0x51000001, "SYS(01h) EnterCriticalSection");
 	}
 
 	static function exitCritical(ctx:CpuState):Void {
-		// Never below zero: a game that exits more than it enters would otherwise leave the
-		// counter negative and interrupts gated off for the rest of the run.
-		if (ctx.critDepth > 0) ctx.critDepth--;
-		else {}
-		if (ctx.critDepth == 0) ctx.sr = ctx.sr | Irq.SR_IEC | Irq.SR_IM_HW;
-		else {}
+		ctx.sr = ctx.sr | Irq.SR_IEC | Irq.SR_IM_HW;
 		noteOnce(0x51000002, "SYS(02h) ExitCriticalSection");
 	}
 

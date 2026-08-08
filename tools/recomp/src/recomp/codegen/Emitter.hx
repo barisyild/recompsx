@@ -49,6 +49,8 @@ class Emitter {
 		final indexOf:Map<Int, Int> = [];
 		for (i in 0...blockAddrs.length) indexOf.set(blockAddrs[i], i);
 
+		final pumpAt = loopHeaders(fn, blockAddrs);
+
 		buf.add('\t/**\n');
 		buf.add('\t\t${fn.name} — ${Vaddr.hex(fn.entry)}..${Vaddr.hex(fn.endAddr - 1)}, '
 			+ '${blockAddrs.length} block${blockAddrs.length == 1 ? "" : "s"}, '
@@ -59,6 +61,7 @@ class Emitter {
 		}
 		buf.add('\t**/\n');
 		buf.add('\tpublic static function ${fn.name}(ctx:CpuState):Void {\n');
+		buf.add(PUMP_ENTRY);
 
 		final flat = blockAddrs.length == 1;
 		if (!flat) {
@@ -70,6 +73,7 @@ class Emitter {
 			final addr = blockAddrs[i];
 			final indent = flat ? "\t\t" : "\t\t\t\t";
 			if (!flat) buf.add('\t\t\tcase $i: // ${Vaddr.hex(addr)}\n');
+			if (pumpAt.exists(addr)) buf.add(indent + PUMP_LINE + "\n");
 			emitBlock(buf, fn, addr, indexOf, indent);
 		}
 
@@ -79,6 +83,47 @@ class Emitter {
 		}
 		buf.add('\t}\n');
 		return buf.toString();
+	}
+
+	/**
+		The pump check, as it appears in generated code.
+
+		`| 0` is not decoration. The comparison is a subtraction so that it stays correct when the
+		cycle counter passes 2^31, and that only works if the subtraction wraps — which C++ does
+		and JavaScript does not (ADR-0004). Without it a deadline just past the wrap reads as long
+		overdue on one target and correctly future on the other, and the two builds diverge.
+
+		Deliberately one statement in the `if` body and no `else`: an `if` with a multi-statement
+		body and no `else` was silently deleted by reflaxe.CPP (upstream defect 8, fixed in our
+		fork), and generated code should not depend on that fix being present.
+	**/
+	static inline final PUMP_LINE =
+		"if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) Runtime.pump(ctx);";
+
+	static inline final PUMP_ENTRY = "\t\t" + PUMP_LINE + "\n";
+
+	/**
+		Blocks that a back-edge returns to — the loop headers.
+
+		The pump goes here rather than at each back-edge *source*, which is the same guarantee for
+		less code: every path that re-enters a loop passes through its header, including the ones
+		that are easy to miss when writing them out one at a time (a recovered switch table's
+		edges, a conditional whose two arms are emitted as a ternary). One check per loop instead
+		of one per branch, and no way to leave a path uncovered.
+
+		Forward progress follows: any loop in the original program has a back-edge, so any loop in
+		the generated program pumps, and an idle `b .` spin still lets time advance.
+	**/
+	function loopHeaders(fn:Func, blockAddrs:Array<Int>):Map<Int, Bool> {
+		final headers:Map<Int, Bool> = [];
+		for (from in blockAddrs) {
+			final block = fn.blocks.get(from);
+			for (to in block.successors) {
+				// Backwards or to itself: the definition of a back-edge in an address-ordered CFG.
+				if (to <= from) headers.set(to, true);
+			}
+		}
+		return headers;
 	}
 
 	// ---- one block ------------------------------------------------------------------------------

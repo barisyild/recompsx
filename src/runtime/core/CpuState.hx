@@ -59,7 +59,11 @@ class CpuState {
 	**/
 	public var unwindToken:Int = 0;
 
-	/** Nesting depth of EnterCriticalSection; interrupts are delivered only at zero. */
+	/**
+		Kept for the HLE thread functions, which do have a depth. Critical sections do not: the
+		BIOS implements them by clearing and setting SR bits, with no counter anywhere, and
+		delivery is gated on SR alone.
+	**/
 	public var critDepth:Int = 0;
 
 	/**
