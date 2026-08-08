@@ -103,6 +103,43 @@ if [ -f .gitmodules ]; then
   fi
 fi
 
+# ---- root-package class names that collide with system headers -------------------------------
+#
+# A Haxe class in the root package compiles to a bare header — `Time.hx` gives `Time.h` — and the
+# generated include directory sits on the compiler's -I path. On a case-insensitive filesystem
+# (macOS by default), libc++'s own `#include <time.h>` then resolves to *our* file, and the
+# translation unit fails with unresolved `time_t` and an incomplete `timespec` while never having
+# mentioned time at all. Cost me a while to find; costs a grep to prevent.
+#
+# Classes inside a package are safe: reflaxe prefixes them (`mem/Memory.hx` -> `mem_Memory.h`).
+#
+# Scoped to what actually reaches a C++ compiler. tools/recomp runs under --interp and is never
+# generated, so a class named `Assert` there is fine — the hazard needs a C++ include path to
+# exist at all.
+RESERVED_HEADERS="time math string memory stdio stdlib limits errno signal thread mutex complex
+new list map set vector queue stack locale random regex tuple utility bit chrono format
+filesystem atomic future optional variant span numeric iterator algorithm functional exception
+typeinfo ctime cmath cstdio assert stdint stddef wchar ctype float"
+collisions=""
+while IFS= read -r hx; do
+  # Root package only — a `package x;` line makes the emitted header prefixed and harmless.
+  if grep -qE '^[[:space:]]*package[[:space:]]+[a-zA-Z_]' "$hx"; then continue; fi
+  base="$(basename "$hx" .hx)"
+  lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  for r in $RESERVED_HEADERS; do
+    if [ "$lower" = "$r" ]; then collisions="$collisions $hx"; fi
+  done
+done <<EOF
+$(find src shared tests/conformance tests/spike -name '*.hx' 2>/dev/null)
+EOF
+if [ -n "$collisions" ]; then
+  fail "root-package class name collides with a system header (case-insensitively):$collisions"
+  echo "  rename the class, or move it into a package so the emitted header gets a prefix" >&2
+else
+  ok "no generated header shadows a system one"
+fi
+
+
 if [ $FAIL -eq 0 ]; then
   printf '\033[32mcheck.sh: clean\033[0m\n'
 else

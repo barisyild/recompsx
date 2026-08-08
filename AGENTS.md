@@ -95,6 +95,16 @@ Prefer this over single-target unit tests for anything numeric, bit-level or mem
 
 ## Key references
 - PS1 hardware truth: https://psx-spx.consoledev.net/ (primary spec, always first)
+- Kernel behaviour: **OpenBIOS** — https://github.com/grumpycoders/pcsx-redux/tree/main/src/mips/openbios
+  A retail-BIOS reimplementation in C that deliberately keeps the original's bugs and quirks —
+  which is what our HLE must match. Those files carry their own **MIT** header even though the
+  surrounding repo is GPL-2.0, so this is the one non-spec source we may read, adapt and
+  translate. Two rules: verify the MIT header in the specific file (the repo is mixed), and carry
+  the attribution in a comment, since a C-to-Haxe translation is a derivative work. Still second
+  to psx-spx, and still needs a fixture — a reimplementation can be wrong.
+  **It is a source to read, never a BIOS to run.** The kernel stays HLE (golden rule 4 is
+  unchanged): we do not build it, ship it, load it, or add a BIOS-image path. Its value is that
+  it answers "what does the retail kernel actually do here" when psx-spx only describes it.
 - Reference emulator: DuckStation — behavioral oracle (compare TTY/VRAM/memory dumps) and
   RE debugger for overlay mapping. NEVER copy/port emulator code (license-incompatible with
   MIT); record learned behavioral facts in docs/ with citation, prefer proving them with our

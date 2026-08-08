@@ -23,30 +23,34 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M2 kernel HLE**, in the order Crash Bash asks for it. With the image loaded, both targets
-   now produce an identical 35-line trace, and it reads as a startup sequence rather than a
-   handful of calls. Names from psx-spx:
+1. **M2 — time, scheduling and interrupts, designed as one piece (ADR-0005).** The startup trace
+   named the mechanism the game is waiting on: `OpenEvent`, `EnableEvent`, `WaitEvent`,
+   `SysEnqIntRP`, `ChangeClearRCnt`. Those are not five stubs, they are one thing, and
+   implementing any of them alone moves the hang without removing it.
 
-   | Call | Name | What it means for us |
-   |---|---|---|
-   | `A0(39h)` | InitHeap | done |
-   | `A0(44h)` | FlushCache | done — and marks where an overlay lands |
-   | `SYS(01h/02h)` | Enter/ExitCriticalSection | done |
-   | `B0(19h)` | HookEntryInt | the game installs its own exception hook |
-   | `B0(35h)` | write | file I/O, before any disc layer exists |
-   | `A0(70h/72h)` | _bu_init / _96_remove | memory card and CD device setup |
-   | `B0(08h/0Ah/0Bh/0Ch)` | OpenEvent / WaitEvent / TestEvent / EnableEvent | **the event system** |
-   | `B0(5Bh)` | ChangeClearPAD | pad handling |
-   | `B0(4Ah/4Bh)` | InitCARD2 / StartCARD2 | memory card |
-   | `C0(0Ah)` | ChangeClearRCnt | what the kernel's timer/vblank handlers acknowledge |
-   | `C0(02h/03h)` | SysEnqIntRP / SysDeqIntRP | interrupt handler priority chains |
-   | `A0(49h)` | GPU_cw | a GP0 command word |
+   Decisions worth knowing before touching the code:
+   - Time is a **pure function of `cycles`**; the scheduler fires only edges. Anything readable —
+     scanline, field, GPUSTAT bit 31, timer values — is computed at the moment of the read, so a
+     game polling between two events still sees it move.
+   - **Pump points are generated-code ABI**: `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);`
+     at function entry and every back-edge, and nowhere else. Those are the only points where the
+     CPU state is whole, which matters because delivering an interrupt means calling a recompiled
+     function.
+   - An idle `WaitEvent` **advances to `nextEvent`** rather than by a constant. No free parameter,
+     and an idle wait costs O(events) instead of O(cycles).
+   - Interrupt handlers get a **saved and restored register snapshot**, and delivery is inhibited
+     while inside one — otherwise a handler's own back-edges would pump, deliver, and recurse.
 
-   The shape of the work is now obvious and it is not a list of independent stubs: the event
-   system (`OpenEvent`/`WaitEvent`), the interrupt chains (`SysEnqIntRP`) and `ChangeClearRCnt`
-   are one mechanism, and `WaitEvent` is where the game is trying to wait for VBlank. So the
-   scheduler and the event model have to arrive together — implementing `WaitEvent` without
-   something to deliver an event would just move the hang.
+   Built bottom-up with a conformance test before each layer is depended on:
+
+   | Layer | State |
+   |---|---|
+   | `TimeBase` | **done** — `tests/conformance/VideoTime.hx`, both targets `052bdaac` |
+   | `Scheduler` | next — fixed slots, ties broken by slot index |
+   | I/O dispatch + `I_STAT`/`I_MASK` | the 0x1F801000 page currently reads 0 and swallows writes |
+   | Event table (EvCB) | `OpenEvent`/`WaitEvent`/`TestEvent`/`DeliverEvent` |
+   | IntRP chains | `SysEnqIntRP`, called at dispatch |
+   | Pump emission | emitter change; regenerates everything |
 
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`

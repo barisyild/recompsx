@@ -86,6 +86,11 @@ valid because no event is ever scheduled more than 2^31 cycles (~63 s) ahead (lo
 ReadTOC ≈ 1 s). The scheduler keeps an `I64 totalCycles` accumulator (updated inside pump only)
 for stats and pacing.
 
+Everything a game can *read* — scanline, field, GPUSTAT bit 31, timer values — is computed from
+`ctx.cycles` analytically at the moment of the read, never stepped forward by the scheduler
+(ADR-0005 §1). The scheduler schedules *edges* only. A game polling GPUSTAT between two events
+must not see a value that stopped moving.
+
 Scheduler: fixed-slot event table, no allocation, no sorting: `VBLANK_START, VBLANK_END,
 TIMER0/1/2, SPU_BATCH, CD_EVENT, SIO_BYTE, DMA_IRQ, MEMCARD_OP, PAD_VSYNC_POLL` — each
 `{due:Int, active:Bool}`; cached `minDue` recomputed on schedule/cancel (N≤12 linear scan).
@@ -105,8 +110,10 @@ pending → immediate dispatch. `ReturnFromException` = no-op marker under HLE.
 
 **VSync convergence** — all three game idioms terminate on the same VBLANK_START event:
 (1) polling I_STAT bit0 (back-edge pump fires the event); (2) polling GPUSTAT bit31 (computed on
-read from the TimeBase line counter); (3) kernel WaitEvent / libetc VSync — HLE wait loops
-advance `ctx.cycles += 64` per iteration and pump.
+read from the TimeBase line counter); (3) kernel WaitEvent / libetc VSync — an HLE wait advances
+`ctx.cycles` **to `ctx.nextEvent`** and runs the scheduler, jumping to the next deadline rather
+than stepping by a constant (ADR-0005 §3; this supersedes the `+= 64` written here earlier, which
+was a free parameter that made delivery time depend on how it divided into deadlines).
 
 ## 3. Kernel HLE
 
