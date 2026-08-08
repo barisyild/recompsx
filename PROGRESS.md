@@ -52,47 +52,35 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD conversation is textbook-correct and libcd still loops. The fault is in what it
-   checks *after* a successful Init, and the trace now shows the whole exchange.**
+2. **The game renders. Pixels of its own making are in VRAM.**
 
-       cd# cmd 0x01 params=0            (Getstat)
-       cd# -> INT3 deferred, bytes 02
-       cd# INT 3 delivered, 1 bytes
-       cd# r 1803.1 -> 227              (0xE0 | 3)
-       cd# ack 7 (int was 3)
-       cd# cmd 0x0A params=0            (Init)
-       cd# -> INT2 queued, first byte 2
-       cd# -> INT3 deferred, bytes 02
-       cd# INT 3 delivered → ack 7
-       cd# r 1803.1 -> 226 → ack 7 (int was 2)
-       cd# cmd 0x01 params=0            ... and the whole sequence repeats
+   Two things stood between Crash Bash and a picture, and neither was the CD.
 
-   Both commands complete with the right interrupt levels in the right order, and libcd
-   acknowledges each one. Then it starts the sequence over, forever. So delivery, ordering,
-   acknowledgement and the queue all work; the failure is in a check libcd makes after Init.
+   **DMA channel 2.** Psy-Q does not write GP0 a word at a time — `DrawOTag` hands the GPU an
+   ordering table and DMA walks it. With no controller, every display list went into an
+   unimplemented register. Twenty-nine GP0 words in eight minutes of play was not a game with
+   nothing to draw; it was a game whose drawing went nowhere. Channel 2's linked-list and block
+   modes turned that into 544 commands.
 
-   **The strongest clue is an absence: there is not one `r resp` line in the trace.** libcd never
-   reads the response FIFO at `1F801801`. A driver that issues Getstat and never reads the status
-   byte it asked for is not behaving like a driver that got what it wanted — which points at
-   `1F801800`'s status bits, the ones it *does* read, as the thing it is unhappy with. Bit 5
-   (RSLRRDY, "a response byte is waiting") is set here only from `responseRead < responseCount`,
-   which becomes true at delivery; if libcd polls it before that or expects a different bit
-   layout, it concludes the drive never answered and retries — which is exactly the observed
-   loop, and would also explain why it never bothers to read the payload.
+   **GP0(A0h), the CPU-to-VRAM upload.** An opcode census of a whole frame settled what the
+   display list actually holds: 364 NOPs, 159 cache-clears, one rectangle for the screen clear,
+   and **three uploads**. No polygons at all. That is how a game puts an image on screen without
+   drawing anything — fonts, logos and loading screens are uploads, not primitives. A transfer
+   arms itself once its header completes, since the size is only known then, and writes two
+   pixels a word wrapping within VRAM's torus as the hardware does.
 
-   `BUSYSTS` (bit 7) was the eighth candidate and is now implemented — a controller that is never
-   busy never visibly *takes* a command — but it did not break the loop either.
+       gpu 552w/16c/1prim/261121px/1056up      618 non-zero pixels
+       content at VRAM x896..927, y256..384
 
-   **Where a fresh session should start.** Do not add a ninth guess. Run the game in DuckStation
-   with a CD-register breakpoint, capture the same exchange, and diff it against our `cd#` trace
-   line for line. The escalation ladder in docs/architecture.md exists for exactly this: observing
-   a reference implementation costs nothing and settles what eight rounds of reasoning from the
-   spec have not. Our trace is already in the right shape to compare against.
+   Counting an upload's words and discarding them renders a game that draws nothing as a game
+   that shows nothing, and from outside the two are identical. That is what made the CD look like
+   the blocker for most of a day.
 
-   Everything around the CD is healthy and should not be re-doubted: interrupt delivery, level
-   ordering, acknowledgement, the queue, the timers, SIO0, the exception hook, and the ISO9660
-   layer under it (verified against a real Crash Bash BIN, Mode 2 Form 1 detected unaided).
-
+   **Still open, now secondary:** `CdInit` fails after fourteen candidates eliminated by
+   measurement, so no level assets load and most of the screen stays empty. The escalation
+   ladder's answer is unchanged — capture the same exchange in DuckStation with a CD-register
+   breakpoint and diff it against our `cd#` trace. What changed is that the path behind it is
+   proven all the way to visible pixels.
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
    import. The PS-EXE path works; the disc path is untouched, and overlays need it.
@@ -434,6 +422,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [opus] THE GAME RENDERS. Two blockers, neither the CD: DMA channel 2 (Psy-Q draws via
+  ordering tables, so every display list went nowhere) and GP0(A0h) CPU-to-VRAM uploads (an
+  opcode census showed a frame is 3 uploads and a clear, no polygons — fonts and logos are
+  uploads, not primitives). 618 non-zero pixels at VRAM x896..927/y256..384. CdInit still fails
+  and is now secondary; next is the DuckStation register diff.
 
 2026-08-08 [opus] DMA channel 2 was the render blocker, not the CD: Psy-Q draws through ordering
   tables, so every display list went into an unimplemented register. With DMA + a minimal
