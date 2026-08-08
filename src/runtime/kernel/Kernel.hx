@@ -25,6 +25,7 @@ class Kernel {
 	public static function init():Void {
 		KEvents.init();
 		KHandlers.init();
+		KLib.init();
 	}
 
 	/** A BIOS call through one of the three vectors. `fn` is the value in $t1. */
@@ -38,6 +39,9 @@ class Kernel {
 	// ---- A0 ------------------------------------------------------------------------------------
 
 	static function a0(ctx:CpuState, fn:Int):Void {
+		// The C library occupies most of this table; ask it first and fall through if it declines.
+		if (KLib.call(ctx, fn)) return;
+		else {}
 		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
 		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
 		// FlushCache: nothing to do under static recompilation — there is no instruction fetch to
