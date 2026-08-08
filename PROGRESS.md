@@ -73,8 +73,21 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         the games have different data/code ratios; the code-region figure is the comparable one,
         and two unrelated engines agreeing at ~25% suggests it is the honest cost of static
         analysis rather than a defect in ours. 134 tool tests green.
-  - [ ] jump-table recovery — the next lever: 55 computed jumps in Crash Bash currently fall back
-        to runtime dispatch, and resolving them statically should reach into that 25%
+  - [x] jump-table + BIOS-call recovery ✔ 2026-08-08 — and it was the lever it looked like:
+
+        | | Crash Bash | Spyro 3 demo |
+        |---|---|---|
+        | unreached in code region | 25.0% -> **19.3%** | 26.1% -> **5.2%** |
+        | switch tables recovered | 17 (381 arms) | 47 (1108 arms) |
+        | BIOS calls identified | 41 | 16 |
+        | computed jumps still unresolved | 55 -> **1** | -> 8 |
+
+        Two findings drove it. Most "unresolved computed jumps" were not switches at all but
+        **BIOS calls**: Psy-Q reaches the kernel with `addiu $t2,$zero,0xB0 / jr $t2 / addiu
+        $t1,$zero,N`, so constant propagation plus reading the delay slot identifies both the
+        vector and the function number. And the recovery pass has to run **after** the prologue
+        sweep as well as before it, since swept functions contain computed jumps of their own —
+        missing that was leaving two thirds of them unexplained.
   - [ ] BIN/CUE + ISO9660 + filesDir loaders, overlay extraction
   - [ ] syms.txt / .map import; optional Psy-Q signature naming (docs/specs/tool.md §2.1)
 - [ ] **M1.5 (M)**: scale spike — synthetic ~20k functions through emitter + reflaxe.CPP + clang;
@@ -197,6 +210,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Jump-table + BIOS-call recovery. Unreached code fell 25.0%->19.3% (Crash Bash)
+  and 26.1%->5.2% (Spyro); unresolved computed jumps 55->1 and ->8. The big surprise was that most
+  of them were kernel calls through a vector register, not switches. 150 tool tests green.
 
 2026-08-08 [claude] M1 analysis: Image/Func/Discovery/Coverage + the analyze command. Runs on both
   real games. Building the tests found a real CFG bug — blocks overlapped because a later backward

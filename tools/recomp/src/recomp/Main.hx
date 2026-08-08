@@ -171,9 +171,19 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		return PsxExe.parse(bytes);
 	}
 
+	/** Accepts 0x-prefixed hex, and decimal — including values above 2^31, which `Std.parseInt`
+	    rejects but which are perfectly ordinary here since every RAM address has the top bit set. */
 	static function parseAddr(s:String):Int {
-		final v = Std.parseInt(s);
-		if (v == null) throw new LoaderError('could not read "$s" as an address');
-		return v;
+		final direct = Std.parseInt(s);
+		if (direct != null) return direct;
+
+		final f = Std.parseFloat(s);
+		if (Math.isNaN(f)) throw new LoaderError('could not read "$s" as an address');
+		if (f < 0 || f > 4294967295.0) {
+			throw new LoaderError('"$s" is outside the 32-bit address range');
+		}
+		// Above 2^31 the value wraps into a negative Int, which is the representation the rest of
+		// the tool uses for KSEG0 addresses anyway.
+		return f >= 2147483648.0 ? Std.int(f - 4294967296.0) : Std.int(f);
 	}
 }

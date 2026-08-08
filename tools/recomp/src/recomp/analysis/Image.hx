@@ -94,6 +94,16 @@ class Image {
 		}
 	}
 
+	/** Forgets every classification, keeping the bytes. Discovery runs a second pass once jump
+	    tables are known, and starting from a clean slate is simpler — and more obviously correct
+	    — than trying to unpick what the first pass concluded. */
+	public function resetClassification():Void {
+		for (i in 0...kinds.length) {
+			kinds[i] = Kind.Unknown;
+			owner[i] = 0;
+		}
+	}
+
 	/** Word counts by kind, for the coverage report. */
 	public function tally():Map<Kind, Int> {
 		final out = [Kind.Unknown => 0, Kind.Code => 0, Kind.DataInText => 0, Kind.Padding => 0];

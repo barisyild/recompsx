@@ -12,6 +12,10 @@ import recomp.analysis.Func.Block;
 import recomp.analysis.Func.CallSite;
 import recomp.analysis.Image;
 import recomp.analysis.Kind;
+import recomp.analysis.JumpTable;
+import recomp.analysis.TableConfidence;
+import recomp.analysis.TableFinder;
+import recomp.analysis.JumpKind;
 
 /** A seed the caller supplies: an address believed to start a function. */
 typedef Seed = {addr:Int, name:String, confidence:Confidence};
@@ -46,8 +50,18 @@ class Discovery {
 	/** Call sites whose target could not be resolved statically, across the whole image. */
 	public final indirectCalls:Array<CallSite> = [];
 
+	/** Switch tables recovered from computed jumps, keyed by the address of the `jr`. */
+	public final tables:Map<Int, JumpTable> = [];
+
+	/** Computed jumps that turned out to have a constant target, keyed by the `jr` address.
+	    Mostly BIOS calls; see JumpKind.Constant. */
+	public final constantJumps:Map<Int, {target:Int, fnNumber:Int}> = [];
+
 	final pending:Array<Seed> = [];
 	final seen:Map<Int, Bool> = [];
+	/** Every seed ever accepted. A pass that learns something new about a computed jump replays
+	    all of them, which reproduces the same functions plus whatever the new knowledge reveals. */
+	final allSeeds:Array<Seed> = [];
 
 	public function new(image:Image) {
 		this.image = image;
@@ -64,26 +78,125 @@ class Discovery {
 			throw new AnalysisError('function address ${Vaddr.hex(a)} is not word-aligned');
 		}
 		seen.set(a, true);
-		pending.push({addr: a, name: name, confidence: confidence});
+		final seed = {addr: a, name: name, confidence: confidence};
+		pending.push(seed);
+		allSeeds.push(seed);
 	}
 
-	/** Runs the closure, then the gap sweep. */
-	public function run(?sweepGaps = true):Void {
+	/**
+		Discovers everything reachable.
+
+		Three stages, each feeding the next. The call closure finds what is statically called. Jump
+		tables are then recovered from the computed jumps that closure ran into — and because every
+		recovered table opens a subtree of previously invisible code, the closure is run again from
+		scratch with the tables known. Finally the prologue sweep guesses at whatever is still
+		unclaimed.
+
+		Re-running rather than patching is deliberate: a table turns a `jr` from "control leaves
+		here" into "control goes to one of these", which changes block boundaries, so the second
+		pass starts from a cleared classification instead of trying to unpick the first.
+	**/
+	public function run(?sweepGaps = true, ?recoverTables = true):Void {
+		closure();
+		if (recoverTables) settleJumps();
+
+		if (sweepGaps) {
+			sweepForPrologues();
+			closure();
+			// The sweep reaches code the closure could not, and that code contains computed jumps
+			// of its own — so the jump analysis has to run again over what it found. Skipping this
+			// leaves BIOS calls in swept functions looking like unresolved dispatch.
+			if (recoverTables) settleJumps();
+		}
+
+		claimTables();
+		markPadding();
+	}
+
+	/**
+		Explains computed jumps until nothing new is learned.
+
+		Each round can only improve on the last: a recovered table opens code that may contain
+		more computed jumps, and a jump recognised as a BIOS call removes a false dead end. The
+		round count is capped because the loop is driven by a heuristic and a pathological image
+		should not be able to spin it.
+	**/
+	function settleJumps():Void {
+		var rounds = 0;
+		while (rounds < 4 && findTables() > 0) {
+			restart();
+			closure();
+			rounds++;
+		}
+	}
+
+	/**
+		Starts discovery over with everything learned so far still known.
+
+		A recovered table turns a `jr` from "control leaves here" into "control goes to one of
+		these", which moves block boundaries — so the classification is cleared and every seed
+		replayed, rather than trying to patch the previous result in place.
+	**/
+	function restart():Void {
+		image.resetClassification();
+		functions.clear();
+		seen.clear();
+		final snapshot = allSeeds.copy();
+		allSeeds.resize(0);
+		for (s in snapshot) addSeed(s.addr, s.name, s.confidence);
+	}
+
+	function closure():Void {
 		while (pending.length > 0) {
 			final seed = pending.shift();
 			final fn = traceFunction(seed);
 			functions.set(fn.entry, fn);
 		}
-		markPadding();
-		if (sweepGaps) {
-			sweepForPrologues();
-			// The sweep produces new seeds; close over them too.
-			while (pending.length > 0) {
-				final seed = pending.shift();
-				final fn = traceFunction(seed);
-				functions.set(fn.entry, fn);
+	}
+
+	/** Tries to explain every computed jump found so far. Returns how many are newly explained. */
+	function findTables():Int {
+		final finder = new TableFinder(image);
+		final codeRange = codeBounds();
+		var found = 0;
+		for (fn in functions) {
+			for (jrAddr in fn.unresolvedJumps) {
+				if (tables.exists(jrAddr) || constantJumps.exists(jrAddr)) continue;
+				switch (finder.analyze(jrAddr, codeRange.start, codeRange.end)) {
+					case Table(t):
+						tables.set(jrAddr, t);
+						found++;
+					case Constant(target, fnNumber):
+						constantJumps.set(jrAddr, {target: target, fnNumber: fnNumber});
+						found++;
+					case Unresolved:
+				}
 			}
-			markPadding();
+		}
+		return found;
+	}
+
+	/**
+		Where a switch arm may plausibly point.
+
+		A PS-EXE holds code and data in one blob, so "inside the image" is far too weak a test —
+		half the image is tables and strings, and any word in them would pass. The end of the code
+		is taken as the highest address any function reached, which is knowable after the first
+		closure and is a much sharper boundary.
+	**/
+	function codeBounds():{start:Int, end:Int} {
+		var end = image.baseAddr;
+		for (fn in functions) if (fn.endAddr > end) end = fn.endAddr;
+		// Allow a margin: the last function's tail may extend past what has been traced.
+		end += 0x1000;
+		if (end > image.endAddr()) end = image.endAddr();
+		return {start: image.baseAddr, end: end};
+	}
+
+	/** Marks recovered tables as data, so coverage does not count them as unreached code. */
+	function claimTables():Void {
+		for (t in tables) {
+			image.claimRange(t.base, t.base + t.sizeBytes(), Kind.DataInText, 0);
 		}
 	}
 
@@ -154,9 +267,27 @@ class Discovery {
 				running = false;
 				switch (instr.op) {
 					case JR:
-						if (instr.rs != 31) fn.unresolvedJumps.push(instr.addr);
-						// Either way control leaves: a return, or a computed jump the runtime
-						// will dispatch by address.
+						if (instr.rs == 31) {
+							// A return: control leaves the function.
+						} else if (tables.exists(instr.addr)) {
+							// A recovered switch. Every arm is ordinary control flow inside this
+							// function, which is the whole point of recovering the table.
+							for (t in tables.get(instr.addr).targets) follow(leaders, queue, t);
+						} else if (constantJumps.exists(instr.addr)) {
+							final c = constantJumps.get(instr.addr);
+							if (isKernelVector(c.target)) {
+								fn.kernelCalls.push({from: instr.addr, vector: c.target,
+									fnNumber: c.fnNumber});
+								// A BIOS call through `jr` does not return here — the kernel
+								// returns to $ra, so control leaves this block exactly as a tail
+								// call would.
+							} else {
+								fn.tailCalls.push(new CallSite(instr.addr, c.target, false));
+								addSeed(c.target, defaultName(c.target), Confidence.Called);
+							}
+						} else {
+							fn.unresolvedJumps.push(instr.addr);
+						}
 
 					case JALR:
 						fn.calls.push(new CallSite(instr.addr, 0, true));
@@ -249,7 +380,14 @@ class Discovery {
 	function recordSuccessors(block:Block, instr:Instr, afterSlot:Int, leaders:Map<Int, Bool>):Void {
 		switch (instr.op) {
 			case JR:
-				block.exits = true;
+				if (instr.rs != 31 && tables.exists(instr.addr)) {
+					for (t in tables.get(instr.addr).targets) {
+						if (leaders.exists(t)) block.successors.push(t);
+					}
+					block.exits = block.successors.length == 0;
+				} else {
+					block.exits = true;
+				}
 			case J:
 				if (leaders.exists(instr.target)) block.successors.push(instr.target);
 				else block.exits = true;
@@ -271,6 +409,10 @@ class Discovery {
 
 	inline function isKnownEntry(addr:Int):Bool
 		return seen.exists(Vaddr.canonRam(addr));
+
+	/** The three BIOS entry points, at the very bottom of RAM. */
+	static inline function isKernelVector(addr:Int):Bool
+		return addr == 0xA0 || addr == 0xB0 || addr == 0xC0;
 
 	// ---- gaps -------------------------------------------------------------------------------
 

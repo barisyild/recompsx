@@ -106,8 +106,20 @@ class Coverage {
 				if (jumpSites.length < 10) jumpSites.push({fn: fn, addr: a});
 			}
 		}
+		var kernelCalls = 0;
+		for (fn in discovery.functions) kernelCalls += fn.kernelCalls.length;
+		var tableArms = 0;
+		var boundedTables = 0;
+		for (t in discovery.tables) {
+			tableArms += t.count();
+			if (t.confidence == recomp.analysis.TableConfidence.Bounded) boundedTables++;
+		}
+
 		out.add('\n  indirect calls (jalr)          ${discovery.indirectCalls.length}\n');
-		out.add('  computed jumps (jr, not ra)    $unresolvedJumps\n');
+		out.add('  BIOS calls (jr through a vector) $kernelCalls\n');
+		out.add('  switch tables recovered        ${Lambda.count(discovery.tables)}'
+			+ '  ($boundedTables with the compiler\'s own bound, $tableArms arms total)\n');
+		out.add('  computed jumps still unresolved  $unresolvedJumps\n');
 		if (jumpSites.length > 0) {
 			out.add('    each is a switch or a call through a register; the runtime dispatches\n');
 			out.add('    them by address. A jumpTableHint in game.json resolves one statically.\n');

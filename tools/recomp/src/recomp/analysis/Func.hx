@@ -52,6 +52,16 @@ class Func {
 	/** `j` to an address outside this function: a tail call. */
 	public final tailCalls:Array<CallSite> = [];
 
+	/**
+		BIOS calls, as `{from, vector, fnNumber}`.
+
+		Psy-Q reaches the kernel by loading a vector into $t2 and jumping through it, with the
+		function number in $t1 — so these arrive here as computed jumps and are only recognisable
+		after constant propagation. They are calls, not jumps: the emitter routes them to the
+		kernel HLE, and the coverage report should not count them as unresolved dispatch.
+	**/
+	public final kernelCalls:Array<{from:Int, vector:Int, fnNumber:Int}> = [];
+
 	public var endAddr:Int = 0;
 	public final warnings:Array<String> = [];
 
@@ -77,6 +87,7 @@ class Func {
 			lines.push('  calls: $direct direct, ${calls.length - direct} indirect');
 		}
 		if (tailCalls.length > 0) lines.push('  tail calls: ${tailCalls.length}');
+		if (kernelCalls.length > 0) lines.push('  kernel calls: ${kernelCalls.length}');
 		if (unresolvedJumps.length > 0) {
 			final at = unresolvedJumps.map(a -> Vaddr.hex(a)).join(", ");
 			lines.push('  unresolved jr at: $at');

@@ -177,6 +177,80 @@ class TestDiscovery {
 			Assert.equals(Lambda.count(d.functions), 1, "and do not become a function");
 		}
 
+		Assert.group("discovery: a switch table is recovered and its arms traced");
+		{
+			// The idiom every compiler emits for a dense switch. Laid out so the table sits in a
+			// region the trace never executes, which is exactly how it appears in a real program.
+			//  0 sltiu $v0, $a0, 3        bound check: three arms
+			//  1 beq   $v0, $zero, +7     out of range -> default at word 9
+			//  2  sll  $v0, $a0, 2        delay slot: scale the index
+			//  3 lui   $at, 0x8001
+			//  4 addu  $at, $at, $v0
+			//  5 lw    $v0, 0x30($at)     table at BASE+0x30 (word 12)
+			//  6 nop
+			//  7 jr    $v0
+			//  8  nop
+			//  9 default: jr $ra
+			// 10  nop
+			// 11 (padding)
+			// 12..14 the table
+			// 15,17,19 the three arms
+			final arm0 = BASE + 15 * 4, arm1 = BASE + 17 * 4, arm2 = BASE + 19 * 4;
+			final d = discover([
+				0x2C820003, 0x10400007, 0x00041080, 0x3C018001, 0x00220821, 0x8C220030,
+				NOP, 0x00400008, NOP,
+				JR_RA, NOP, NOP,
+				arm0, arm1, arm2,
+				JR_RA, NOP, JR_RA, NOP, JR_RA, NOP
+			]);
+
+			Assert.equals(Lambda.count(d.tables), 1, "one table recovered");
+			final t = d.tables.get(BASE + 7 * 4);
+			Assert.isTrue(t != null, "keyed by the address of the jr");
+			if (t != null) {
+				Assert.equals(t.base, BASE + 0x30, "table base folded from lui + lw offset");
+				Assert.equals(t.count(), 3, "the compiler's own bound gives the arm count");
+				Assert.equals(t.targets[0], arm0, "first arm");
+				Assert.equals(t.targets[2], arm2, "last arm");
+			}
+			// The point of recovering it: the arms are now reachable code.
+			Assert.equals(d.image.kindAt(arm0), Kind.Code, "arm 0 is traced");
+			Assert.equals(d.image.kindAt(arm2), Kind.Code, "arm 2 is traced");
+			Assert.equals(d.image.kindAt(BASE + 0x30), Kind.DataInText,
+				"and the table itself is marked as data, not left as a gap");
+			Assert.equals(d.functions.get(BASE).unresolvedJumps.length, 0,
+				"the jump is no longer unresolved");
+		}
+
+		Assert.group("discovery: a BIOS call is recognised, not left as dispatch");
+		{
+			// addiu $t2, $zero, 0xB0 ; jr $t2 ; addiu $t1, $zero, 0x19
+			// The Psy-Q kernel-call convention: vector in $t2, function number in the delay slot.
+			final d = discover([0x240A00B0, 0x01400008, 0x24090019]);
+			final fn = d.functions.get(BASE);
+			Assert.equals(fn.kernelCalls.length, 1, "recognised as a kernel call");
+			Assert.equals(fn.kernelCalls[0].vector, 0xB0, "the B0 vector");
+			Assert.equals(fn.kernelCalls[0].fnNumber, 0x19,
+				"and the function number, read from the delay slot");
+			Assert.equals(fn.unresolvedJumps.length, 0, "so it is not counted as unresolved");
+		}
+
+		Assert.group("discovery: a table that fails validation is rejected");
+		{
+			// The same idiom, but the table holds values that cannot be jump targets — they point
+			// outside the image. Guessing is only safe because the guess is checked.
+			final d = discover([
+				0x2C820003, 0x10400007, 0x00041080, 0x3C018001, 0x00220821, 0x8C220030,
+				NOP, 0x00400008, NOP,
+				JR_RA, NOP, NOP,
+				0x11111111, 0x22222222, 0x33333333,
+				JR_RA, NOP, JR_RA, NOP, JR_RA, NOP
+			]);
+			Assert.equals(Lambda.count(d.tables), 0, "no table claimed");
+			Assert.equals(d.functions.get(BASE).unresolvedJumps.length, 1,
+				"the jump stays unresolved, which is correct and safe");
+		}
+
 		Assert.group("discovery: calls outside the image are recorded but not chased");
 		{
 			// A jal to a kernel vector: outside the image, so nothing to trace.
