@@ -52,42 +52,37 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **libcd sees its interrupts. `NoIntr` was a misleading message, and the fault is in the
-   response content or ordering — not in delivery.**
+2. **The CD conversation is textbook-correct and libcd still loops. The fault is in what it
+   checks *after* a successful Init, and the trace now shows the whole exchange.**
 
-   The poll trace (reads of `1F801800..1F801803` from outside interrupt dispatch, with the
-   caller's `ra`) settles three sessions of hypotheses in twenty lines:
+       cd# cmd 0x01 params=0            (Getstat)
+       cd# -> INT3 deferred, bytes 02
+       cd# INT 3 delivered, 1 bytes
+       cd# r 1803.1 -> 227              (0xE0 | 3)
+       cd# ack 7 (int was 3)
+       cd# cmd 0x0A params=0            (Init)
+       cd# -> INT2 queued, first byte 2
+       cd# -> INT3 deferred, bytes 02
+       cd# INT 3 delivered → ack 7
+       cd# r 1803.1 -> 226 → ack 7 (int was 2)
+       cd# cmd 0x01 params=0            ... and the whole sequence repeats
 
-       cdpoll r 1F801803.idx1 from ra=8003193C int=0
-       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=3
-       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=0
-       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=3
-       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=2
-       cdpoll r 1F801803.idx1 from ra=8003EEB8 int=0
+   Both commands complete with the right interrupt levels in the right order, and libcd
+   acknowledges each one. Then it starts the sequence over, forever. So delivery, ordering,
+   acknowledgement and the queue all work; the failure is in a check libcd makes after Init.
 
-   **libcd polls the flag register directly** — it installs no chain element, opens no event, and
-   does not use the exception hook, so this is its door — and it *reads INT3 and INT2 at the
-   right moments and acknowledges them*. Delivery works. Every "why does the interrupt not
-   arrive" question from the last three sessions was aimed at a mechanism that was already
-   functioning.
+   **The strongest clue is an absence: there is not one `r resp` line in the trace.** libcd never
+   reads the response FIFO at `1F801801`. A driver that issues Getstat and never reads the status
+   byte it asked for is not behaving like a driver that got what it wanted — which points at
+   `1F801800`'s status bits, the ones it *does* read, as the thing it is unhappy with. Bit 5
+   (RSLRRDY, "a response byte is waiting") is set here only from `responseRead < responseCount`,
+   which becomes true at delivery; if libcd polls it before that or expects a different bit
+   layout, it concludes the drive never answered and retries — which is exactly the observed
+   loop, and would also explain why it never bothers to read the payload.
 
-   The sequence also repeats verbatim, which is one command being retried forever. So the
-   remaining fault is in what the controller *says*, not that it says it. Two concrete suspects:
-
-   - **Two INT3s per command.** `CdlNop` (Getstat) should answer INT3 once. The trace shows
-     `3, 0, 3, 2` for what may be a single command, which would mean `respond` and `queue` both
-     firing where only one should.
-   - **The status byte.** Everything answers with `status`, which is `ST_MOTOR` alone (0x02).
-     psx-spx defines a shell-open latch that a fresh drive reports until the first `Getstat`
-     clears it; libcd's Init checks the byte and may be rejecting a drive that never claims to
-     have been opened, or expecting a bit this controller never sets.
-
-   Next step is small and bounded: extend the existing `cd#` trace to log every response byte
-   handed back, and read one full `CdlNop` exchange end to end. The instrument already exists.
-
-   Diagnostic paths added this session and worth keeping: `Memory.raHint` (the caller's return
-   address, stored by the same pump line that carries `cycleHint`, so any register can name who
-   touched it) and `Irq.dispatching()` (which separates a driver's poll from a handler's read).
+   Next probe, small and already tooled: extend the poll trace to `1F801800` reads (currently
+   only `1803` shows, because that is what the filter caught) and compare each returned value
+   against psx-spx's status-register bit table.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -430,6 +425,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [opus] CD dialogue fully traced: Getstat and Init both complete correctly, libcd acks
+  both, then loops the whole init forever. Delivery/ordering/ack all proven working. Tell: libcd
+  never reads the response FIFO — so the suspect is 1F801800's status bits, which it does read.
+  Next: trace 1800 reads against psx-spx's bit table.
 
 2026-08-08 [opus] Timer wrap clamp (froze all counters at 2^31), SIO0 empty port, HookEntryInt
   now invoked as the exception epilogue OpenBIOS documents. Game passes frame 120k. Measured:

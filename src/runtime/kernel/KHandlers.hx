@@ -128,9 +128,6 @@ class KHandlers {
 		else {}
 
 		calls++;
-		if (cd.Cdrom.tracing() && cd.Cdrom.intLatched()) {
-			cd.Cdrom.tnote("chain el=" + hex(element) + " f1=" + hex(func1) + " f2=" + hex(func2));
-		} else {}
 		ctx.v0 = 0;
 		Runtime.call(ctx, func1);
 		if (claimed(ctx)) return;

@@ -137,7 +137,7 @@ class Cdrom {
 	// Bounded, and removed once the dialogue is understood. Five hypotheses about why libcd never
 	// sees its interrupt have died to measurement; this stops the guessing by recording the actual
 	// conversation: every register access, every response, every acknowledgement, in order.
-	static var traceLeft = 400;
+	static var traceLeft = 60;
 
 	public static inline function tracing():Bool return traceLeft > 0;
 
@@ -551,6 +551,7 @@ class Cdrom {
 		controller that works and one that does not.
 	**/
 	static function respond(level:Int, count:Int):Void {
+		tnote("-> INT" + level + " deferred, bytes " + bytesOf(response, count));
 		for (i in 0...count) pendingResponse[i] = response[i];
 		pendingInt = level;
 		pendingCount = count;
@@ -569,6 +570,7 @@ class Cdrom {
 	}
 
 	static function queue(level:Int, first:Int, count:Int):Void {
+		tnote("-> INT" + level + " queued, first byte " + first);
 		queuedResponse[0] = first;
 		queuedInt = level;
 		queuedCount = count;
@@ -597,6 +599,12 @@ class Cdrom {
 
 	public static var raised(default, null) = 0;
 	public static var swallowed(default, null) = 0;
+
+	static function bytesOf(a:Array<Int>, n:Int):String {
+		var out = "";
+		for (i in 0...n) out += (i > 0 ? "," : "") + StringTools.hex(a[i], 2);
+		return out;
+	}
 
 	static inline function fromBcd(v:Int):Int {
 		return ((v >> 4) & 0xF) * 10 + (v & 0xF);
