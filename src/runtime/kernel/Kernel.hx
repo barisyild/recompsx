@@ -42,7 +42,9 @@ class Kernel {
 		// Nothing to do under static recompilation — there is no instruction fetch to invalidate.
 		// It is still a signal worth having: games call it right after copying code into RAM, so
 		// it is where an overlay has just landed, and where overlay activation will hook in (M6).
-		if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
+		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
+		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
+		else if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
 		else reportCall(ctx, 0xA0, fn);
 	}
 

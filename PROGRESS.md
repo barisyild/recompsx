@@ -161,6 +161,14 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
             mfc0/mtc0 COP0 r12      the status register: interrupts being set up
             GTE control 24..30      the projection constants
 
+        **The image is not loaded yet.** `GenMain` calls `Memory.init()` and sets pc/gp/sp, but
+        nothing copies the executable's payload into emulated RAM — so every load returns 0. The
+        call *sequence* above is still real, because it comes from recompiled code rather than
+        from data, but any argument that arrives via memory is not. `InitHeap` reporting a
+        zero-length heap is the first place that showed, and it is the next thing to fix: the
+        loader exists in the tool, the runtime just never asks it for the bytes. Until then, no
+        value read out of RAM should be believed.
+
         Names verified against psx-spx "BIOS Function Summary", not written from memory. The
         first three are now implemented: `FlushCache` is a genuine no-op under static
         recompilation — there is no instruction fetch to invalidate — and the critical-section
@@ -342,6 +350,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Fixed reflaxe defect 9: `case TContinue: acc = []` deleted every statement
+  BEFORE a continue, gutting 86% of the basic-block bodies in the C++ build (1119/1296 cases in
+  one shard). C++ now matches JS call-for-call on the real game. Corrected the M1.5 binary size
+  (340 KB was measuring deleted code; 2.1 MB is honest). First 3 kernel calls implemented from
+  psx-spx. Next: load the program image into RAM — nothing does, so every load returns 0.
 
 2026-08-08 [claude] Found and fixed BOTH of reflaxe's worst defects, sixty lines apart in
   RemovePureExpressionsImpl: an inverted return in `hasSideEffects` was deleting if-bodies
