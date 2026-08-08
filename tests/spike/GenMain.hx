@@ -43,6 +43,7 @@ class GenMain {
 		// The game's main loop never returns, so the frame that proves rendering works has to be
 		// taken from inside it. kernel.Kernel's heartbeat asks for this once the game has drawn.
 		kernel.Kernel.vramDump = true;
+		kernel.Kernel.reportOps = true;
 		Runtime.callAndResume(ctx, GameInfo.ENTRY_POINT);
 		if (false) {
 			shim.Backend.log(shim.Backend.LOG_ERROR, "entry point is not in the table");

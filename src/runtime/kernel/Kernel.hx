@@ -570,7 +570,9 @@ class Kernel {
 	static var dumped = false;
 
 	static function heartbeat(ctx:CpuState):Void {
-		if (vramDump && !dumped && gpu.Gpu.pixels > 0) takeFrame();
+		// Late, not at the first pixel: the opening clear arrives thousands of frames before the
+		// rest of the display list, and a census taken at the clear describes only the clear.
+		if (vramDump && !dumped && vblankCount >= 60000) takeFrame();
 		else {}
 		if (vblankCount % 60 != 0) return;
 		else {}
@@ -581,7 +583,7 @@ class Kernel {
 			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list"
-			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px"
+			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
 			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
 	}
@@ -594,11 +596,24 @@ class Kernel {
 		disc is the emulated framebuffer itself and any disagreement is the emulator's, not the
 		dumper's.
 	**/
+	public static var reportOps = false;
+
 	static function takeFrame():Void {
 		dumped = true;
+		if (reportOps) reportOpcodes();
+		else {}
 		Backend.storageWrite("vram.bin", gpu.Vram.data, gpu.Vram.BYTES);
 		Runtime.note("wrote vram.bin at frame " + vblankCount + " — "
 			+ gpu.Gpu.pixels + " pixels from " + gpu.Gpu.primitives + " primitives");
+	}
+
+	/** Every GP0 opcode the frame contained, with its count. */
+	static function reportOpcodes():Void {
+		for (op in 0...256) {
+			if (gpu.Gpu.opCount[op] > 0) {
+				Runtime.note("gp0 op 0x" + StringTools.hex(op, 2) + " x" + gpu.Gpu.opCount[op]);
+			} else {}
+		}
 	}
 
 	// ---- syscall / break -------------------------------------------------------------------------

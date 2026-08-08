@@ -67,6 +67,27 @@ class Gpu {
 	/** How many words of the command in progress are still expected. */
 	static var pending = 0;
 
+	/**
+		A CPU-to-VRAM transfer in flight: GP0(A0h) is a header followed by raw pixel data, and the
+		data's length is only known once the size word has arrived. So the packet machinery cannot
+		size it up front the way it does a polygon — the transfer arms itself when its header is
+		complete and swallows halfwords straight into the framebuffer after that.
+
+		This is how a game gets an image onto the screen without drawing anything: fonts, logos and
+		loading screens are uploads, not primitives. Counting the words and discarding them, which
+		is what this did, renders a game that draws nothing as a game that shows nothing — and the
+		two look identical from outside.
+	**/
+	static var xferLeft = 0;
+	static var xferX = 0;
+	static var xferY = 0;
+	static var xferW = 0;
+	static var xferH = 0;
+	static var xferI = 0;
+
+	/** Pixels delivered by upload rather than by rasterisation. */
+	public static var uploaded(default, null) = 0;
+
 	/** The command word and its parameters, gathered until the packet is whole. */
 	static var packet:Array<Int>;
 	static var packetLen = 0;
@@ -77,12 +98,15 @@ class Gpu {
 
 	public static function init():Void {
 		packet = [for (_ in 0...32) 0];
+		opCount = [for (_ in 0...256) 0];
 		Vram.init();
 		reset();
 		wordsReceived = 0;
 		commandsReceived = 0;
 		primitives = 0;
 		pixels = 0;
+		uploaded = 0;
+		xferLeft = 0;
 	}
 
 	/** GP1(00h). psx-spx: GPUSTAT becomes 14802000h, which is what these defaults produce. */
@@ -110,6 +134,8 @@ class Gpu {
 
 	public static function writeGp0(v:Int):Void {
 		wordsReceived++;
+		if (xferLeft > 0) return transferWord(v);
+		else {}
 		if (pending > 0) return consumeParameter(v);
 		else {}
 		commandsReceived++;
@@ -125,6 +151,44 @@ class Gpu {
 		pending--;
 		if (pending == 0) draw();
 		else {}
+	}
+
+	/**
+		Two pixels a word, left to right and top to bottom, wrapping at the rectangle's edge.
+
+		Coordinates wrap within VRAM rather than clipping: the hardware's transfer is a blit into a
+		1024x512 torus and games rely on it, notably when uploading a texture page that straddles
+		the right edge.
+	**/
+	static function transferWord(v:Int):Void {
+		xferLeft--;
+		putTexel(v & 0xFFFF);
+		putTexel((v >>> 16) & 0xFFFF);
+	}
+
+	static function putTexel(p:Int):Void {
+		if (xferI >= xferW * xferH) return;
+		else {}
+		final x = (xferX + (xferI % xferW)) & 1023;
+		final y = (xferY + Std.int(xferI / xferW)) & 511;
+		Vram.set(x, y, p);
+		xferI++;
+		uploaded++;
+	}
+
+	/** Arms the transfer once its header words are in. */
+	static function beginTransfer():Void {
+		xferX = packet[1] & 0x3FF;
+		xferY = (packet[1] >>> 16) & 0x1FF;
+		xferW = packet[2] & 0xFFFF;
+		xferH = (packet[2] >>> 16) & 0xFFFF;
+		if (xferW == 0) xferW = 1024;
+		else {}
+		if (xferH == 0) xferH = 512;
+		else {}
+		xferI = 0;
+		// Two pixels to a word, rounded up: an odd-width rectangle pads its last word.
+		xferLeft = Std.int((xferW * xferH + 1) / 2);
 	}
 
 	static function push(v:Int):Void {
@@ -146,6 +210,7 @@ class Gpu {
 		if (op >= 0x20 && op <= 0x3F) drawPolygon(op);
 		else if (op >= 0x60 && op <= 0x7F) drawRect(op);
 		else if (op == 0x02) drawFill();
+		else if (op == 0xA0) beginTransfer();
 		else {}
 	}
 
@@ -307,8 +372,14 @@ class Gpu {
 		mis-counting a packet's length would leave the next command word read as a parameter and
 		desynchronise everything after it, which is far worse than not drawing.
 	**/
+	/** How many of each GP0 opcode arrived. A drawable command that never becomes a primitive is
+		a rasteriser dropping work, which looks exactly like a game that draws nothing. */
+	public static var opCount:Array<Int>;
+
 	static function command(v:Int):Void {
 		final op = v >>> 24;
+		if (opCount != null) opCount[op]++;
+		else {}
 		if (op == 0xE1) texPage = v & 0x3FFF;
 		else if (op == 0xE2) textureWindow = v & 0xFFFFF;
 		else if (op == 0xE3) drawAreaTopLeft = v & 0xFFFFF;
