@@ -306,6 +306,7 @@ class Cdrom {
 	}
 
 	static function releaseQueued():Void {
+		tnote("INT " + queuedInt + " released from the queue");
 		responseCount = queuedCount;
 		responseRead = 0;
 		for (i in 0...queuedCount) response[i] = queuedResponse[i];

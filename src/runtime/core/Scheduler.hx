@@ -32,10 +32,19 @@ class Scheduler {
 	static var due:Array<Int>;
 	static var active:Array<Bool>;
 
+	/**
+		The machine's one CpuState, kept so a device can arm a deadline without holding it.
+
+		There is exactly one, created at boot and never replaced, so this is a reference rather than
+		state — and it is what lets `scheduleAt` do the whole job instead of half of it.
+	**/
+	static var owner:CpuState;
+
 	/** How many events have fired. Deterministic, so it belongs in a digest. */
 	public static var fired(default, null) = 0;
 
 	public static function init(ctx:CpuState):Void {
+		owner = ctx;
 		due = [for (_ in 0...SLOTS) 0];
 		active = [for (_ in 0...SLOTS) false];
 		fired = 0;
@@ -50,16 +59,22 @@ class Scheduler {
 	}
 
 	/**
-		The same, for a device that has no CpuState.
+		The same, for a device that has no CpuState to hand.
 
-		`nextEvent` is not recomputed here, so a deadline set this way is picked up at the next
-		pump rather than immediately. That is exactly right: a device arming itself from inside its
-		own handler is already inside a pump, and one that arms itself from a register write has
-		until the next one to be noticed.
+		It recomputes `nextEvent` like every other path, and the version that did not cost a day.
+		The reasoning for skipping it — "a device arming itself from a register write has until the
+		next pump to be noticed" — sounded thrifty and was wrong: `nextEvent` still pointed at the
+		next vblank, so a CD-ROM deadline fifty thousand cycles away went unnoticed for a whole
+		frame. libcd polls for its second interrupt a handful of times and gives up long before
+		that, so `Init` answered INT3, never delivered INT2 in time, and the library restarted its
+		initialisation forever.
+
+		A deadline nobody looks at is not scheduled. There is no cheap version of this.
 	**/
 	public static function scheduleAt(slot:Int, atCycle:Int):Void {
 		due[slot] = atCycle;
 		active[slot] = true;
+		recomputeNext(owner);
 	}
 
 	public static function cancel(ctx:CpuState, slot:Int):Void {
