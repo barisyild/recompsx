@@ -122,10 +122,20 @@ upstream behavior this project's code shape depends on.
 
 Recorded so they are not rediscovered. None currently block us; workarounds are in place.
 
-1. **Inlined instance methods collide** — every inline expansion emits `T& _this = …;` with a
-   fixed name, so two calls in one scope fail to compile. *Impact: high* (it dictates the
-   static-accessor design). *Workaround:* static methods only in hot code. *Real fix:* uniquify
-   the temp by TVar id.
+1. **Inlined locals collide — FIXED IN OUR FORK.** Haxe's inliner materialises a callee's
+   parameters and temporaries as locals in the caller's scope, always with the callee's own
+   names, so two calls to the same inline function in one scope emitted two declarations of the
+   same name: `redefinition of 'a'`. The `_this` / `this1` receiver temporaries were the same
+   bug wearing a different name, and it also blocked `RawMem.get16`/`get32` (whose parameter is
+   used more than once, so Haxe binds it) from being called twice in a scope — which generated
+   game code would do constantly.
+
+   Fixed on branch `recompsx-fixes` in `vendor/reflaxe.CPP`: every declaration and reference
+   already funnels through `Compiler.compileVarName`, and Haxe gives each variable a unique id,
+   so names are now made unique per function body — first claimant keeps the name, later ones
+   get their id appended (`a`, `a_24018`). Three small edits: `Compiler.hx` (the map and scope
+   push/pop), `Expressions.hx` (declaration and reference sites), `Classes.hx` (reset per
+   function). Worth offering upstream.
 2. **`Array<FunctionType>` does not compile** — the `std::deque` of `std::function` initializer
    is malformed. *Impact: high* (killed FnTable Plan A). *Workaround:* Plan B integer handles.
 3. **`Sys.println` emits `std::cout` without `#include <iostream>`.** *Workaround:*
@@ -147,21 +157,29 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    uses (`cxx.CArray`, `cxx.ConstCharPtr`, `cxx.Stdlib`); `untyped __cpp__` is reflaxe's generic
    injection hook, whose name is merely configured to hxcpp's spelling. Prefer the former and
    keep target code inside declarations; reserve `__cpp__` for statement-level injection.
-8. **`if` statements are silently DELETED in several common shapes — the most serious defect
-   found.** No error, no warning; the branch simply vanishes and the program takes a different
-   path. Confirmed shapes (`tests/spike/ifdrop`, `tests/spike/guard`):
-   - **`if (cond) { ...; return; }` in a `Void` function** — the guard clause. The body is
-     dropped *and the fall-through code runs instead*, so the function does the opposite of
-     what it says. This is the most common control-flow idiom in systems code.
-   - Inside a `while` loop, when the branch body assigns to the loop-condition variable.
-   - Inside a `while` loop, when the branch body contains a ternary.
-   - Inside a `while` loop, when branches are nested.
-   Haxe's own targets are correct on identical source: `--interp` and `-js` both produce the
-   right answer, and the emitted JavaScript is a faithful translation. **The defect is entirely
-   reflaxe.CPP's.** *Workarounds:* `if/else` instead of guard clauses; no ternaries or nested
-   branches inside loop bodies. But these are workarounds for the shapes we have found, not a
-   guarantee about the ones we have not — which is the real problem for a project whose output
-   is millions of lines of machine-written branches.
+8. **An `if` with no `else` and more than one statement in its body is silently DELETED.**
+   The most serious defect found, and now characterised exactly (`tests/spike/ifbody`):
+
+   | Shape | Result |
+   |---|---|
+   | `if (c) { one; }` | kept |
+   | `if (c) { two; statements; }` | **entire `if` deleted** |
+   | `if (c) { two; statements; } else { ... }` | kept |
+   | `if (c) { one; }  if (c) { one; }` | kept |
+
+   Not the body — the whole statement disappears, so execution continues as if the condition
+   were never tested. Everything previously filed as separate shapes was this one rule: guard
+   clauses (`{ ...; return; }` is two statements), loop bodies that also advance the index, and
+   ternaries (which lower to several statements). It bit the conformance harness itself:
+   `Conf.expect` compiled to `feed(actual);` alone, so every assertion silently passed on C++
+   while failing on JS.
+
+   Haxe's own `--interp` and `-js` compile identical source correctly, so this is reflaxe.CPP's
+   alone. Root cause not yet located — `compileIf` and `isMutator` both look correct, so it is
+   further up the preprocessor pipeline. Reported shape is minimal and ready to file upstream.
+
+   *Workarounds, all verified:* add `else {}`; extract the body into a function call; or invert
+   a guard into `if (!c) {} else { ... }`. `scripts/spike.sh` reports when upstream fixes it.
 
 ## Blockers & open questions
 
@@ -169,6 +187,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Conformance testing made first-class: tests/conformance/ + Conf harness +
+  scripts/conformance.sh runs every test on every target and compares digests; adding a test is
+  dropping in a file. Two tests so far (Arith 14b7201f, Mem 27f9aa59). Building them found two
+  things: upstream defect 1 (inline local collisions) is now FIXED in our vendored fork, and
+  defect 8 is characterised exactly — an `if` with no `else` and >1 statement is deleted whole.
+  It had silently disabled Conf.expect on C++, which is precisely the failure this harness
+  exists to catch.
 
 2026-08-08 [claude] Integer semantics settled (ADR-0004) after a suggestion to use haxe.Int64
   led to measuring it. Two findings: haxe.Int64 allocates per value on BOTH our targets (no

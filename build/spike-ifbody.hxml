@@ -1,0 +1,5 @@
+build/reflaxe-cpp.hxml
+-cp tests/spike/ifbody
+-D mainClass=Main
+-main Main
+-D cpp-output=out/_spike/ifbody

@@ -1,7 +1,0 @@
-# Arithmetic conformance, reflaxe.CPP. Run from the repository root.
-build/reflaxe-cpp.hxml
--cp tests/conformance
--cp src/shims/cxx
--D mainClass=Arith
--main Arith
--D cpp-output=out/_conf/cpp

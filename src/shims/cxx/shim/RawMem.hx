@@ -34,9 +34,11 @@ class RawMem {
 		return m;
 	}
 
-	public static function free(m:RawBuf):Void {
-		Stdlib.free(Stdlib.ccast(m));
-	}
+	// There is deliberately no `free`. Emulated memory — RAM, VRAM, SPU RAM, scratchpad — is
+	// allocated once during init and lives until the process exits; the portable subset forbids
+	// allocation after boot, so there is no release path to write. (An attempt at one also ran
+	// into reflaxe.CPP emitting `cxx.Stdlib.free` unqualified, where C++ resolved it to the
+	// enclosing member function instead of the C library — worth knowing if one is ever needed.)
 
 	public static inline function get8(m:RawBuf, a:Int):Int return m[a];
 	public static inline function set8(m:RawBuf, a:Int, v:Int):Void m[a] = v & 0xFF;

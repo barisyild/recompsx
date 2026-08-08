@@ -46,4 +46,17 @@ else
   say "  guard clauses still miscompiled (upstream defect 8) — keep using if/else"
 fi
 
+say "spike: ifbody (does the compiler keep multi-statement branches?)"
+rm -rf out/_spike/ifbody
+haxe build/spike-ifbody.hxml
+clang++ "${CXXFLAGS[@]}" -w -Iout/_spike/ifbody/include out/_spike/ifbody/src/*.cpp -o out/_spike/ifbody/run
+IFBODY_OUT="$(out/_spike/ifbody/run)"
+echo "$IFBODY_OUT"
+if echo "$IFBODY_OUT" | grep -q '2 stmts       : "B1B2"'; then
+  say "  multi-statement branches survive — upstream defect 8 appears FIXED; the `else {}`"
+  say "  workarounds in src/ and tests/ can be revisited"
+else
+  say "  multi-statement branches still deleted without an else (upstream defect 8)"
+fi
+
 printf '\033[32mspike.sh: clean\033[0m\n'

@@ -32,9 +32,10 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
    Float) and never bare `a * b` past 31 bits — use `IntMath.div` / `IntMath.mul`. 64-bit values
    are hi/lo Int pairs via `shim.I64`, never `haxe.Int64` (it allocates per value on both our
    targets — measured 6x slower on the GTE workload).
-   Control flow: no guard clauses (`if (c) { ...; return; }`), no ternaries or nested branches
-   inside loop bodies — reflaxe.CPP silently DELETES these. See PROGRESS.md upstream defect 8;
-   `scripts/spike.sh` reports if upstream ever fixes it.
+   Control flow: **an `if` with no `else` and more than one statement in its body is silently
+   DELETED by reflaxe.CPP** — the whole statement, so the wrong path runs. Give it an `else {}`,
+   or extract the body into a call. Guard clauses and ternaries are instances of this. See
+   PROGRESS.md upstream defect 8; `scripts/spike.sh` reports if upstream fixes it.
    Target code: use `@:nativeFunctionCode` on an extern (what reflaxe.CPP's own std uses), not
    `untyped __cpp__`, which is reflaxe's generic hook borrowing hxcpp's spelling — reserve it for
    statement-level injection. BOTH splice arguments as raw text, so parenthesise every
@@ -54,7 +55,8 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
     ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)            [from M1]
     ./scripts/build-pc.sh crashbash # cmake+ninja
     ./scripts/run-pc.sh crashbash [--headless-hash 600]
-    ./scripts/test.sh               # THE gate: spikes + JS digest + C++ digest must agree
+    ./scripts/test.sh               # THE gate: spikes + conformance + both target digests
+    ./scripts/conformance.sh [name] # run cross-target conformance tests (add one = add a file)
     ./scripts/spike.sh              # reflaxe.CPP behaviour regression — run after pin changes
     ./scripts/check.sh              # discipline gate — run before EVERY commit
     haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300   # fast inner loop
@@ -66,6 +68,14 @@ src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,js} (RawBuf/RawMem/IntMath
 games/<id> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
 docs/{architecture.md,specs,decisions} · vendor/{reflaxe,reflaxe.CPP} (pinned submodules) ·
 build/ (hxml) · scripts/
+
+## Testing discipline
+Write many small tests and run each on EVERY target. A test that passes on one target proves
+little; two targets disagreeing is how this project finds both its own bugs and its compiler's.
+Adding one is dropping a file in `tests/conformance/` — a class with a `main` that feeds values
+into `Conf` and calls `Conf.report`. `scripts/conformance.sh` finds it, builds it everywhere and
+requires identical digests. When targets disagree, JavaScript is the reference.
+Prefer this over single-target unit tests for anything numeric, bit-level or memory-shaped.
 
 ## Session protocol (both Codex CLI and Claude Code)
 - START: read PROGRESS.md "Status snapshot" + "Next up". Do the top item unless told otherwise.

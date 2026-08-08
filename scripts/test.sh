@@ -26,20 +26,8 @@ say "1/4 reflaxe.CPP behaviour spikes"
 ./scripts/spike.sh >/dev/null || fail "spikes broke — upstream behaviour changed, read scripts/spike.sh output"
 say "    ok"
 
-say "2/4 arithmetic conformance on both targets"
-mkdir -p out/_conf
-haxe build/conf-arith-js.hxml
-CONF_JS="$(node out/_conf/arith.js | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
-rm -rf out/_conf/cpp
-haxe build/conf-arith-cpp.hxml
-SDL_FLAGS="$(pkg-config --cflags --libs sdl2 2>/dev/null || echo '-I/opt/homebrew/include/SDL2 -L/opt/homebrew/lib -lSDL2')"
-# shellcheck disable=SC2086
-(cd out/_conf/cpp && clang++ "${CXXFLAGS[@]}" -Iinclude -I"$ROOT/src/backend/api" \
-   src/*.cpp "$ROOT/src/backend/pc/backend_sdl2.c" -o arith $SDL_FLAGS 2>/dev/null)
-CONF_CPP="$(out/_conf/cpp/arith | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
-say "    js=$CONF_JS  cpp=$CONF_CPP"
-[ -n "$CONF_JS" ] && [ "$CONF_JS" = "$CONF_CPP" ] || fail "targets disagree on basic integer arithmetic (js=$CONF_JS cpp=$CONF_CPP).
-  Look for a bare + - or * on Ints that should be wrapped with | 0 or routed through IntMath (ADR-0004)."
+say "2/4 conformance: every test on every target"
+./scripts/conformance.sh || fail "conformance failed — see above"
 
 say "3/4 JavaScript build + headless digest"
 mkdir -p out/_demo/js

@@ -15,18 +15,9 @@
 	deletes those (PROGRESS.md upstream defect 8).
 **/
 class Arith {
-	static var digest = 0x811C9DC5;
-
-	static function feed(v:Int):Void {
-		var h = digest ^ (v & 0xFF);
-		h = shim.IntMath.mul(h, 16777619);
-		h = h ^ ((v >>> 8) & 0xFF);
-		h = shim.IntMath.mul(h, 16777619);
-		h = h ^ ((v >>> 16) & 0xFF);
-		h = shim.IntMath.mul(h, 16777619);
-		h = h ^ ((v >>> 24) & 0xFF);
-		digest = shim.IntMath.mul(h, 16777619);
-	}
+	// No `inline` wrapper around Conf.feed. An inlined function materialises its parameter as a
+	// local with a fixed name in the caller's scope, so two calls in one scope collide —
+	// `redefinition of 'v'`. Same root cause as the `_this` collision; see upstream defect 1.
 
 	/** The values that break things: boundaries, signs, and the bit patterns MIPS code produces. */
 	static final PROBES = [
@@ -45,10 +36,10 @@ class Arith {
 			while (j < n) {
 				final a = PROBES[i];
 				final b = PROBES[j];
-				feed((a + b) | 0);
-				feed((a - b) | 0);
-				feed((-a) | 0);
-				feed(shim.IntMath.mul(a, b));
+				Conf.feed((a + b) | 0);
+				Conf.feed((a - b) | 0);
+				Conf.feed((-a) | 0);
+				Conf.feed(shim.IntMath.mul(a, b));
 				j++;
 			}
 			i++;
@@ -61,11 +52,11 @@ class Arith {
 			while (j < n) {
 				final a = PROBES[i];
 				final b = PROBES[j];
-				feed(a & b);
-				feed(a | b);
-				feed(a ^ b);
-				feed(~a);
-				feed(~(a | b));          // nor
+				Conf.feed(a & b);
+				Conf.feed(a | b);
+				Conf.feed(a ^ b);
+				Conf.feed(~a);
+				Conf.feed(~(a | b));          // nor
 				j++;
 			}
 			i++;
@@ -77,9 +68,9 @@ class Arith {
 			var s = 0;
 			while (s < 32) {
 				final a = PROBES[i];
-				feed(a << s);
-				feed(a >> s);
-				feed(a >>> s);
+				Conf.feed(a << s);
+				Conf.feed(a >> s);
+				Conf.feed(a >>> s);
 				s++;
 			}
 			i++;
@@ -92,8 +83,8 @@ class Arith {
 			while (j < n) {
 				final a = PROBES[i];
 				final b = PROBES[j];
-				feed(a < b ? 1 : 0);
-				feed((a ^ 0x80000000) < (b ^ 0x80000000) ? 1 : 0);
+				Conf.feed(a < b ? 1 : 0);
+				Conf.feed((a ^ 0x80000000) < (b ^ 0x80000000) ? 1 : 0);
 				j++;
 			}
 			i++;
@@ -111,8 +102,8 @@ class Arith {
 				// recompiler special-cases it and this test stays away from it.
 				final skip = (a == -0x80000000 && safe == -1);
 				final divisor = skip ? 3 : safe;
-				feed(shim.IntMath.div(a, divisor));
-				feed(shim.IntMath.mod(a, divisor));
+				Conf.feed(shim.IntMath.div(a, divisor));
+				Conf.feed(shim.IntMath.mod(a, divisor));
 				j++;
 			}
 			i++;
@@ -122,24 +113,24 @@ class Arith {
 		i = 0;
 		while (i < n) {
 			final a = PROBES[i];
-			feed((a << 24) >> 24);       // lb  sign-extend
-			feed(a & 0xFF);              // lbu
-			feed((a << 16) >> 16);       // lh  sign-extend
-			feed(a & 0xFFFF);            // lhu
+			Conf.feed((a << 24) >> 24);       // lb  sign-extend
+			Conf.feed(a & 0xFF);              // lbu
+			Conf.feed((a << 16) >> 16);       // lh  sign-extend
+			Conf.feed(a & 0xFFFF);            // lhu
 			i++;
 		}
 
-		shim.Backend.log(shim.Backend.LOG_INFO, "arith digest=" + hex(digest));
-	}
+		// A few answers are known outright, so state them rather than only hashing them.
+		Conf.expect("0x7FFFFFFF + 1 wraps", (0x7FFFFFFF + 1) | 0, -2147483648);
+		Conf.expect("-0x80000000 - 1 wraps", (-0x80000000 - 1) | 0, 2147483647);
+		Conf.expect("imul keeps low 32 bits", shim.IntMath.mul(0x10001, 0x10001), 0x20001);
+		Conf.expect("div truncates toward zero", shim.IntMath.div(-7, 2), -3);
+		Conf.expect("mod takes the dividend's sign", shim.IntMath.mod(-7, 2), -1);
+		Conf.expect("logical shift right", -1 >>> 28, 15);
+		Conf.expect("arithmetic shift right", -1 >> 28, -1);
+		Conf.expect("unsigned compare idiom",
+			((0x80000000 ^ 0x80000000) < (1 ^ 0x80000000)) ? 1 : 0, 0);
 
-	static function hex(v:Int):String {
-		final digits = "0123456789abcdef";
-		var out = "";
-		var shift = 28;
-		while (shift >= 0) {
-			out += digits.charAt((v >>> shift) & 0xF);
-			shift -= 4;
-		}
-		return out;
+		Conf.report("arith");
 	}
 }

@@ -1,5 +1,0 @@
-# Arithmetic conformance, JavaScript. Run from the repository root.
--cp tests/conformance
--cp src/shims/js
--main Arith
--js out/_conf/arith.js
