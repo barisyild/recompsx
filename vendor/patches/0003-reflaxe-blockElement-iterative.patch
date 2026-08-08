@@ -1,0 +1,216 @@
+From d3fe06b1ebc76c0f3673957069fab17251e90352 Mon Sep 17 00:00:00 2001
+From: barisyild <25794892+barisyild@users.noreply.github.com>
+Date: Sat, 8 Aug 2026 05:24:06 +0300
+Subject: [PATCH] Make blockElement iterative instead of recursing per
+ statement
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`blockElement` walked a block's statement list by recursing once per element,
+so a block of N statements cost N eval-stack frames. Compiling a large
+generated program — 87,000 lines of machine-written Haxe — exhausted the stack
+and failed with "Uncaught exception Stack overflow", with no indication of
+which construct was responsible.
+
+Every recursive call was already in tail position: the frames carried nothing
+the next iteration could not read from `acc` and `el`. So the recursion is a
+loop, and the transformation is mechanical — each `return blockElement(a, b)`
+becomes `acc = a; el = b; continue;` inside a `while(true)`.
+
+The one non-tail call, a `switch` on the else-branch of a constant `if`, is
+rewritten as an explicit if/else assigning `el` before continuing.
+
+With this, a program that previously overflowed compiles in 63 seconds.
+---
+ .../RemovePureExpressionsImpl.hx              | 170 +++++++++---------
+ 1 file changed, 89 insertions(+), 81 deletions(-)
+
+diff --git a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+index 5a49716..5a2e9ac 100644
+--- a/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
++++ b/src/reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.hx
+@@ -240,91 +240,99 @@ private class OptimizerTexpr {
+ 		is built in reverse order and must be reversed by the caller.
+ 	**/
+ 	public static function blockElement(acc: Array<TypedExpr>, el: Array<TypedExpr>): Array<TypedExpr> {
+-		if(el.length == 0) {
+-			return acc;
+-		}
+-
+-		final head = el[0];
+-		final tail = el.slice(1);
+-		switch(head.expr) {
+-			case TBinop(OpAssign, { expr: TLocal(v1) }, { expr: TLocal(v2) }) if(v1 == v2): {
+-				return blockElement(acc, tail);
+-			}
+-			case TBinop(op, _, _) if(op.match(OpAssignOp(_)) || op == OpAssign): {
+-				return blockElement([head].concat(acc), tail);
+-			}
+-			case TUnop(op, _, _) if(op == OpIncrement || op == OpDecrement): {
+-				return blockElement([head].concat(acc), tail);
++		// recompsx: this walked the statement list by recursing once per element, so a block
++		// of N statements cost N stack frames and a large program exhausted the eval stack.
++		// Every recursive call was in tail position, so the recursion is a loop: the frames
++		// were carrying nothing the next iteration could not read from `acc` and `el`.
++		while(true) {
++			if(el.length == 0) {
++				return acc;
+ 			}
+-			case TLocal(_): {
+-				return blockElement(acc, tail);
+-			}
+-			case TField(_, fa) if(!PurityState.isPureFieldAccess(fa)): {
+-				return blockElement([head].concat(acc), tail);
+-			}
+-			case TFunction(_), TConst(_), TTypeExpr(_): {
+-				return blockElement(acc, tail);
+-			}
+-			case TMeta(meta, _) if(PurityState.getPurityFromMeta(meta) == Pure): {
+-				return blockElement(acc, tail);
+-			}
+-			case TIf({ expr: TConst(TBool(t)) }, e1, e2): {
+-				if(t) {
+-					return blockElement(acc, [e1].concat(tail));
+-				} else {
+-					return switch(e2) {
+-						case null: blockElement(acc, tail);
+-						case e: blockElement(acc, [e.trustMe()].concat(tail));
++
++			final head = el[0];
++			final tail = el.slice(1);
++			switch(head.expr) {
++				case TBinop(OpAssign, { expr: TLocal(v1) }, { expr: TLocal(v2) }) if(v1 == v2): {
++					{ el = tail; continue; }
++				}
++				case TBinop(op, _, _) if(op.match(OpAssignOp(_)) || op == OpAssign): {
++					{ acc = [head].concat(acc); el = tail; continue; }
++				}
++				case TUnop(op, _, _) if(op == OpIncrement || op == OpDecrement): {
++					{ acc = [head].concat(acc); el = tail; continue; }
++				}
++				case TLocal(_): {
++					{ el = tail; continue; }
++				}
++				case TField(_, fa) if(!PurityState.isPureFieldAccess(fa)): {
++					{ acc = [head].concat(acc); el = tail; continue; }
++				}
++				case TFunction(_), TConst(_), TTypeExpr(_): {
++					{ el = tail; continue; }
++				}
++				case TMeta(meta, _) if(PurityState.getPurityFromMeta(meta) == Pure): {
++					{ el = tail; continue; }
++				}
++				case TIf({ expr: TConst(TBool(t)) }, e1, e2): {
++					if(t) {
++						{ el = [e1].concat(tail); continue; }
++					} else {
++						if(e2 == null) {
++							el = tail;
++						} else {
++							el = [e2.trustMe()].concat(tail);
++						}
++						continue;
+ 					}
+ 				}
+-			}
+-			case TSwitch(e, cases, edef): {
+-				final opt = checkConstantSwitch({e: e, cases: cases, edef: edef});
+-				if(opt != null) {
+-					return blockElement(acc, [opt.trustMe()].concat(tail));
+-				} else {
+-					return blockElement([head].concat(acc), tail);
++				case TSwitch(e, cases, edef): {
++					final opt = checkConstantSwitch({e: e, cases: cases, edef: edef});
++					if(opt != null) {
++						{ el = [opt.trustMe()].concat(tail); continue; }
++					} else {
++						{ acc = [head].concat(acc); el = tail; continue; }
++					}
++				}
++				case TParenthesis(e1), TMeta(_, e1), TCast(e1, null), TField(e1, _), TUnop(_, _, e1), TEnumIndex(e1), TEnumParameter(e1, _, _): {
++					{ el = [e1].concat(tail); continue; }
++				}
++				case TArray(e1, e2), TBinop(_, e1, e2): {
++					{ el = [e1, e2].concat(tail); continue; }
++				}
++				case TArrayDecl(el1): {
++					{ el = el1.concat(tail); continue; }
++				}
++				case TCall({ expr: TField(_, FEnum(_)) }, el1): {
++					{ el = el1.concat(tail); continue; }
++				}
++				case TObjectDecl(fl): {
++					final values = [for(f in fl) f.expr];
++					{ el = values.concat(tail); continue; }
++				}
++				case TIf(e1, e2, null) if(!hasSideEffects(e2)): {
++					{ el = [e1].concat(tail); continue; }
++				}
++				case TIf(e1, e2, e3) 
++					if(e3 != null && !hasSideEffects(e2) && !hasSideEffects(e3)): {
++					{ el = [e1].concat(tail); continue; }
++				}
++				case TBlock([e1]): {
++					{ el = [e1].concat(tail); continue; }
++				}
++				case TBlock([]): {
++					{ el = tail; continue; }
++				}
++				case TBlock(el1): {
++					final r: Array<TypedExpr> = OptimizerTexpr.blockElement([], el1);
++					r.reverse();
++					{ el = r.concat(tail); continue; }
++				}
++				case TContinue: {
++					{ acc = []; el = tail; continue; }
++				}
++				case _: {
++					{ acc = [head].concat(acc); el = tail; continue; }
+ 				}
+-			}
+-			case TParenthesis(e1), TMeta(_, e1), TCast(e1, null), TField(e1, _), TUnop(_, _, e1), TEnumIndex(e1), TEnumParameter(e1, _, _): {
+-				return blockElement(acc, [e1].concat(tail));
+-			}
+-			case TArray(e1, e2), TBinop(_, e1, e2): {
+-				return blockElement(acc, [e1, e2].concat(tail));
+-			}
+-			case TArrayDecl(el1): {
+-				return blockElement(acc, el1.concat(tail));
+-			}
+-			case TCall({ expr: TField(_, FEnum(_)) }, el1): {
+-				return blockElement(acc, el1.concat(tail));
+-			}
+-			case TObjectDecl(fl): {
+-				final values = [for(f in fl) f.expr];
+-				return blockElement(acc, values.concat(tail));
+-			}
+-			case TIf(e1, e2, null) if(!hasSideEffects(e2)): {
+-				return blockElement(acc, [e1].concat(tail));
+-			}
+-			case TIf(e1, e2, e3) 
+-				if(e3 != null && !hasSideEffects(e2) && !hasSideEffects(e3)): {
+-				return blockElement(acc, [e1].concat(tail));
+-			}
+-			case TBlock([e1]): {
+-				return blockElement(acc, [e1].concat(tail));
+-			}
+-			case TBlock([]): {
+-				return blockElement(acc, tail);
+-			}
+-			case TBlock(el1): {
+-				final r: Array<TypedExpr> = OptimizerTexpr.blockElement([], el1);
+-				r.reverse();
+-				return blockElement(acc, r.concat(tail));
+-			}
+-			case TContinue: {
+-				return blockElement([], tail);
+-			}
+-			case _: {
+-				return blockElement([head].concat(acc), tail);
+ 			}
+ 		}
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+

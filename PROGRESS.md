@@ -122,9 +122,13 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
       compile and a slightly larger one would not, which makes this a hard blocker rather than a
       tuning problem.
 
-      Next: instrument the vendored compiler to find the recursive call — it is ours to edit, and
-      a depth counter on the expression compiler should name it in one run. Fixing it there is
-      far preferable to shaping generated code around an unknown limit.
+      **Fixed 2026-08-08, in the vendored fork.** The stack trace named
+      `reflaxe/preprocessors/implementations/RemovePureExpressionsImpl.blockElement`, which walked
+      a block's statement list by recursing once per element. Every call was in tail position, so
+      it is now a loop. The whole game generates C++ in **63 s, 19 files, 2.1 MB**.
+
+      Reading that file to fix the recursion also turned up the cause of upstream defect 8 —
+      see below. Both patches are exported to `vendor/patches/`.
 
       This is the clearest vindication so far of developing on JavaScript (ADR-0003). A
       C++-only project would be completely blocked at this milestone; instead the JS build runs
@@ -216,8 +220,23 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    uses (`cxx.CArray`, `cxx.ConstCharPtr`, `cxx.Stdlib`); `untyped __cpp__` is reflaxe's generic
    injection hook, whose name is merely configured to hxcpp's spelling. Prefer the former and
    keep target code inside declarations; reserve `__cpp__` for statement-level injection.
-8. **An `if` with no `else` and more than one statement in its body is silently DELETED.**
-   The most serious defect found, and now characterised exactly (`tests/spike/ifbody`):
+8. **FIXED in our fork.** *An `if` with no `else` and more than one statement in its body was
+   silently deleted.* The cause was one missing `!`:
+   `RemovePureExpressionsImpl.hasSideEffects` returns true to mean "has side effects" in every
+   branch except the composite one covering TBlock/TIf/TVar/TSwitch, which computed a local named
+   `isPure` and returned it unnegated. `blockElement` then used that to rewrite
+   `if (cond) { body }` into just `cond`, believing a body full of assignments and calls was
+   side-effect free.
+
+   That single inversion explains everything filed here: guard clauses compiling to their
+   fall-through, loop bodies losing branches, ternaries vanishing. It also explains why it looked
+   like a size limit — a one-statement body is not a `TBlock` and never reached the inverted
+   branch.
+
+   The `else {}` workarounds in `src/runtime` and `tests/conformance` stay for now, so the code
+   still builds against an unpatched reflaxe until this is upstreamed. `scripts/spike.sh` reports
+   the change of state. Original characterisation, kept because it is what a future occurrence
+   would look like:
 
    | Shape | Result |
    |---|---|
