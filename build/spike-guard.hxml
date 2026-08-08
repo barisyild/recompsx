@@ -1,0 +1,5 @@
+build/reflaxe-cpp.hxml
+-cp tests/spike/ifdrop
+-D mainClass=Guard
+-main Guard
+-D cpp-output=out/_spike/guard

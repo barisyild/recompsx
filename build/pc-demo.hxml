@@ -1,0 +1,9 @@
+# build/pc-demo.hxml — the walking-skeleton demo (M0.5/M0.6).
+# Run from the repository root:  haxe build/pc-demo.hxml
+build/reflaxe-cpp.hxml
+-cp src/runtime
+-cp src/shims/cxx
+-D mainClass=Main
+-main Main
+-D cpp-output=out/_demo/cpp
+-dce full

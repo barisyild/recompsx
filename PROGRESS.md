@@ -127,6 +127,25 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    constructor. *Workaround:* use plain `if`/`else` statements.
 6. **`@:valueType` class as a static field** requires a default constructor that is not
    generated. *Workaround:* static fields of primitive/`CArray` type instead.
+7. **`untyped __cpp__` splices arguments without parentheses.** `__cpp__("({0} / {1})", y*31, h-1)`
+   emits `(y * 31 / h - 1)` — silently the wrong arithmetic. *Impact: high, silent.*
+   *Workaround:* parenthesise every placeholder: `"(({0}) / ({1}))"`. Locked by a check in
+   `tests/spike/verify`.
+8. **`if` statements are silently DELETED in several common shapes — the most serious defect
+   found.** No error, no warning; the branch simply vanishes and the program takes a different
+   path. Confirmed shapes (`tests/spike/ifdrop`, `tests/spike/guard`):
+   - **`if (cond) { ...; return; }` in a `Void` function** — the guard clause. The body is
+     dropped *and the fall-through code runs instead*, so the function does the opposite of
+     what it says. This is the most common control-flow idiom in systems code.
+   - Inside a `while` loop, when the branch body assigns to the loop-condition variable.
+   - Inside a `while` loop, when the branch body contains a ternary.
+   - Inside a `while` loop, when branches are nested.
+   Haxe's own targets are correct on identical source: `--interp` and `-js` both produce the
+   right answer, and the emitted JavaScript is a faithful translation. **The defect is entirely
+   reflaxe.CPP's.** *Workarounds:* `if/else` instead of guard clauses; no ternaries or nested
+   branches inside loop bodies. But these are workarounds for the shapes we have found, not a
+   guarantee about the ones we have not — which is the real problem for a project whose output
+   is millions of lines of machine-written branches.
 
 ## Blockers & open questions
 

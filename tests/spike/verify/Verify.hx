@@ -95,6 +95,13 @@ class Verify {
 		final injected:Int = untyped __cpp__("((int)({0}) * 3 + 1)", 14);
 		check("untyped __cpp__", injected, 43);
 
+		// ...and the trap: arguments are spliced in as raw source text with NO parentheses of
+		// their own, so every placeholder must be parenthesised by hand. Without the inner
+		// parens this evaluates (7*4/3+1) = 10 instead of 28/4 = 7. shim.IntMath depends on
+		// getting this right; if this check ever fails, every division in the project is wrong.
+		final divided:Int = untyped __cpp__("(({0}) / ({1}))", 7 * 4, 3 + 1);
+		check("__cpp__ arg parenthesisation", divided, 7);
+
 		// #9 native int64: 32x32 -> 64 multiply, the GTE/mult primitive
 		final a:CxxInt64 = cast 0x12345678;
 		final b:CxxInt64 = cast 0x10;

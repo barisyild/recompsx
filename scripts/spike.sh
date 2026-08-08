@@ -33,4 +33,17 @@ clang++ "${CXXFLAGS[@]}" -Iout/_spike/verify/include -Itests/spike/verify \
 out/_spike/verify/verify
 say "  all checks passed"
 
+say "spike: guard (does the compiler keep our branches?)"
+rm -rf out/_spike/guard
+haxe build/spike-guard.hxml
+clang++ "${CXXFLAGS[@]}" -Iout/_spike/guard/include out/_spike/guard/src/*.cpp -o out/_spike/guard/guard
+GUARD_OUT="$(out/_spike/guard/guard)"
+echo "$GUARD_OUT"
+if echo "$GUARD_OUT" | grep -q 'early-return guard: "guarded;"'; then
+  say "  guard clauses are compiled correctly — upstream defect 8 appears FIXED; revisit the"
+  say "  workarounds in src/runtime and docs/specs before relying on it"
+else
+  say "  guard clauses still miscompiled (upstream defect 8) — keep using if/else"
+fi
+
 printf '\033[32mspike.sh: clean\033[0m\n'
