@@ -34,7 +34,8 @@ class GenMain {
 
 		// Dispatch to the entry point purely to prove the table resolves. The runtime is not
 		// complete enough to let it get far, and the unimplemented-call report is the output.
-		if (!FnTable.call(GameInfo.ENTRY_POINT, ctx)) {
+		Runtime.callAndResume(ctx, GameInfo.ENTRY_POINT);
+		if (false) {
 			shim.Backend.log(shim.Backend.LOG_ERROR, "entry point is not in the table");
 		}
 		// What the machine actually did, not just what it could not do. Every one of these is

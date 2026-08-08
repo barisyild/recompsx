@@ -60,12 +60,12 @@ class Emitter {
 			buf.add('\t\tprogram is known to reach it statically.\n');
 		}
 		buf.add('\t**/\n');
-		buf.add('\tpublic static function ${fn.name}(ctx:CpuState):Void {\n');
+		buf.add('\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n');
 		buf.add(PUMP_ENTRY);
 
 		final flat = blockAddrs.length == 1;
 		if (!flat) {
-			buf.add('\t\tvar bb = 0;\n');
+			buf.add('\t\tvar bb = entry;\n');
 			buf.add('\t\twhile (true) switch (bb) {\n');
 		}
 
@@ -101,6 +101,19 @@ class Emitter {
 		"if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) Runtime.pump(ctx);";
 
 	static inline final PUMP_ENTRY = "\t\t" + PUMP_LINE + "\n";
+
+	/**
+		What makes `longjmp` able to leave.
+
+		A non-local jump has to abandon every frame between where it was called and where it
+		lands, and in a recompiled program those are host stack frames that only return normally.
+		So `longjmp` restores the emulated registers, sets the token, and this line — after every
+		call — carries the return all the way out. The top of the runtime then dispatches afresh
+		to the saved address, with `sp` and `ra` already correct.
+
+		One statement and no `else`, for the same reason the pump check is.
+	**/
+	static inline final UNWIND_LINE = "if (ctx.unwindToken != 0) return;";
 
 	/**
 		Blocks that a back-edge returns to — the loop headers.
@@ -243,6 +256,7 @@ class Emitter {
 				bump();
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}Runtime.call(ctx, $t);\n');
+				buf.add(ind + UNWIND_LINE + "\n");
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case J:
@@ -294,10 +308,12 @@ class Emitter {
 		final t = Vaddr.canonRam(target);
 		if (discovery.functions.exists(t)) {
 			buf.add('$ind${shardOf(t)}.${Discovery.defaultName(t)}(ctx);\n');
+			buf.add(ind + UNWIND_LINE + "\n");
 		} else {
 			// Outside this image — another overlay, or the kernel.
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
+			buf.add(ind + UNWIND_LINE + "\n");
 		}
 	}
 

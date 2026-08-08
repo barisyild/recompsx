@@ -37,10 +37,13 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
    - `cdrom:` files need ISO9660 — M1's remaining work.
    - `bu00:` files need SIO and a card image.
-   - `longjmp` unwinds correctly and resumes at the saved address, but **generated code does not
-     yet emit the unwind check**, so the frames between do not return. The runtime half is done;
-     the emitter half is a `bb:Int = 0` entry parameter (proved to work on both targets in
-     `tests/spike/defarg`) plus `if (ctx.unwindToken != 0) return;` after calls.
+   - `longjmp` is wired end to end: generated functions take an entry-block parameter, every call
+     is followed by `if (ctx.unwindToken != 0) return;`, and `Runtime.callAndResume` dispatches
+     afresh from the saved `pc`. What is *not* built is block-granular resume — a saved return
+     address in the middle of a block cannot be entered there, because call sites are not block
+     leaders. Landing on a function entry works; landing mid-block reports the address. Making it
+     general means promoting call-return sites to leaders and emitting a block table, which is
+     worth doing when a game is found that needs it.
    - `qsort`/`bsearch`/`lsearch` take a comparison callback, which means calling back into
      recompiled code from a sort — possible, but no game seen so far calls them.
 

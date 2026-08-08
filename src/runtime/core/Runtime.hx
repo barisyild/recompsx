@@ -72,6 +72,31 @@ class Runtime {
 		a register, computed jumps without a recoverable table, and calls into an overlay that is
 		resident but was compiled separately.
 	**/
+	/**
+		Runs `addr`, and then wherever a `longjmp` out of it wants to continue.
+
+		The unwind leaves every frame between the jump and here, so this is where control comes
+		back to. Dispatching again from the saved `pc` is what completes the jump — a fresh native
+		frame, but the emulated `sp` and `ra` are the ones `setjmp` recorded, so the game cannot
+		tell the difference.
+	**/
+	public static function callAndResume(ctx:CpuState, addr:Int):Void {
+		call(ctx, addr);
+		var guard = 0;
+		while (ctx.unwindToken != 0) {
+			ctx.unwindToken = 0;
+			guard++;
+			// A longjmp loop that never settles would otherwise hang with no explanation.
+			if (guard > 1024) return unwindStuck(ctx);
+			else {}
+			call(ctx, ctx.pc);
+		}
+	}
+
+	static function unwindStuck(ctx:CpuState):Void {
+		reportOnce(0x5A00FFFF, "1024 unwinds without settling — a longjmp loop");
+	}
+
 	public static function call(ctx:CpuState, addr:Int):Void {
 		final d = dispatcher;
 		if (d != null && d(addr, ctx)) {
