@@ -26,6 +26,9 @@ class Kernel {
 		KEvents.init();
 		KHandlers.init();
 		KLib.init();
+		KFiles.init();
+		hookEntryInt = 0;
+		clearPad = true;
 	}
 
 	/** A BIOS call through one of the three vectors. `fn` is the value in $t1. */
@@ -41,6 +44,7 @@ class Kernel {
 	static function a0(ctx:CpuState, fn:Int):Void {
 		// The C library occupies most of this table; ask it first and fall through if it declines.
 		if (KLib.call(ctx, fn)) return;
+		else if (KFiles.callA0(ctx, fn)) return;
 		else {}
 		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
 		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
@@ -48,12 +52,16 @@ class Kernel {
 		// invalidate. Still worth logging: it marks where a game just copied code, so it is where
 		// overlay activation will hook in at M6.
 		else if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
+		else if (fn == 0x70) ctx.v0 = buInit();
+		else if (fn == 0x72) ctx.v0 = removeCdDevice();
 		else reportCall(ctx, 0xA0, fn);
 	}
 
 	// ---- B0 ------------------------------------------------------------------------------------
 
 	static function b0(ctx:CpuState, fn:Int):Void {
+		if (KFiles.callB0(ctx, fn)) return;
+		else {}
 		if (fn == 0x07) ctx.v0 = deliverEvent(ctx);
 		else if (fn == 0x08) ctx.v0 = KEvents.open(ctx, ctx.a0, ctx.a1, ctx.a2, ctx.a3);
 		else if (fn == 0x09) ctx.v0 = KEvents.close(ctx, ctx.a0);
@@ -62,6 +70,9 @@ class Kernel {
 		else if (fn == 0x0C) ctx.v0 = KEvents.enable(ctx, ctx.a0);
 		else if (fn == 0x0D) ctx.v0 = KEvents.disable(ctx, ctx.a0);
 		else if (fn == 0x20) ctx.v0 = undeliverEvent(ctx);
+		else if (fn == 0x19) ctx.v0 = hookEntry(ctx);
+		else if (fn == 0x4A || fn == 0x4B) ctx.v0 = cardInit(fn);
+		else if (fn == 0x5B) ctx.v0 = changeClearPad(ctx);
 		else reportCall(ctx, 0xB0, fn);
 	}
 
@@ -107,6 +118,68 @@ class Kernel {
 	}
 
 	static var clearRCnt:Array<Bool> = [true, true, true, true];
+
+	// ---- devices ---------------------------------------------------------------------------------
+
+	/**
+		`HookEntryInt(addr)` — a hook the kernel runs after its own exception handling.
+
+		Games install one to get a look at every interrupt before the priority chains do. Stored
+		and honoured; the structure it points at is the game's, so we only keep the pointer.
+	**/
+	static var hookEntryInt = 0;
+
+	static function hookEntry(ctx:CpuState):Int {
+		hookEntryInt = ctx.a0;
+		noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook");
+		return 0;
+	}
+
+	/**
+		`_bu_init` and the card starters.
+
+		Registering devices that do not exist yet. They report themselves as handled rather than
+		missing, because a game calling them is doing normal setup, not asking for anything: the
+		work only begins when it opens a `bu00:` file, and that is where the honest failure is.
+	**/
+	static function buInit():Int {
+		noteOnce(0xA0070, "A0(70h) _bu_init — memory card device registered, but there is no card layer");
+		return 0;
+	}
+
+	static function cardInit(fn:Int):Int {
+		noteOnce(0xB0000 | fn, (fn == 0x4A ? "B0(4Ah) InitCARD2" : "B0(4Bh) StartCARD2")
+			+ " — no card layer yet");
+		return 0;
+	}
+
+	/**
+		`_96_remove` — detach the CD device.
+
+		Does nothing, and that is the correct behaviour rather than a gap. psx-spx records that
+		this function does not work on real hardware, because it removes its handler with
+		SysDeqIntRP, which can only ever remove the first element of a chain. Games ship against
+		the broken version; making it work would detach a CD device that every console keeps
+		attached.
+	**/
+	static function removeCdDevice():Int {
+		noteOnce(0xA0072, "A0(72h) _96_remove — does nothing, as on hardware (SysDeqIntRP bug)");
+		return 0;
+	}
+
+	/**
+		`ChangeClearPAD(flag)` — whether the kernel's pad handler acknowledges the interrupt itself.
+
+		Kept because the pad layer will need it: a game that takes over acknowledgement and then
+		finds the kernel has already done it reads the controller a frame late.
+	**/
+	static var clearPad = true;
+
+	static function changeClearPad(ctx:CpuState):Int {
+		clearPad = ctx.a0 != 0;
+		noteOnce(0xB005B, "B0(5Bh) ChangeClearPAD");
+		return 0;
+	}
 
 	// ---- what the interrupt controller hands us -------------------------------------------------
 

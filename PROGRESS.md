@@ -23,34 +23,36 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M2 — time, scheduling and interrupts, designed as one piece (ADR-0005).** The startup trace
-   named the mechanism the game is waiting on: `OpenEvent`, `EnableEvent`, `WaitEvent`,
-   `SysEnqIntRP`, `ChangeClearRCnt`. Those are not five stubs, they are one thing, and
-   implementing any of them alone moves the hang without removing it.
+1. **M2 kernel HLE — done for everything that does not need another subsystem.**
+   Crash Bash runs its main loop, and both targets produce identical output over 239 lines.
 
-   Decisions worth knowing before touching the code:
-   - Time is a **pure function of `cycles`**; the scheduler fires only edges. Anything readable —
-     scanline, field, GPUSTAT bit 31, timer values — is computed at the moment of the read, so a
-     game polling between two events still sees it move.
-   - **Pump points are generated-code ABI**: `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);`
-     at function entry and every back-edge, and nowhere else. Those are the only points where the
-     CPU state is whole, which matters because delivering an interrupt means calling a recompiled
-     function.
-   - An idle `WaitEvent` **advances to `nextEvent`** rather than by a constant. No free parameter,
-     and an idle wait costs O(events) instead of O(cycles).
-   - Interrupt handlers get a **saved and restored register snapshot**, and delivery is inhibited
-     while inside one — otherwise a handler's own back-edges would pump, deliver, and recurse.
-
-   Built bottom-up with a conformance test before each layer is depended on:
-
-   | Layer | State |
+   | Area | State |
    |---|---|
-   | `TimeBase` | **done** — `tests/conformance/VideoTime.hx`, both targets `052bdaac` |
-   | `Scheduler` | next — fixed slots, ties broken by slot index |
-   | I/O dispatch + `I_STAT`/`I_MASK` | the 0x1F801000 page currently reads 0 and swallows writes |
-   | Event table (EvCB) | `OpenEvent`/`WaitEvent`/`TestEvent`/`DeliverEvent` |
-   | IntRP chains | `SysEnqIntRP`, called at dispatch |
-   | Pump emission | emitter change; regenerates everything |
+   | Time, scheduler, interrupt controller | done — ADR-0005, `VideoTime` pinned |
+   | Event system, priority chains | done — `OpenEvent`/`WaitEvent`/`SysEnqIntRP` |
+   | Critical sections, COP0 SR/CAUSE, `rfe` | done |
+   | C library, heap, integer `printf` | done — `KernelLib` pinned at 4486283b |
+   | File descriptors and the TTY | done — the game's own debug output arrives |
+   | Device registration (`_bu_init`, CARD2, `ChangeClearPAD`, `HookEntryInt`) | done |
+
+   What is left is blocked on subsystems rather than on the kernel:
+
+   - `A0(49h) GPU_cw` and the rest of `A0(46h..4Eh)` need GPU registers.
+   - `cdrom:` files need ISO9660, which is M1's remaining work.
+   - `bu00:` files need SIO and a card image.
+   - `setjmp`/`longjmp` need the unwind protocol emitted into generated code (ADR-0005 has the
+     design; nothing emits the check yet).
+   - Threads (`OpenTh`/`ChangeTh`) are P2 and no game seen so far calls them.
+
+   The game says what it wants next, in its own words, through the TTY the kernel now provides:
+
+       tty: ResetGraph:jtb=8006790c,env=80067954
+       tty: GPU timeout:que=0,stat=00000000,chcr=00000000,madr=00000000
+       tty: VSync: timeout
+
+   That is Psy-Q's libgpu initialising and then timing out because GPUSTAT reads zero. **The GPU
+   is the next subsystem**, and the first piece of it is the register file, not the rasteriser —
+   `ResetGraph` only needs GP1 and a status word that moves.
 
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
@@ -406,6 +408,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] M2 kernel HLE: scheduler, interrupt controller, event system, priority chains,
+  C library, heap, printf, file descriptors, TTY. Crash Bash reaches its main loop and prints its
+  own libgpu output; both targets identical over 239 lines. Two of my own bugs found by my own
+  guards (frame-length overflow, a non-wrapping cycle compare that diverged JS from C++) and one
+  fidelity error corrected (critical sections are a flag, not a counter). OpenBIOS supplied the
+  event status values psx-spx omits. Next: the GPU register file — the game is timing out on it.
 
 2026-08-08 [claude] Designed time/scheduling/interrupts as one piece (ADR-0005) after the startup
   trace showed the game waiting on the event system, not on five separate stubs. TimeBase landed

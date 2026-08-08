@@ -340,7 +340,7 @@ class KLib {
 	**/
 	static var line = "";
 
-	static function putchar(c:Int):Void {
+	public static function putchar(c:Int):Void {
 		final ch = c & 0xFF;
 		if (ch == 0x0A) flushLine();
 		else if (ch >= 0x20 && ch < 0x7F) line += String.fromCharCode(ch);
