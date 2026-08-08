@@ -449,10 +449,53 @@ class Kernel {
 		deliverPending(ctx);
 	}
 
+	/**
+		Turns each pending hardware line into the kernel event that stands for it.
+
+		On hardware the BIOS's own handlers do this, and under HLE they are not game code, so it
+		falls here. Missing a line does not look like a missing line: libcd's `CdSync` waits on the
+		CDROM *event*, so a controller that raised nineteen interrupts nobody translated reported
+		itself as `NoIntr` — a library waiting on a message the kernel never sent.
+	**/
 	static function deliverPending(ctx:CpuState):Void {
 		final live = Irq.stat & Irq.mask;
 		if ((live & (1 << Irq.VBLANK)) != 0) vblank(ctx);
 		else {}
+		if ((live & (1 << Irq.CDROM)) != 0) cdrom(ctx);
+		else {}
+		if ((live & (1 << Irq.SPU)) != 0) line(ctx, Irq.SPU, KEvents.CLASS_SPU);
+		else {}
+		if ((live & (1 << Irq.GPU)) != 0) line(ctx, Irq.GPU, KEvents.CLASS_GPU);
+		else {}
+		if ((live & (1 << Irq.DMA)) != 0) line(ctx, Irq.DMA, KEvents.CLASS_DMA);
+		else {}
+		if ((live & (1 << Irq.SIO0)) != 0) line(ctx, Irq.SIO0, KEvents.CLASS_CONTROLLER);
+		else {}
+	}
+
+	/**
+		The CD, whose event carries *which* answer arrived.
+
+		Every other source has one thing to say. The CD-ROM has five, and libcd branches on them:
+		an acknowledgement is not a completion and neither is a sector. psx-spx "BIOS Event
+		Summary" maps the controller's INT levels onto these specs.
+	**/
+	static function cdrom(ctx:CpuState):Void {
+		KEvents.deliver(ctx, KEvents.CLASS_CDROM, specForCdInt(cd.Cdrom.currentLevel()));
+		Irq.writeStat(~(1 << Irq.CDROM));
+	}
+
+	static function specForCdInt(level:Int):Int {
+		if (level == 3) return 0x0010;        // acknowledged
+		else if (level == 2) return 0x0020;   // the slow part completed
+		else if (level == 1) return 0x0040;   // a sector is ready
+		else if (level == 4) return 0x0080;   // end of the data
+		else return 0x8000;                   // error
+	}
+
+	static function line(ctx:CpuState, bit:Int, cls:Int):Void {
+		KEvents.deliver(ctx, cls, SPEC_INTERRUPTED);
+		Irq.writeStat(~(1 << bit));
 	}
 
 	/**

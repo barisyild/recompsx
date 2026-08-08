@@ -52,31 +52,35 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD-ROM controller answers; libcd still sees no interrupt. Two of three candidates are
-   eliminated by measurement.**
-
-   `cd/Cdrom.hx` implements the four registers, both FIFOs, the INT levels, the
-   one-outstanding-interrupt queue, and the boot commands. Crash Bash initialises libcd
-   (`tty: CD_init:addr=8006de94`) and issues 15–17 commands, where before it issued none.
+2. **The CD-ROM controller answers. libcd still reports `NoIntr`, and all four of my candidates
+   are eliminated by measurement.**
 
    | Candidate | Verdict |
    |---|---|
-   | `irqEnable` never set, so every interrupt is dropped | **Eliminated.** Counters say 19 raised, 1 dropped. |
-   | The game never unmasks the CD line in I_MASK | **Was true, and fixed — but not the cause.** |
-   | The response is raised synchronously inside the register write | **Prime suspect. Untested.** |
+   | `irqEnable` never set, so interrupts are dropped | **Eliminated** — 19–20 raised, 1 dropped |
+   | The CD line is never unmasked in I_MASK | **Was true. Fixed. Not the cause.** |
+   | Answers raised synchronously inside the register write | **Was true. Fixed. Not the cause.** |
+   | Hardware lines never became kernel events | **Was true. Fixed. Not the cause.** |
 
-   The middle one is worth keeping even though it changed nothing: I_MASK was only ever written
-   `0x001`, vblank alone, because a game does *not* unmask the CD itself — `_96_init` does it on
-   the game's behalf while installing the CD BIOS handlers. That is real hardware behaviour and
-   the kernel was wrong without it.
+   All three fixes are right on their own merits — `_96_init` unmasks the CD because that is what
+   it does on hardware, answers take cycles because hardware takes cycles, and the BIOS handlers
+   are what turn an INT level into a `F0000003` event with the spec that says *which* answer
+   arrived. None of them moved the symptom, which makes each one a variable that is now nailed
+   down rather than a wasted step.
 
-   **What is left is the timing.** Every command answers inside the register write that issued it.
-   Hardware always takes cycles, and libcd very likely arms its wait *after* writing the command —
-   so the interrupt has already fired and been seen by nobody. The scheduler is already there and
-   `queue`/`schedule` already exist for the second answer; the fix is to route the *first* answer
-   through them too, so `respond` becomes a deferral rather than an immediate raise.
+   **The structural gap the counters point at.** `KHandlers.calls` is exactly equal to the frame
+   count — one chain element running per vblank — so libcd's own CD handler is not in any priority
+   chain. And `KEvents.delivered` is 0, so the game never opened a CDROM event either. libcd is
+   therefore waiting on neither of the two mechanisms this kernel implements.
 
-   That is one change to one function, and it is the next thing to do.
+   That points at the CD BIOS handler's *side effects*. On hardware `_96_init` installs a handler
+   that maintains state libcd polls — `CdSync` and `CdReady` read variables that handler writes,
+   not the hardware registers. Under HLE that handler is native and writes nothing, so libcd polls
+   memory that never changes. Finding **what** it polls is the next step, and it is a
+   reverse-engineering question rather than a hardware one: disassemble `CD_init` at 8006de94 in
+   the recompiled output and see which addresses its wait loops read.
+
+   `recompsx dis --at 0x8006de94` is the tool for it, and it already exists.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -419,6 +423,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] GPU register file, cdrom: in both shapes (directory and image — ISO9660
+  detects Mode 2 Form 1 on a real Crash Bash BIN), and the CD-ROM controller. Game now initialises
+  libcd and issues 17 commands. Four candidates for its NoIntr eliminated by measurement; three
+  were real bugs fixed on their own merits. Next: disassemble CD_init at 8006de94 to find what
+  libcd's wait loops actually poll — the answer is a memory address, not a register.
 
 2026-08-08 [claude] Kernel HLE complete: threads, setjmp/longjmp, timers, device table, GPU helper
   calls, kernel RAM tables, the rest of the C library. Crash Bash now makes zero unimplemented

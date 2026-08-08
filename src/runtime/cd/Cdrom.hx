@@ -74,6 +74,20 @@ class Cdrom {
 
 	static var irqEnable = 0;
 
+	/**
+		The first answer, waiting out its acknowledgement delay.
+
+		Separate from the queue, which holds the *second* answer to a slow command. Both exist
+		because a command produces up to two interrupts and neither may be raised inside the
+		register write that asked for it — see `respond`.
+	**/
+	static var pendingInt = 0;
+	static var pendingResponse:Array<Int>;
+	static var pendingCount = 0;
+
+	/** The cycle count as of the last register access, so a response can be dated. */
+	static var now = 0;
+
 	// Where the head is and what it is doing.
 	static var seekLba = 0;
 	static var readLba = 0;
@@ -92,6 +106,10 @@ class Cdrom {
 		param = [for (_ in 0...FIFO) 0];
 		response = [for (_ in 0...FIFO) 0];
 		queuedResponse = [for (_ in 0...FIFO) 0];
+		pendingResponse = [for (_ in 0...FIFO) 0];
+		pendingInt = 0;
+		pendingCount = 0;
+		now = 0;
 		sector = RawMem.alloc(SECTOR_BYTES);
 		index = 0;
 		status = ST_MOTOR;
@@ -125,6 +143,7 @@ class Cdrom {
 	}
 
 	public static function write8(addr:Int, v:Int, cycles:Int):Void {
+		now = cycles;
 		final reg = addr & 3;
 		if (reg == 0) index = v & 3;
 		else if (reg == 1) write1801(v, cycles);
@@ -285,10 +304,9 @@ class Cdrom {
 	static function seek(cycles:Int):Void {
 		readLba = seekLba;
 		status |= ST_SEEKING;
-		ackWith1(status);
-		// The second answer: the head arrived.
+		// The second answer follows the first; both go through the event, in order.
 		queue(INT2_DONE, seekDone(), 1);
-		schedule(cycles, SEEK_BASE);
+		ackWith1(status);
 	}
 
 	static function seekDone():Int {
@@ -301,24 +319,21 @@ class Cdrom {
 		reading = true;
 		status = (status | ST_READING) & ~ST_SEEKING;
 		ackWith1(status);
-		schedule(cycles, sectorInterval());
 	}
 
 	static function pause(cycles:Int):Void {
 		reading = false;
 		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING);
-		ackWith1(status);
 		queue(INT2_DONE, status, 1);
-		schedule(cycles, PAUSE_TIME);
+		ackWith1(status);
 	}
 
 	static function initCommand(cycles:Int):Void {
 		mode = 0;
 		reading = false;
 		status = ST_MOTOR;
-		ackWith1(status);
 		queue(INT2_DONE, status, 1);
-		schedule(cycles, INIT_TIME);
+		ackWith1(status);
 	}
 
 	/** `Test 20h` reports the controller's date and version, which is all any game asks it for. */
@@ -349,14 +364,12 @@ class Cdrom {
 		queuedResponse[6] = 0x45; queuedResponse[7] = 0x41;   // 'E' 'A'
 		queuedInt = INT2_DONE;
 		queuedCount = 8;
-		schedule(cycles, GETID_TIME);
 	}
 
 	static function queueNoDisc(cycles:Int):Void {
 		queuedResponse[0] = 0x08; queuedResponse[1] = 0x40;
 		queuedInt = INT5_ERROR;
 		queuedCount = 2;
-		schedule(cycles, GETID_TIME);
 	}
 
 	/**
@@ -400,9 +413,8 @@ class Cdrom {
 	}
 
 	static function readToc(cycles:Int):Void {
-		ackWith1(status);
 		queue(INT2_DONE, status, 1);
-		schedule(cycles, INIT_TIME);
+		ackWith1(status);
 	}
 
 	// ---- the event that delivers ------------------------------------------------------------------
@@ -423,8 +435,13 @@ class Cdrom {
 		makes `ReadN` a stream rather than a single answer.
 	**/
 	public static function onEvent(ctx:CpuState):Void {
-		if (queuedInt != 0 && currentInt == 0) return releaseQueued();
-		else if (queuedInt != 0) return schedule(ctx.cycles, ACK);   // wait for the acknowledgement
+		now = ctx.cycles;
+		// The first answer, then the second, then sectors — each waits for the CPU to have
+		// acknowledged the one before, because only one interrupt is outstanding at a time.
+		if (pendingInt != 0 && currentInt == 0) return deliverPending();
+		else if (pendingInt != 0) return schedule(ctx.cycles, ACK);
+		else if (queuedInt != 0 && currentInt == 0) return releaseQueued();
+		else if (queuedInt != 0) return schedule(ctx.cycles, ACK);
 		else {}
 		if (reading) deliverSector(ctx);
 		else {}
@@ -468,10 +485,33 @@ class Cdrom {
 		respond(INT5_ERROR, 2);
 	}
 
+	/**
+		Answers a command — later, never now.
+
+		This used to set the response and raise the interrupt inside the register write that issued
+		the command, and libcd never saw any of it. Hardware always takes cycles to answer, and
+		libcd arms its wait *after* writing the command: an interrupt raised before that arrives to
+		an empty room. Nineteen were raised and acknowledged by nobody, while the library reported
+		`NoIntr` about commands it had understood perfectly.
+
+		So every answer is deferred by the acknowledgement latency and delivered from the
+		scheduler. Deferring is not a fidelity nicety here; it is the difference between a
+		controller that works and one that does not.
+	**/
 	static function respond(level:Int, count:Int):Void {
-		responseCount = count;
+		for (i in 0...count) pendingResponse[i] = response[i];
+		pendingInt = level;
+		pendingCount = count;
+		schedule(now, ACK);
+	}
+
+	/** Moves a deferred answer into the FIFO and rings the bell. */
+	static function deliverPending():Void {
+		responseCount = pendingCount;
 		responseRead = 0;
-		currentInt = level;
+		for (i in 0...pendingCount) response[i] = pendingResponse[i];
+		currentInt = pendingInt;
+		pendingInt = 0;
 		raise();
 	}
 
@@ -480,6 +520,9 @@ class Cdrom {
 		queuedInt = level;
 		queuedCount = count;
 	}
+
+	/** Which answer is outstanding, so the kernel can say what kind of event it is. */
+	public static function currentLevel():Int return currentInt;
 
 	static function raise():Void {
 		if ((irqEnable & currentInt) != 0) fire();
