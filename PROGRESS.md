@@ -23,7 +23,14 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **Load the program image into emulated RAM.** Nothing does: `GenMain` calls `Memory.init()`
+1. **Command-line arguments do not reach Haxe on C++.** `Backend.argCount()` returns 0 under
+   reflaxe.CPP, so the C++ build cannot be told where the image is and still runs on empty
+   memory while JavaScript loads it. This is exactly [M0-VERIFY] item 16, now answered NO by
+   observation. The fallback the plan already named is a `bp_args`-style backend accessor —
+   argv belongs to the C `main` anyway, so routing it through the backend ABI is arguably where
+   it should have been from the start.
+
+2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
    and sets pc/gp/sp, so every load returns 0 and any kernel argument arriving via memory is
    meaningless (`InitHeap` reporting a zero-length heap is how this surfaced). The C++ shim
    already has `fileOpen`/`fileRead` over the backend's `bp_file_*`; the JavaScript shim returns
@@ -174,13 +181,15 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
             mfc0/mtc0 COP0 r12      the status register: interrupts being set up
             GTE control 24..30      the projection constants
 
-        **The image is not loaded yet.** `GenMain` calls `Memory.init()` and sets pc/gp/sp, but
-        nothing copies the executable's payload into emulated RAM — so every load returns 0. The
-        call *sequence* above is still real, because it comes from recompiled code rather than
-        from data, but any argument that arrives via memory is not. `InitHeap` reporting a
-        zero-length heap is the first place that showed, and it is the next thing to fix: the
-        loader exists in the tool, the runtime just never asks it for the bytes. Until then, no
-        value read out of RAM should be believed.
+        **The image is loaded now, and it changed the picture.** `ExeLoader` copies the payload
+        from offset 0x800 to the load address `GameInfo` recorded at build time. With real bytes
+        in RAM, `InitHeap` reports **1,569,644 bytes at 0x80078c98** instead of zero — a sane
+        1.5 MB heap for a 2 MB machine — and the game reaches calls it never got to before:
+        `B0(19h)`, `A0(72h)`, `B0(35h)`. That is the difference between running on the game's own
+        data and running on a memory full of nothing.
+
+        JavaScript only, for now: see item 1 above — arguments do not reach Haxe on C++, so that
+        build still has no way to be told where the image is.
 
         Names verified against psx-spx "BIOS Function Summary", not written from memory. The
         first three are now implemented: `FlushCache` is a genuine no-op under static

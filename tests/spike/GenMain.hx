@@ -14,6 +14,15 @@ class GenMain {
 		Runtime.bindDispatch(FnTable.call);
 		mem.Memory.init();
 
+		// The image the recompiler was built from. Without it every load returns zero, so the
+		// game runs on empty memory and its kernel arguments are meaningless.
+		if (shim.Backend.argCount() >= 1) {
+			kernel.ExeLoader.load(shim.Backend.arg(0), GameInfo.LOAD_ADDR, GameInfo.LOAD_SIZE);
+		} else {
+			shim.Backend.log(shim.Backend.LOG_WARN,
+				"no image path given — running on empty memory, values read from RAM are not real");
+		}
+
 		final ctx = new CpuState();
 		ctx.pc = GameInfo.ENTRY_POINT;
 		ctx.gp = GameInfo.INITIAL_GP;
