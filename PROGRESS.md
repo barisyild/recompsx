@@ -23,13 +23,26 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M1** — the recompiler tool, developed against `haxe --interp` (no target constraints):
-   PS-EXE loader first, verified against the Crash Bash and Spyro 3 headers already recorded in
-   `games/*/notes.md`; then the R3000A decoder with golden disassembly fixtures.
-2. **M1** cont. — BIN/CUE + ISO9660 + `filesDir` loaders, then function discovery and the
-   coverage report. Acceptance needs a coverage percentage for both game executables.
-3. Report the reflaxe.CPP defects upstream (issues, with the minimal repros already in
-   `tests/spike/{ifdrop,guard}`). Cheap, and the fixes benefit us directly.
+1. **Load the program image into emulated RAM.** Nothing does: `GenMain` calls `Memory.init()`
+   and sets pc/gp/sp, so every load returns 0 and any kernel argument arriving via memory is
+   meaningless (`InitHeap` reporting a zero-length heap is how this surfaced). The C++ shim
+   already has `fileOpen`/`fileRead` over the backend's `bp_file_*`; the JavaScript shim returns
+   -1 and needs a real implementation. Then an `ExeLoader` copying `LOAD_SIZE` bytes from offset
+   0x800 to `LOAD_ADDR`, with the path taken from `Backend.arg`.
+
+   Everything below is guesswork until this lands — the *sequence* of kernel calls is trustworthy
+   because it comes from recompiled code, but no value read out of RAM is.
+
+2. **M2 kernel HLE**, in the order Crash Bash asks for it: `A0(49h) GPU_cw` next, which needs the
+   GPU register file behind it. Names come from psx-spx, never from memory (golden rule 6).
+
+3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
+   import. The PS-EXE path works; the disc path is untouched, and overlays need it.
+
+4. **Report the reflaxe defects upstream** — three now, with minimal repros already in
+   `tests/spike/{ifdrop,guard,bbswitch}` and patches in `vendor/patches/000{1,2,4}`. Defect 9
+   (`continue` deleting preceding statements) is the one that matters most to anyone else using
+   reflaxe for generated code.
 
 ## Milestones
 
