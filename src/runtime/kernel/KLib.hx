@@ -347,12 +347,17 @@ class KLib {
 		else {}
 	}
 
+	public static function flushTty():Void {
+		if (line.length > 0) flushLine();
+		else {}
+	}
+
 	static function flushLine():Void {
 		Backend.log(Backend.LOG_INFO, "tty: " + line);
 		line = "";
 	}
 
-	static function puts(s:Int):Int {
+	public static function puts(s:Int):Int {
 		var i = 0;
 		while (true) {
 			final c = Memory.read8u(s + i);

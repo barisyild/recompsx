@@ -23,36 +23,30 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M2 kernel HLE — done for everything that does not need another subsystem.**
-   Crash Bash runs its main loop, and both targets produce identical output over 239 lines.
+1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
+   and syscall it reaches is handled, and both targets produce identical output across 238 lines.
 
-   | Area | State |
-   |---|---|
-   | Time, scheduler, interrupt controller | done — ADR-0005, `VideoTime` pinned |
-   | Event system, priority chains | done — `OpenEvent`/`WaitEvent`/`SysEnqIntRP` |
-   | Critical sections, COP0 SR/CAUSE, `rfe` | done |
-   | C library, heap, integer `printf` | done — `KernelLib` pinned at 4486283b |
-   | File descriptors and the TTY | done — the game's own debug output arrives |
-   | Device registration (`_bu_init`, CARD2, `ChangeClearPAD`, `HookEntryInt`) | done |
+   The whole surface is implemented, not only what this game touches: the C library and heap,
+   `printf`, file descriptors and the TTY, events and interrupt chains, critical sections, COP0,
+   threads, `setjmp`/`longjmp`, kernel timers, the device table, the GPU helper calls (which
+   forward to GP0/GP1 and start working the moment those registers exist), and the kernel's own
+   RAM tables at 100h/200h/674h/874h so a game that reads `GetB0Table` and jumps through an entry
+   lands on a stub the runtime recognises.
 
-   What is left is blocked on subsystems rather than on the kernel:
+   What is genuinely still blocked, and on what:
 
-   - `A0(49h) GPU_cw` and the rest of `A0(46h..4Eh)` need GPU registers.
-   - `cdrom:` files need ISO9660, which is M1's remaining work.
+   - `cdrom:` files need ISO9660 — M1's remaining work.
    - `bu00:` files need SIO and a card image.
-   - `setjmp`/`longjmp` need the unwind protocol emitted into generated code (ADR-0005 has the
-     design; nothing emits the check yet).
-   - Threads (`OpenTh`/`ChangeTh`) are P2 and no game seen so far calls them.
+   - `longjmp` unwinds correctly and resumes at the saved address, but **generated code does not
+     yet emit the unwind check**, so the frames between do not return. The runtime half is done;
+     the emitter half is a `bb:Int = 0` entry parameter (proved to work on both targets in
+     `tests/spike/defarg`) plus `if (ctx.unwindToken != 0) return;` after calls.
+   - `qsort`/`bsearch`/`lsearch` take a comparison callback, which means calling back into
+     recompiled code from a sort — possible, but no game seen so far calls them.
 
-   The game says what it wants next, in its own words, through the TTY the kernel now provides:
-
-       tty: ResetGraph:jtb=8006790c,env=80067954
-       tty: GPU timeout:que=0,stat=00000000,chcr=00000000,madr=00000000
-       tty: VSync: timeout
-
-   That is Psy-Q's libgpu initialising and then timing out because GPUSTAT reads zero. **The GPU
-   is the next subsystem**, and the first piece of it is the register file, not the rasteriser —
-   `ResetGraph` only needs GP1 and a status word that moves.
+   **The GPU is next**, and the game says so itself through the TTY the kernel now provides:
+   `ResetGraph` initialises, then `GPU timeout` and `VSync: timeout` because GPUSTAT reads zero.
+   The first piece is the register file, not the rasteriser.
 
 
 2. ~~**Load the program image into emulated RAM.**~~ **Done on JavaScript.** Nothing does: `GenMain` calls `Memory.init()`
@@ -408,6 +402,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Kernel HLE complete: threads, setjmp/longjmp, timers, device table, GPU helper
+  calls, kernel RAM tables, the rest of the C library. Crash Bash now makes zero unimplemented
+  kernel calls and both targets match over 238 lines. Three reflaxe.CPP traps found and each one
+  turned into a check.sh guard: a root-package class shadowing a system header, a static table
+  built at its declaration, and an identifier that is a C macro (`errno`). Next: the GPU register
+  file — libgpu is timing out on GPUSTAT.
 
 2026-08-08 [claude] M2 kernel HLE: scheduler, interrupt controller, event system, priority chains,
   C library, heap, printf, file descriptors, TTY. Crash Bash reaches its main loop and prints its

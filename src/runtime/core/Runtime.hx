@@ -77,8 +77,29 @@ class Runtime {
 		if (d != null && d(addr, ctx)) {
 			// Dispatched.
 		} else {
-			reportOnce(addr, "no function at this address");
+			notInProgram(ctx, addr);
 		}
+	}
+
+	/**
+		An address the program has no function at.
+
+		Usually a kernel stub: a game that read an entry out of the A0/B0/C0 tables and jumped
+		through it lands in the BIOS window, where `KTables` can say which call it meant. That is a
+		real and supported route into the kernel, not a failure — libraries that hook a BIOS
+		function do exactly this to reach the original.
+
+		Anything else is a genuine gap, and worth the address.
+	**/
+	static function notInProgram(ctx:CpuState, addr:Int):Void {
+		final index = kernel.KTables.callAt(addr);
+		if (index >= 0) kernelStub(ctx, index);
+		else reportOnce(addr, "no function at this address");
+	}
+
+	static function kernelStub(ctx:CpuState, index:Int):Void {
+		final vector = index < 0x100 ? 0xA0 : (index < 0x200 ? 0xB0 : 0xC0);
+		kernel.Kernel.call(ctx, vector, index & 0xFF);
 	}
 
 	/**

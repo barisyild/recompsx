@@ -210,6 +210,16 @@ class KEvents {
 
 	// ---- plumbing -----------------------------------------------------------------------------
 
+	/** How many event slots are unused — what `get_free_EvCB_slot` reports. */
+	public static function freeSlotCount():Int {
+		var n = 0;
+		for (i in 0...COUNT) {
+			if (evFlags[i] == FREE) n++;
+			else {}
+		}
+		return n;
+	}
+
 	static function freeSlot():Int {
 		for (i in 0...COUNT) {
 			if (evFlags[i] == FREE) return i;

@@ -140,6 +140,43 @@ else
 fi
 
 
+# ---- static arrays built at their declaration -------------------------------------------------
+#
+# reflaxe.CPP emits a statement block at namespace scope for a static field initialised with an
+# array comprehension, which is not valid C++ and fails only on the C++ build. Tables belong in an
+# init function, which is also what "no allocation after boot" wants. Cost me three separate
+# debugging rounds before it went in here.
+# Scoped to what reflaxe.CPP actually compiles. src/shims/js is the JavaScript half of the seam
+# and never reaches a C++ generator, so a table at its declaration there is fine.
+bad_static="$(grep -rnE '^[[:space:]]*(public[[:space:]]+)?static[[:space:]]+(var|final)[^=]*=[[:space:]]*\[for[[:space:]]' src/runtime src/shims/cxx shared tests/conformance tests/spike 2>/dev/null || true)"
+if [ -n "$bad_static" ]; then
+  fail "static field initialised with an array comprehension — build it in init() instead:"
+  echo "$bad_static" >&2
+else
+  ok "no static tables built at their declaration"
+fi
+
+
+# ---- identifiers that are C macros -------------------------------------------------------------
+#
+# A field named `errno` does not compile: <errno.h> defines it as a macro, so the generated C++
+# expands it inside the declaration. Reserved words are not the hazard — macros are, and they are
+# invisible from the Haxe side.
+MACRO_NAMES="errno stdin stdout stderr assert NULL EOF BUFSIZ EXIT_SUCCESS EXIT_FAILURE
+RAND_MAX offsetof major minor complex I"
+macro_hits=""
+for m in $MACRO_NAMES; do
+  h="$(grep -rnE "(var|final|function)[[:space:]]+$m\b" src/runtime src/shims/cxx shared 2>/dev/null || true)"
+  if [ -n "$h" ]; then macro_hits="$macro_hits
+$h"; fi
+done
+if [ -n "$macro_hits" ]; then
+  fail "identifier collides with a C macro, which the C++ build expands:$macro_hits"
+else
+  ok "no identifier collides with a C macro"
+fi
+
+
 if [ $FAIL -eq 0 ]; then
   printf '\033[32mcheck.sh: clean\033[0m\n'
 else

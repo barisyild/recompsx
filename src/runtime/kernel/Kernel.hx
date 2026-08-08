@@ -4,6 +4,8 @@ import core.CpuState;
 import core.Irq;
 import core.Runtime;
 import core.Scheduler;
+import mem.Memory;
+import shim.Backend;
 
 /**
 	The PlayStation kernel, high-level emulated.
@@ -27,6 +29,16 @@ class Kernel {
 		KHandlers.init();
 		KLib.init();
 		KFiles.init();
+		KThreads.init();
+		KTables.init();
+		KTimers.init();
+		// Every table is built here rather than at its declaration: reflaxe emits a statement
+		// block at namespace scope for a static initialised with a comprehension, which is not
+		// valid C++ — and nothing may allocate after boot anyway.
+		autoAck = [for (_ in 0...11) true];
+		clearRCnt = [true, true, true, true];
+		lastError = 0;
+		drivers = 0;
 		hookEntryInt = 0;
 		clearPad = true;
 	}
@@ -52,8 +64,17 @@ class Kernel {
 		// invalidate. Still worth logging: it marks where a game just copied code, so it is where
 		// overlay activation will hook in at M6.
 		else if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
-		else if (fn == 0x70) ctx.v0 = buInit();
-		else if (fn == 0x72) ctx.v0 = removeCdDevice();
+		else if (fn == 0x13) ctx.v0 = KThreads.setjmp(ctx, ctx.a0);
+		else if (fn == 0x14) KThreads.longjmp(ctx, ctx.a0, ctx.a1);
+		else if (fn >= 0x46 && fn <= 0x4E) gpuHelper(ctx, fn);
+		else if (fn == 0x45) noteOnce(0xA0045, "A0(45h) init_a0_b0_c0_vectors — the tables are ours");
+		else if (fn == 0x52) ctx.v0 = ctx.sp;                       // GetSysSp
+		else if (fn == 0x06 || fn == 0x3A) exitGame(ctx);
+		else if (fn == 0x54 || fn == 0x71) ctx.v0 = cdDeviceInit();
+		else if (fn == 0x55 || fn == 0x70) ctx.v0 = buInit();
+		else if (fn == 0x56 || fn == 0x72) ctx.v0 = removeCdDevice();
+		else if (fn == 0x40 || fn == 0x4F || fn == 0x50 || fn == 0x53) systemError(ctx, 0xA0, fn);
+		else if (returnsZero(fn)) ctx.v0 = 0;
 		else reportCall(ctx, 0xA0, fn);
 	}
 
@@ -73,6 +94,28 @@ class Kernel {
 		else if (fn == 0x19) ctx.v0 = hookEntry(ctx);
 		else if (fn == 0x4A || fn == 0x4B) ctx.v0 = cardInit(fn);
 		else if (fn == 0x5B) ctx.v0 = changeClearPad(ctx);
+		else if (fn == 0x00) ctx.v0 = KHeap.malloc(ctx.a0);         // alloc_kernel_memory
+		else if (fn == 0x01) ctx.v0 = freeKernelMemory(ctx);
+		else if (fn >= 0x02 && fn <= 0x06) ctx.v0 = KTimers.call(ctx, fn);
+		else if (fn == 0x0E) ctx.v0 = KThreads.openTh(ctx, ctx.a0, ctx.a1, ctx.a2);
+		else if (fn == 0x0F) ctx.v0 = KThreads.closeTh(ctx, ctx.a0);
+		else if (fn == 0x10) ctx.v0 = KThreads.changeTh(ctx, ctx.a0);
+		else if (fn == 0x17) ctx.v0 = returnFromException();
+		else if (fn == 0x18) ctx.v0 = resetEntryInt();
+		else if (fn == 0x38) exitGame(ctx);
+		else if (fn == 0x3B) ctx.v0 = putcB0(ctx);
+		else if (fn == 0x3D) ctx.v0 = putcharB0(ctx);
+		else if (fn == 0x3F) ctx.v0 = putsB0(ctx);
+		else if (fn == 0x3A || fn == 0x3C) ctx.v0 = -1;             // getc/getchar: no input exists
+		else if (fn == 0x47) ctx.v0 = addDrv(ctx);
+		else if (fn == 0x48) ctx.v0 = delDrv(ctx);
+		else if (fn == 0x49) ctx.v0 = printDevices();
+		else if (fn == 0x54) ctx.v0 = lastError;
+		else if (fn == 0x55) ctx.v0 = lastError;
+		else if (fn == 0x56) ctx.v0 = KTables.c0Table();
+		else if (fn == 0x57) ctx.v0 = KTables.b0Table();
+		else if (fn == 0x59) ctx.v0 = testDevice(ctx);
+		else if (isSystemErrorB0(fn)) systemError(ctx, 0xB0, fn);
 		else reportCall(ctx, 0xB0, fn);
 	}
 
@@ -92,6 +135,25 @@ class Kernel {
 		if (fn == 0x02) ctx.v0 = enqIntRP(ctx);
 		else if (fn == 0x03) ctx.v0 = deqIntRP(ctx);
 		else if (fn == 0x0A) ctx.v0 = changeClearRCnt(ctx);
+		// The kernel's own installers. Under HLE the handlers they would install are native, so
+		// these are acknowledgements rather than no-ops: the thing they set up already exists.
+		else if (fn == 0x00) ctx.v0 = installed("EnqueueTimerAndVblankIrqs");
+		else if (fn == 0x01) ctx.v0 = installed("EnqueueSyscallHandler");
+		else if (fn == 0x06 || fn == 0x07) ctx.v0 = installed("exception handlers");
+		else if (fn == 0x09) ctx.v0 = installed("SysInitKernelVariables");
+		else if (fn == 0x0C) ctx.v0 = installed("InitDefInt");
+		else if (fn == 0x12) ctx.v0 = installed("InstallDevices");
+		else if (fn == 0x04) ctx.v0 = KEvents.freeSlotCount();
+		else if (fn == 0x05) ctx.v0 = 0;                            // get_free_TCB_slot
+		else if (fn == 0x08) ctx.v0 = sysInitMemory(ctx);
+		else if (fn == 0x0D) ctx.v0 = setIrqAutoAck(ctx);
+		else if (fn == 0x13) ctx.v0 = flushStdInOut();
+		else if (fn == 0x19) ioAbort(ctx);
+		else if (fn == 0x1A) ctx.v0 = setCardFindMode(ctx);
+		else if (fn == 0x1D) ctx.v0 = cardFindMode;
+		else if (fn == 0x1C) ctx.v0 = installed("AdjustA0Table");
+		else if (fn >= 0x0E && fn <= 0x11) ctx.v0 = 0;
+		else if (fn == 0x14) ctx.v0 = 0;
 		else reportCall(ctx, 0xC0, fn);
 	}
 
@@ -117,7 +179,184 @@ class Kernel {
 		return was;
 	}
 
-	static var clearRCnt:Array<Bool> = [true, true, true, true];
+	static var clearRCnt:Array<Bool>;
+
+	// ---- the rest of the surface ------------------------------------------------------------------
+
+	/**
+		What `_get_errno` reports.
+
+		Named `lastError` and not `errno`, which would be the obvious choice and does not compile:
+		`errno` is a *macro* in C's `<errno.h>` — `#define errno (*__error())` — so the generated
+		C++ expands it in the middle of a field declaration. A whole class of identifier is unsafe
+		this way, not just reserved words.
+	**/
+	public static var lastError = 0;
+
+	/**
+		Addresses that psx-spx lists as "returns 0".
+
+		Real entries in the table that do nothing, kept apart from the ones we simply have not
+		written: a game calling one of these is getting the hardware's answer, not a stub's.
+	**/
+	static function returnsZero(fn:Int):Bool {
+		return (fn >= 0x57 && fn <= 0x5A) || (fn >= 0x73 && fn <= 0x77)
+			|| (fn >= 0x79 && fn <= 0x7B) || fn == 0x7D || fn == 0x7F;
+	}
+
+	static function isSystemErrorB0(fn:Int):Bool {
+		return (fn >= 0x1A && fn <= 0x1F) || (fn >= 0x21 && fn <= 0x23)
+			|| fn == 0x2A || fn == 0x2B || fn == 0x52 || fn == 0x5A;
+	}
+
+	/**
+		The BIOS error handler.
+
+		On hardware it prints and hangs the machine. Reporting and continuing is more useful during
+		bring-up and cannot be less correct — a game that reaches it has already gone wrong, and
+		hanging would only hide whatever it does next.
+	**/
+	static function systemError(ctx:CpuState, vector:Int, fn:Int):Void {
+		Runtime.reportOnce(0x5D000000 | (vector << 8) | fn,
+			"SystemError via " + vectorName(vector) + "(" + hex2(fn) + ")");
+	}
+
+	static function exitGame(ctx:CpuState):Void {
+		Runtime.note("the game called exit(" + ctx.a0 + ")");
+		Backend.requestQuit();
+	}
+
+	/**
+		The GPU helpers, A0(46h..4Eh).
+
+		They are thin: the kernel writes a word to a GPU port and returns. Written through the
+		memory map rather than to a GPU object, so the moment the GPU register file exists these
+		start working with no change here — and until then the unimplemented-register report says
+		exactly which port a game wanted.
+	**/
+	static inline var GP0 = 0x1F801810;
+	static inline var GP1 = 0x1F801814;
+
+	static function gpuHelper(ctx:CpuState, fn:Int):Void {
+		if (fn == 0x48) Memory.write32(GP1, ctx.a0);                // SendGP1Command
+		else if (fn == 0x49) Memory.write32(GP0, ctx.a0);           // GPU_cw
+		else if (fn == 0x4A) sendWords(ctx.a0, ctx.a1);             // GPU_cwp
+		else if (fn == 0x4D) ctx.v0 = Memory.read32(GP1);           // GetGPUStatus
+		else if (fn == 0x4E) ctx.v0 = 0;                            // gpu_sync: drawing is instant
+		else reportCall(ctx, 0xA0, fn);
+	}
+
+	static function sendWords(src:Int, count:Int):Void {
+		var i = 0;
+		while (i < count) {
+			Memory.write32(GP0, Memory.read32(src + (i << 2)));
+			i++;
+		}
+	}
+
+	static function freeKernelMemory(ctx:CpuState):Int {
+		KHeap.free(ctx.a0);
+		return 0;
+	}
+
+	static function cdDeviceInit():Int {
+		noteOnce(0xA0054, "A0(54h) _96_init — CD device registered, but there is no disc layer");
+		return 0;
+	}
+
+	/** `ReturnFromException` — a marker. Under HLE the handler simply returned to its caller. */
+	static function returnFromException():Int {
+		return 0;
+	}
+
+	static function resetEntryInt():Int {
+		hookEntryInt = 0;
+		return 0;
+	}
+
+	static function putcB0(ctx:CpuState):Int {
+		KLib.putchar(ctx.a0);
+		return ctx.a0 & 0xFF;
+	}
+
+	static function putcharB0(ctx:CpuState):Int {
+		KLib.putchar(ctx.a0);
+		return ctx.a0 & 0xFF;
+	}
+
+	static function putsB0(ctx:CpuState):Int {
+		KLib.puts(ctx.a0);
+		return 0;
+	}
+
+	/**
+		`AddDrv` / `DelDrv` — the device table.
+
+		Games install drivers for the CD and the memory card. The structures are theirs and stay in
+		their memory; what the kernel owns is the list, and a count is enough to answer `testdevice`
+		honestly until the device layers exist.
+	**/
+	static var drivers = 0;
+
+	static function addDrv(ctx:CpuState):Int {
+		drivers++;
+		noteOnce(0xB0047, "B0(47h) AddDrv — a game installed its own device driver");
+		return 1;
+	}
+
+	static function delDrv(ctx:CpuState):Int {
+		if (drivers > 0) drivers--;
+		else {}
+		return 1;
+	}
+
+	static function printDevices():Int {
+		Runtime.note("installed devices: tty, and " + drivers + " the game added");
+		return 0;
+	}
+
+	static function testDevice(ctx:CpuState):Int {
+		return 0;
+	}
+
+	static function sysInitMemory(ctx:CpuState):Int {
+		KHeap.init(ctx.a0, ctx.a1);
+		return 0;
+	}
+
+	/** `SetIrqAutoAck(irq, flag)` — whether the kernel acknowledges a line on the game's behalf. */
+	static var autoAck:Array<Bool>;
+
+	static function setIrqAutoAck(ctx:CpuState):Int {
+		final irq = ctx.a0;
+		if (irq < 0 || irq >= 11) return 0;
+		else {}
+		final was = autoAck[irq] ? 1 : 0;
+		autoAck[irq] = ctx.a1 != 0;
+		return was;
+	}
+
+	static function flushStdInOut():Int {
+		KLib.flushTty();
+		return 0;
+	}
+
+	static function ioAbort(ctx:CpuState):Void {
+		Runtime.reportOnce(0x5D000001, "_ioabort — the kernel gave up on an I/O operation");
+	}
+
+	static var cardFindMode = 0;
+
+	static function setCardFindMode(ctx:CpuState):Int {
+		final was = cardFindMode;
+		cardFindMode = ctx.a0;
+		return was;
+	}
+
+	static function installed(what:String):Int {
+		Runtime.noteOnce(0x5E000000 + what.length, what + " — already native under HLE");
+		return 0;
+	}
 
 	// ---- devices ---------------------------------------------------------------------------------
 

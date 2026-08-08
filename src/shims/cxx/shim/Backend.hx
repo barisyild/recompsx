@@ -49,6 +49,12 @@ class Backend {
 	public static inline function padType(pad:Int):Int return BackendNative.bp_pad_type(pad);
 	public static inline function padButtons(pad:Int):Int return cast BackendNative.bp_pad_buttons(pad);
 	public static inline function padAxis(pad:Int, axis:Int):Int return BackendNative.bp_pad_axis(pad, axis);
+	public static inline function requestQuit():Void {
+		quitting = true;
+	}
+
+	static var quitting = false;
+
 	public static inline function quitRequested():Bool return BackendNative.bp_quit_requested() != 0;
 
 	public static inline function storageRead(name:String, buf:RawBuf, len:Int):Int

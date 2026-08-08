@@ -55,6 +55,10 @@ class Backend {
 	public static function padType(pad:Int):Int return pad == 0 ? 1 : 0;
 	public static function padButtons(pad:Int):Int return 0;
 	public static function padAxis(pad:Int, axis:Int):Int return 0x80;
+	public static function requestQuit():Void {
+		quit = true;
+	}
+
 	public static function quitRequested():Bool return quit;
 
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int return -1;
