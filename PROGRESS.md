@@ -435,6 +435,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [opus] DMA channel 2 was the render blocker, not the CD: Psy-Q draws through ordering
+  tables, so every display list went into an unimplemented register. With DMA + a minimal
+  rasteriser the path is proven end to end — 23 draw commands became 544, 261,121 pixels reached
+  VRAM. The frame dumps uniformly black: the only primitive Crash Bash sends is a screen clear,
+  because CdInit still fails. 14 CD candidates now eliminated by measurement. Final trace fact:
+  every CD register access is [poll], never [handler] — libcd drives the drive entirely from
+  ordinary code. NEXT: DuckStation register-breakpoint capture, diffed against our cd# trace.
+
 2026-08-08 [opus] CD dialogue fully traced: Getstat and Init both complete correctly, libcd acks
   both, then loops the whole init forever. Delivery/ordering/ack all proven working. Tell: libcd
   never reads the response FIFO — so the suspect is 1F801800's status bits, which it does read.

@@ -248,7 +248,10 @@ class Cdrom {
 	/** 1F801803 reads the interrupt enable on index 0 and the pending flags on index 1. */
 	static function read1803():Int {
 		final v = (index & 1) == 0 ? irqEnable | 0xE0 : currentInt | 0xE0;
-		tnote("r 1803." + index + " -> " + v);
+		// Whether this read is the handler's or the driver's own poll is the whole question: if a
+		// handler acknowledges before CdSync gets to look, CdSync sees an idle controller and
+		// reports the interrupt never came.
+		tnote("r 1803." + index + " -> " + v + (Irq.dispatching() ? " [handler]" : " [poll]"));
 		return v;
 	}
 
@@ -294,7 +297,8 @@ class Cdrom {
 	}
 
 	static function acknowledge(v:Int):Void {
-		tnote("ack " + v + " (int was " + currentInt + ")");
+		tnote("ack " + v + " (int was " + currentInt + ")"
+			+ (Irq.dispatching() ? " [handler]" : " [poll]"));
 		if ((v & 0x40) != 0) paramCount = 0;
 		else {}
 		if ((v & 0x07) == 0) return;
