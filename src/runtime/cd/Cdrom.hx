@@ -29,6 +29,10 @@ import shim.RawMem;
 **/
 class Cdrom {
 	// Latencies, in CPU cycles. docs/specs/runtime.md §7.7.
+	// psx-spx's measured figure. Shortening it to 1500 was tried, on the theory that libcd polls
+	// the flag register twice and gives up before a millisecond-and-a-half answer arrives; it
+	// changed nothing, so the sourced number stays. An unsourced constant that fixes nothing is
+	// strictly worse than a sourced one that fixes nothing.
 	static inline var ACK = 50000;
 	static inline var SEEK_BASE = 564480;
 	static inline var INIT_TIME = 2000000;
