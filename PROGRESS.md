@@ -216,12 +216,32 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         `FnTable.cpp` does include that header, and clang's own LLVM IR for the function contains
         a genuine `switch` — so the label is not being lost between C++ and machine code either.
 
-        Everything from the Haxe source down to the IR is correct, the first dispatch still
-        misses a present label, and the same generated Haxe is right on JavaScript. The next
-        probe has to go below the source: single-step the failing call in a debugger, or dump the
-        jump table clang emitted for that switch. This is now a genuine compiler-or-ABI question
-        rather than anything the generator controls, and it is the last thing standing between
-        M1.5 and a C++ build that behaves like the JavaScript one.
+        Going below the source found it, and it is far worse than the symptom suggested.
+
+        **86% of the switch-case bodies in the generated C++ are empty.** In shard 4 alone,
+        1119 of 1296 `case` blocks compile down to a bare `break;`. The generated Haxe has the
+        real instructions in them:
+
+            case 0: // 0x8002e7b0
+                ctx.v0 = 0x80070000;
+                ctx.v0 = (ctx.v0 + -5648) | 0;
+
+        and the emitted C++ for the same case is `case 0: { break; }`. JavaScript keeps them.
+        This is the sibling of upstream defect 8 — statements deleted from a branch body — but in
+        switch cases rather than `if` bodies, so the fix in patch 0002 does not cover it.
+
+        The dispatch failure was only the first visible consequence: with most bodies gone, clang
+        sees a 91-case switch whose arms are largely indistinguishable, folds it to a 13-comparison
+        tree with no jump table, and `case 14` is simply not in the compiled code — the branch
+        goes 13, then 15, then default. That is why `entry saw 14` and the switch still missed it.
+
+        **Open question to settle first:** whether `-D analyzer-optimize`, made mandatory in this
+        same session, causes or merely exposes this. The dispatch failure predates the flag, so
+        the deletion probably does too, but that has not been measured — build the game C++ with
+        and without it and count empty case blocks. Whichever way it lands, the answer is a spike:
+        a function with a `while(true) switch(bb)` whose cases assign to a field, compiled both
+        ways, digest-compared. That shape is the core of every recompiled function, so nothing
+        about the C++ target can be trusted until it is fixed.
 
 ## [M0-VERIFY] checklist
 

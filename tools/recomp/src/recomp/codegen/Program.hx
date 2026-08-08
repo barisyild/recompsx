@@ -70,6 +70,7 @@ class Program {
 		buf.add('\t\temulated memory turns into a call without any function value existing.\n');
 		buf.add('\t**/\n');
 		buf.add('\tpublic static function dispatch(slot:Int, ctx:CpuState):Void {\n');
+		buf.add('\t\tRuntime.lastSlot = slot;\n');
 		buf.add('\t\tswitch (slot) {\n');
 		for (i in 0...shard.functions.length) {
 			buf.add('\t\t\tcase $i: ${shard.functions[i].name}(ctx);\n');

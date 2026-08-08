@@ -33,6 +33,9 @@ class Runtime {
 	**/
 	public static var dispatches = 0;
 
+	/** The slot value a shard's dispatcher was handed, observed at entry, before its switch. */
+	public static var lastSlot = -999;
+
 	static final reported:Map<Int, Bool> = new Map();
 
 	/**
@@ -72,7 +75,7 @@ class Runtime {
 	**/
 	public static function badHandle(ctx:CpuState, where:String, shard:Int, slot:Int):Void {
 		Backend.fatal("recompsx: " + where + " dispatch fell through for shard " + shard
-			+ " slot " + slot + " on dispatch #" + dispatches
+			+ " slot " + slot + " (entry saw " + lastSlot + ") on dispatch #" + dispatches
 			+ ", which should exist. This is a code-generation defect.");
 	}
 
