@@ -1,5 +1,7 @@
 package shim;
 
+import shim.RawBuf;
+
 import cxx.CArray;
 import cxx.Ptr;
 import cxx.Stdlib;
@@ -25,32 +27,32 @@ import cxx.num.Int16;
 class RawMem {
 	/** Allocates a zero-filled buffer. Zero-filled matters: emulated state must never start from
 	    host garbage, or determinism is gone before the first instruction runs. */
-	public static function alloc(size:Int):CArray<UInt8> {
-		final m:CArray<UInt8> = Stdlib.ccast(Stdlib.malloc(size));
+	public static function alloc(size:Int):RawBuf {
+		final m:RawBuf = Stdlib.ccast(Stdlib.malloc(size));
 		var i = 0;
 		while (i < size) { m[i] = 0; i++; }
 		return m;
 	}
 
-	public static function free(m:CArray<UInt8>):Void {
+	public static function free(m:RawBuf):Void {
 		Stdlib.free(Stdlib.ccast(m));
 	}
 
-	public static inline function get8(m:CArray<UInt8>, a:Int):Int return m[a];
-	public static inline function set8(m:CArray<UInt8>, a:Int, v:Int):Void m[a] = v & 0xFF;
+	public static inline function get8(m:RawBuf, a:Int):Int return m[a];
+	public static inline function set8(m:RawBuf, a:Int, v:Int):Void m[a] = v & 0xFF;
 
-	public static inline function get16(m:CArray<UInt8>, a:Int):Int
+	public static inline function get16(m:RawBuf, a:Int):Int
 		return get8(m, a) | (get8(m, a + 1) << 8);
 
-	public static inline function get32(m:CArray<UInt8>, a:Int):Int
+	public static inline function get32(m:RawBuf, a:Int):Int
 		return get8(m, a) | (get8(m, a + 1) << 8) | (get8(m, a + 2) << 16) | (get8(m, a + 3) << 24);
 
-	public static inline function set16(m:CArray<UInt8>, a:Int, v:Int):Void {
+	public static inline function set16(m:RawBuf, a:Int, v:Int):Void {
 		set8(m, a, v);
 		set8(m, a + 1, v >>> 8);
 	}
 
-	public static inline function set32(m:CArray<UInt8>, a:Int, v:Int):Void {
+	public static inline function set32(m:RawBuf, a:Int, v:Int):Void {
 		set8(m, a, v);
 		set8(m, a + 1, v >>> 8);
 		set8(m, a + 2, v >>> 16);
@@ -60,7 +62,7 @@ class RawMem {
 	/** Base pointer views, for handing buffers to the backend. On a big-endian host these will
 	    return a swizzled staging copy instead; that is the one place byte order is allowed to
 	    exist, and it stays here rather than leaking into any backend. */
-	public static inline function u16Ptr(m:CArray<UInt8>):Ptr<UInt16> return Stdlib.ccast(m.toPtr());
-	public static inline function s16Ptr(m:CArray<UInt8>):Ptr<Int16> return Stdlib.ccast(m.toPtr());
-	public static inline function u8Ptr(m:CArray<UInt8>):Ptr<UInt8> return m.toPtr();
+	public static inline function u16Ptr(m:RawBuf):Ptr<UInt16> return Stdlib.ccast(m.toPtr());
+	public static inline function s16Ptr(m:RawBuf):Ptr<Int16> return Stdlib.ccast(m.toPtr());
+	public static inline function u8Ptr(m:RawBuf):Ptr<UInt8> return m.toPtr();
 }

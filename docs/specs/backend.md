@@ -23,7 +23,8 @@ shim directory. No runtime code changes.
 | **Dreamcast** | KallistiOS | SH-4 | LE | 16 MB | Tightest memory budget; binary-search FnTable mandatory |
 | **GameCube / Wii** | devkitPPC + libogc | PowerPC | **BE** | 24 / 88 MB | The only current target needing the byteswap path in `RawMem` |
 | **Switch** | devkitA64 + libnx | ARM64 | LE | ample | |
-| **JVM family** | Haxe JVM target | — | — | ample | No C ABI at all: `JvmBackend` implements the same Haxe interface directly |
+| **JavaScript** | Haxe JS target + Node | — | — | ample | **The development and verification target (ADR-0003).** No C ABI: `shim.Backend` is pure Haxe. Node-headless today; a browser backend needs the main loop inverted (`stepFrame()` driven by the platform) since a browser cannot block in `while (!quit)` |
+| **JVM family** | Haxe JVM target | — | — | ample | No C ABI either; same shape as the JS shim |
 
 Consequences captured in the design:
 

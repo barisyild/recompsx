@@ -1,0 +1,12 @@
+# build/js-demo.hxml — the same runtime, compiled to JavaScript.
+# Run from the repository root:  haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300
+#
+# The JS target is where the emulator is developed and verified: Haxe's JS backend is mature and
+# correct, the edit-run loop is seconds long, and its digest is the reference the C++ build must
+# reproduce. The project is still SHAPED for reflaxe.CPP — the portable subset and every
+# constraint in ADR-0002 apply here too, even where JavaScript would not require them.
+-cp src/runtime
+-cp src/shims/js
+-main Main
+-js out/_demo/js/demo.js
+-dce full

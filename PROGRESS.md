@@ -2,17 +2,20 @@
 
 ## Status snapshot
 
-Phase: **M0 in progress — 0.1 through 0.4 done.** Process docs and specs are committed; the
-pinned toolchain (Haxe 4.3.7 + Neko, project-local) is installed and the vendored reflaxe pair is
-pinned as submodules; the `[M0-VERIFY]` checklist has been executed with the answers recorded
-below; a two-module reflaxe.CPP program and a behavior-verification spike both compile to C++17
-and run. `./scripts/spike.sh` re-runs both.
+Phase: **M0 complete.** Toolchain pinned, specs committed, walking skeleton running on two
+targets, and cross-target determinism verified — `./scripts/test.sh` builds the JavaScript and
+the reflaxe.CPP builds and asserts their headless digests match (currently `329de455` over 300
+frames). The windowed SDL2 build presents a gradient at 60 Hz.
 
-Two findings changed the design and are captured in ADR-0002: memory accessors must be **static**
-methods (inlined instance methods do not compile in reflaxe.CPP), and the function table stores
-**integer handles** dispatched through generated switches (function values are heap-allocated
-`std::function` and their arrays do not compile). Remaining in M0: the SDL2 backend shim and the
-headless hash runner.
+Three decisions came out of M0, all forced by measurement rather than preference:
+- **ADR-0002**: memory accessors are static methods, and the function table stores integer
+  handles — inlined instance methods and arrays of function values do not compile.
+- **ADR-0003**: develop on JavaScript, design for reflaxe.CPP. reflaxe.CPP was caught silently
+  deleting `if` statements, including guard clauses, in code that then takes the wrong path.
+  Haxe's own targets are correct on identical source. JS is the reference; every reflaxe.CPP
+  constraint still applies everywhere.
+- `IntMath.div` and `IntMath.mul` are mandatory: `/` on Ints yields Float, and `*` loses low bits
+  on JS above 2^53. The first cross-target comparison diverged for exactly that reason.
 
 Scope reminders that shape every decision: **all PS1 games are the target** (Crash Bash is the
 bring-up vehicle, Spyro 3 demo is the anti-overfitting check), and **consoles are the
@@ -20,14 +23,13 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
 
 ## Next up (ordered)
 
-1. **M0.5** — write `src/backend/api/backend_c_api.h`, `src/backend/pc/backend_sdl2.c` and
-   `src/backend/pc/main_pc.c` (we own `main` — see [M0-VERIFY] #16); `src/shims/cxx/RawMem.hx` +
-   `BackendNative.hx`; a `runtime.Main` that fills VRAM with a gradient and presents it. Add the
-   real CMake template — it must exclude the generated `_main_.cpp` and pass `-fwrapv`.
-2. **M0.6** — null backend + `--headless-hash 600`; assert the digest is identical across two
-   runs; wire it into `scripts/test.sh`.
-3. **M1** — start the tool: PS-EXE loader first, then the R3000A decoder with golden fixtures.
-   The Crash Bash and Spyro 3 headers recorded in `games/*/notes.md` are the first real test data.
+1. **M1** — the recompiler tool, developed against `haxe --interp` (no target constraints):
+   PS-EXE loader first, verified against the Crash Bash and Spyro 3 headers already recorded in
+   `games/*/notes.md`; then the R3000A decoder with golden disassembly fixtures.
+2. **M1** cont. — BIN/CUE + ISO9660 + `filesDir` loaders, then function discovery and the
+   coverage report. Acceptance needs a coverage percentage for both game executables.
+3. Report the reflaxe.CPP defects upstream (issues, with the minimal repros already in
+   `tests/spike/{ifdrop,guard}`). Cheap, and the fixes benefit us directly.
 
 ## Milestones
 
@@ -52,8 +54,16 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         `include/<Module>.h` + `src/<Module>.cpp` per class + `src/_main_.cpp` +
         `_GeneratedFiles.json`, as predicted. CMake template deferred to 0.5, where it has a
         real backend to link.
-  - [ ] 0.5 SDL window test pattern — accept: runtime.Main draws gradient VRAM via bp_present
-  - [ ] 0.6 headless hash mode — accept: `run-pc.sh demo --headless-hash 600` stable across two runs
+  - [x] 0.5 SDL window test pattern — accept: runtime.Main draws gradient VRAM via bp_present
+        ✔ 2026-08-08. Evidence: `./scripts/run-pc.sh _demo` presented 3547 frames of the gradient
+        with the moving marker before the window was closed. The chain Haxe → reflaxe.CPP →
+        backend_c_api.h → SDL2 carries pixels end to end.
+  - [x] 0.6 headless hash mode — accept: digest stable across two runs ✔ 2026-08-08
+        Evidence: `--headless-hash 300` printed `digest=329de455` on both runs; `--headless-hash
+        30` printed `ca3afab5`, so the digest tracks content rather than being constant.
+  - [x] 0.7 (added) cross-target parity — accept: JS and C++ digests agree ✔ 2026-08-08
+        Evidence: `./scripts/test.sh` → "both targets agree — 329de455". The first attempt
+        diverged (js=1370700c) and found a real bug in our FNV-1a; see ADR-0003.
 - [ ] **M1 (L)**: tool — PS-EXE / CUE-BIN / filesDir loaders, ISO9660, overlay extraction, R3000A
       disasm, CFG/function discovery, jump tables, coverage report — accept: golden disasm tests
       green; coverage % printed for the Crash Bash main exe *and* the Spyro 3 demo exe
@@ -154,6 +164,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] M0 COMPLETE. Backend ABI + SDL2 + our own main; shim/{RawBuf,RawMem,IntMath,
+  Backend}; runtime/{Main,core.Hash,gpu.Vram}; CMake template; scripts/{build-pc,run-pc,test}.sh.
+  Found reflaxe.CPP silently deleting `if` statements (guard clauses run the WRONG path) -> added
+  the JS target and made it the reference (ADR-0003). Cross-target digests now agree: 329de455.
+  Next: M1, the recompiler tool, starting with the PS-EXE loader.
 2026-08-08 [claude] M0.2-0.4 done: pinned toolchain installed (Haxe 4.3.7 universal, no Rosetta),
   reflaxe pair pinned as submodules, [M0-VERIFY] executed via tests/spike/*. Two findings forced
   design changes (ADR-0002): static memory accessors, integer-handle dispatch. Haxe 5 confirmed

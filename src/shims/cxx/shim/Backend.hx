@@ -1,5 +1,7 @@
 package shim;
 
+import shim.RawBuf;
+
 import cxx.CArray;
 import cxx.ConstCharPtr;
 import cxx.num.UInt8;
@@ -34,10 +36,10 @@ class Backend {
 	public static inline function arg(i:Int):String return BackendNative.bp_arg(i).toString();
 
 	/** `vram` is the whole 1024x512 halfword buffer; the rectangle selects what to show. */
-	public static inline function present(vram:CArray<UInt8>, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void
+	public static inline function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void
 		BackendNative.bp_present(RawMem.u16Ptr(vram), sx, sy, sw, sh, flags);
 
-	public static inline function audioPush(frames:CArray<UInt8>, frameCount:Int):Void
+	public static inline function audioPush(frames:RawBuf, frameCount:Int):Void
 		BackendNative.bp_audio_push(RawMem.s16Ptr(frames), frameCount);
 
 	public static inline function audioBuffered():Int return BackendNative.bp_audio_buffered();
@@ -49,10 +51,10 @@ class Backend {
 	public static inline function padAxis(pad:Int, axis:Int):Int return BackendNative.bp_pad_axis(pad, axis);
 	public static inline function quitRequested():Bool return BackendNative.bp_quit_requested() != 0;
 
-	public static inline function storageRead(name:String, buf:CArray<UInt8>, len:Int):Int
+	public static inline function storageRead(name:String, buf:RawBuf, len:Int):Int
 		return BackendNative.bp_storage_read(ConstCharPtr.fromString(name), RawMem.u8Ptr(buf), len);
 
-	public static inline function storageWrite(name:String, buf:CArray<UInt8>, len:Int):Int
+	public static inline function storageWrite(name:String, buf:RawBuf, len:Int):Int
 		return BackendNative.bp_storage_write(ConstCharPtr.fromString(name), RawMem.u8Ptr(buf), len);
 
 	public static inline function fileOpen(slot:Int, path:String):Int
@@ -60,7 +62,7 @@ class Backend {
 
 	public static inline function fileSize(slot:Int):Int return BackendNative.bp_file_size(slot);
 
-	public static inline function fileRead(slot:Int, offset:Int, buf:CArray<UInt8>, len:Int):Int
+	public static inline function fileRead(slot:Int, offset:Int, buf:RawBuf, len:Int):Int
 		return BackendNative.bp_file_read(slot, offset, RawMem.u8Ptr(buf), len);
 
 	public static inline function fileClose(slot:Int):Void BackendNative.bp_file_close(slot);

@@ -11,16 +11,27 @@ game whose failures drive the work order. Nothing game-specific ever goes in too
 src/runtime; per-game facts live in games/<id>/game.json (+ syms.txt, notes.md). If a fix would
 only work for one game, it belongs in config, not in code.
 
-**Platforms: PC first, consoles are the point.** macOS/SDL2 now; PS2 and derivatives (PSP,
-Dreamcast, GameCube/Wii, Switch) and JVM targets follow by implementing one C header
-(src/backend/api/backend_c_api.h) plus one shim directory. Target matrix, memory budgets and
-byte-order rules: docs/specs/backend.md §0. Never let platform assumptions leak into
-src/runtime — that is what the backend ABI and src/shims exist to prevent.
+**Platforms: consoles are the point.** PS2 and derivatives (PSP, Dreamcast, GameCube/Wii,
+Switch) plus JVM follow by implementing one C header (src/backend/api/backend_c_api.h) and one
+shim directory. Target matrix, memory budgets and byte-order rules: docs/specs/backend.md §0.
+Never let platform assumptions leak into src/runtime — that is what the backend ABI and
+src/shims exist to prevent.
+
+**Develop on JS, design for reflaxe.CPP (ADR-0003).** Write and verify emulator logic against
+the JavaScript build: its compiler is mature, its loop is seconds long, and it is the reference
+when targets disagree. But shape everything as if reflaxe.CPP is the only target, because for
+consoles it is — take none of JavaScript's freedoms. `scripts/test.sh` builds both and compares
+digests; a mismatch is either a portability leak of ours or an upstream miscompilation.
 
 ## Golden rules
 1. Portable subset in src/runtime, src/shims, shared/, generated code: NO Float/Single, no
    Dynamic, no reflection, no anon structs, no closures in hot paths, no exceptions, no
    allocation after init, I64 abstract for 64-bit. `scripts/check.sh` enforces what grep can.
+   Arithmetic: never `a / b` on Ints (yields Float) and never `a * b` where the product can
+   exceed 31 bits (loses low bits on JS) — use `IntMath.div` / `IntMath.mul`.
+   Control flow: no guard clauses (`if (c) { ...; return; }`), no ternaries or nested branches
+   inside loop bodies — reflaxe.CPP silently DELETES these. See PROGRESS.md upstream defect 8;
+   `scripts/spike.sh` reports if upstream ever fixes it.
 2. reflaxe.CPP only — never hxcpp, never system Haxe. Pinned toolchain: `source scripts/env.sh`.
 3. Determinism is sacred: bp_time_us is pacing-only; all state zero-initialized; no host
    float/rand/iteration-order may reach emulated state.
@@ -33,18 +44,18 @@ src/runtime — that is what the backend ABI and src/shims exist to prevent.
 ## Commands
     ./scripts/setup.sh              # once: toolchain + submodules + haxelib dev
     source scripts/env.sh           # every shell
-    ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)
+    ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)            [from M1]
     ./scripts/build-pc.sh crashbash # cmake+ninja
     ./scripts/run-pc.sh crashbash [--headless-hash 600]
-    ./scripts/test.sh               # tool tests (interp) + runtime tests (native)   [from M1]
-    ./scripts/spike.sh              # reflaxe.CPP behavior regression — run after pin changes
+    ./scripts/test.sh               # THE gate: spikes + JS digest + C++ digest must agree
+    ./scripts/spike.sh              # reflaxe.CPP behaviour regression — run after pin changes
     ./scripts/check.sh              # discipline gate — run before EVERY commit
-
-Commands marked [from M1] arrive with the milestone that needs them; setup/env/spike/check work now.
+    haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300   # fast inner loop
+    ./scripts/build-pc.sh _demo && ./scripts/run-pc.sh _demo                   # windowed
 
 ## Directory map
 tools/recomp (tool) · shared/psxdisc (disc model, portable) · src/runtime (core) ·
-src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,jvm} (RawMem/I64/externs) ·
+src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,js} (RawBuf/RawMem/IntMath/Backend) ·
 games/<id> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
 docs/{architecture.md,specs,decisions} · vendor/{reflaxe,reflaxe.CPP} (pinned submodules) ·
 build/ (hxml) · scripts/

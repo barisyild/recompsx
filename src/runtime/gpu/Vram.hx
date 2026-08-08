@@ -1,8 +1,7 @@
 package gpu;
 
-import cxx.CArray;
-import cxx.num.UInt8;
 import shim.IntMath;
+import shim.RawBuf;
 import shim.RawMem;
 
 /**
@@ -18,7 +17,7 @@ class Vram {
 	public static inline var HEIGHT = 512;
 	public static inline var BYTES  = WIDTH * HEIGHT * 2;
 
-	public static var data:CArray<UInt8>;
+	public static var data:RawBuf;
 
 	public static function init():Void {
 		data = RawMem.alloc(BYTES);

@@ -29,6 +29,12 @@ class IntMath {
 	public static inline function mod(a:Int, b:Int):Int
 		return untyped __cpp__("(({0}) % ({1}))", a, b);
 
+	/** 32-bit wrapping multiply. Plain `a * b` is already correct here under `-fwrapv`, but the
+	    JS target needs `Math.imul` to avoid losing low bits above 2^53. Callers use `IntMath.mul`
+	    on both targets so the two cannot drift apart. */
+	public static inline function mul(a:Int, b:Int):Int
+		return untyped __cpp__("(int)((int32_t)({0}) * (int32_t)({1}))", a, b);
+
 	/** Truncating division by a power of two behaves differently from a shift for negative
 	    numbers (`-1 / 2 == 0`, but `-1 >> 1 == -1`). Named so the choice is visible at the
 	    call site rather than implied. */

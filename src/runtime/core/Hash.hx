@@ -1,7 +1,7 @@
 package core;
 
-import cxx.CArray;
-import cxx.num.UInt8;
+import shim.IntMath;
+import shim.RawBuf;
 import shim.RawMem;
 
 /**
@@ -16,8 +16,12 @@ class Hash {
 	public static inline var FNV_OFFSET = 0x811C9DC5;
 	static inline var FNV_PRIME = 16777619;
 
+	// IntMath.mul, not `*`. FNV-1a is defined on a 32-bit wrapping multiply; plain `*` wraps
+	// correctly in C++ under -fwrapv but silently loses low bits in JavaScript once the exact
+	// product passes 2^53, so the two targets computed different digests for identical input.
+	// Caught by comparing them — which is the whole reason for keeping both.
 	public static inline function byte(h:Int, b:Int):Int
-		return (h ^ (b & 0xFF)) * FNV_PRIME;
+		return IntMath.mul(h ^ (b & 0xFF), FNV_PRIME);
 
 	public static inline function word(h:Int, w:Int):Int {
 		var acc = byte(h, w);
@@ -27,7 +31,7 @@ class Hash {
 	}
 
 	/** Hashes `len` bytes starting at `offset`. */
-	public static function region(h:Int, m:CArray<UInt8>, offset:Int, len:Int):Int {
+	public static function region(h:Int, m:RawBuf, offset:Int, len:Int):Int {
 		var acc = h;
 		var i = 0;
 		while (i < len) {
@@ -40,7 +44,7 @@ class Hash {
 	/** Hashes a rectangle of a halfword buffer with a row pitch — the shape a framebuffer has.
 	    Hashing only the visible rectangle, rather than all of VRAM, keeps the digest meaningful:
 	    it changes when the picture changes, not when scratch areas do. */
-	public static function rect(h:Int, m:CArray<UInt8>, pitchHalfwords:Int, x:Int, y:Int, w:Int, hgt:Int):Int {
+	public static function rect(h:Int, m:RawBuf, pitchHalfwords:Int, x:Int, y:Int, w:Int, hgt:Int):Int {
 		var acc = h;
 		var row = 0;
 		while (row < hgt) {
