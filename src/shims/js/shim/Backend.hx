@@ -62,7 +62,12 @@ class Backend {
 	public static function quitRequested():Bool return quit;
 
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int return -1;
-	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int return -1;
+	/** Writes a blob beside the program. Used by the VRAM dump, which is how a frame is looked at. */
+	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int {
+		js.Syntax.code("require('fs').writeFileSync({0}, Buffer.from({1}.u8.buffer, 0, {2}))",
+			name, buf, len);
+		return 0;
+	}
 
 	// ---- file slots ---------------------------------------------------------------------------
 	//

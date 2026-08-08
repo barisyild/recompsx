@@ -565,7 +565,13 @@ class Kernel {
 		whether the machine is running a hundred frames a second or wedged in a spin. Every number
 		here is deterministic, so two runs that disagree have diverged.
 	**/
+	/** Set by a launcher that wants the first drawn frame written out. */
+	public static var vramDump = false;
+	static var dumped = false;
+
 	static function heartbeat(ctx:CpuState):Void {
+		if (vramDump && !dumped && gpu.Gpu.pixels > 0) takeFrame();
+		else {}
 		if (vblankCount % 60 != 0) return;
 		else {}
 		core.Runtime.note("frame " + vblankCount
@@ -575,9 +581,24 @@ class Kernel {
 			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list"
-			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c"
+			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
 			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
+	}
+
+	/**
+		Writes VRAM out once, the first time anything has been drawn into it.
+
+		A pixel counter says the rasteriser ran; only the bytes say what it drew. One megabyte,
+		1024x512 halfwords, exactly as `gpu.Vram` holds it — no conversion here, so what lands on
+		disc is the emulated framebuffer itself and any disagreement is the emulator's, not the
+		dumper's.
+	**/
+	static function takeFrame():Void {
+		dumped = true;
+		Backend.storageWrite("vram.bin", gpu.Vram.data, gpu.Vram.BYTES);
+		Runtime.note("wrote vram.bin at frame " + vblankCount + " — "
+			+ gpu.Gpu.pixels + " pixels from " + gpu.Gpu.primitives + " primitives");
 	}
 
 	// ---- syscall / break -------------------------------------------------------------------------

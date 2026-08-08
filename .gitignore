@@ -37,3 +37,4 @@ tests/spike/*/out/
 # V8 profiler output — diagnostic droppings, never history
 isolate-*.log
 *.heapsnapshot
+vram.bin

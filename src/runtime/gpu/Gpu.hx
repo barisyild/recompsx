@@ -67,10 +67,22 @@ class Gpu {
 	/** How many words of the command in progress are still expected. */
 	static var pending = 0;
 
+	/** The command word and its parameters, gathered until the packet is whole. */
+	static var packet:Array<Int>;
+	static var packetLen = 0;
+
+	/** Primitives actually rasterised, and pixels written. The proof a frame exists. */
+	public static var primitives(default, null) = 0;
+	public static var pixels(default, null) = 0;
+
 	public static function init():Void {
+		packet = [for (_ in 0...32) 0];
+		Vram.init();
 		reset();
 		wordsReceived = 0;
 		commandsReceived = 0;
+		primitives = 0;
+		pixels = 0;
 	}
 
 	/** GP1(00h). psx-spx: GPUSTAT becomes 14802000h, which is what these defaults produce. */
@@ -98,15 +110,194 @@ class Gpu {
 
 	public static function writeGp0(v:Int):Void {
 		wordsReceived++;
-		if (pending > 0) return consumeParameter();
+		if (pending > 0) return consumeParameter(v);
 		else {}
 		commandsReceived++;
+		packetLen = 0;
+		push(v);
 		command(v);
+		if (pending == 0) draw();
+		else {}
 	}
 
-	static function consumeParameter():Void {
+	static function consumeParameter(v:Int):Void {
+		push(v);
 		pending--;
+		if (pending == 0) draw();
+		else {}
 	}
+
+	static function push(v:Int):Void {
+		if (packetLen < 32) packet[packetLen] = v;
+		else {}
+		if (packetLen < 32) packetLen++;
+		else {}
+	}
+
+	/**
+		Turns a completed packet into pixels.
+
+		Flat and gouraud polygons, rectangles and the fill command, all untextured for now: a solid
+		triangle is what proves the path from a game's ordering table to VRAM is whole, and
+		texturing is a lookup added onto the same span loop afterwards.
+	**/
+	static function draw():Void {
+		final op = packet[0] >>> 24;
+		if (op >= 0x20 && op <= 0x3F) drawPolygon(op);
+		else if (op >= 0x60 && op <= 0x7F) drawRect(op);
+		else if (op == 0x02) drawFill();
+		else {}
+	}
+
+	static inline function colourOf(word:Int):Int {
+		// 24-bit BGR to the 15-bit word VRAM holds.
+		return ((word >>> 3) & 0x1F) | (((word >>> 11) & 0x1F) << 5) | (((word >>> 19) & 0x1F) << 10);
+	}
+
+	static inline function sx(word:Int):Int {
+		// 11-bit signed, plus the drawing offset.
+		return signed11(word & 0x7FF) + signed11(drawOffset & 0x7FF);
+	}
+
+	static inline function sy(word:Int):Int {
+		return signed11((word >>> 16) & 0x7FF) + signed11((drawOffset >>> 11) & 0x7FF);
+	}
+
+	static inline function signed11(v:Int):Int {
+		return (v & 0x400) != 0 ? v - 0x800 : v;
+	}
+
+	static function drawPolygon(op:Int):Void {
+		final gouraud = (op & 0x10) != 0;
+		final textured = (op & 0x04) != 0;
+		final quad = (op & 0x08) != 0;
+		final colour = colourOf(packet[0]);
+
+		// Vertex words sit at a fixed stride once the command word is past; with gouraud the
+		// first vertex's colour was the command word itself.
+		var i = 1;
+		final xs = [0, 0, 0, 0];
+		final ys = [0, 0, 0, 0];
+		final n = quad ? 4 : 3;
+		for (v in 0...n) {
+			if (gouraud && v > 0) i++;
+			xs[v] = sx(packet[i]);
+			ys[v] = sy(packet[i]);
+			i++;
+			if (textured) i++;
+		}
+		triangle(xs[0], ys[0], xs[1], ys[1], xs[2], ys[2], colour);
+		if (quad) triangle(xs[1], ys[1], xs[2], ys[2], xs[3], ys[3], colour);
+		else {}
+	}
+
+	static function drawRect(op:Int):Void {
+		final colour = colourOf(packet[0]);
+		final textured = (op & 0x04) != 0;
+		var i = 1;
+		final x = sx(packet[i]);
+		final y = sy(packet[i]);
+		i++;
+		if (textured) i++;
+		var w = 1;
+		var h = 1;
+		final size = (op >>> 3) & 3;
+		if (size == 0) { w = packet[i] & 0x3FF; h = (packet[i] >>> 16) & 0x1FF; }
+		else if (size == 2) { w = 8; h = 8; }
+		else if (size == 3) { w = 16; h = 16; }
+		else {}
+		fillRect(x, y, w, h, colour);
+		primitives++;
+	}
+
+	static function drawFill():Void {
+		final colour = colourOf(packet[0]);
+		final x = packet[1] & 0x3F0;
+		final y = (packet[1] >>> 16) & 0x1FF;
+		final w = ((packet[2] & 0x3FF) + 0xF) & ~0xF;
+		final h = (packet[2] >>> 16) & 0x1FF;
+		fillRect(x, y, w, h, colour);
+		primitives++;
+	}
+
+	/**
+		A solid triangle, by half-space test over its bounding box.
+
+		Not the fastest way and not the shape the final rasteriser will keep — a span walk with
+		incremental edge functions is — but it is the one whose correctness is obvious, which is
+		what a first render needs. Degenerate and oversized triangles are dropped exactly as the
+		hardware drops them: anything wider than 1023 or taller than 511 is not drawn at all.
+	**/
+	static function triangle(x0:Int, y0:Int, x1:Int, y1:Int, x2:Int, y2:Int, colour:Int):Void {
+		var minX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+		var maxX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+		var minY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+		var maxY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+		if (maxX - minX > 1023 || maxY - minY > 511) return;
+		else {}
+
+		final clip = clipBox();
+		if (minX < clipX0(clip)) minX = clipX0(clip);
+		else {}
+		if (minY < clipY0(clip)) minY = clipY0(clip);
+		else {}
+		if (maxX > clipX1(clip)) maxX = clipX1(clip);
+		else {}
+		if (maxY > clipY1(clip)) maxY = clipY1(clip);
+		else {}
+
+		final area = edge(x0, y0, x1, y1, x2, y2);
+		if (area == 0) return;
+		else {}
+		primitives++;
+		var y = minY;
+		while (y <= maxY) {
+			var x = minX;
+			while (x <= maxX) {
+				final w0 = edge(x1, y1, x2, y2, x, y);
+				final w1 = edge(x2, y2, x0, y0, x, y);
+				final w2 = edge(x0, y0, x1, y1, x, y);
+				if (inside(w0, w1, w2, area)) plot(x, y, colour);
+				else {}
+				x++;
+			}
+			y++;
+		}
+	}
+
+	static inline function inside(w0:Int, w1:Int, w2:Int, area:Int):Bool {
+		return area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0) : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+	}
+
+	static inline function edge(ax:Int, ay:Int, bx:Int, by:Int, cx:Int, cy:Int):Int {
+		return shim.IntMath.mul(bx - ax, cy - ay) - shim.IntMath.mul(by - ay, cx - ax);
+	}
+
+	static function fillRect(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
+		var j = 0;
+		while (j < h) {
+			var i = 0;
+			while (i < w) {
+				plot(x + i, y + j, colour);
+				i++;
+			}
+			j++;
+		}
+	}
+
+	static inline function plot(x:Int, y:Int, colour:Int):Void {
+		if (x >= 0 && x < 1024 && y >= 0 && y < 512) {
+			Vram.set(x, y, colour);
+			pixels++;
+		} else {}
+	}
+
+	// The draw area, packed as it arrives: X in bits 0..9, Y in 10..18.
+	static inline function clipBox():Int return 0;
+	static inline function clipX0(_:Int):Int return drawAreaTopLeft & 0x3FF;
+	static inline function clipY0(_:Int):Int return (drawAreaTopLeft >>> 10) & 0x1FF;
+	static inline function clipX1(_:Int):Int return drawAreaBottomRight & 0x3FF;
+	static inline function clipY1(_:Int):Int return (drawAreaBottomRight >>> 10) & 0x1FF;
 
 	/**
 		A GP0 command word.
