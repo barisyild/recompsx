@@ -16,12 +16,14 @@ import shim.Backend;
 **/
 class Runtime {
 	/** Set once by the generated program's own bootstrap; see `Runtime.bindDispatch`. */
-	static var dispatcher:Int -> CpuState -> Bool = null;
+	// Null<> is required, not decoration: reflaxe.CPP compiles with null-safety enforced, so a
+	// field that can be null has to say so.
+	static var dispatcher:Null<Int -> CpuState -> Bool> = null;
 
 	/** How many distinct unimplemented things have been reported, so a run can be judged. */
 	public static var reportedGaps(default, null) = 0;
 
-	static var reported:Map<Int, Bool> = new Map();
+	static final reported:Map<Int, Bool> = new Map();
 
 	/**
 		Connects the generated `FnTable` to the runtime.
@@ -42,8 +44,12 @@ class Runtime {
 		resident but was compiled separately.
 	**/
 	public static function call(ctx:CpuState, addr:Int):Void {
-		if (dispatcher != null && dispatcher(addr, ctx)) return;
-		reportOnce(addr, "no function at this address");
+		final d = dispatcher;
+		if (d != null && d(addr, ctx)) {
+			// Dispatched.
+		} else {
+			reportOnce(addr, "no function at this address");
+		}
 	}
 
 	/** A handle that named a shard or slot that does not exist — a generator bug, not a game one. */

@@ -45,6 +45,9 @@ class Shard {
 	diff of generated output becomes unreadable and incremental compilation rebuilds the world.
 **/
 class Shards {
+	// These were tuned against the C++ generator's stack-overflow limit and found not to matter:
+	// 25 functions per shard fails exactly as 120 does (PROGRESS.md M1.5). Kept at a size that
+	// produces a readable number of files, since that is the only thing they are known to affect.
 	/** Enough functions to keep the file count sane, few enough to keep each file compilable. */
 	static inline var MAX_FUNCTIONS = 120;
 

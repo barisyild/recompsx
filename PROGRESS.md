@@ -90,9 +90,29 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
         missing that was leaving two thirds of them unexplained.
   - [ ] BIN/CUE + ISO9660 + filesDir loaders, overlay extraction
   - [ ] syms.txt / .map import; optional Psy-Q signature naming (docs/specs/tool.md §2.1)
-- [ ] **M1.5 (M)**: scale spike — synthetic ~20k functions through emitter + reflaxe.CPP + clang;
-      accept: wall times, peak RSS and **binary size** recorded here, checked against the console
-      memory budgets in `docs/specs/backend.md` §0; mitigations chosen
+- [~] **M1.5 (M)**: scale spike — run early against the real game rather than a synthetic one,
+      because the real one was available. Findings 2026-08-08:
+
+      | Stage | Result |
+      |---|---|
+      | `recompsx gen` on Crash Bash | 861 functions, 11 files, **87,547 lines**, 0.9 s |
+      | Haxe typecheck | 0.95 s |
+      | Haxe → JavaScript | 3.7 s, 6.9 MB, **and it runs** |
+      | Haxe → C++ (reflaxe.CPP) | **fails: "Uncaught exception Stack overflow" after ~19 s** |
+
+      **The C++ target does not currently scale to a whole PS1 game.** Not fixed by raising the
+      OS stack to 64 MB (so it is Haxe's eval stack, not the process stack), nor by
+      `-D analyzer-optimize`, nor by cutting shards from 120 functions to 25 — which rules out
+      per-file size and points at either one large function's expression tree or something
+      global. 88 K lines is not a lot; this is a limit in a v0.1.0 compiler, not in the approach.
+
+      Next steps, in order: bisect to the function that triggers it (generate subsets until it
+      passes), then decide between fixing the recursion in our vendored fork and restructuring
+      what the emitter produces for very large functions.
+
+      This is the clearest vindication so far of developing on JavaScript (ADR-0003). A
+      C++-only project would be completely blocked at this milestone; instead the JS build runs
+      the recompiled game today and the compiler problem is a parallel task.
 - [ ] **M2 (L)**: codegen v1 + runtime skeleton + kernel-HLE TTY — accept: PSn00bSDK hello.exe
       prints through HLE putchar; amidog psxtest_cpu passes with a committed exclusion list
 - [ ] **M3 (M)**: GTE integer-exact — accept: amidog psxtest_gte pass recorded
@@ -221,6 +241,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Whole-program generation works: 861 Crash Bash functions -> 87.5 K lines of
+  Haxe in 0.9 s. The JS build links in 3.7 s and RUNS — recompiled startup code clears its BSS,
+  calls through several functions, and reaches A0(44h) FlushCache, COP0 SR access and GTE control
+  writes, all reported as unimplemented. The C++ build hits a stack overflow inside reflaxe.CPP
+  (M1.5 above); not caused by shard size, OS stack or the analyzer. Adopted `-D js-es=6` project
+  wide; measured `-D analyzer-optimize` as behaviour-preserving but currently worthless.
 
 2026-08-08 [claude] core.Ops (mult/div, hardware edge cases) + tests/conformance/Mul.hx. The test
   earned itself immediately: four successive formulations of div/divu were correct on JS and
