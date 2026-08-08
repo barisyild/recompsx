@@ -47,9 +47,19 @@ class Iso9660 {
 		Returns false rather than reporting a hard failure: a caller may reasonably try an image
 		path, find it is not one, and fall back to a directory.
 	**/
+	/**
+		Allocates the scratch sector, once, at boot.
+
+		Not lazily on first use: `RawBuf` is a value type on the C++ side, so it can never be null
+		and `if (buf == null)` does not compile there at all. Which is the rule this runtime already
+		has — nothing allocates after boot — arriving from a second direction.
+	**/
+	public static function init():Void {
+		sector = RawMem.alloc(RAW_SIZE);
+		mounted = false;
+	}
+
 	public static function mount(backendSlot:Int):Bool {
-		if (sector == null) sector = RawMem.alloc(RAW_SIZE);
-		else {}
 		slot = backendSlot;
 		mounted = false;
 		if (!detectLayout()) return false;
@@ -186,14 +196,19 @@ class Iso9660 {
 		if (recEnd != wantEnd) return false;
 		else {}
 		for (i in 0...recEnd) {
-			if (upper(RawMem.get8(sector, off + 33 + i)) != upper(name.charCodeAt(i))) return false;
+			// Compared as one-character strings rather than codes. `String.charCodeAt` on a String
+			// *parameter* does not survive reflaxe.CPP — it indexes to a `char` and then calls a
+			// method on it — though it compiles elsewhere, which is why this is a note here and not
+			// a blanket rule. Cold path anyway: a few name lookups per level.
+			if (upperChar(String.fromCharCode(RawMem.get8(sector, off + 33 + i)))
+					!= upperChar(name.charAt(i))) return false;
 			else {}
 		}
 		return true;
 	}
 
-	static inline function upper(c:Int):Int {
-		return (c >= 0x61 && c <= 0x7A) ? c - 0x20 : c;
+	static inline function upperChar(c:String):String {
+		return c.toUpperCase();
 	}
 
 	// ---- reading -----------------------------------------------------------------------------

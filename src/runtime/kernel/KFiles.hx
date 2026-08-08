@@ -98,6 +98,9 @@ class KFiles {
 		pos = [for (_ in 0...MAX_FD) 0];
 		lba = [for (_ in 0...MAX_FD) 0];
 		size = [for (_ in 0...MAX_FD) 0];
+		// Allocated here rather than on first read: RawBuf is a value type on C++ and cannot be
+		// null, so there is nothing to test for. Nothing allocates after boot in any case.
+		staging = RawMem.alloc(STAGING);
 		// The BIOS hands these out already open, as any C runtime expects.
 		kind[0] = DEV_TTY;   // stdin, which never has anything to give
 		kind[1] = DEV_TTY;   // stdout
@@ -313,8 +316,6 @@ class KFiles {
 	static inline var STAGING = 0x8000;
 
 	static function readDisc(fd:Int, dst:Int, len:Int):Int {
-		if (staging == null) staging = RawMem.alloc(STAGING);
-		else {}
 		if (slot[fd] < 0) return readFromImage(fd, dst, len);
 		else {}
 		var done = 0;
