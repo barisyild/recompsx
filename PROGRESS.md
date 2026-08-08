@@ -64,9 +64,19 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
   - [x] 0.7 (added) cross-target parity — accept: JS and C++ digests agree ✔ 2026-08-08
         Evidence: `./scripts/test.sh` → "both targets agree — 329de455". The first attempt
         diverged (js=1370700c) and found a real bug in our FNV-1a; see ADR-0003.
-- [ ] **M1 (L)**: tool — PS-EXE / CUE-BIN / filesDir loaders, ISO9660, overlay extraction, R3000A
-      disasm, CFG/function discovery, jump tables, coverage report — accept: golden disasm tests
-      green; coverage % printed for the Crash Bash main exe *and* the Spyro 3 demo exe
+- [~] **M1 (L)**: tool — loaders, disasm, discovery, coverage report
+  - [x] PS-EXE loader, R3000A decoder, disassembler — accept: golden tests green ✔ 2026-08-08
+  - [x] function discovery + CFG + coverage report — accept: coverage printed for both games
+        ✔ 2026-08-08. Crash Bash: 844 functions, 46,705 instructions, code ends at 0x8004c564,
+        **25.0% of the code region unreached**. Spyro 3 demo: 597 functions, 70,351 instructions,
+        **26.1% unreached**. The raw whole-image percentages (42.8% / 68.1%) differ only because
+        the games have different data/code ratios; the code-region figure is the comparable one,
+        and two unrelated engines agreeing at ~25% suggests it is the honest cost of static
+        analysis rather than a defect in ours. 134 tool tests green.
+  - [ ] jump-table recovery — the next lever: 55 computed jumps in Crash Bash currently fall back
+        to runtime dispatch, and resolving them statically should reach into that 25%
+  - [ ] BIN/CUE + ISO9660 + filesDir loaders, overlay extraction
+  - [ ] syms.txt / .map import; optional Psy-Q signature naming (docs/specs/tool.md §2.1)
 - [ ] **M1.5 (M)**: scale spike — synthetic ~20k functions through emitter + reflaxe.CPP + clang;
       accept: wall times, peak RSS and **binary size** recorded here, checked against the console
       memory budgets in `docs/specs/backend.md` §0; mitigations chosen
@@ -187,6 +197,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] M1 analysis: Image/Func/Discovery/Coverage + the analyze command. Runs on both
+  real games. Building the tests found a real CFG bug — blocks overlapped because a later backward
+  branch can make an address inside an already-traced run a leader, so tracing is now two passes
+  (reachability + leaders, then cut). Instruction counts dropped 57k->47k accordingly while
+  coverage held, which is exactly the signature of removing double-counting. Also answered the
+  Psy-Q version question in docs/specs/tool.md §2.1: no per-version abstraction needed, because we
+  recompile library code rather than reimplementing it; signatures are a naming convenience.
 
 2026-08-08 [claude] M1: decoder + disassembler + tool CLI, 99 tool tests green. Validated against
   the real Crash Bash executable — `info` reproduces every header field recorded in notes.md, and

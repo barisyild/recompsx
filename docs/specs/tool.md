@@ -152,6 +152,49 @@ with no callers; overlaps). Warnings don't fail `analyze`; hard errors do.
 blocks/succ/jumpTables/calls, dataRegions, stats). `gen` reuses it when input hashes match, else
 re-analyzes in-process.
 
+## 2.1 Psy-Q library versions, and why they need no abstraction
+
+Games were built against many Psy-Q SDK releases — the public signature databases cover roughly
+fifteen, from 2.60 to 4.70 — and each ships different library code. A reasonable worry is that
+recompsx therefore needs a per-version compatibility layer.
+
+It does not, and the reason is the central advantage of recompiling over reimplementing.
+**Psy-Q library functions are not special.** `GsInitGraph`, `CdRead` and `printf` are ordinary
+MIPS code sitting in the executable, and the recompiler translates them exactly like the game's
+own functions. Whichever version of libgpu a game linked, its instructions end up poking the same
+GPU registers, and those registers are what the runtime emulates. The version difference is
+invisible to us.
+
+An emulator that high-level-emulated the libraries would need to know every version and every
+behavioural difference between them. We only high-level-emulate the *kernel* (the A0/B0/C0
+tables), which is in ROM and does not vary with the SDK a game was built with.
+
+### Where version knowledge is still worth having
+
+Not for correctness — for names. A coverage report that says `f_8001a2b0` gives a person nothing;
+one that says `GsInitGraph` tells them instantly that a 40 KB unreached region is library code
+rather than a missed subsystem. Signature matching therefore lands as an **optional `syms.txt`
+generator**, and the project already has the hook: `game.json` names a `symsFile`, and analysis
+consumes it for naming and seeding. No new concept, no code path that only exists for one SDK
+version.
+
+Second-order uses, all optional and all opt-in:
+
+- Auto-filling `setjmpFns` / `longjmpFns`, which the config already declares and which are
+  otherwise found by hand.
+- Flagging a known-problematic library routine for `nativeReplacements`.
+- Replacing `memcpy`/`memset` with native implementations for speed — worth measuring one day,
+  and safe to try because the cross-target digest proves whether behaviour changed.
+- Separating "unreached game code" from "unreached library code" in the coverage report, which
+  is the difference between a lead worth chasing and a dead end.
+
+Prior art: `lab313ru/psx_psyq_signatures` publishes per-version signatures as JSON, and
+`lab313ru/ghidra_psx_ldr` consumes them, though it asks the user to declare the version rather
+than detecting it. **Check the licence before vendoring any of it** — signature data derived from
+Sony's SDK is not obviously ours to redistribute, and the feature is a convenience, not a
+dependency. Detection, if implemented, is a matching problem: try each version's signature set
+and keep the one that identifies the most functions consistently.
+
 ## 3. Codegen — structure
 
 (Complete instruction→Haxe emission tables and the worked example: **Appendix A** below.)

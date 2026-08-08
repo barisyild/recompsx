@@ -11,6 +11,7 @@ class TestMain {
 		Sys.println("");
 		TestPsxExe.run();
 		TestDecoder.run();
+		TestDiscovery.run();
 		Sys.exit(Assert.summary());
 	}
 }

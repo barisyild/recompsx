@@ -1,6 +1,11 @@
 package recomp;
 
 import haxe.io.Bytes;
+import recomp.analysis.AnalysisError;
+import recomp.analysis.Confidence;
+import recomp.analysis.Coverage;
+import recomp.analysis.Discovery;
+import recomp.analysis.Image;
 import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
@@ -21,6 +26,7 @@ class Main {
 	static inline var EXIT_OK = 0;
 	static inline var EXIT_USAGE = 2;
 	static inline var EXIT_LOADER = 3;
+	static inline var EXIT_ANALYSIS = 4;
 
 	public static function main():Void {
 		final args = Sys.args();
@@ -36,6 +42,7 @@ class Main {
 			switch (command) {
 				case "info": Sys.exit(cmdInfo(rest));
 				case "dis": Sys.exit(cmdDis(rest));
+				case "analyze": Sys.exit(cmdAnalyze(rest));
 				case "help" | "-h" | "--help": usage(); Sys.exit(EXIT_OK);
 				case _:
 					Sys.stderr().writeString('unknown command "$command"\n\n');
@@ -45,6 +52,9 @@ class Main {
 		} catch (e:LoaderError) {
 			Sys.stderr().writeString("error: " + e.message + "\n");
 			Sys.exit(EXIT_LOADER);
+		} catch (e:AnalysisError) {
+			Sys.stderr().writeString("error: " + e.message + "\n");
+			Sys.exit(EXIT_ANALYSIS);
 		}
 	}
 
@@ -111,6 +121,48 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		Sys.println(Disasm.lines(instrs));
 		return EXIT_OK;
+	}
+
+	static function cmdAnalyze(args:Array<String>):Int {
+		final path = args.length > 0 ? args[0] : null;
+		if (path == null) {
+			Sys.stderr().writeString("analyze: expected a file\n");
+			return EXIT_USAGE;
+		}
+		var sweep = true;
+		var listFunctions = false;
+		for (i in 1...args.length) {
+			switch (args[i]) {
+				case "--no-sweep": sweep = false;
+				case "--functions": listFunctions = true;
+				case other:
+					Sys.stderr().writeString('analyze: unexpected argument "$other"\n');
+					return EXIT_USAGE;
+			}
+		}
+
+		final exe = loadExe(path);
+		for (w in exe.warnings) Sys.println("warning: " + w);
+
+		final image = Image.ofExe(nameOf(path), exe);
+		final discovery = new Discovery(image);
+		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
+		discovery.run(sweep);
+
+		if (listFunctions) {
+			final entries = [for (k in discovery.functions.keys()) k];
+			entries.sort((a, b) -> a - b);
+			for (e in entries) Sys.println(discovery.functions.get(e).describe());
+			Sys.println("");
+		}
+
+		Sys.print(new Coverage(image, discovery).render());
+		return EXIT_OK;
+	}
+
+	static function nameOf(path:String):String {
+		final slash = path.lastIndexOf("/");
+		return slash >= 0 ? path.substr(slash + 1) : path;
 	}
 
 	static function loadExe(path:String):PsxExe {
