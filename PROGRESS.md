@@ -80,9 +80,18 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    layout, it concludes the drive never answered and retries — which is exactly the observed
    loop, and would also explain why it never bothers to read the payload.
 
-   Next probe, small and already tooled: extend the poll trace to `1F801800` reads (currently
-   only `1803` shows, because that is what the filter caught) and compare each returned value
-   against psx-spx's status-register bit table.
+   `BUSYSTS` (bit 7) was the eighth candidate and is now implemented — a controller that is never
+   busy never visibly *takes* a command — but it did not break the loop either.
+
+   **Where a fresh session should start.** Do not add a ninth guess. Run the game in DuckStation
+   with a CD-register breakpoint, capture the same exchange, and diff it against our `cd#` trace
+   line for line. The escalation ladder in docs/architecture.md exists for exactly this: observing
+   a reference implementation costs nothing and settles what eight rounds of reasoning from the
+   spec have not. Our trace is already in the right shape to compare against.
+
+   Everything around the CD is healthy and should not be re-doubted: interrupt delivery, level
+   ordering, acknowledgement, the queue, the timers, SIO0, the exception hook, and the ISO9660
+   layer under it (verified against a real Crash Bash BIN, Mode 2 Form 1 detected unaided).
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map

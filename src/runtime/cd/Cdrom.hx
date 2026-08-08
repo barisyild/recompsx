@@ -81,6 +81,9 @@ class Cdrom {
 		because a command produces up to two interrupts and neither may be raised inside the
 		register write that asked for it — see `respond`.
 	**/
+	/** True between a command write and the first answer reaching the CPU. */
+	static var busy = false;
+
 	static var pendingInt = 0;
 	static var pendingResponse:Array<Int>;
 	static var pendingCount = 0;
@@ -124,6 +127,7 @@ class Cdrom {
 		seekLba = 0;
 		readLba = 0;
 		reading = false;
+		busy = false;
 		sectorPos = 0;
 		sectorReady = false;
 		sectorsDelivered = 0;
@@ -203,6 +207,14 @@ class Cdrom {
 		if (responseRead < responseCount) s |= 0x20; // a response byte is waiting
 		else {}
 		if (sectorReady && sectorPos < SECTOR_BYTES) s |= 0x40;   // data is waiting
+		else {}
+		// Bit 7, BUSYSTS: a command has been written and the controller has not answered it yet.
+		//
+		// It was never set, and a controller that is never busy is one that never visibly *took*
+		// a command. libcd writes a command and watches this bit go up and come down again — that
+		// transition is its acknowledgement that the drive heard it at all, and without it the
+		// library re-issues the same command forever, which is exactly the loop the trace shows.
+		if (busy) s |= 0x80;
 		else {}
 		return s;
 	}
@@ -308,6 +320,7 @@ class Cdrom {
 		once would leave it waiting forever.
 	**/
 	static function execute(cmd:Int, cycles:Int):Void {
+		busy = true;
 		tnote("cmd 0x" + StringTools.hex(cmd, 2) + " params=" + paramCount);
 		commands++;
 		if (cmd == 0x01) ackWith1(status);                      // Getstat
@@ -560,6 +573,7 @@ class Cdrom {
 
 	/** Moves a deferred answer into the FIFO and rings the bell. */
 	static function deliverPending():Void {
+		busy = false;
 		tnote("INT " + pendingInt + " delivered, " + pendingCount + " bytes");
 		responseCount = pendingCount;
 		responseRead = 0;
