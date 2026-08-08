@@ -33,3 +33,7 @@ build/*.local.hxml
 
 # Spike outputs live under out/ (already ignored); this catches stray local builds.
 tests/spike/*/out/
+
+# V8 profiler output — diagnostic droppings, never history
+isolate-*.log
+*.heapsnapshot

@@ -194,13 +194,28 @@ class Memory {
 		else ioUnknownWrite(p, v);
 	}
 
+	/**
+		The unknown-register reports, guarded before the message exists.
+
+		`reportOnce(key, "..." + hexAddr(p))` builds its string on every call and only then finds
+		the key already reported. Harmless for a call that happens once; fatal for a register a
+		game polls in a tight loop — a profile showed the machine spending a quarter of its time
+		in string concatenation, limping a thousand times slower than it emulated, which read as a
+		hang. The guard makes the already-reported path one map lookup and nothing else.
+	**/
 	static function ioUnknownRead(p:Int):Int {
-		core.Runtime.reportOnce(0x10000000 | (p & 0xFFFF), "read from I/O register " + hexAddr(p));
+		final key = 0x10000000 | (p & 0xFFFF);
+		if (!core.Runtime.alreadyReported(key)) {
+			core.Runtime.reportOnce(key, "read from I/O register " + hexAddr(p));
+		} else {}
 		return 0;
 	}
 
 	static function ioUnknownWrite(p:Int, v:Int):Void {
-		core.Runtime.reportOnce(0x11000000 | (p & 0xFFFF), "write to I/O register " + hexAddr(p));
+		final key = 0x11000000 | (p & 0xFFFF);
+		if (!core.Runtime.alreadyReported(key)) {
+			core.Runtime.reportOnce(key, "write to I/O register " + hexAddr(p));
+		} else {}
 	}
 
 	static function hexAddr(v:Int):String {
@@ -216,12 +231,22 @@ class Memory {
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
 		// a 32-bit word would read three neighbours that mean something else entirely.
 		else if (isCdrom(p)) return cd.Cdrom.read8(p);
+		else if (isSio(p)) return sio.Sio0.read8(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
 		else return unmapped8();
 	}
 
 	static inline function isCdrom(p:Int):Bool
 		return p >= 0x1F801800 && p <= 0x1F801803;
+
+	/** The root counters: 1F801100..1F80112F. */
+	static inline function isTimer(p:Int):Bool
+		return p >= 0x1F801100 && p <= 0x1F80112F;
+
+	/** SIO0 and SIO1: 1F801040..1F80105F. Byte- and halfword-accessed, so they bypass the
+		32-bit folding the ordinary I/O page uses. */
+	static inline function isSio(p:Int):Bool
+		return p >= 0x1F801040 && p <= 0x1F80105F;
 
 	static function unmapped8():Int {
 		unmappedAccesses++;
@@ -231,12 +256,16 @@ class Memory {
 	static function slowRead16(p:Int):Int {
 		if (isScratch(p)) return RawMem.get16(scratch, p - SCRATCH_BASE);
 		else if (isCdrom(p)) return cd.Cdrom.read8(p) | (cd.Cdrom.read8(p + 1) << 8);
+		else if (isSio(p)) return sio.Sio0.read16(p);
+		else if (isTimer(p)) return timers.Timers.read(p, cycleHint) & 0xFFFF;
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
 		else return unmapped8();
 	}
 
 	static function slowRead32(p:Int):Int {
 		if (isScratch(p)) return RawMem.get32(scratch, p - SCRATCH_BASE);
+		else if (isSio(p)) return sio.Sio0.read32(p);
+		else if (isTimer(p)) return timers.Timers.read(p, cycleHint);
 		else if (isIo(p)) return ioRead32(p);
 		else return unmapped8();
 	}
@@ -244,6 +273,7 @@ class Memory {
 	static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch, p - SCRATCH_BASE, v);
 		else if (isCdrom(p)) cd.Cdrom.write8(p, v, cycleHint);
+		else if (isSio(p)) sio.Sio0.write8(p, v);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFF, 0xFF);
 		else unmappedAccesses++;
 	}
@@ -263,12 +293,15 @@ class Memory {
 
 	static function slowWrite16(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set16(scratch, p - SCRATCH_BASE, v);
+		else if (isSio(p)) sio.Sio0.write16(p, v);
+		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		else unmappedAccesses++;
 	}
 
 	static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch, p - SCRATCH_BASE, v);
+		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
 		else if (isIo(p)) ioWrite32(p, v);
 		else unmappedAccesses++;
 	}

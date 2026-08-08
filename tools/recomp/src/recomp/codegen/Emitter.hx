@@ -97,8 +97,11 @@ class Emitter {
 		body and no `else` was silently deleted by reflaxe.CPP (upstream defect 8, fixed in our
 		fork), and generated code should not depend on that fix being present.
 	**/
+	// The cycleHint store is not decoration: memory-mapped registers whose value derives from
+	// the clock — the root counters above all — read it, and a poll loop that only updated it
+	// inside pump() would watch a frozen timer for a whole scheduler interval between deadlines.
 	static inline final PUMP_LINE =
-		"if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) Runtime.pump(ctx);";
+		"Memory.cycleHint = ctx.cycles; if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) Runtime.pump(ctx);";
 
 	static inline final PUMP_ENTRY = "\t\t" + PUMP_LINE + "\n";
 

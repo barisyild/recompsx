@@ -52,32 +52,39 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD interrupt handler was lost to an 8-byte sweep miss, and a phantom regression cost a
-   day of detours. Both are settled.**
+2. **The frame-29100 stall is solved, and its causal chain rewrote itself twice before settling.
+   The machine now runs past frame 120,000 with the game's own interrupt handlers live.**
 
-   The register trace answered in four lines what five hypotheses could not: on every CD
-   interrupt the chains ran libcd's element with `f1=0x8003b1bc` (the verifier, seeded, works)
-   and `f2=0x8003b224` — the handler, which was a dispatch black hole. The verifier claimed the
-   interrupt; the function that would read the response, set `CdSync`'s flags and acknowledge the
-   controller never existed.
+   The final, profiler-verified chain: resolving `f_8003b224` (the sweep had seeded its prologue
+   8 bytes past the true entry) unblocked the game's *device initialisation* — which had been
+   silently skipped through a dispatch black hole all along. Device init drives **SIO0**, and at
+   frame ~29,100 the game began probing the controller port. Two genuine runtime gaps turned that
+   probe into what looked like a hang:
 
-   Why it never existed: the handler opens `lui, lw, addiu sp` — GCC schedules two loads ahead of
-   the stack adjustment — and the prologue sweep seeded the *adjustment's* address, `0x8003b22c`,
-   eight bytes past the true entry. Every pointer-table call to the real entry missed. The sweep
-   now seeds the gap start when a prologue sits within its first four instructions
-   (`prologueIndex` in Discovery), which also corrected two other swept entries and found one new
-   function.
+   - **The unknown-register report built its message on every poll.** `reportOnce(key, "..." +
+     hex(p))` concatenates before it discovers the key is already reported. One call is free; a
+     poll loop paid 25% of all CPU ticks to `StringAdd` and limped ~1000× under emulated speed.
+     Hot sites now test `alreadyReported(key)` before any string exists.
+   - **libpad times its acknowledge timeout on hardware timer 2**, which read a constant zero, so
+     the timeout never expired (`f_8003c6a8`, 79% of ticks, polling `1F801120`). Timers 0–2 now
+     compute their values closed-form from the cycle count (§7.10): no stepping, divide-by-8
+     source, reset-at-target, reached/overflow flags. The emitted pump line also stores
+     `Memory.cycleHint` at every pump *point*, because a clock the poll loop cannot see move is
+     no clock at all.
+   - **SIO0 exists as an honest empty port**: TX always ready, every exchange answering 0xFF, and
+     /ACK never pulsing — what real hardware reports with nothing plugged in, and the state
+     libpad's "no controller" path is written to meet.
 
-   The "seeding 0x8003b224 regresses the game" claim from earlier today is **retracted**: the
-   game spends its first ~30–60k frames in VSync-timeout limping before it installs any handler
-   or touches the CD, and a loaded host let 40-second runs reach only frame ~29k — normal
-   trajectory, misread as a regression. The tell that finally exposed it: the *known-good* run
-   also shows `handlers 0` at frame 6000. Lesson recorded: never judge a run by wall time, judge
-   it by frame-indexed counters.
+   With all three in, the pad probe concludes and the game runs to frame 120,000+ with
+   `handlers` ≈ 1.5 × frames — its own chain handlers are installed and being called. Not yet
+   reached: `CD_init` (the game is doing something for those 120k frames — the next session's
+   first question), drawing (`gpu 1w`), and the SPU (whose whole register page it read once).
 
-   A long run with the handler resolvable is in flight. Next session reads its `cd#` dialogue:
-   either `CdInit` passes and sector reads begin (next wall: DMA channel 3), or the dialogue
-   shows exactly which register answer libcd rejects.
+   Method note, recorded because it cost hours: the stall was diagnosed **twice wrongly** — first
+   as a generation regression, then as host-load noise — and both wrong diagnoses were "confirmed"
+   by A/B runs that varied two things at once or compared stale copies. What actually worked:
+   `node --prof`, whose SIGPROF sampling names the hot function even inside a starved event loop,
+   twice, in one minute each. Profile before hypothesising about anything that looks like a hang.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -420,6 +427,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [fable] Frame-29100 stall solved by profiler, twice: report-once built its string
+  before the dedup check (25% of ticks in StringAdd), and libpad's ACK timeout counts on timer 2
+  which read zero forever. Landed: Timers 0-2 closed-form (§7.10), SIO0 as honest empty port,
+  alreadyReported guard, cycleHint at every pump point. Game now passes frame 120k with its own
+  handlers live. Next: where do 120k frames go — CD_init not reached yet.
 
 2026-08-08 [fable] The CD handler black hole was the sweep seeding a prologue 8 bytes past the
   true entry (GCC schedules loads before addiu sp) — sweep now seeds gap starts. Retracted the

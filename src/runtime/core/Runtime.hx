@@ -64,6 +64,8 @@ class Runtime {
 		gpu.Gpu.init();
 		cd.Iso9660.init();
 		cd.Cdrom.init();
+		sio.Sio0.init();
+		timers.Timers.init();
 		kernel.Kernel.init();
 		Scheduler.init(ctx);
 	}
@@ -237,6 +239,11 @@ class Runtime {
 		in its main loop would otherwise produce a hundred thousand identical lines and hide
 		everything else. The count is what a bring-up session actually watches.
 	**/
+	/** For hot paths: whether a key has reported, so the caller can skip building the message. */
+	public static function alreadyReported(key:Int):Bool {
+		return reported.exists(key);
+	}
+
 	public static function reportOnce(key:Int, what:String):Void {
 		if (reported.exists(key)) return;
 		reported.set(key, true);
