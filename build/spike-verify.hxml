@@ -1,4 +1,5 @@
 # Run from the repository root:  haxe build/spike-verify.hxml
+build/common.hxml
 build/reflaxe-cpp.hxml
 -cp tests/spike/verify
 -D mainClass=Verify

@@ -36,6 +36,9 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
    DELETED by reflaxe.CPP** — the whole statement, so the wrong path runs. Give it an `else {}`,
    or extract the body into a call. Guard clauses and ternaries are instances of this. See
    PROGRESS.md upstream defect 8; `scripts/spike.sh` reports if upstream fixes it.
+   Every build includes `build/common.hxml`, which carries `-D analyzer-optimize`. It is
+   verified behaviour-preserving (identical conformance digests on both targets) and must be on
+   every path that produces code, or what is measured stops being what is shipped.
    JavaScript builds always pass `-D js-es=6`. Haxe's default emits prototype-based code; ES6
    classes let V8 optimise static access far better, and this runtime is nearly all static
    accessors. Never benchmark or ship a JS build without it.
@@ -58,6 +61,8 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
     ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)            [from M1]
     ./scripts/build-pc.sh crashbash # cmake+ninja
     ./scripts/run-pc.sh crashbash [--headless-hash 600]
+    haxe build/game-js.hxml && node out/_gen/game.js   # run a generated game (JS = reference)
+    haxe build/game-cpp.hxml                            # the same game through reflaxe.CPP
     ./scripts/test.sh               # THE gate: spikes + conformance + both target digests
     ./scripts/conformance.sh [name] # run cross-target conformance tests (add one = add a file)
     ./scripts/spike.sh              # reflaxe.CPP behaviour regression — run after pin changes

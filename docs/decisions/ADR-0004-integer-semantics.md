@@ -66,13 +66,17 @@ by construction rather than by agreement between two native implementations.
   digest is identical either way — so it costs nothing to make unconditional, and benchmarking a
   non-ES6 build would measure something the project does not ship.
 
-- **`-D analyzer-optimize` is safe but currently earns nothing.** Enabling Haxe's optimising
+- **`-D analyzer-optimize` on every build**, via `build/common.hxml`. Enabling Haxe's optimising
   analyzer leaves every conformance digest unchanged on both targets, which is the test that
-  matters: it is behaviour-preserving on our code. It does not, however, move the needle on the
-  demo (2.12s against 2.13s over 6000 frames), because V8 and clang already perform the same
-  constant and copy propagation. It also does not fix reflaxe.CPP's deleted-branch defect. Worth
-  revisiting for *generation* time once whole-program C++ output is measured, since a smaller
-  typed AST is less for an immature compiler to chew on.
+  decides it: behaviour-preserving on our code. It does not move the demo's run time (2.12s
+  against 2.13s over 6000 frames) because V8 and clang already do that work — but the demo is
+  hand-written runtime code, and the case it exists for is *generated* code, which is full of the
+  redundant temporaries a per-instruction translation produces. Giving a v0.1.0 C++ generator a
+  smaller typed AST is worth having regardless of what the JIT would have done later.
+
+  It is applied in one shared file rather than per build on purpose: a flag that changes
+  generated code must be on every path that produces it, or the thing benchmarked and the thing
+  shipped quietly stop being the same program.
 
 ## Consequences
 

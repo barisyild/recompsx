@@ -1,4 +1,5 @@
 # Recompiler tool tests. Run from the repository root:  haxe build/tests-tool.hxml
+build/common.hxml
 -cp tools/recomp/src
 -cp tools/recomp/test
 -main TestMain

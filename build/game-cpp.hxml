@@ -1,0 +1,15 @@
+# build/game-cpp.hxml — the same recompiled game, through reflaxe.CPP.
+#
+# What the console targets will actually run. When this disagrees with build/game-js.hxml, the
+# JavaScript build is right by decision (ADR-0003) and the difference is a compiler defect to
+# reduce to a spike — that is how three of them have been found so far.
+build/common.hxml
+build/reflaxe-cpp.hxml
+-cp src/runtime
+-cp src/shims/cxx
+-cp out/gen
+-cp tests/spike
+-D mainClass=GenMain
+-main GenMain
+-D cpp-output=out/_gen/cpp
+-dce full

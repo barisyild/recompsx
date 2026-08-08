@@ -1,0 +1,16 @@
+# build/game-js.hxml — a recompiled game, on JavaScript.
+#
+# JavaScript is the development target (ADR-0003) and the reference when the two disagree, so
+# this is the build that says whether a generated program is *right*. The C++ build says whether
+# it is shippable. Both compile the same generated Haxe.
+#
+# Run `recompsx gen` first; this compiles whatever is in out/gen.
+build/common.hxml
+-cp src/runtime
+-cp src/shims/js
+-cp out/gen
+-cp tests/spike
+-main GenMain
+-js out/_gen/game.js
+-D js-es=6
+-dce full

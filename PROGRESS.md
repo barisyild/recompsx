@@ -145,6 +145,27 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
       3.5 MB of emulated hardware state and ~7 KB of dispatch table. The memory budget in
       `docs/specs/backend.md` §0 holds.
 
+  - [x] **The recompiled game runs on JavaScript.** `build/game-js.hxml` compiles out/gen in
+        **4.5 s** with `-D analyzer-optimize` and `node` executes it. It gets through Crash Bash's
+        real startup, in this order:
+
+            A0(39h) InitHeap        the kernel heap the game asks for at boot
+            A0(49h)                 (unimplemented; identify during M2)
+            syscall 0               EnterCriticalSection
+            A0(44h) FlushCache      immediately after a code copy — an overlay landing
+            mfc0/mtc0 COP0 r12      the status register: interrupts being set up
+            GTE control 24..30      the projection constants: OFX, OFY, H, DQA, DQB, ZSF3, ZSF4
+
+        and then spins. The spin is *correct behaviour for what exists*: having enabled
+        interrupts and configured the GTE, the game waits for VBlank, and there is no scheduler
+        to deliver one yet. Seven hundred instructions of real game code executed to reach that
+        point, through the dispatch table, the memory map, and the emitted arithmetic.
+
+        That list is also the M2 work order, written by the game itself in the order it needs
+        things. It is worth more than any checklist I could have drawn up: `A0(49h)` and
+        `syscall 0` are not on the P0 list in docs/specs/runtime.md §7.3.1, and Crash Bash calls
+        them before anything else.
+
   - [ ] **M1.5 open item — the C++ build dispatches wrongly.** Running the C++ binary of the
         recompiled game fails immediately: `dispatch to shard 4 slot 14, which does not exist`,
         although the generated C++ visibly contains `case 14` among shard 4's 91 cases and

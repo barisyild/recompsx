@@ -1,3 +1,4 @@
+build/common.hxml
 build/reflaxe-cpp.hxml
 -cp tests/spike/ifdrop
 -D mainClass=Guard

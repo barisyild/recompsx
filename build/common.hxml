@@ -1,0 +1,11 @@
+# Flags every build in this project uses, whatever the target.
+#
+# Include this from any hxml. Keeping them in one file rather than repeating them per build is
+# not tidiness — a flag that changes generated code has to be on *every* path that produces it,
+# or the thing measured and the thing shipped stop being the same program.
+
+# Haxe's optimising analyzer: constant and copy propagation, local dead-code elimination,
+# expression fusion. Verified behaviour-preserving here — every conformance digest is identical
+# with it on both targets — which is the only evidence that counts for a project whose promise is
+# bit-identical output. It also gives an immature C++ generator a smaller typed AST to chew on.
+-D analyzer-optimize
