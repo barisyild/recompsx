@@ -137,10 +137,16 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    constructor. *Workaround:* use plain `if`/`else` statements.
 6. **`@:valueType` class as a static field** requires a default constructor that is not
    generated. *Workaround:* static fields of primitive/`CArray` type instead.
-7. **`untyped __cpp__` splices arguments without parentheses.** `__cpp__("({0} / {1})", y*31, h-1)`
-   emits `(y * 31 / h - 1)` — silently the wrong arithmetic. *Impact: high, silent.*
-   *Workaround:* parenthesise every placeholder: `"(({0}) / ({1}))"`. Locked by a check in
-   `tests/spike/verify`.
+7. **Target-code templates splice arguments without parentheses — in BOTH mechanisms.**
+   `"({0} / {1})"` via `untyped __cpp__`, and `"({arg0} / {arg1})"` via `@:nativeFunctionCode`,
+   both emit `(y * 31 / h - 1)` for `div(y * 31, h - 1)` — returning 42 where 54 is correct.
+   *Impact: high, silent.* *Rule:* parenthesise every placeholder by hand, always:
+   `"(({arg0}) / ({arg1}))"`. Locked by checks in `tests/spike/{verify,intdiv}`.
+
+   On mechanism choice: `@:nativeFunctionCode` is the reflaxe.CPP-native way and what its own std
+   uses (`cxx.CArray`, `cxx.ConstCharPtr`, `cxx.Stdlib`); `untyped __cpp__` is reflaxe's generic
+   injection hook, whose name is merely configured to hxcpp's spelling. Prefer the former and
+   keep target code inside declarations; reserve `__cpp__` for statement-level injection.
 8. **`if` statements are silently DELETED in several common shapes — the most serious defect
    found.** No error, no warning; the branch simply vanishes and the program takes a different
    path. Confirmed shapes (`tests/spike/ifdrop`, `tests/spike/guard`):

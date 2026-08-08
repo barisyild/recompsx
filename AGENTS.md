@@ -32,6 +32,10 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
    Control flow: no guard clauses (`if (c) { ...; return; }`), no ternaries or nested branches
    inside loop bodies — reflaxe.CPP silently DELETES these. See PROGRESS.md upstream defect 8;
    `scripts/spike.sh` reports if upstream ever fixes it.
+   Target code: use `@:nativeFunctionCode` on an extern (what reflaxe.CPP's own std uses), not
+   `untyped __cpp__`, which is reflaxe's generic hook borrowing hxcpp's spelling — reserve it for
+   statement-level injection. BOTH splice arguments as raw text, so parenthesise every
+   placeholder by hand: `"(({arg0}) / ({arg1}))"`. See PROGRESS.md upstream defect 7.
 2. reflaxe.CPP only — never hxcpp, never system Haxe. Pinned toolchain: `source scripts/env.sh`.
 3. Determinism is sacred: bp_time_us is pacing-only; all state zero-initialized; no host
    float/rand/iteration-order may reach emulated state.
