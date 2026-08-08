@@ -130,6 +130,33 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
       Reading that file to fix the recursion also turned up the cause of upstream defect 8 —
       see below. Both patches are exported to `vendor/patches/`.
 
+      **Full M1.5 numbers, Crash Bash, 861 functions:**
+
+      | Stage | Result |
+      |---|---|
+      | `recompsx gen` | 11 files, 87,547 lines, 0.9 s |
+      | Haxe typecheck | 0.95 s |
+      | Haxe → JavaScript | 3.7 s, 6.9 MB — **runs** |
+      | Haxe → C++ | 63 s, 19 files, 2.1 MB |
+      | clang -O2 | 7.7 s, **340 KB binary** |
+
+      Every threshold in the original plan is met with room to spare, and the binary size is the
+      number that matters for the console targets: 340 KB of code against a 32 MB machine, with
+      3.5 MB of emulated hardware state and ~7 KB of dispatch table. The memory budget in
+      `docs/specs/backend.md` §0 holds.
+
+  - [ ] **M1.5 open item — the C++ build dispatches wrongly.** Running the C++ binary of the
+        recompiled game fails immediately: `dispatch to shard 4 slot 14, which does not exist`,
+        although the generated C++ visibly contains `case 14` among shard 4's 91 cases and
+        `FnTable::dispatch` visibly contains `case 4`. The identical generated Haxe runs correctly
+        on JavaScript and gets well into Crash Bash's initialisation — `A0(39h)` InitHeap,
+        `A0(44h)` FlushCache, `syscall 0`, COP0 status access, GTE control writes.
+
+        So this is another reflaxe.CPP miscompilation, and which side is right is not in question.
+        Suspect the 91-case switch or the call into it. Next: shrink `MAX_FUNCTIONS` until the
+        C++ build agrees with JS, which will say whether switch size is the trigger, then reduce
+        it to a spike.
+
       This is the clearest vindication so far of developing on JavaScript (ADR-0003). A
       C++-only project would be completely blocked at this milestone; instead the JS build runs
       the recompiled game today and the compiler problem is a parallel task.
@@ -276,6 +303,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [claude] Found and fixed BOTH of reflaxe's worst defects, sixty lines apart in
+  RemovePureExpressionsImpl: an inverted return in `hasSideEffects` was deleting if-bodies
+  (defect 8), and a per-statement recursion in `blockElement` was overflowing the eval stack on
+  large programs (M1.5). Whole game now: gen 0.9 s -> C++ 63 s -> clang 7.7 s -> 340 KB binary.
+  The JS build RUNS the recompiled game into Crash Bash's real init sequence; the C++ build
+  mis-dispatches on the first call, which is now the top open item.
 
 2026-08-08 [claude] Whole-program generation works: 861 Crash Bash functions -> 87.5 K lines of
   Haxe in 0.9 s. The JS build links in 3.7 s and RUNS — recompiled startup code clears its BSS,
