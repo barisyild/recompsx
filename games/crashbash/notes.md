@@ -170,3 +170,16 @@ Two readings follow, and they are distinguishable by that one word:
 
 A memory watch on `0x80077630` decides it in one run. The real polling loop is further up, before
 `0x8003ee10`.
+
+
+## What the spin counter said (2026-08-08)
+
+Watched `0x80077630` at every heartbeat: **it is 0, always.** So the game is not sitting in
+libcd's timeout loop at all — those `CD timeout` lines were printed once, early, and passed. The
+counter never climbs because that loop is not where the game lives.
+
+Which retires "CdInit loops forever" as the explanation for the stall. The game is stuck
+somewhere else, and the profile names it: `f_8003ebf8` calls `f_800320ec`, which reads a hardware
+counter, on every iteration of a tight loop. **That** is the wait to understand next — it is a
+timer poll, not a CD poll, and the two have been conflated all along because the CD's error
+messages are the loudest thing in the log.

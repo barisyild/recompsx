@@ -31,6 +31,7 @@ class Timers {
 		mode = [0, 0, 0];
 		target = [0, 0, 0];
 		reached = [0, 0, 0];
+		sourceReported = [false, false, false];
 	}
 
 	public static function read(addr:Int, cycles:Int):Int {
@@ -136,13 +137,31 @@ class Timers {
 		cost this runtime a thousandfold slowdown in the I/O path earlier today; the guard is the
 		same one.
 	**/
+	/**
+		Reported once, and the guard is a boolean — not a map lookup.
+
+		The first attempt at this asked `Runtime.alreadyReported`, which does the very
+		`Map.exists` that made it expensive: the check moved, the cost did not. A profile put
+		`ObjectPrototypeHasOwnProperty` at 5% of all ticks with 98.6% of it arriving through here,
+		down a chain from the game's own polling loop — `f_8003ebf8` to `f_800320ec` to a counter
+		read, on every single iteration.
+
+		A per-timer flag costs an array index. The rule this keeps arriving at: a report-once
+		helper is only cheap where the *call* is rare, and on a hot path the guard has to be
+		cheaper than the thing it guards.
+	**/
+	static var sourceReported:Array<Bool>;
+
 	static function unusualSource(t:Int):Int {
-		final key = 0x68000000 | t;
-		if (!Runtime.alreadyReported(key)) {
-			Runtime.reportOnce(key, "timer " + t
-				+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
-		} else {}
+		if (!sourceReported[t]) reportSource(t);
+		else {}
 		return 0;
+	}
+
+	static function reportSource(t:Int):Void {
+		sourceReported[t] = true;
+		Runtime.reportOnce(0x68000000 | t, "timer " + t
+			+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
 	}
 
 	static function readMode(t:Int, cycles:Int):Int {
