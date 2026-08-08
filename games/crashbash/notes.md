@@ -127,3 +127,46 @@ An earlier revision of this note said seeding 0x8003b224 regresses the game. It 
 VSync timeouts before it installs handlers or touches the CD, and a loaded host let a 40-second
 run reach only frame ~29k — still on the normal trajectory, misread as "stuck earlier". The
 counters that told the truth all along: the *working* run also shows `handlers 0` at frame 6000.
+
+
+## libcd's timeout, located (2026-08-08)
+
+Disassembling around the address the poll trace kept naming turned up the wrong thing being
+watched, and then the right one.
+
+`ra=0x8003EEB8` is **not** a polling site. The instruction before it is `jal 0x8003f08c`, and the
+two before *that* load a string and call `0x800322fc` — the printf that emits
+`CD timeout: CD_cw:(...)`. So every CD register read attributed to "libcd polling" was in fact the
+post-mortem state dump, taken after the library had already given up. Three sessions of reasoning
+were aimed at a conversation that had ended.
+
+The timeout itself is at `0x8003ee48`:
+
+    8003ee48  lui  $v0, 0x003c        ; 3,932,160
+    8003ee4c  slt  $v0, $v0, $v1      ; has the elapsed measure passed it
+    8003ee50  beq  $v0, $zero, 0x8003eec0   ; no -> keep waiting (returns 0)
+    ...                                     ; yes -> print, call 8003f08c, return -1
+
+`$v1` is not a clock. Reading a little further up settles it:
+
+    8003ee2c  lui  $v0, 0x8007
+    8003ee30  lw   $v0, 0x7630($v0)    ; counter := [0x80077630]
+    8003ee38  addu $v1, $v0, $zero     ; the value tested
+    8003ee3c  addiu $v0, $v0, 1
+    8003ee44  sw   $v0, 0x7630($at)    ; store counter + 1
+
+**It is a plain spin counter**, one increment per poll, compared against 3,932,160. So the timeout
+means "I went round this many times", not "this much time passed" — and that makes it directly
+observable: watch `0x80077630`.
+
+Two readings follow, and they are distinguishable by that one word:
+
+- If it reaches 3.9M, the loop really is spinning that hard and the interrupt is arriving too late
+  or not at all — a scheduling question.
+- If it is already past 3.9M when a wait *begins*, the counter is never being reset between
+  attempts and every wait after the first fails instantly, regardless of what the controller does.
+  That would explain a first attempt behaving differently from all the rest, which is exactly the
+  shape of `CdInit` looping.
+
+A memory watch on `0x80077630` decides it in one run. The real polling loop is further up, before
+`0x8003ee10`.
