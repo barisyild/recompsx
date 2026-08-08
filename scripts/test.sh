@@ -22,14 +22,18 @@ CXXFLAGS=(-std=c++17 -O2 -fwrapv)   # see ADR-0004
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
-say "1/4 reflaxe.CPP behaviour spikes"
+say "1/5 recompiler tool tests (interp)"
+haxe build/tests-tool.hxml || fail "tool tests failed"
+say "    ok"
+
+say "2/5 reflaxe.CPP behaviour spikes"
 ./scripts/spike.sh >/dev/null || fail "spikes broke — upstream behaviour changed, read scripts/spike.sh output"
 say "    ok"
 
-say "2/4 conformance: every test on every target"
+say "3/5 conformance: every test on every target"
 ./scripts/conformance.sh || fail "conformance failed — see above"
 
-say "3/4 JavaScript build + headless digest"
+say "4/5 JavaScript build + headless digest"
 mkdir -p out/_demo/js
 haxe build/js-demo.hxml
 JS_OUT="$(node out/_demo/js/demo.js --headless-hash "$FRAMES")"
@@ -41,7 +45,7 @@ say "    js digest = $JS_DIGEST"
 JS_AGAIN="$(node out/_demo/js/demo.js --headless-hash "$FRAMES" | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p')"
 [ "$JS_DIGEST" = "$JS_AGAIN" ] || fail "the JS build is not deterministic: $JS_DIGEST vs $JS_AGAIN"
 
-say "4/4 C++ build + cross-target comparison"
+say "5/5 C++ build + cross-target comparison"
 rm -rf out/_demo/cpp
 haxe build/pc-demo.hxml
 ./scripts/build-pc.sh _demo >/dev/null

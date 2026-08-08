@@ -54,6 +54,37 @@ truncated. Entry point sits at payload offset `0x1E7B0`, inside the loaded range
 sha256 `fd5727a18feb2a2d5a6359a55966f0266284d1e50f64ee9b8a127a97091bd516` — recorded in
 `game.json` as `exeSha256`; a mismatch means a different revision and is a hard error.
 
+## Entry point, read from the real executable
+
+`./scripts/recompsx.sh dis <SCUS_945.70> --count 28` produces the standard Psy-Q startup, which
+also serves as the first real validation of the decoder:
+
+```
+0x8002e7b0: lui   $v0, 0x8007        ; \
+0x8002e7b4: addiu $v0, $v0, -0x1610  ;  > 0x8006e9f0 — start of the region to clear
+0x8002e7b8: lui   $v1, 0x8008        ; \
+0x8002e7bc: addiu $v1, $v1, -0x7370  ;  > 0x80078c90 — end of it
+0x8002e7c0: sw    $zero, 0($v0)      ; the BSS clear loop
+0x8002e7c4: addiu $v0, $v0, 4
+0x8002e7c8: sltu  $at, $v0, $v1
+0x8002e7cc: bne   $at, $zero, 0x8002e7c0
+0x8002e7d0: nop
+...
+0x8002e7f4: lw    $v0, 0($a0)        ; stack pointer, from a table indexed by a mode value
+0x8002e7f8: lui   $t0, 0x8000
+0x8002e7fc: or    $sp, $v0, $t0      ; ...forced into KSEG0
+```
+
+Two things worth carrying forward:
+
+- **The game clears its own BSS**, from 0x8006e9f0 to 0x80078c90, even though the header's
+  memfill fields are zero. So the loaded image ends at 0x80078fff but the *used* data region
+  extends to at least 0x80078c90, and anything the analyzer sees between those is initialised
+  data rather than code.
+- **`lui`+`addiu` is how every address is built**, including negative `addiu` halves
+  (`0x8007` then `-0x1610`). The jump-table matcher must fold exactly this pattern, and the
+  sign of the second half is the part that is easy to get wrong.
+
 ## Open questions (answered during M1/M6, recorded here as they resolve)
 
 - **Overlays**: where the game's overlay loader lives, which file(s) overlays come from

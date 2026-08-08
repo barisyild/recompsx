@@ -1,0 +1,7 @@
+# Classpath for the recompiler tool. Invoked as:
+#   haxe build/tool.hxml --run recomp.Main <args>
+# or, more conveniently, through scripts/recompsx.sh
+#
+# The tool runs on the Haxe interpreter: it has no target constraints and never ships anywhere,
+# so it uses the full language. Only its OUTPUT obeys the portable subset.
+-cp tools/recomp/src

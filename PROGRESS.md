@@ -188,6 +188,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] M1: decoder + disassembler + tool CLI, 99 tool tests green. Validated against
+  the real Crash Bash executable — `info` reproduces every header field recorded in notes.md, and
+  `dis` renders the Psy-Q startup correctly (BSS clear loop, backward branch target, lui/addiu
+  address pairs). Findings added to games/crashbash/notes.md. Tool tests are now step 1 of
+  test.sh. Next: function discovery and the CFG.
+
 2026-08-08 [claude] Conformance testing made first-class: tests/conformance/ + Conf harness +
   scripts/conformance.sh runs every test on every target and compares digests; adding a test is
   dropping in a file. Two tests so far (Arith 14b7201f, Mem 27f9aa59). Building them found two
