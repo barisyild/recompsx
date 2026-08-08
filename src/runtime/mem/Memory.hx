@@ -21,14 +21,19 @@ import shim.RawMem;
 	three bits collapses them. Games rely on that — display lists are commonly built through
 	KSEG1 so that writes are visible to the GPU without a cache flush.
 
-	Only RAM and the scratchpad exist so far. Hardware registers, the BIOS window and the bus
-	error path arrive with the subsystems that need them.
+	RAM, the scratchpad, and the interrupt controller's two registers exist. The rest of the
+	hardware page reads 0, swallows writes, and reports itself once — which makes the log a list
+	of the subsystems still to build, in the order the game asks for them.
 **/
 class Memory {
 	public static inline var RAM_SIZE = 0x200000;      // 2 MB
 	public static inline var RAM_MASK = 0x1FFFFF;
 	public static inline var SCRATCH_SIZE = 0x400;     // 1 KB of fast memory in the CPU
 	static inline var SCRATCH_BASE = 0x1F800000;
+
+	/** The hardware register page. 0x1F801000..0x1F803FFF, 12 KB of I/O plus expansion 2. */
+	static inline var IO_BASE = 0x1F801000;
+	static inline var IO_SIZE = 0x3000;
 
 	public static var ram:RawBuf;
 	public static var scratch:RawBuf;
@@ -151,36 +156,99 @@ class Memory {
 	static inline function isScratch(p:Int):Bool
 		return p >= SCRATCH_BASE && p < SCRATCH_BASE + SCRATCH_SIZE;
 
+	static inline function isIo(p:Int):Bool
+		return p >= IO_BASE && p < IO_BASE + IO_SIZE;
+
+	/**
+		The hardware registers.
+
+		Only the interrupt controller so far. Everything else in the page still reads 0 and
+		swallows writes, and says so once — which is the list of subsystems left to build, in the
+		order the game asks for them.
+
+		Registers are 32-bit and the narrow accesses fold onto them: a halfword read of I_STAT is
+		the low half, which games do use.
+	**/
+	static function ioRead32(p:Int):Int {
+		if (p == 0x1F801070) return core.Irq.readStat();
+		else if (p == 0x1F801074) return core.Irq.readMask();
+		else return ioUnknownRead(p);
+	}
+
+	static function ioWrite32(p:Int, v:Int):Void {
+		if (p == 0x1F801070) core.Irq.writeStat(v);
+		else if (p == 0x1F801074) core.Irq.writeMask(v);
+		else ioUnknownWrite(p, v);
+	}
+
+	static function ioUnknownRead(p:Int):Int {
+		core.Runtime.reportOnce(0x10000000 | (p & 0xFFFF), "read from I/O register " + hexAddr(p));
+		return 0;
+	}
+
+	static function ioUnknownWrite(p:Int, v:Int):Void {
+		core.Runtime.reportOnce(0x11000000 | (p & 0xFFFF), "write to I/O register " + hexAddr(p));
+	}
+
+	static function hexAddr(v:Int):String {
+		final digits = "0123456789abcdef";
+		var out = "";
+		var s = 28;
+		while (s >= 0) { out += digits.charAt((v >>> s) & 0xF); s -= 4; }
+		return "0x" + out;
+	}
+
 	static function slowRead8(p:Int):Int {
 		if (isScratch(p)) return RawMem.get8(scratch, p - SCRATCH_BASE);
+		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
+		else return unmapped8();
+	}
+
+	static function unmapped8():Int {
 		unmappedAccesses++;
 		return 0;
 	}
 
 	static function slowRead16(p:Int):Int {
 		if (isScratch(p)) return RawMem.get16(scratch, p - SCRATCH_BASE);
-		unmappedAccesses++;
-		return 0;
+		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
+		else return unmapped8();
 	}
 
 	static function slowRead32(p:Int):Int {
 		if (isScratch(p)) return RawMem.get32(scratch, p - SCRATCH_BASE);
-		unmappedAccesses++;
-		return 0;
+		else if (isIo(p)) return ioRead32(p);
+		else return unmapped8();
 	}
 
 	static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch, p - SCRATCH_BASE, v);
+		else if (isIo(p)) ioWriteNarrow(p, v & 0xFF, 0xFF);
 		else unmappedAccesses++;
+	}
+
+	/**
+		A narrow write to a 32-bit register.
+
+		Read-modify-write rather than a plain store, because the surrounding bits belong to the
+		register and a game writing one byte of I_MASK means to leave the rest alone.
+	**/
+	static function ioWriteNarrow(p:Int, v:Int, valueMask:Int):Void {
+		final reg = p & ~3;
+		final shift = (p & 3) << 3;
+		final old = ioRead32(reg);
+		ioWrite32(reg, (old & ~(valueMask << shift)) | ((v & valueMask) << shift));
 	}
 
 	static function slowWrite16(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set16(scratch, p - SCRATCH_BASE, v);
+		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		else unmappedAccesses++;
 	}
 
 	static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch, p - SCRATCH_BASE, v);
+		else if (isIo(p)) ioWrite32(p, v);
 		else unmappedAccesses++;
 	}
 

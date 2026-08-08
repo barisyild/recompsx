@@ -62,5 +62,19 @@ class CpuState {
 	/** Nesting depth of EnterCriticalSection; interrupts are delivered only at zero. */
 	public var critDepth:Int = 0;
 
+	/**
+		COP0r12, the status register, and COP0r13, cause.
+
+		Bit layout from psx-spx "COP0 Register Summary": SR bit 0 is IEc, the current interrupt
+		enable; bits 8..15 are the interrupt mask Im; CAUSE bits 10..15 are the pending field IP,
+		masked bit-for-bit by the matching SR bits. The PlayStation's whole interrupt controller
+		hangs off one line, IP bit 10.
+
+		Games read and write these directly, so they are kept honest even though delivery is
+		actually gated by `critDepth` and the runtime's own state.
+	**/
+	public var sr:Int = 0;
+	public var cause:Int = 0;
+
 	public function new() {}
 }

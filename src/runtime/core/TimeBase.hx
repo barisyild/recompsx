@@ -37,8 +37,17 @@ class TimeBase {
 	/** False for NTSC. Set once at boot from the game's region; never changes mid-run. */
 	public static var pal(default, null) = false;
 
+	// Derived once per region rather than per call. `line()` is read on every GPUSTAT poll, and a
+	// game polling GPUSTAT in a loop should not pay two divisions for it.
+	static var perLine = 0;
+	static var perFrame = 0;
+	static var lastLine = 0;
+
 	public static function setRegion(isPal:Bool):Void {
 		pal = isPal;
+		perLine = computeCyclesPerLine();
+		perFrame = computeCyclesPerFrame();
+		lastLine = lines() - 1;
 	}
 
 	/**
@@ -49,19 +58,52 @@ class TimeBase {
 		division truncates, and the remainder is what `lineCycleRemainder` exists to carry, so a
 		frame's worth of lines adds up to the frame length rather than drifting.
 	**/
-	public static function cyclesPerLine():Int {
+	public static function cyclesPerLine():Int return perLine;
+
+	/** CPU cycles in one whole frame. */
+	public static function cyclesPerFrame():Int return perFrame;
+
+	static function computeCyclesPerLine():Int {
 		return IntMath.div(IntMath.mul(clocksPerLine(), DEN), num());
 	}
 
-	/** CPU cycles in one whole frame — the number that must be exact, so it is computed once. */
-	public static function cyclesPerFrame():Int {
-		return IntMath.div(IntMath.mul(IntMath.mul(clocksPerLine(), lines()), DEN), num());
+	/**
+		CPU cycles in one whole frame, exactly, without leaving 32 bits.
+
+		The obvious expression — `clocksPerLine * lines * DEN / num` — overflows badly: the NTSC
+		numerator is about 4.05e11, two hundred times what an Int holds. It wrapped to something
+		small, every deadline landed in the past, and the scheduler fired events forever. Its
+		runaway guard is what surfaced this.
+
+		Nor can it be `cyclesPerLine * lines`: that truncated line length loses 227 cycles per NTSC
+		frame, which is a drifting frame rate rather than a wrong one — the kind of error that
+		looks fine for a minute.
+
+		So: divide first, then multiply, and carry the remainder. With `X = clocksPerLine * DEN`,
+
+		    frame = lines * (X / num) + (lines * (X % num)) / num
+
+		Every intermediate fits — the largest is `lines * (num-1)`, about 2.2e8 on PAL — and the
+		result is the exact quotient, not an approximation of it.
+	**/
+	static function computeCyclesPerFrame():Int {
+		final x = IntMath.mul(clocksPerLine(), DEN);
+		final n = num();
+		final whole = IntMath.div(x, n);
+		final rem = IntMath.mod(x, n);
+		return (IntMath.mul(lines(), whole) + IntMath.div(IntMath.mul(lines(), rem), n)) | 0;
 	}
 
-	/** Which line the beam is on, 0..lines()-1. */
+	/**
+		Which line the beam is on, 0..lines()-1.
+
+		Clamped at the end. A line is a whole number of cycles here but the real one is not, so the
+		truncation leaves the last line a little long, and without the clamp a cycle near the end
+		of a frame would report a line that does not exist.
+	**/
 	public static function line(cycles:Int):Int {
-		final into = intoFrame(cycles);
-		return IntMath.div(into, cyclesPerLine());
+		final l = IntMath.div(intoFrame(cycles), perLine);
+		return l > lastLine ? lastLine : l;
 	}
 
 	/** Cycles elapsed since the start of the current frame. */
@@ -95,7 +137,7 @@ class TimeBase {
 
 	/** The cycle at which the next vblank starts, strictly after `cycles`. */
 	public static function nextVblankStart(cycles:Int):Int {
-		final start = IntMath.mul(DEFAULT_VBLANK_LINE, cyclesPerLine());
+		final start = IntMath.mul(DEFAULT_VBLANK_LINE, perLine);
 		final into = intoFrame(cycles);
 		final delta = into < start ? start - into : (cyclesPerFrame() - into) + start;
 		return (cycles + delta) | 0;

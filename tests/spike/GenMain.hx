@@ -11,8 +11,9 @@ import core.Runtime;
 **/
 class GenMain {
 	public static function main():Void {
+		final ctx = new CpuState();
 		Runtime.bindDispatch(FnTable.call);
-		mem.Memory.init();
+		Runtime.boot(ctx);
 
 		// The image the recompiler was built from. Without it every load returns zero, so the
 		// game runs on empty memory and its kernel arguments are meaningless.
@@ -23,7 +24,6 @@ class GenMain {
 				"no image path given — running on empty memory, values read from RAM are not real");
 		}
 
-		final ctx = new CpuState();
 		ctx.pc = GameInfo.ENTRY_POINT;
 		ctx.gp = GameInfo.INITIAL_GP;
 		ctx.sp = GameInfo.INITIAL_SP;

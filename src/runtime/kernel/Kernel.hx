@@ -1,91 +1,192 @@
 package kernel;
 
 import core.CpuState;
+import core.Irq;
 import core.Runtime;
+import core.Scheduler;
 
 /**
 	The PlayStation kernel, high-level emulated.
 
 	This is the one part of the machine recompsx does not recompile. The BIOS is in ROM, not in
-	the game, so there is nothing to translate — and reimplementing it natively means no BIOS
-	image is ever needed, which is what lets a recompiled game be distributed as an ordinary
-	program.
+	the game, so there is nothing to translate — and reimplementing it natively means no BIOS image
+	is ever needed, which is what lets a recompiled game be distributed as an ordinary program.
 
 	Games reach it three ways, all of which land here: the A0/B0/C0 vectors (`jr` through a
 	register holding 0xA0, with the function number in $t1), `syscall` for the handful of
 	operations that use it, and `break` for the divide-by-zero guards Psy-Q emits.
 
-	Unimplemented so far. Each call reports once with its vector and number, which is exactly the
-	list a bring-up session works through — see docs/specs/runtime.md §3 for what P0 needs.
+	Function numbers and semantics come from psx-spx "BIOS Function Summary", with OpenBIOS
+	(MIT, pcsx-redux `src/mips/openbios`) settling the numeric details psx-spx leaves in prose.
+	Never from memory — golden rule 6. An unimplemented call reports once and returns, because a
+	stub that halted would only ever show the first gap.
 **/
 class Kernel {
-	/**
-		A BIOS call through one of the three vectors. `fn` is the value in $t1.
+	public static function init():Void {
+		KEvents.init();
+		KHandlers.init();
+	}
 
-		The kernel returns to $ra, exactly as a called function would, so an unimplemented call is
-		survivable: it reports and the game carries on. That is deliberate — a stub that halted
-		would only ever show the first gap, and the whole value of this stage is seeing the list.
-	**/
+	/** A BIOS call through one of the three vectors. `fn` is the value in $t1. */
 	public static function call(ctx:CpuState, vector:Int, fn:Int):Void {
 		if (vector == 0xA0) a0(ctx, fn);
+		else if (vector == 0xB0) b0(ctx, fn);
+		else if (vector == 0xC0) c0(ctx, fn);
 		else reportCall(ctx, vector, fn);
 	}
 
-	/**
-		The A0 vector.
+	// ---- A0 ------------------------------------------------------------------------------------
 
-		Function names and semantics are from psx-spx "BIOS Function Summary" — never from memory,
-		per golden rule 6. Each one implemented here cites what it is; the rest report and return.
-	**/
 	static function a0(ctx:CpuState, fn:Int):Void {
-		// FlushCache: "Flushes the Code Cache, so opcodes are ensured to be loaded from RAM".
-		// Nothing to do under static recompilation — there is no instruction fetch to invalidate.
-		// It is still a signal worth having: games call it right after copying code into RAM, so
-		// it is where an overlay has just landed, and where overlay activation will hook in (M6).
 		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
 		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
+		// FlushCache: nothing to do under static recompilation — there is no instruction fetch to
+		// invalidate. Still worth logging: it marks where a game just copied code, so it is where
+		// overlay activation will hook in at M6.
 		else if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
 		else reportCall(ctx, 0xA0, fn);
 	}
 
-	static function reportCall(ctx:CpuState, vector:Int, fn:Int):Void {
-		Runtime.reportOnce((vector << 16) | (fn & 0xFFFF), vectorName(vector) + "(" + hex2(fn) + ")");
+	// ---- B0 ------------------------------------------------------------------------------------
+
+	static function b0(ctx:CpuState, fn:Int):Void {
+		if (fn == 0x07) ctx.v0 = deliverEvent(ctx);
+		else if (fn == 0x08) ctx.v0 = KEvents.open(ctx, ctx.a0, ctx.a1, ctx.a2, ctx.a3);
+		else if (fn == 0x09) ctx.v0 = KEvents.close(ctx, ctx.a0);
+		else if (fn == 0x0A) ctx.v0 = KEvents.wait(ctx, ctx.a0);
+		else if (fn == 0x0B) ctx.v0 = KEvents.test(ctx, ctx.a0);
+		else if (fn == 0x0C) ctx.v0 = KEvents.enable(ctx, ctx.a0);
+		else if (fn == 0x0D) ctx.v0 = KEvents.disable(ctx, ctx.a0);
+		else if (fn == 0x20) ctx.v0 = undeliverEvent(ctx);
+		else reportCall(ctx, 0xB0, fn);
 	}
 
-	/** Reported once, like a gap, but as a thing handled rather than a thing missing. */
-	static function noteOnce(key:Int, what:String):Void {
-		Runtime.noteOnce(key, what);
+	static function deliverEvent(ctx:CpuState):Int {
+		KEvents.deliver(ctx, ctx.a0, ctx.a1);
+		return 0;
 	}
+
+	static function undeliverEvent(ctx:CpuState):Int {
+		KEvents.undeliver(ctx, ctx.a0, ctx.a1);
+		return 0;
+	}
+
+	// ---- C0 ------------------------------------------------------------------------------------
+
+	static function c0(ctx:CpuState, fn:Int):Void {
+		if (fn == 0x02) ctx.v0 = enqIntRP(ctx);
+		else if (fn == 0x03) ctx.v0 = deqIntRP(ctx);
+		else if (fn == 0x0A) ctx.v0 = changeClearRCnt(ctx);
+		else reportCall(ctx, 0xC0, fn);
+	}
+
+	static function enqIntRP(ctx:CpuState):Int {
+		KHandlers.enqueue(ctx, ctx.a0, ctx.a1);
+		return 0;
+	}
+
+	static function deqIntRP(ctx:CpuState):Int {
+		KHandlers.dequeue(ctx, ctx.a0, ctx.a1);
+		return 0;
+	}
+
+	/**
+		`ChangeClearRCnt(timer, flag)` — whether the kernel's own handler acknowledges a timer IRQ.
+
+		Returns the previous setting, which callers save and put back.
+	**/
+	static function changeClearRCnt(ctx:CpuState):Int {
+		final t = ctx.a0 & 3;
+		final was = clearRCnt[t] ? 1 : 0;
+		clearRCnt[t] = ctx.a1 != 0;
+		return was;
+	}
+
+	static var clearRCnt:Array<Bool> = [true, true, true, true];
+
+	// ---- what the interrupt controller hands us -------------------------------------------------
+
+	/**
+		An interrupt reached the CPU: turn hardware bits into kernel events.
+
+		On hardware this work is done by the BIOS's own handlers sitting in the priority chains.
+		Under HLE those handlers are not game code, so the delivery is ours: the game's chains run
+		first — they are the ones that may acknowledge the hardware — and whatever is still
+		pending afterwards becomes an event.
+
+		Called from `Irq.dispatch`, which has already saved the registers.
+	**/
+	public static function onInterrupt(ctx:CpuState):Void {
+		KHandlers.runChains(ctx);
+		deliverPending(ctx);
+	}
+
+	static function deliverPending(ctx:CpuState):Void {
+		final live = Irq.stat & Irq.mask;
+		if ((live & (1 << Irq.VBLANK)) != 0) vblank(ctx);
+		else {}
+	}
+
+	/**
+		Vblank: deliver the class, and acknowledge on the game's behalf.
+
+		The kernel's own vblank handler acks the controller, so a game that only opened an event
+		never has to touch I_STAT. Acknowledging here is what stops the same vblank being
+		re-delivered on the next pump, forever.
+	**/
+	static function vblank(ctx:CpuState):Void {
+		vblankCount++;
+		KEvents.deliver(ctx, KEvents.CLASS_VBLANK, SPEC_INTERRUPTED);
+		KEvents.deliver(ctx, CLASS_RCNT3, SPEC_INTERRUPTED);
+		Irq.writeStat(~(1 << Irq.VBLANK));
+	}
+
+	/** The spec every hardware-interrupt event is opened with. */
+	public static inline var SPEC_INTERRUPTED = 0x0002;
+
+	/** Vblank doubles as root counter 3, which is what libetc's VSync actually waits on. */
+	public static inline var CLASS_RCNT3 = 0xF2000003;
+
+	/** Frames elapsed. Deterministic, and the first number a bring-up session watches. */
+	public static var vblankCount(default, null) = 0;
+
+	// ---- syscall / break -------------------------------------------------------------------------
 
 	/**
 		`syscall`.
 
 		The function is selected by **$a0**, not by the instruction's 20-bit code field — compilers
-		emit that field as 0 essentially always. Reporting the code field therefore said "syscall 0"
-		for every call the game made, which is a diagnostic that cannot distinguish anything.
-		Both are reported now, with the one that decides the behaviour first.
+		emit that field as 0 essentially always. Reporting the code field said "syscall 0" for
+		every call, which is a diagnostic that cannot distinguish anything.
 	**/
 	public static function syscall(ctx:CpuState, code:Int):Void {
-		// psx-spx: SYS(01h) EnterCriticalSection disables interrupts by clearing SR bits 2 and 10;
-		// SYS(02h) ExitCriticalSection sets them again. Under HLE the interrupt state that matters
-		// is ours, so this is a depth counter: delivery is gated on it reaching zero, which lets
-		// nested critical sections work the way the hardware's flag never had to.
 		if (ctx.a0 == 1) enterCritical(ctx);
 		else if (ctx.a0 == 2) exitCritical(ctx);
 		else Runtime.reportOnce(0x51000000 | (ctx.a0 & 0xFFFF), "syscall a0=" + ctx.a0);
 	}
 
+	/**
+		`EnterCriticalSection` / `ExitCriticalSection`.
+
+		psx-spx describes these as clearing and setting SR bits 2 and 10, which looks wrong until
+		you notice they run *inside* a syscall exception: there, bit 2 is IEp, the value that
+		becomes IEc when the handler returns. Under HLE no exception is taken, so the equivalent
+		is to drive IEc directly — and to keep our own depth counter, which is what actually gates
+		delivery and lets nesting work the way the hardware's single flag never had to.
+	**/
 	static function enterCritical(ctx:CpuState):Void {
-		// v0 reports whether interrupts *were* enabled, which is what callers save and restore.
 		ctx.v0 = ctx.critDepth == 0 ? 1 : 0;
 		ctx.critDepth++;
+		ctx.sr = ctx.sr & ~(Irq.SR_IEC | Irq.SR_IM_HW);
 		noteOnce(0x51000001, "SYS(01h) EnterCriticalSection");
 	}
 
 	static function exitCritical(ctx:CpuState):Void {
 		// Never below zero: a game that exits more than it enters would otherwise leave the
-		// counter negative and interrupts permanently gated off.
+		// counter negative and interrupts gated off for the rest of the run.
 		if (ctx.critDepth > 0) ctx.critDepth--;
+		else {}
+		if (ctx.critDepth == 0) ctx.sr = ctx.sr | Irq.SR_IEC | Irq.SR_IM_HW;
 		else {}
 		noteOnce(0x51000002, "SYS(02h) ExitCriticalSection");
 	}
@@ -93,6 +194,16 @@ class Kernel {
 	/** `break`. Psy-Q emits `break 0x400` after a divide as its divide-by-zero check. */
 	public static function brk(ctx:CpuState, code:Int):Void {
 		Runtime.reportOnce(0x52000000 | code, "break " + code);
+	}
+
+	// ---- plumbing -------------------------------------------------------------------------------
+
+	static function reportCall(ctx:CpuState, vector:Int, fn:Int):Void {
+		Runtime.reportOnce((vector << 16) | (fn & 0xFFFF), vectorName(vector) + "(" + hex2(fn) + ")");
+	}
+
+	static function noteOnce(key:Int, what:String):Void {
+		Runtime.noteOnce(key, what);
 	}
 
 	static function vectorName(v:Int):String {

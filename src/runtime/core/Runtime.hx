@@ -50,6 +50,22 @@ class Runtime {
 	}
 
 	/**
+		Brings the machine up, in the one order that works.
+
+		Memory before anything that can touch it, the interrupt controller before the scheduler
+		that raises into it, and the scheduler last because arming vblank needs a cycle count to
+		measure from. A launcher should call this and nothing else.
+	**/
+	public static function boot(ctx:CpuState):Void {
+		// Region first: every video constant derives from it, and they are computed once.
+		TimeBase.setRegion(false);
+		mem.Memory.init();
+		Irq.init();
+		kernel.Kernel.init();
+		Scheduler.init(ctx);
+	}
+
+	/**
 		Calls the function at an emulated address.
 
 		This is where every jump the analysis could not resolve statically ends up: calls through
@@ -79,6 +95,38 @@ class Runtime {
 			+ ", which should exist. This is a code-generation defect.");
 	}
 
+	/**
+		Time has reached the next deadline: run what is due, then deliver any interrupt.
+
+		The only place recompiled code re-enters the runtime for reasons other than a memory access
+		or a kernel call, and the only place an interrupt can be delivered. Generated code calls it
+		guarded — `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);` — at function entry and
+		every back-edge, so the common cost is a subtraction and a branch (ADR-0005 §2).
+
+		Order matters: events first, because firing one is what raises the interrupt that the
+		second half then delivers. Reversing them would cost a whole pump of latency on every
+		vblank.
+	**/
+	public static function pump(ctx:CpuState):Void {
+		Scheduler.runDue(ctx);
+		Irq.dispatch(ctx);
+	}
+
+	/**
+		Advances emulated time to the next deadline and runs it.
+
+		What an idle kernel wait uses. There is no thread to block, so waiting means moving the
+		clock — and moving it straight to the deadline rather than by some step, which is exact and
+		makes an idle wait cost one iteration per event instead of one per N cycles (ADR-0005 §3).
+	**/
+	public static function idleToNextEvent(ctx:CpuState):Void {
+		// Never backwards: if a deadline has already passed, just run it. `| 0` because the
+		// comparison has to survive the counter wrapping, and JavaScript does not wrap `-`.
+		if (((ctx.nextEvent - ctx.cycles) | 0) > 0) ctx.cycles = ctx.nextEvent;
+		else {}
+		pump(ctx);
+	}
+
 	// ---- COP0 ------------------------------------------------------------------------------------
 
 	/**
@@ -88,17 +136,34 @@ class Runtime {
 		kernel HLE also mediates; the breakpoint registers are used by almost nothing.
 	**/
 	public static function mfc0(ctx:CpuState, reg:Int):Int {
+		if (reg == 12) return ctx.sr;
+		// CAUSE's pending field is not stored; it is whatever the controller says right now.
+		else if (reg == 13) return (ctx.cause & ~Irq.CAUSE_IP_HW) | Irq.causeBits();
+		else if (reg == 14) return ctx.pc;   // EPC
+		else return unknownCop0(reg);
+	}
+
+	static function unknownCop0(reg:Int):Int {
 		reportOnce(0xC0000000 | reg, "mfc0 from COP0 register " + reg);
 		return 0;
 	}
 
 	public static function mtc0(ctx:CpuState, reg:Int, value:Int):Void {
-		reportOnce(0xC1000000 | reg, "mtc0 to COP0 register " + reg);
+		if (reg == 12) ctx.sr = value;
+		else if (reg == 13) ctx.cause = value;
+		else reportOnce(0xC1000000 | reg, "mtc0 to COP0 register " + reg);
 	}
 
-	/** Returns from an exception by restoring the interrupt-enable stack in SR. */
+	/**
+		`rfe` — pop the interrupt-enable stack in SR.
+
+		SR bits 0..5 are three pairs, current/previous/old, and returning from an exception shifts
+		them down two: previous becomes current, old becomes previous. The old pair is left as it
+		is, which is what the hardware does — it does not clear, it just stops being read.
+	**/
 	public static function rfe(ctx:CpuState):Void {
-		reportOnce(0xC2000000, "rfe");
+		final stack = ctx.sr & 0x3F;
+		ctx.sr = (ctx.sr & ~0xF) | (stack >> 2);
 	}
 
 	// ---- diagnostics -------------------------------------------------------------------------------

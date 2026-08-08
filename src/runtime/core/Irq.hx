@@ -1,0 +1,168 @@
+package core;
+
+import kernel.Kernel;
+
+/**
+	The interrupt controller, and delivery of interrupts into recompiled code.
+
+	Two halves that are easy to confuse. `I_STAT`/`I_MASK` at 0x1F801070 are the *hardware*
+	controller: subsystems raise bits, the game acknowledges them by writing. COP0's SR decides
+	whether the CPU is listening at all. An interrupt reaches the game only when both agree, and
+	when the runtime is somewhere it is safe to call into (ADR-0005 §4).
+
+	Delivery means calling a recompiled game function. That is why it happens only at pump points,
+	where the emulated CPU state is whole, and why the registers are saved around it: on hardware
+	the BIOS preserves them, and under HLE nothing does unless this does.
+**/
+class Irq {
+	// I_STAT / I_MASK bit assignments, psx-spx "Interrupt Registers".
+	public static inline var VBLANK = 0;
+	public static inline var GPU = 1;
+	public static inline var CDROM = 2;
+	public static inline var DMA = 3;
+	public static inline var TIMER0 = 4;
+	public static inline var TIMER1 = 5;
+	public static inline var TIMER2 = 6;
+	public static inline var SIO0 = 7;
+	public static inline var SIO1 = 8;
+	public static inline var SPU = 9;
+	public static inline var PIO = 10;
+
+	/** COP0 SR bit 0: the CPU is listening at all. */
+	public static inline var SR_IEC = 0x00000001;
+
+	/** COP0 SR bit 10: the mask bit for the one line the PlayStation's controller drives. */
+	public static inline var SR_IM_HW = 0x00000400;
+
+	/** COP0 CAUSE bit 10: that same line, pending. */
+	public static inline var CAUSE_IP_HW = 0x00000400;
+
+	public static var stat(default, null) = 0;
+	public static var mask(default, null) = 0;
+
+	/** How many interrupts have actually been delivered into game code. Deterministic. */
+	public static var delivered(default, null) = 0;
+
+	/** True while a game handler is running. Delivery is closed then; see `dispatch`. */
+	static var inHandler = false;
+
+	/** Registers saved around a handler. Allocated once — nothing allocates after init. */
+	static var saved:CpuState;
+
+	public static function init():Void {
+		stat = 0;
+		mask = 0;
+		delivered = 0;
+		inHandler = false;
+		saved = new CpuState();
+	}
+
+	/**
+		A subsystem's line went high.
+
+		Edge-triggered: the bit latches and stays until the game acknowledges it, which is what
+		lets a game that was inside a critical section still see the vblank it missed.
+	**/
+	public static function raise(ctx:CpuState, bit:Int):Void {
+		stat |= 1 << bit;
+	}
+
+	// ---- the memory-mapped registers -------------------------------------------------------
+
+	public static function readStat():Int return stat;
+	public static function readMask():Int return mask;
+
+	/**
+		Writing I_STAT acknowledges: bits *cleared* in the written value are cleared in the status.
+
+		Not an assignment. A game acknowledging vblank writes a value with bit 0 low and every
+		other bit high, and expects its other pending interrupts to survive.
+	**/
+	public static function writeStat(v:Int):Void {
+		stat = stat & v;
+	}
+
+	public static function writeMask(v:Int):Void {
+		mask = v;
+	}
+
+	/** What the game would see in CAUSE: the controller's line, folded into IP bit 10. */
+	public static function causeBits():Int {
+		return (stat & mask) != 0 ? CAUSE_IP_HW : 0;
+	}
+
+	// ---- delivery ---------------------------------------------------------------------------
+
+	/** Anything pending and unmasked at the controller. */
+	public static inline function pending():Bool {
+		return (stat & mask) != 0;
+	}
+
+	/**
+		Whether an interrupt may be delivered right now.
+
+		Four conditions, and each one is a different kind of "no":
+		the controller has nothing (`pending`); the game is inside a critical section
+		(`critDepth`); the CPU is not listening (SR); or we are already inside a handler.
+
+		That last one is not an optimisation. Without it a handler's own back-edges would pump,
+		deliver again, and recurse until the host stack died — with a cause that looks like
+		anything but an interrupt.
+	**/
+	public static function deliverable(ctx:CpuState):Bool {
+		return pending()
+			&& ctx.critDepth == 0
+			&& !inHandler
+			&& (ctx.sr & SR_IEC) != 0
+			&& (ctx.sr & SR_IM_HW) != 0;
+	}
+
+	/**
+		Runs the game's handlers for whatever is pending.
+
+		Called from `Runtime.pump`, never from anywhere else, because this is where recompiled
+		code gets re-entered and only a pump point guarantees the CPU state is consistent.
+	**/
+	public static function dispatch(ctx:CpuState):Void {
+		if (!deliverable(ctx)) return;
+		else {}
+		inHandler = true;
+		delivered++;
+		saveRegisters(ctx);
+		ctx.cause = (ctx.cause & ~CAUSE_IP_HW) | causeBits();
+		Kernel.onInterrupt(ctx);
+		restoreRegisters(ctx);
+		inHandler = false;
+	}
+
+	// A handler is an ordinary recompiled function and will use registers freely. On hardware the
+	// BIOS saves and restores them; here this does. `pc` and `cycles` are deliberately not
+	// restored: time really did pass, and pc is only meaningful at a boundary anyway.
+	static function saveRegisters(ctx:CpuState):Void {
+		saved.at = ctx.at;
+		saved.v0 = ctx.v0; saved.v1 = ctx.v1;
+		saved.a0 = ctx.a0; saved.a1 = ctx.a1; saved.a2 = ctx.a2; saved.a3 = ctx.a3;
+		saved.t0 = ctx.t0; saved.t1 = ctx.t1; saved.t2 = ctx.t2; saved.t3 = ctx.t3;
+		saved.t4 = ctx.t4; saved.t5 = ctx.t5; saved.t6 = ctx.t6; saved.t7 = ctx.t7;
+		saved.s0 = ctx.s0; saved.s1 = ctx.s1; saved.s2 = ctx.s2; saved.s3 = ctx.s3;
+		saved.s4 = ctx.s4; saved.s5 = ctx.s5; saved.s6 = ctx.s6; saved.s7 = ctx.s7;
+		saved.t8 = ctx.t8; saved.t9 = ctx.t9;
+		saved.k0 = ctx.k0; saved.k1 = ctx.k1;
+		saved.gp = ctx.gp; saved.sp = ctx.sp; saved.fp = ctx.fp; saved.ra = ctx.ra;
+		saved.hi = ctx.hi; saved.lo = ctx.lo;
+	}
+
+	static function restoreRegisters(ctx:CpuState):Void {
+		ctx.at = saved.at;
+		ctx.v0 = saved.v0; ctx.v1 = saved.v1;
+		ctx.a0 = saved.a0; ctx.a1 = saved.a1; ctx.a2 = saved.a2; ctx.a3 = saved.a3;
+		ctx.t0 = saved.t0; ctx.t1 = saved.t1; ctx.t2 = saved.t2; ctx.t3 = saved.t3;
+		ctx.t4 = saved.t4; ctx.t5 = saved.t5; ctx.t6 = saved.t6; ctx.t7 = saved.t7;
+		ctx.s0 = saved.s0; ctx.s1 = saved.s1; ctx.s2 = saved.s2; ctx.s3 = saved.s3;
+		ctx.s4 = saved.s4; ctx.s5 = saved.s5; ctx.s6 = saved.s6; ctx.s7 = saved.s7;
+		ctx.t8 = saved.t8; ctx.t9 = saved.t9;
+		ctx.k0 = saved.k0; ctx.k1 = saved.k1;
+		ctx.gp = saved.gp; ctx.sp = saved.sp; ctx.fp = saved.fp; ctx.ra = saved.ra;
+		ctx.hi = saved.hi; ctx.lo = saved.lo;
+	}
+}
