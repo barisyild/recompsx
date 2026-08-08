@@ -127,9 +127,21 @@ class Timers {
 		else return 0;
 	}
 
+	/**
+		Reported once, and asked once.
+
+		`dividerShift` runs on every read of a counter, and a game polling one polls it hard — so
+		building the message here, only to have `reportOnce` discover the key was already seen, put
+		string concatenation and a map lookup in the hottest loop the timers have. The same shape
+		cost this runtime a thousandfold slowdown in the I/O path earlier today; the guard is the
+		same one.
+	**/
 	static function unusualSource(t:Int):Int {
-		Runtime.reportOnce(0x68000000 | t, "timer " + t
-			+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
+		final key = 0x68000000 | t;
+		if (!Runtime.alreadyReported(key)) {
+			Runtime.reportOnce(key, "timer " + t
+				+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
+		} else {}
 		return 0;
 	}
 
