@@ -52,45 +52,40 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The frame-29100 stall is solved, and its causal chain rewrote itself twice before settling.
-   The machine now runs past frame 120,000 with the game's own interrupt handlers live.**
+2. **The machine runs past frame 120,000 with pad and exception-hook paths live. The CD's
+   `Init failed` survives six eliminations and is now a *located* question.**
 
-   The final, profiler-verified chain: resolving `f_8003b224` (the sweep had seeded its prologue
-   8 bytes past the true entry) unblocked the game's *device initialisation* — which had been
-   silently skipped through a dispatch black hole all along. Device init drives **SIO0**, and at
-   frame ~29,100 the game began probing the controller port. Two genuine runtime gaps turned that
-   probe into what looked like a hang:
+   Solved this session, each a real bug on its own terms:
 
-   - **The unknown-register report built its message on every poll.** `reportOnce(key, "..." +
-     hex(p))` concatenates before it discovers the key is already reported. One call is free; a
-     poll loop paid 25% of all CPU ticks to `StringAdd` and limped ~1000× under emulated speed.
-     Hot sites now test `alreadyReported(key)` before any string exists.
-   - **libpad times its acknowledge timeout on hardware timer 2**, which read a constant zero, so
-     the timeout never expired (`f_8003c6a8`, 79% of ticks, polling `1F801120`). Timers 0–2 now
-     compute their values closed-form from the cycle count (§7.10): no stepping, divide-by-8
-     source, reset-at-target, reached/overflow flags. The emitted pump line also stores
-     `Memory.cycleHint` at every pump *point*, because a clock the poll loop cannot see move is
-     no clock at all.
-   - **SIO0 exists as an honest empty port**: TX always ready, every exchange answering 0xFF, and
-     /ACK never pulsing — what real hardware reports with nothing plugged in, and the state
-     libpad's "no controller" path is written to meet.
+   | Bug | Effect |
+   |---|---|
+   | Sweep seeded prologues, not entries | libpad's handler unreachable — GCC schedules loads before `addiu sp` |
+   | `reportOnce` built its message before the dedup check | 25% of ticks in `StringAdd`; ~1000× slowdown read as a hang |
+   | Timers clamped a wrapped `elapsed` to zero | every counter froze at the first 2^31 wrap; libpad's ACK timeout could never expire |
+   | SIO0 absent | pad probe polled a dead port |
+   | `HookEntryInt` stored and never invoked | the exception epilogue a library installs never ran |
 
-   With all three in, the pad probe concludes and the game runs to frame 120,000+ with
-   `handlers` ≈ 1.5 × frames — its own chain handlers are installed and being called. Not yet
-   reached: `CD_init` (the game is doing something for those 120k frames — the next session's
-   first question), drawing (`gpu 1w`), and the SPU (whose whole register page it read once).
+   **What is now known about the CD, by measurement rather than hypothesis.** Exactly one chain
+   element is ever installed — `0x8006d984`, libpad's (`f1=0x8003b1bc`, `f2=0x8003b224`, which
+   dereferences the SIO0 base). **libcd never calls `SysEnqIntRP` at all**, and
+   `KEvents.delivered` is 0, so it uses neither of the kernel's two published mechanisms. The
+   exception hook now runs once per interrupt (70k entries) and `CdInit` still fails, which
+   eliminates the third.
 
-   **Correction to yesterday's attribution.** `0x8003b224` is libpad's SIO handler, not libcd's:
-   it dereferences `[0x8006D99C]`, which the image holds as `0x1F801040` — the SIO0 base — and
-   reads `JOY_CTRL` at +10. So the chain element `0x8006d984` belongs to the pad library, and
-   **libcd's own interrupt handler has still not been located.** That is now the CD question:
-   not why the handler fails, but which function is the handler.
+   So libcd reaches the CD by a route this kernel has not identified. The remaining candidates,
+   in the order worth testing:
 
-   Method note, recorded because it cost hours: the stall was diagnosed **twice wrongly** — first
-   as a generation regression, then as host-load noise — and both wrong diagnoses were "confirmed"
-   by A/B runs that varied two things at once or compared stale copies. What actually worked:
-   `node --prof`, whose SIGPROF sampling names the hot function even inside a starved event loop,
-   twice, in one minute each. Profile before hypothesising about anything that looks like a hang.
+   - It polls `1F801800`'s status bits directly from `CdSync` without an interrupt at all, in
+     which case the bug is in what those bits report rather than in delivery.
+   - It patches the A0/B0 table entry for a CD function and expects its own code called through
+     `KTables`' stubs.
+   - Its wait state lives in memory a BIOS handler would have written, and no such handler exists
+     under HLE — the possibility named two sessions ago and still not excluded.
+
+   The decisive instrument is the same one that has worked twice: trace every read of
+   `1F801800..1F801803` *outside* interrupt dispatch, with the caller's `ra`. Whoever polls the
+   controller from ordinary code is `CdSync`, and its address makes the rest a disassembly
+   question.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -433,6 +428,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [opus] Timer wrap clamp (froze all counters at 2^31), SIO0 empty port, HookEntryInt
+  now invoked as the exception epilogue OpenBIOS documents. Game passes frame 120k. Measured:
+  libcd installs NO chain element and opens NO event — only libpad does. CD route still
+  unidentified; next probe is tracing 1F80180x reads outside dispatch to find CdSync.
 
 2026-08-08 [fable] Frame-29100 stall solved by profiler, twice: report-once built its string
   before the dedup check (25% of ticks in StringAdd), and libpad's ACK timeout counts on timer 2

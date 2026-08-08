@@ -47,6 +47,7 @@ class KThreads {
 		used = [for (i in 0...THREADS) i == 0];
 		current = 0;
 		longjmps = 0;
+		hookEntries = 0;
 	}
 
 	// ---- setjmp / longjmp -----------------------------------------------------------------------
@@ -95,6 +96,45 @@ class KThreads {
 		ctx.unwindToken = 1;
 		longjmps++;
 	}
+
+	/**
+		Enters a `JmpBuf` as the exception handler's exit does: restore its registers and go.
+
+		Not a return — a jump. `HookEntryInt` hands the kernel a buffer of exactly the `setjmp`
+		shape and the exception dispatcher leaves through it, which OpenBIOS makes explicit as
+		`g_exceptionJmpBufPtr` (`kernel/handlers.c`, MIT): its default is a buffer whose `ra` is
+		`returnFromException` on a dedicated stack, and installing a hook swaps that pointer for
+		the game's own.
+
+		So the hooked code runs on the stack the buffer names, with the saved-register set the
+		buffer holds, and control arrives at `ra`. Everything the interrupt disturbed has already
+		been put back by `Irq.dispatch` before this is called.
+	**/
+	public static function enterJmpBuf(ctx:CpuState, buf:Int):Void {
+		ctx.sp = Memory.read32(buf + JB_SP);
+		ctx.fp = Memory.read32(buf + JB_FP);
+		ctx.s0 = Memory.read32(buf + JB_S0 + 0);
+		ctx.s1 = Memory.read32(buf + JB_S0 + 4);
+		ctx.s2 = Memory.read32(buf + JB_S0 + 8);
+		ctx.s3 = Memory.read32(buf + JB_S0 + 12);
+		ctx.s4 = Memory.read32(buf + JB_S0 + 16);
+		ctx.s5 = Memory.read32(buf + JB_S0 + 20);
+		ctx.s6 = Memory.read32(buf + JB_S0 + 24);
+		ctx.s7 = Memory.read32(buf + JB_S0 + 28);
+		ctx.gp = Memory.read32(buf + JB_GP);
+		final target = Memory.read32(buf + JB_RA);
+		if (target == 0) return;
+		else {}
+		hookEntries++;
+		Runtime.call(ctx, target);
+		// A hook that leaves through ReturnFromException has done its job; the token stops here
+		// rather than unwinding past the dispatcher.
+		if (ctx.unwindToken == Kernel.UNWIND_FROM_EXCEPTION) ctx.unwindToken = 0;
+		else {}
+	}
+
+	/** How many times a game's exception hook has been entered. */
+	public static var hookEntries(default, null) = 0;
 
 	// ---- threads --------------------------------------------------------------------------------
 

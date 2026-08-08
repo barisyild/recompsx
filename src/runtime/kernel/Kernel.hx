@@ -470,6 +470,13 @@ class Kernel {
 	public static function onInterrupt(ctx:CpuState):Void {
 		KHandlers.runChains(ctx);
 		deliverPending(ctx);
+		// The way out. On hardware the dispatcher does not return — it jumps through a JmpBuf
+		// whose default lands on ReturnFromException, and `HookEntryInt` replaces that buffer with
+		// the game's own. A library that installs a hook is asking to be the exception epilogue,
+		// and libcd is one: it never touches SysEnqIntRP, so this is the only door it comes
+		// through. Leaving it unimplemented made the kernel look like it was ignoring the CD.
+		if (hookEntryInt != 0) KThreads.enterJmpBuf(ctx, hookEntryInt);
+		else {}
 	}
 
 	/**
@@ -559,7 +566,7 @@ class Kernel {
 			+ " | events " + core.Scheduler.fired
 			+ " | irqs " + core.Irq.delivered
 			+ " | handlers " + KHandlers.calls
-			+ " | claims " + KHandlers.claims
+			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
