@@ -57,9 +57,18 @@ class Shards {
 	public final shards:Array<Shard> = [];
 	final shardOfAddr:Map<Int, Shard> = [];
 
-	public function new(discovery:Discovery) {
-		final entries = [for (k in discovery.functions.keys()) k];
+	/**
+		`limit` emits only the first N functions by address.
+
+		It exists to bisect compiler failures: when a whole-program build fails inside the C++
+		generator, halving the program until it passes names the function responsible in a dozen
+		builds. Not a feature of the pipeline — a diagnostic that would otherwise mean editing
+		generated files by hand.
+	**/
+	public function new(discovery:Discovery, limit:Int = 0) {
+		var entries = [for (k in discovery.functions.keys()) k];
 		entries.sort((a, b) -> a - b);
+		if (limit > 0 && limit < entries.length) entries = entries.slice(0, limit);
 
 		var current:Shard = null;
 		var instructions = 0;

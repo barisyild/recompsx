@@ -28,11 +28,11 @@ class Program {
 	public var filesWritten(default, null) = 0;
 	public var linesWritten(default, null) = 0;
 
-	public function new(image:Image, discovery:Discovery, exe:PsxExe) {
+	public function new(image:Image, discovery:Discovery, exe:PsxExe, limit:Int = 0) {
 		this.image = image;
 		this.discovery = discovery;
 		this.exe = exe;
-		this.shards = new Shards(discovery);
+		this.shards = new Shards(discovery, limit);
 		this.emitter = new Emitter(image, discovery);
 		emitter.shardOf = a -> shards.classOf(a);
 	}
@@ -84,7 +84,9 @@ class Program {
 	// ---- the dispatch table -------------------------------------------------------------------
 
 	function fnTableSource():String {
-		final entries = [for (k in discovery.functions.keys()) k];
+		// Only the functions that were actually emitted: under --limit the rest do not exist.
+		final entries = [];
+		for (s in shards.shards) for (fn in s.functions) entries.push(fn.entry);
 		entries.sort((a, b) -> a - b);
 
 		final buf = new StringBuf();

@@ -106,9 +106,25 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
       per-file size and points at either one large function's expression tree or something
       global. 88 K lines is not a lot; this is a limit in a v0.1.0 compiler, not in the approach.
 
-      Next steps, in order: bisect to the function that triggers it (generate subsets until it
-      passes), then decide between fixing the recursion in our vendored fork and restructuring
-      what the emitter produces for very large functions.
+      **Bisected 2026-08-08.** `gen --limit N` emits the first N functions by address; binary
+      search over N puts the boundary at exactly 860 functions passing and 861 failing — roughly
+      87,500 lines. Everything that would explain a *structural* cause has been ruled out:
+
+      - Not one large function. Function 861 is `f_8004c55c`: one block, three instructions.
+      - Not per-file size. 25 functions per shard fails identically to 120.
+      - Not the dispatch table's 861-element array literals. Replacing them with `[0]` still
+        overflows.
+      - Not the process stack. 64 MB changes nothing, so it is Haxe's eval stack.
+      - Not the analyzer, in either direction.
+
+      So it is cumulative: some recursion inside reflaxe.CPP grows with total program size and
+      runs out of eval stack a hair past where Crash Bash lands. A slightly smaller game would
+      compile and a slightly larger one would not, which makes this a hard blocker rather than a
+      tuning problem.
+
+      Next: instrument the vendored compiler to find the recursive call — it is ours to edit, and
+      a depth counter on the expression compiler should name it in one run. Fixing it there is
+      far preferable to shaping generated code around an unknown limit.
 
       This is the clearest vindication so far of developing on JavaScript (ADR-0003). A
       C++-only project would be completely blocked at this milestone; instead the JS build runs

@@ -216,10 +216,12 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			return EXIT_USAGE;
 		}
 		var outDir = "out/gen";
+		var limit = 0;
 		var i = 1;
 		while (i < args.length) {
 			switch (args[i]) {
 				case "--out" if (i + 1 < args.length): outDir = args[i + 1]; i++;
+				case "--limit" if (i + 1 < args.length): limit = Std.parseInt(args[i + 1]); i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
 					return EXIT_USAGE;
@@ -233,7 +235,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
 		discovery.run();
 
-		final program = new Program(image, discovery, exe);
+		final program = new Program(image, discovery, exe, limit);
 		program.writeTo(outDir);
 
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
