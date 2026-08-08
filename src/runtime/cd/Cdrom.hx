@@ -132,6 +132,25 @@ class Cdrom {
 		swallowed = 0;
 	}
 
+	// ---- diagnostic trace ------------------------------------------------------------------------
+	//
+	// Bounded, and removed once the dialogue is understood. Five hypotheses about why libcd never
+	// sees its interrupt have died to measurement; this stops the guessing by recording the actual
+	// conversation: every register access, every response, every acknowledgement, in order.
+	static var traceLeft = 400;
+
+	public static inline function tracing():Bool return traceLeft > 0;
+
+	/** True while an interrupt is latched — the window where the handler's reads matter. */
+	public static inline function intLatched():Bool return currentInt != 0;
+
+	public static function tnote(what:String):Void {
+		if (traceLeft <= 0) return;
+		else {}
+		traceLeft--;
+		Runtime.note("cd# " + what);
+	}
+
 	// ---- the four registers ----------------------------------------------------------------------
 
 	public static function read8(addr:Int):Int {
@@ -170,11 +189,17 @@ class Cdrom {
 	}
 
 	static function popResponse():Int {
-		if (responseRead >= responseCount) return 0;
+		if (responseRead >= responseCount) return emptyResponse();
 		else {}
 		final b = response[responseRead];
 		responseRead++;
+		tnote("r resp -> " + b);
 		return b;
+	}
+
+	static function emptyResponse():Int {
+		tnote("r resp -> EMPTY");
+		return 0;
 	}
 
 	static function popData():Int {
@@ -187,8 +212,9 @@ class Cdrom {
 
 	/** 1F801803 reads the interrupt enable on index 0 and the pending flags on index 1. */
 	static function read1803():Int {
-		if ((index & 1) == 0) return irqEnable | 0xE0;
-		else return currentInt | 0xE0;
+		final v = (index & 1) == 0 ? irqEnable | 0xE0 : currentInt | 0xE0;
+		tnote("r 1803." + index + " -> " + v);
+		return v;
 	}
 
 	static function write1801(v:Int, cycles:Int):Void {
@@ -198,8 +224,13 @@ class Cdrom {
 
 	static function write1802(v:Int):Void {
 		if (index == 0) pushParam(v);
-		else if (index == 1) irqEnable = v & 0x1F;
+		else if (index == 1) setIrqEnable(v);
 		else {}   // the volume registers, which mean nothing without audio
+	}
+
+	static function setIrqEnable(v:Int):Void {
+		irqEnable = v & 0x1F;
+		tnote("irqEnable := " + irqEnable);
 	}
 
 	static function pushParam(v:Int):Void {
@@ -228,6 +259,7 @@ class Cdrom {
 	}
 
 	static function acknowledge(v:Int):Void {
+		tnote("ack " + v + " (int was " + currentInt + ")");
 		if ((v & 0x40) != 0) paramCount = 0;
 		else {}
 		if ((v & 0x07) == 0) return;
@@ -257,6 +289,7 @@ class Cdrom {
 		once would leave it waiting forever.
 	**/
 	static function execute(cmd:Int, cycles:Int):Void {
+		tnote("cmd 0x" + StringTools.hex(cmd, 2) + " params=" + paramCount);
 		commands++;
 		if (cmd == 0x01) ackWith1(status);                      // Getstat
 		else if (cmd == 0x02) setloc();
@@ -507,6 +540,7 @@ class Cdrom {
 
 	/** Moves a deferred answer into the FIFO and rings the bell. */
 	static function deliverPending():Void {
+		tnote("INT " + pendingInt + " delivered, " + pendingCount + " bytes");
 		responseCount = pendingCount;
 		responseRead = 0;
 		for (i in 0...pendingCount) response[i] = pendingResponse[i];

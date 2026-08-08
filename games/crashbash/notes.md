@@ -111,11 +111,16 @@ The runtime names each miss (`no function at 0x...`); feeding them back closes t
 
     ./scripts/recompsx.sh gen <SCUS_945.70> \
       --seed 0x80031d28 --seed 0x8003ae40 --seed 0x8003b068 \
-      --seed 0x8003b1bc --seed 0x800403b4
+      --seed 0x8003b1bc --seed 0x800403b4 --seed 0x8003b224
 
 One of these carries libcd's own `I_MASK |= cdrom|dma` write — without it the CD line never
-unmasks and every controller interrupt sits undelivered.
+unmasks and every controller interrupt sits undelivered. `0x8003b224` is the CD interrupt
+handler itself (chain element func2): the sweep used to seed its *prologue* at `0x8003b22c`,
+eight bytes past the true entry, because GCC schedules two loads ahead of the stack adjust —
+fixed in the sweep, and the explicit seed is kept as documentation of what the address is.
 
-**Do not seed 0x8003b224.** It lies inside another function's extent, and seeding it truncates
-the host function (the tool lacks §6.2's multi-entry duplication), which regresses the game to
-before handler installation. It stays a reported black hole until the tool learns overlap.
+An earlier revision of this note said seeding 0x8003b224 regresses the game. It does not. The
+"regression" was a wall-clock artefact: the game spends its first ~30–60k frames limping through
+VSync timeouts before it installs handlers or touches the CD, and a loaded host let a 40-second
+run reach only frame ~29k — still on the normal trajectory, misread as "stuck earlier". The
+counters that told the truth all along: the *working* run also shows `handlers 0` at frame 6000.

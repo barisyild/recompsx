@@ -79,7 +79,12 @@ class Irq {
 
 	// ---- the memory-mapped registers -------------------------------------------------------
 
-	public static function readStat():Int return stat;
+	public static function readStat():Int {
+		if ((stat & (1 << CDROM)) != 0 && cd.Cdrom.tracing()) {
+			cd.Cdrom.tnote("I_STAT read -> " + stat + " (mask " + mask + ")");
+		} else {}
+		return stat;
+	}
 	public static function readMask():Int return mask;
 
 	/**

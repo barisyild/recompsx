@@ -445,7 +445,27 @@ class Discovery {
 		for (run in image.unknownRuns(2)) {
 			var a = run.addr;
 			final end = run.addr + run.words * 4;
-			var atGapStart = true;
+
+			// Leading zero words are the previous function's alignment fill, not the gap's code —
+			// and they must not be mistaken for an entry's opening instructions.
+			while (a + 8 <= end && image.readWord(a) == 0) a += 4;
+
+			// The gap start is the one address here that is not a guess: if this gap holds code at
+			// all, it starts at the start. Compilers schedule loads ahead of the stack adjustment,
+			// so the prologue may sit a few instructions in — and the seed must be THIS address,
+			// not the adjustment's. Seeding the adjustment emits a function that begins past its
+			// own entry, which every caller through a pointer table then misses by a few bytes.
+			// libcd's CD interrupt handler (lui, lw, then addiu sp) was lost to exactly this, and
+			// with it every sector the bring-up game ever asked for.
+			final lead = prologueIndex(a, end, 4);
+			if (lead >= 0) {
+				addSeed(a, defaultName(a), Confidence.Swept);
+				// Resume past the adjustment, or the sliding scan below re-seeds it and produces
+				// a second function starting inside the first.
+				a += (lead + 2) * 4;
+			}
+
+			var atGapStart = lead < 0;
 			while (a + 8 <= end) {
 				if (looksLikePrologue(a, end, atGapStart)) {
 					addSeed(a, defaultName(a), Confidence.Swept);
@@ -458,6 +478,23 @@ class Discovery {
 				atGapStart = false;
 			}
 		}
+	}
+
+	/**
+		The index of an `addiu sp, sp, -N` within the first `k` instructions, every instruction
+		before it being plain — no branch, no jump, nothing invalid, because that is not how a
+		function opens. -1 when the window holds none.
+	**/
+	function prologueIndex(addr:Int, limit:Int, k:Int):Int {
+		var i = 0;
+		while (i < k && addr + (i + 1) * 4 <= limit) {
+			final instr = Decoder.decode(addr + i * 4, image.readWord(addr + i * 4));
+			if (instr.op == Op.ADDIU && instr.rt == 29 && instr.rs == 29 && instr.immS < 0
+					&& (instr.immS & 7) == 0) return i;
+			if (instr.op == Op.INVALID || instr.op.hasDelaySlot) return -1;
+			i++;
+		}
+		return -1;
 	}
 
 	/**

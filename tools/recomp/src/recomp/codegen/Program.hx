@@ -39,6 +39,15 @@ class Program {
 
 	public function writeTo(dir:String):Void {
 		ensureDir(dir);
+		// Remove every previously generated file first. Shard names carry their split point, so
+		// when a discovery change moves a split, the old file's name no longer matches anything —
+		// and a directory that accumulates every layout it has ever had is a haunted one: twenty
+		// files where eleven belong, and any tooling that globs `Fns_*.hx` reads functions from
+		// builds that no longer exist. Generated output is machine-owned; nothing hand-edited
+		// lives here to protect (golden rule 5).
+		for (name in FileSystem.readDirectory(dir)) {
+			if (StringTools.endsWith(name, ".hx")) FileSystem.deleteFile('$dir/$name');
+		}
 		for (s in shards.shards) write('$dir/${s.className}.hx', shardSource(s));
 		write('$dir/FnTable.hx', fnTableSource());
 		write('$dir/GameInfo.hx', gameInfoSource());

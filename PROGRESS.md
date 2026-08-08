@@ -52,35 +52,32 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **libcd's handler runs on every CD interrupt and still does not satisfy `CdSync`. The next
-   probe is a register trace, not another hypothesis.**
+2. **The CD interrupt handler was lost to an 8-byte sweep miss, and a phantom regression cost a
+   day of detours. Both are settled.**
 
-   Measured state: `I_MASK` = `0x08d` (libcd unmasks cdrom+dma itself, once its black-holed
-   functions are seeded), `irqs` > `frames` so CD interrupts really are delivered, and
-   `handlers` ≈ 1.1 × `frames` so libcd's own chain element is installed and called. `CdInit`
-   runs its full `CdlNop`/`CdlReset`/`CdlGetTN` sequence and then reports `Init failed`.
+   The register trace answered in four lines what five hypotheses could not: on every CD
+   interrupt the chains ran libcd's element with `f1=0x8003b1bc` (the verifier, seeded, works)
+   and `f2=0x8003b224` — the handler, which was a dispatch black hole. The verifier claimed the
+   interrupt; the function that would read the response, set `CdSync`'s flags and acknowledge the
+   controller never existed.
 
-   `ReturnFromException` is now an unwind rather than a return, which OpenBIOS
-   (`kernel/handlers.c`, MIT) settles beyond doubt: the dispatcher holds a `JmpBuf` whose `ra` is
-   `returnFromException` and whose `sp` is a dedicated exception stack, so a handler that claims
-   an interrupt jumps back through it and its frame is abandoned. Treating that as an ordinary
-   return let the recompiled handler run on into code unreachable on hardware.
+   Why it never existed: the handler opens `lui, lw, addiu sp` — GCC schedules two loads ahead of
+   the stack adjustment — and the prologue sweep seeded the *adjustment's* address, `0x8003b22c`,
+   eight bytes past the true entry. Every pointer-table call to the real entry missed. The sweep
+   now seeds the gap start when a prologue sits within its first four instructions
+   (`prologueIndex` in Discovery), which also corrected two other swept entries and found one new
+   function.
 
-   **It is correct and it changed nothing: `claims` is 0.** libcd's handler returns normally
-   rather than through `ReturnFromException`, so this path is not the one it uses. Fifth
-   hypothesis, fifth elimination — and the third fix that stands on hardware behaviour alone.
+   The "seeding 0x8003b224 regresses the game" claim from earlier today is **retracted**: the
+   game spends its first ~30–60k frames in VSync-timeout limping before it installs any handler
+   or touches the CD, and a loaded host let 40-second runs reach only frame ~29k — normal
+   trajectory, misread as a regression. The tell that finally exposed it: the *known-good* run
+   also shows `handlers 0` at frame 6000. Lesson recorded: never judge a run by wall time, judge
+   it by frame-indexed counters.
 
-   Enough guessing. The question is no longer *whether* the handler is called but **what it reads
-   and what it gets**, and that is directly observable: trace every CD register access made while
-   inside `Irq.dispatch` — address, index, value — and compare it against what psx-spx says libcd
-   would expect. One run answers it. Candidate faults it would expose immediately:
-
-   - `read1803` on index 1 returns the *level* (1–5). The hardware returns interrupt **flags**
-     there, and libcd may be testing bits rather than comparing a number.
-   - The response FIFO may be drained by the handler before `pendingInt` has been delivered, or
-     the handler may ack before reading, leaving `CdSync` with nothing.
-   - `statusRegister` bit 5 claims "response waiting" from `responseRead < responseCount`, which
-     is true only after delivery — a handler polling it earlier sees a permanently empty mailbox.
+   A long run with the handler resolvable is in flight. Next session reads its `cd#` dialogue:
+   either `CdInit` passes and sector reads begin (next wall: DMA channel 3), or the dialogue
+   shows exactly which register answer libcd rejects.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -423,6 +420,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [fable] The CD handler black hole was the sweep seeding a prologue 8 bytes past the
+  true entry (GCC schedules loads before addiu sp) — sweep now seeds gap starts. Retracted the
+  phantom "6th-seed regression": host load made 40s runs reach frame 29k instead of 65k, same
+  trajectory. Detour cost: stale out/gen shard files (writeTo now cleans? no — TODO), zsh not
+  splitting $VAR seed lists, and a diff script that lied. Long run in flight; next reads cd#.
 
 2026-08-08 [fable] Named the dispatch misses (address+ra), found libcd's function-pointer black
   holes, added `gen --seed`. Five seeds: libcd now unmasks CD+DMA itself, its handler installs and
