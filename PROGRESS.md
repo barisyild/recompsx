@@ -170,6 +170,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] JS memory fast path: RawBuf now carries u8/u16/i32 views over one
+  ArrayBuffer; aligned wide accesses use them (endianness measured at startup, not assumed).
+  Motivated by a performance question; measured first: byte-composed get32 = 596 Mops/s,
+  view = 1204 Mops/s, PS1 realtime needs ~10 M/s. Digests unchanged (329de455).
+
 2026-08-08 [claude] M1 started: Vaddr, PsxExe loader (full header validation + warnings), mips.Op
   (exhaustive enum abstract) and mips.Instr written; decoder + golden tests are the next step.
   Added docs/specs/tool.md §3.1: why memory stays a flat array and what may be promoted later
