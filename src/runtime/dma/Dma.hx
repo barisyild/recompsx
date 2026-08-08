@@ -61,8 +61,26 @@ class Dma {
 
 	public static function read(p:Int):Int {
 		if (p == 0x1F8010F0) return dpcr;
-		else if (p == 0x1F8010F4) return dicr;
+		else if (p == 0x1F8010F4) return readDicr();
 		else return channelRead(p);
+	}
+
+	/**
+		DICR, with bit 31 computed rather than stored.
+
+		psx-spx defines it as read-only and derived: the force bit, or the master enable together
+		with any flag whose channel is enabled. Returning the raw register left it permanently
+		clear, so a driver that polls this one bit to learn a transfer finished waits on a
+		condition that can never become true — and the whole of DMA looks like it never completes
+		while every channel has in fact already run.
+	**/
+	static function readDicr():Int {
+		final force = (dicr & 0x00008000) != 0;
+		final master = (dicr & 0x00800000) != 0;
+		final flags = (dicr >>> 24) & 0x7F;
+		final enables = (dicr >>> 16) & 0x7F;
+		final raised = force || (master && (flags & enables) != 0);
+		return raised ? (dicr | 0x80000000) : (dicr & 0x7FFFFFFF);
 	}
 
 	static function channelRead(p:Int):Int {
