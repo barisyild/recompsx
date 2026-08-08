@@ -210,6 +210,10 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 	}
 
 	static function cmdGen(args:Array<String>):Int {
+		// Extra function entries, for targets only reachable through data the analysis cannot
+		// read — a library's function-pointer tables, typically. The runtime names them when it
+		// misses ("no function at 0x..."), and feeding them back here is the loop closing.
+		final seeds:Array<String> = [];
 		final path = args.length > 0 ? args[0] : null;
 		if (path == null) {
 			Sys.stderr().writeString("gen: expected a file\n");
@@ -222,6 +226,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			switch (args[i]) {
 				case "--out" if (i + 1 < args.length): outDir = args[i + 1]; i++;
 				case "--limit" if (i + 1 < args.length): limit = Std.parseInt(args[i + 1]); i++;
+				case "--seed" if (i + 1 < args.length): seeds.push(args[i + 1]); i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
 					return EXIT_USAGE;
@@ -233,6 +238,12 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		final image = Image.ofExe(nameOf(path), exe);
 		final discovery = new Discovery(image);
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
+		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
+		// had named them.
+		for (sd in seeds) {
+			final a = parseAddr(sd);
+			discovery.addSeed(a, 'f_${StringTools.hex(a, 8).toLowerCase()}', Confidence.Entry);
+		}
 		discovery.run();
 
 		final program = new Program(image, discovery, exe, limit);

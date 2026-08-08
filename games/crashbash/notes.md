@@ -103,3 +103,19 @@ The sibling project `crash-bash-editor` (the user's own work) contains extensive
 documentation for this game's data files. It is a legitimate reference for *data* formats and
 disc rebuilding. It says nothing about executable code layout, which is what recompsx needs — do
 not assume overlap.
+
+## Indirect-call seeds (2026-08-08)
+
+libcd reaches parts of itself through function-pointer tables the static analysis cannot read.
+The runtime names each miss (`no function at 0x...`); feeding them back closes the loop:
+
+    ./scripts/recompsx.sh gen <SCUS_945.70> \
+      --seed 0x80031d28 --seed 0x8003ae40 --seed 0x8003b068 \
+      --seed 0x8003b1bc --seed 0x800403b4
+
+One of these carries libcd's own `I_MASK |= cdrom|dma` write — without it the CD line never
+unmasks and every controller interrupt sits undelivered.
+
+**Do not seed 0x8003b224.** It lies inside another function's extent, and seeding it truncates
+the host function (the tool lacks §6.2's multi-entry duplication), which regresses the game to
+before handler installation. It stays a reported black hole until the tool learns overlap.

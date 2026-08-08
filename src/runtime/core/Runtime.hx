@@ -120,9 +120,20 @@ class Runtime {
 		Anything else is a genuine gap, and worth the address.
 	**/
 	static function notInProgram(ctx:CpuState, addr:Int):Void {
+		// The vectors themselves. On hardware 0xA0/0xB0/0xC0 hold real code — a jump into the
+		// dispatcher — and libraries call them through registers, which arrives here rather than
+		// through the emitter's constant-target path. The function number rides in $t1, exactly
+		// as it does for a direct call.
+		final p = addr & 0x1FFFFFFF;
+		if (p == 0xA0 || p == 0xB0 || p == 0xC0) return kernel.Kernel.call(ctx, p, ctx.t1);
+		else {}
 		final index = kernel.KTables.callAt(addr);
 		if (index >= 0) kernelStub(ctx, index);
-		else reportOnce(addr, "no function at this address");
+		// Target AND caller, as the failure-mode policy always required (docs/specs/tool.md §6.8).
+		// The address-less form hid N distinct misses behind one identical line — and an
+		// unresolved call is a black hole: it does nothing, silently, so whatever side effects
+		// the callee had (installing a handler, unmasking a line) simply never happen.
+		else reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra) + ")");
 	}
 
 	static function kernelStub(ctx:CpuState, index:Int):Void {

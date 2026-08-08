@@ -52,35 +52,38 @@ destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same bac
    stored, so a game polling it sees something that moves without an event having to fire. Bits 26
    and 28 read ready always, which is the truthful answer for a model where drawing is instant.
 
-2. **The CD-ROM controller answers. libcd still reports `NoIntr`, and all four of my candidates
-   are eliminated by measurement.**
+2. **CD interrupts are delivered and libcd's handler runs. `CdInit` still fails, and the gap is
+   now measured to be *inside* the handler's conversation with `CdSync`.**
 
-   | Candidate | Verdict |
-   |---|---|
-   | `irqEnable` never set, so interrupts are dropped | **Eliminated** — 19–20 raised, 1 dropped |
-   | The CD line is never unmasked in I_MASK | **Was true. Fixed. Not the cause.** |
-   | Answers raised synchronously inside the register write | **Was true. Fixed. Not the cause.** |
-   | Hardware lines never became kernel events | **Was true. Fixed. Not the cause.** |
+   The address-less `no function at this address` diagnostic was hiding the cause. Naming the
+   addresses found six distinct unresolved call targets — libcd reaches parts of itself through
+   function-pointer tables the analysis cannot read, and every such call was a silent black hole.
+   `gen --seed` now exists (the CLI form of a functionHint), and the exact command lives in
+   `games/crashbash/notes.md`.
 
-   All three fixes are right on their own merits — `_96_init` unmasks the CD because that is what
-   it does on hardware, answers take cycles because hardware takes cycles, and the BIOS handlers
-   are what turn an INT level into a `F0000003` event with the spec that says *which* answer
-   arrived. None of them moved the symptom, which makes each one a variable that is now nailed
-   down rather than a wasted step.
+   Seeding five of them changed the machine's whole posture, all measured:
 
-   **The structural gap the counters point at.** `KHandlers.calls` is exactly equal to the frame
-   count — one chain element running per vblank — so libcd's own CD handler is not in any priority
-   chain. And `KEvents.delivered` is 0, so the game never opened a CDROM event either. libcd is
-   therefore waiting on neither of the two mechanisms this kernel implements.
+   | | before | after |
+   |---|---|---|
+   | I_MASK | `0x001` vblank only | **`0x08d` vblank+cdrom+dma+sio0 — written by libcd itself** |
+   | irqs vs frames | equal (vblank only) | **irqs > frames: CD deliveries happen** |
+   | handlers vs frames | equal (one element) | **~1.12×: libcd's chain element is installed and runs** |
+   | libcd init | GetTN timeout | full `CdlNop`/`CdlReset`/`CdlGetTN` sequence, then `CdInit: Init failed` |
 
-   That points at the CD BIOS handler's *side effects*. On hardware `_96_init` installs a handler
-   that maintains state libcd polls — `CdSync` and `CdReady` read variables that handler writes,
-   not the hardware registers. Under HLE that handler is native and writes nothing, so libcd polls
-   memory that never changes. Finding **what** it polls is the next step, and it is a
-   reverse-engineering question rather than a hardware one: disassemble `CD_init` at 8006de94 in
-   the recompiled output and see which addresses its wait loops read.
+   So the earlier hypothesis was right in mechanism — the CD enable *was* behind a black-holed
+   indirect call — and the remaining failure is one layer deeper: the handler runs but `CdSync`
+   never learns the answer arrived. Candidates, each checkable against OpenBIOS's MIT source:
 
-   `recompsx dis --at 0x8006de94` is the tool for it, and it already exists.
+   - **The chain element convention.** func1 at +8 first, func2 at +4 on `v0 != 0` — and on
+     retail, a claiming handler exits via `ReturnFromException`, which never returns. Ours is a
+     no-op, so the recompiled handler *continues into code that is unreachable on hardware*.
+     RFE should drive the unwind token instead. OpenBIOS `kernel/handlers.c` is the contract.
+   - **`B0(19h) HookEntryInt`.** The game installed a hook we store and never invoke; libetc's
+     callback dispatch may ride it. Same file answers what the kernel does with it.
+
+   - Sixth black hole `0x8003b224`: **do not seed it** — it lies inside another function's
+     extent and seeding truncates the host (§6.2 multi-entry duplication is unimplemented in the
+     tool; that is the real fix). Regression verified and reverted.
 
 
 3. **M1 remaining** — BIN/CUE + ISO9660 + `filesDir` loaders, overlay extraction, syms.txt/.map
@@ -423,6 +426,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-08 [fable] Named the dispatch misses (address+ra), found libcd's function-pointer black
+  holes, added `gen --seed`. Five seeds: libcd now unmasks CD+DMA itself, its handler installs and
+  runs, CD interrupts deliver (irqs>frames, handlers~1.12x frames). CdInit still fails — next is
+  the chain/RFE/HookEntryInt contract, readable in OpenBIOS kernel/handlers.c (MIT). Sixth seed
+  regresses (entry-inside-extent truncation): tool needs §6.2 multi-entry duplication.
 
 2026-08-08 [claude] GPU register file, cdrom: in both shapes (directory and image — ISO9660
   detects Mode 2 Form 1 on a real Crash Bash BIN), and the CD-ROM controller. Game now initialises
