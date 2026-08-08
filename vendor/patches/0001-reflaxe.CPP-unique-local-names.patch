@@ -1,0 +1,137 @@
+From 8134759f302525e8e9c35a03fb2c31f68ef4c2b4 Mon Sep 17 00:00:00 2001
+From: barisyild <25794892+barisyild@users.noreply.github.com>
+Date: Sat, 8 Aug 2026 04:01:35 +0300
+Subject: [PATCH] Make local variable names unique per function body
+
+Haxe's inliner materialises a callee's parameters and temporaries as locals
+in the caller's scope, always under the callee's own names. Two calls to the
+same inline function in one scope therefore emit two declarations of the same
+name and C++ rejects the second:
+
+    int a = at + 1;
+    int a = at + 2;   // error: redefinition of 'a'
+
+The `_this` temporary generated for inlined instance methods (and `this1` for
+abstracts) is the same problem wearing a different name.
+
+Every declaration and every reference already funnels through
+Compiler.compileVarName, and Haxe gives each variable a unique id, so the
+names can simply be disambiguated: the first variable to claim a name keeps
+it, and any later variable with a different id gets its id appended. Names
+stay readable, output stays stable across runs, and the failure class goes
+away entirely.
+
+Three edits: the maps and a save/restore scope in Compiler.hx, the
+declaration and reference sites in Expressions.hx, and a push/pop around each
+function body in Classes.hx.
+
+Found while writing an emulator whose generated code calls inline memory
+accessors several times per statement.
+---
+ src/cxxcompiler/Compiler.hx                 | 46 +++++++++++++++++++++
+ src/cxxcompiler/subcompilers/Classes.hx     |  2 +
+ src/cxxcompiler/subcompilers/Expressions.hx |  4 +-
+ 3 files changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/src/cxxcompiler/Compiler.hx b/src/cxxcompiler/Compiler.hx
+index 5dbf1b4..957b753 100644
+--- a/src/cxxcompiler/Compiler.hx
++++ b/src/cxxcompiler/Compiler.hx
+@@ -399,6 +399,52 @@ class Compiler extends reflaxe.DirectToStringCompiler {
+ 	// possibly replacing them.
+ 	var tvarTypeOverrides: Map<Int, Type> = [];
+ 
++	// --- recompsx: unique local variable names per function -------------------------------
++	//
++	// Haxe's inliner materialises a callee's parameters and temporaries as locals in the
++	// caller's scope, always with the callee's own names. Two calls to the same inline
++	// function in one scope therefore emit two declarations of the same name, and C++
++	// rejects the second: `redefinition of 'a'`. The receiver temporary Haxe calls `_this`
++	// (and `this1` for abstracts) is the same problem wearing a different name.
++	//
++	// Every declaration and every reference already funnels through this class, and Haxe
++	// gives each variable a unique `id`, so the names can simply be made unique: the first
++	// variable to claim a name keeps it, and any later variable with a different id gets its
++	// id appended. Names stay readable, output stays stable, and an entire class of
++	// compile failures disappears.
++	var localNameById: Map<Int, String> = [];
++	var localNameOwner: Map<String, Int> = [];
++
++	/** Called when a new function body begins; returns the previous state to restore after. **/
++	public function pushLocalNameScope(): { byId: Map<Int, String>, owner: Map<String, Int> } {
++		final prev = { byId: localNameById, owner: localNameOwner };
++		localNameById = [];
++		localNameOwner = [];
++		return prev;
++	}
++
++	public function popLocalNameScope(prev: { byId: Map<Int, String>, owner: Map<String, Int> }) {
++		localNameById = prev.byId;
++		localNameOwner = prev.owner;
++	}
++
++	/** The emitted C++ name for a local, stable for the lifetime of one function body. **/
++	public function compileTVarName(tvar: TVar, expr: Null<TypedExpr> = null): String {
++		final known = localNameById.get(tvar.id);
++		if(known != null) return known;
++
++		final base = compileVarName(tvar.name, expr);
++		var name = base;
++		final owner = localNameOwner.get(name);
++		if(owner != null && owner != tvar.id) {
++			name = base + "_" + tvar.id;
++		}
++		localNameOwner.set(name, tvar.id);
++		localNameById.set(tvar.id, name);
++		return name;
++	}
++	// --- end recompsx --------------------------------------------------------------------
++
+ 	public function getTVarType(tvar: TVar): Type {
+ 		if(tvarTypeOverrides.exists(tvar.id)) {
+ 			return tvarTypeOverrides.get(tvar.id).trustMe();
+diff --git a/src/cxxcompiler/subcompilers/Classes.hx b/src/cxxcompiler/subcompilers/Classes.hx
+index 37395a4..b2801c5 100644
+--- a/src/cxxcompiler/subcompilers/Classes.hx
++++ b/src/cxxcompiler/subcompilers/Classes.hx
+@@ -960,6 +960,7 @@ class Classes extends SubCompiler {
+ 		final f = ctx.f;
+ 		final field = ctx.field;
+ 		XComp.pushReturnType(f.ret);
++		final prevLocalNames = Main.pushLocalNameScope(); // recompsx: names are unique per function
+ 
+ 		var content = "";
+ 		final funcDeclaration = generateHeaderDecl(ctx, ctx.name, ctx.ret, argDecl, topLevel);
+@@ -1068,6 +1069,7 @@ class Classes extends SubCompiler {
+ 		}
+ 
+ 		XComp.popReturnType();
++		Main.popLocalNameScope(prevLocalNames); // recompsx
+ 
+ 		return {
+ 			funcDeclaration: funcDeclaration,
+diff --git a/src/cxxcompiler/subcompilers/Expressions.hx b/src/cxxcompiler/subcompilers/Expressions.hx
+index 2fee126..fd9a9e4 100644
+--- a/src/cxxcompiler/subcompilers/Expressions.hx
++++ b/src/cxxcompiler/subcompilers/Expressions.hx
+@@ -181,7 +181,7 @@ class Expressions extends SubCompiler {
+ 			case TLocal(v): {
+ 				if(!topLevel) {
+ 					IComp.addIncludeFromMetaAccess(v.meta, compilingInHeader);
+-					result = Main.compileVarName(v.name, expr);
++					result = Main.compileTVarName(v, expr); // recompsx: unique per function
+ 				}
+ 			}
+ 			case TIdent(s): {
+@@ -1166,7 +1166,7 @@ class Expressions extends SubCompiler {
+ 		final prefix = attributes.length > 0 ? (attributes.join(" ") + " ") : "";
+ 
+ 		// Generate variable declaration
+-		var result = prefix + typeCpp + " " + Main.compileVarName(tvar.name, originalExpr);
++		var result = prefix + typeCpp + " " + Main.compileTVarName(tvar, originalExpr); // recompsx
+ 
+ 		// Generate expression assignment if it exists
+ 		if(maybeExpr != null) {
+-- 
+2.50.1 (Apple Git-155)
+
