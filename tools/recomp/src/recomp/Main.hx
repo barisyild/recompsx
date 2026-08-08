@@ -7,6 +7,7 @@ import recomp.analysis.Coverage;
 import recomp.analysis.Discovery;
 import recomp.analysis.Image;
 import recomp.codegen.Emitter;
+import recomp.codegen.Program;
 import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
@@ -45,6 +46,7 @@ class Main {
 				case "dis": Sys.exit(cmdDis(rest));
 				case "analyze": Sys.exit(cmdAnalyze(rest));
 				case "emit": Sys.exit(cmdEmit(rest));
+				case "gen": Sys.exit(cmdGen(rest));
 				case "help" | "-h" | "--help": usage(); Sys.exit(EXIT_OK);
 				case _:
 					Sys.stderr().writeString('unknown command "$command"\n\n');
@@ -204,6 +206,39 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		Sys.println("");
 		Sys.print(new Emitter(image, discovery).emitFunction(fn));
+		return EXIT_OK;
+	}
+
+	static function cmdGen(args:Array<String>):Int {
+		final path = args.length > 0 ? args[0] : null;
+		if (path == null) {
+			Sys.stderr().writeString("gen: expected a file\n");
+			return EXIT_USAGE;
+		}
+		var outDir = "out/gen";
+		var i = 1;
+		while (i < args.length) {
+			switch (args[i]) {
+				case "--out" if (i + 1 < args.length): outDir = args[i + 1]; i++;
+				case other:
+					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
+					return EXIT_USAGE;
+			}
+			i++;
+		}
+
+		final exe = loadExe(path);
+		final image = Image.ofExe(nameOf(path), exe);
+		final discovery = new Discovery(image);
+		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
+		discovery.run();
+
+		final program = new Program(image, discovery, exe);
+		program.writeTo(outDir);
+
+		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
+		Sys.println('${Lambda.count(discovery.functions)} functions, '
+			+ '${Lambda.count(discovery.tables)} switch tables');
 		return EXIT_OK;
 	}
 

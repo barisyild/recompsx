@@ -59,7 +59,7 @@ for name in "${TESTS[@]}"; do
   # ---- JavaScript ----
   js_log="$OUT/$name.js.log"
   if ! haxe -cp tests/conformance -cp src/runtime -cp src/shims/js -main "$name" \
-            -js "$OUT/$name.js" >"$js_log" 2>&1; then
+            -js "$OUT/$name.js" -D js-es=6 >"$js_log" 2>&1; then
     bad "$name" "JS build failed — see $js_log"; FAILED=1; continue
   fi
   js_out="$(node "$OUT/$name.js" 2>&1)"

@@ -36,6 +36,9 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
    DELETED by reflaxe.CPP** — the whole statement, so the wrong path runs. Give it an `else {}`,
    or extract the body into a call. Guard clauses and ternaries are instances of this. See
    PROGRESS.md upstream defect 8; `scripts/spike.sh` reports if upstream fixes it.
+   JavaScript builds always pass `-D js-es=6`. Haxe's default emits prototype-based code; ES6
+   classes let V8 optimise static access far better, and this runtime is nearly all static
+   accessors. Never benchmark or ship a JS build without it.
    Target code: use `@:nativeFunctionCode` on an extern (what reflaxe.CPP's own std uses), not
    `untyped __cpp__`, which is reflaxe's generic hook borrowing hxcpp's spelling — reserve it for
    statement-level injection. BOTH splice arguments as raw text, so parenthesise every

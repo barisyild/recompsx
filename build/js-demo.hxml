@@ -9,4 +9,10 @@
 -cp src/shims/js
 -main Main
 -js out/_demo/js/demo.js
+
+# ES6 output, always. Haxe's default emits prototype-based code; -D js-es=6 emits real classes,
+# which V8 optimises considerably better — static field and method access in particular, and this
+# runtime is built almost entirely from static accessors (ADR-0002). Every JS build in this
+# project uses it, so that measurements and the shipped artefact are the same thing.
+-D js-es=6
 -dce full

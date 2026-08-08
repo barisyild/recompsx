@@ -58,6 +58,22 @@ by construction rather than by agreement between two native implementations.
 - **Wrap only where analysis proves overflow possible.** Would remove most `| 0`s, but it costs
   an analysis pass to save an operation that C++ folds away and JS executes in one cycle.
 
+## Related build flags, settled by measurement
+
+- **`-D js-es=6` on every JavaScript build.** Haxe's default emits prototype-based code; ES6
+  classes let V8 optimise static field and method access considerably better, and this runtime is
+  built almost entirely from static accessors (ADR-0002). Behaviour is unchanged — the demo
+  digest is identical either way — so it costs nothing to make unconditional, and benchmarking a
+  non-ES6 build would measure something the project does not ship.
+
+- **`-D analyzer-optimize` is safe but currently earns nothing.** Enabling Haxe's optimising
+  analyzer leaves every conformance digest unchanged on both targets, which is the test that
+  matters: it is behaviour-preserving on our code. It does not, however, move the needle on the
+  demo (2.12s against 2.13s over 6000 frames), because V8 and clang already perform the same
+  constant and copy propagation. It also does not fix reflaxe.CPP's deleted-branch defect. Worth
+  revisiting for *generation* time once whole-program C++ output is measured, since a smaller
+  typed AST is less for an immature compiler to chew on.
+
 ## Consequences
 
 - `tests/conformance/Arith.hx` runs every affected operation over boundary values on both targets

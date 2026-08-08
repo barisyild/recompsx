@@ -152,8 +152,12 @@ class Emitter {
 					emitSlot();
 					bump();
 					buf.add('${ind}switch ($t) {\n');
+					// A switch may send several indices to the same arm, which shows up here as a
+					// repeated case label. Emit each target once.
+					final emitted:Map<Int, Bool> = [];
 					for (target in table.targets) {
-						if (indexOf.exists(target)) {
+						if (indexOf.exists(target) && !emitted.exists(target)) {
+							emitted.set(target, true);
 							buf.add('$ind\tcase ${hex(target)}: bb = ${indexOf.get(target)}; continue;\n');
 						}
 					}
