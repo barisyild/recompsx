@@ -469,14 +469,20 @@ class Kernel {
 	**/
 	public static function onInterrupt(ctx:CpuState):Void {
 		KHandlers.runChains(ctx);
-		deliverPending(ctx);
-		// The way out. On hardware the dispatcher does not return — it jumps through a JmpBuf
-		// whose default lands on ReturnFromException, and `HookEntryInt` replaces that buffer with
-		// the game's own. A library that installs a hook is asking to be the exception epilogue,
-		// and libcd is one: it never touches SysEnqIntRP, so this is the only door it comes
-		// through. Leaving it unimplemented made the kernel look like it was ignoring the CD.
+
+		// The game's own epilogue runs BEFORE the kernel acknowledges anything.
+		//
+		// `HookEntryInt` installs a JmpBuf the exception dispatcher leaves through, and a library
+		// that installs one is asking to be the exception epilogue. Its whole job is to look at
+		// I_STAT and decide what happened — so acknowledging first, as this used to, handed it a
+		// register with every pending bit already cleared. libetc's vblank counter never
+		// incremented and `VSync` timed out against a handler that was running perfectly and
+		// being shown nothing.
 		if (hookEntryInt != 0) KThreads.enterJmpBuf(ctx, hookEntryInt);
 		else {}
+
+		// Whatever the game did not claim is the kernel's to deliver and clear.
+		deliverPending(ctx);
 	}
 
 	/**
