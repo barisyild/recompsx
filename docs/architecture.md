@@ -120,13 +120,39 @@ capable debugger. It is used two ways, and the boundary between them is a hard r
   — always take them from psx-spx.
 - **Escalation ladder when stuck**:
   1. psx-spx — the primary spec, resolves most questions.
-  2. *Observe* DuckStation: reproduce the scenario in its debugger and watch
+  2. **For kernel questions: OpenBIOS** (pcsx-redux `src/mips/openbios`). Those files carry their
+     own MIT header, so unlike every emulator this is a source we may actually read, adapt and
+     translate — see the licence note below first. It reimplements the retail BIOS in C and
+     deliberately reproduces the original's bugs and quirks, which is exactly the behaviour our
+     HLE has to match, so it settles what psx-spx describes only in prose. It is *not* the retail
+     BIOS: where the two could differ, psx-spx and a test fixture decide.
+  3. *Observe* DuckStation: reproduce the scenario in its debugger and watch
      registers/memory/VRAM. No source exposure, and usually faster than reading code.
-  3. *Read* DuckStation source, last resort, under the **prose-intermediary discipline**: read
+  4. *Read* DuckStation source, last resort, under the **prose-intermediary discipline**: read
      to extract the behavioral rule → write that rule as prose in `docs/` with a citation →
      close the source → implement only from the prose note → write a PS1 test fixture proving
      the rule so our own test becomes the authority. Never implement with emulator source open
      side by side; never mirror its structure.
+
+- **OpenBIOS licence note — read before using it.** The pcsx-redux repository as a whole is
+  GPL-2.0, but the files under `src/mips/openbios/` each carry an MIT header
+  (`Copyright (c) 2019 PCSX-Redux authors`), confirmed across `main/` and `kernel/`. A per-file
+  notice is the grant that governs that file, and MIT is compatible with this project. Two
+  obligations follow, neither optional:
+  1. **Check the individual file.** The repository is mixed; a file without the header is
+     GPL-2.0 and off limits.
+  2. **Carry the attribution.** MIT requires the notice to travel with substantial portions, and
+     a C-to-Haxe translation is a derivative work, not a clean rewrite. Anything adapted says so
+     in a comment naming the file it came from.
+
+  The prose-intermediary discipline exists for licence reasons that do not apply here, so it does
+  not bind this source — but writing a fixture that proves the behaviour still does, because a
+  reimplementation can be wrong and our own tests are what make a claim ours.
+
+  **And it stays a source, never a BIOS we run.** The kernel is HLE by decision and that is not
+  reopened: recompsx does not build OpenBIOS, ship it, load it, or grow a BIOS-image code path
+  (golden rule 4 is unchanged). What it buys is an answer to "what does the retail kernel
+  actually *do* here" where psx-spx names a function without pinning its behaviour.
 
 ## Repository layout
 

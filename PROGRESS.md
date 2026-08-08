@@ -407,6 +407,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-08 [claude] Designed time/scheduling/interrupts as one piece (ADR-0005) after the startup
+  trace showed the game waiting on the event system, not on five separate stubs. TimeBase landed
+  and pinned on both targets (VideoTime, 052bdaac). User found OpenBIOS: its files are MIT even
+  though pcsx-redux is GPL-2, so it is the one non-spec source we may read and translate — added
+  to the escalation ladder with the attribution rules; kernel stays HLE, we never run it.
+  Next: Scheduler, then I/O dispatch so I_STAT/I_MASK have somewhere to live.
+
 2026-08-08 [claude] Fixed reflaxe defect 9: `case TContinue: acc = []` deleted every statement
   BEFORE a continue, gutting 86% of the basic-block bodies in the C++ build (1119/1296 cases in
   one shard). C++ now matches JS call-for-call on the real game. Corrected the M1.5 binary size
