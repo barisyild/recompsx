@@ -55,6 +55,11 @@ class Gpu {
 	/** What GP1(10h) left for the next read of the data port. */
 	static var readLatch = 0;
 
+	// The scanout reads these; nothing else outside this class may.
+	public static inline function displayOrigin():Int return displayStart;
+	public static inline function displayModeBits():Int return displayMode;
+	public static inline function displayOn():Bool return !displayDisabled;
+
 	/**
 		How many GP0 words have arrived, and how many were commands rather than parameters.
 
@@ -211,8 +216,56 @@ class Gpu {
 		else if (op >= 0x60 && op <= 0x7F) drawRect(op);
 		else if (op == 0x02) drawFill();
 		else if (op == 0xA0) beginTransfer();
+		else if (op == 0x80) copyWithinVram();
 		else {}
 	}
+
+	/**
+		GP0(80h) — a rectangle of VRAM copied somewhere else in VRAM.
+
+		Three words: the command, the source corner, the destination corner, then the size. It is
+		the cheapest thing the GPU can do, and for a game built around pre-rendered artwork it is
+		most of what the GPU is asked to do at all: upload the images once, then blit pieces of them
+		into the visible framebuffer every frame. Crash Bash's boot sequence is nearly nothing else
+		— seven thousand of these per eight thousand frames, against a single rectangle.
+
+		Which is why its absence looked like a working emulator. The uploads landed, the ordering
+		tables were built and walked, the packets arrived and were correctly sized and skipped, and
+		the screen stayed black: every part of the path worked except the one that moves pixels.
+
+		Zero width or height means the full 1024 or 512, and the copy wraps, because VRAM is a torus
+		to the GPU and games rely on it. Copied through a row buffer would be tidier, but the
+		overlapping case has to behave like hardware — which copies in increasing order — and doing
+		it directly is both simpler and what the hardware does.
+	**/
+	static function copyWithinVram():Void {
+		final sx0 = packet[1] & 0x3FF;
+		final sy0 = (packet[1] >>> 16) & 0x1FF;
+		final dx0 = packet[2] & 0x3FF;
+		final dy0 = (packet[2] >>> 16) & 0x1FF;
+		final w = ((packet[3] - 1) & 0x3FF) + 1;
+		final h = (((packet[3] >>> 16) - 1) & 0x1FF) + 1;
+		for (y in 0...h) {
+			for (x in 0...w) {
+				final src = Vram.get((sx0 + x) & 0x3FF, (sy0 + y) & 0x1FF);
+				blend(dx0, dy0, x, y, src);
+			}
+		}
+		copies++;
+	}
+
+	/** One copied pixel, honouring the mask bits exactly as a drawn one does. */
+	static function blend(dx0:Int, dy0:Int, x:Int, y:Int, src:Int):Void {
+		final dx = (dx0 + x) & 0x3FF;
+		final dy = (dy0 + y) & 0x1FF;
+		if (maskCheck && (Vram.get(dx, dy) & 0x8000) != 0) return;
+		else {}
+		Vram.set(dx, dy, maskSet ? src | 0x8000 : src);
+		pixels++;
+	}
+
+	/** VRAM-to-VRAM rectangles copied. */
+	public static var copies(default, null) = 0;
 
 	static inline function colourOf(word:Int):Int {
 		// 24-bit BGR to the 15-bit word VRAM holds.
