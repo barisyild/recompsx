@@ -34,6 +34,18 @@ installed because a `setjmp` return value was left to chance; ordering tables wa
 after being built out of uninitialised memory; a game waiting not on sound but on being told that
 sound had finished. Nothing here was a missing feature that announced itself.
 
+**2026-08-09: overlays are done, and the boot screen is now reproducible from the disc alone.**
+A game bigger than RAM is compiled as several *universes* — the executable, and the executable
+with each overlay's bytes laid over its window — and which one answers at run time is decided by
+fingerprinting what is actually in the window. Crash Bash's two overlays are 41 lines of committed
+config pointing at disc offsets; no capture file exists anywhere in the build, which is what
+golden rule 4 requires and what the reverted first attempt got wrong. The design is ADR-0006.
+
+The work left the run bounded for the first time: `--headless-hash <frames>` stops a game whose
+main loop never returns, by sending a halt down the same road a `longjmp` travels, and prints one
+digest over VRAM plus twenty-two deterministic counters. That is what makes a *game* — not just a
+demo — comparable between JavaScript and reflaxe.CPP.
+
 ## Next up (ordered)
 
 1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
@@ -415,6 +427,12 @@ sound had finished. Nothing here was a missing feature that announced itself.
               ok   Overlay    7564ec5d   values=43
             conformance: all targets agree
 
+        *Revised during S4 bring-up and the audit that followed.* The real game replaced the
+        exclusive-windows model with nesting (a 32 KB overlay loads into the middle of a 378 KB
+        one and both are genuinely present; the smaller window answers where they share), and the
+        audit added KSEG canonicalisation and the resident-but-no-row diagnostic. The test grew
+        with each: digest `9fdcde0f`, 54 values, both targets agreeing throughout.
+
             $ ./scripts/test.sh
             conformance: 7 test(s) x 2 targets — all agree
             js digest = c++ digest = 329de455
@@ -441,8 +459,71 @@ sound had finished. Nothing here was a missing feature that announced itself.
             never held, so the tool never saw it. Add it to games/<id>/game.json with
             loadAddr 2147978384 length 387072 and entryHint 2148084700.
 
-  - [ ] S4 Crash Bash end-to-end + ADR-0006
-  - [ ] S4 Crash Bash end-to-end + ADR-0006
+  - [x] **S4 Crash Bash end-to-end + ADR-0006** — accept: the game generated from disc and config
+        alone, running on both targets to the same digest ✔ 2026-08-09
+
+        Two overlays, found by running the game and reading what the misses said, written into
+        `games/crashbash/game.json` as disc offsets: `boot` (387072 bytes at 0x80078c90) and
+        `stage` (32768 bytes at 0x800b32b4, inside boot's window). **No capture file exists
+        anywhere in the build** — the tool opens the disc the gitignored `local.json` names and
+        reads the extents itself.
+
+            $ ./scripts/recompsx.sh gen games/crashbash/game.json
+            wrote 21 files, 180722 lines to out/gen
+            963 functions, 17 switch tables
+            overlay boot: 0x80078c90..0x800d748f (387072 bytes): 319 functions, 26 rejected as data
+            overlay stage: 0x800b32b4..0x800bb2b3 (32768 bytes): 66 functions
+
+        The audit that closed the stage found eight things; the four that were defects are fixed
+        and now have tests. A resident overlay **shadows** the executable even where it has no row
+        (falling back to the base table would run code the game overwrote); the executable's own
+        functions *inside* a window are dispatched, never direct-called (same reason, and the
+        window test now runs before the own-universe test); a window shorter than its own
+        fingerprint is a build error (the tool clamped where the runtime would not, so the overlay
+        could never activate); and the resident-but-no-row miss now names the overlay and the hint
+        to add instead of implying nothing is loaded. The rest were documentation — the
+        fingerprint-region-only eviction rule and its accepted cost are in ADR-0006 and in the
+        `OverlayMgr` header — plus KSEG canonicalisation on every address entering the manager and
+        an unsigned-decimal printer, because `x >>> 0` still prints negative through C++.
+
+        **The overlay program compiles and runs through reflaxe.CPP**, which nothing had yet
+        proved: eight `Ovl_*` translation units, and the two builds agree to the bit.
+
+            $ ./out/_gen/build/recompsx SCUS_945.70 disc.bin --headless-hash 600
+            frame 600 | events 5057 | irqs 992 | handlers 1479 | delivered 215/0cb
+              | dma 523w/1list/98880cdw | gpu 552w/16c/1prim/261121px/1056up
+              | cd 19cmd/192sec/215irq/1drop | spu 109656hw/72kon/442318smp
+            frames=600 digest=7e32dc6d          # C++
+            frames=600 digest=7e32dc6d          # JavaScript, every counter line identical
+
+        Comparing a *game* at all is new. Its main loop never returns, so `--headless-hash
+        <frames>` stops one from inside: `Kernel.UNWIND_HALT` travels the road a `longjmp` already
+        travels — every generated call site returns when a token is set — and nothing catches it,
+        so `Runtime.callAndResume` stops instead of resuming. The digest is VRAM plus twenty-two
+        deterministic counters, because either half can agree while the machine differs: the
+        picture alone would miss a dropped interrupt, and the counters alone would miss a wrong
+        pixel. C++ runs the 600 frames in 0.31 s against JavaScript's 1.91 s.
+
+        Two things found on the way, both instruments rather than features. `core.Hash` — what
+        every digest in this project is measured with — had **no test at all**, and `Hash.word`
+        was the exact shape upstream defect 1 mishandles: a multi-statement `inline` whose
+        parameter is used four times. It is correct on both targets, but that was luck until
+        `tests/conformance/HashFold.hx` (`a5b38872`, 69 values) made it a fact. And `check.sh`
+        caught four bare integer divisions that lowered to `double` in generated C++
+        (`Gpu.putTexel`, `Iso9660.totalSectors`, and two constant-folded ones in `Cdrom`/
+        `KTables`) — ADR-0004 forbids `a / b` on Ints and these predate the rule's enforcement
+        reaching generated output. Conformance digests are unchanged by the fix, as expected.
+
+        Also measured, not acted on: **upstream defect 8 is fixed in the pinned fork.** All nine
+        `spike-ifbody` cases pass, including a two-statement `if` with no `else` and an inverted
+        guard clause. The `else {}` workaround stays everywhere for now — removing hundreds of
+        them is its own decision, and `scripts/spike.sh` is the regression test that says when it
+        is safe. (That script was also printing its own finding as a shell syntax error; fixed.)
+
+  - [ ] **Deferred from S4, deliberately.** `shared/psxdisc` stays an aspiration: the tool and the
+        runtime each keep a small disc reader (~150 lines apiece, three-layout autodetect proven
+        twice) rather than being unified mid-feature. §6.2 multi-entry extent duplication is still
+        the known gap it was; overlay tracing did not hit it.
 
 ## [M0-VERIFY] checklist
 
@@ -570,6 +651,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [fable] Overlay S4 closes the milestone: two overlays from disc offsets in committed
+  config, no capture anywhere; the audit's four defects fixed and tested (resident overlays
+  shadow the base with no fallthrough, in-window base functions dispatch, a fingerprint longer
+  than its overlay is a build error, misses name the overlay). `--headless-hash` bounds a game
+  whose loop never returns — JS and C++ agree at `7e32dc6d` over 600 frames. New `HashFold` test
+  covers the digest instrument itself; four Int divisions that lowered to `double` fixed.
+  Next: the logged `unimplemented:` work, S1 (CD Play + IRQ latch) first.
 
 2026-08-09 [opus] Overlay S3: `kernel.OverlayMgr` decides which code is in a window. The runtime
   installs nothing — the game loads its own overlays through hardware already emulated, so only

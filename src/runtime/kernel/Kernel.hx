@@ -304,6 +304,17 @@ class Kernel {
 	**/
 	public static inline var UNWIND_FROM_EXCEPTION = 0x52464558;   // 'RFEX'
 
+	/**
+		The token that means "stop the machine", used by a headless run that has seen enough frames.
+
+		A game's main loop never returns, so a run bounded by frames has to end from inside one. It
+		travels the same road a `longjmp` does — every generated call site already returns when a
+		token is set — but nothing catches it, so it reaches `Runtime.callAndResume`, which stops
+		rather than resuming. That is a clean stop on every target: no exception, no process kill,
+		and the launcher gets control back to print what the run produced.
+	**/
+	public static inline var UNWIND_HALT = 0x48414C54;             // 'HALT'
+
 	static function resetEntryInt():Int {
 		hookEntryInt = 0;
 		return 0;
@@ -572,7 +583,17 @@ class Kernel {
 		// dropping it on the floor stays bit-identical to one drawing it.
 		gpu.Scanout.present();
 		heartbeat(ctx);
+		if (haltAt > 0 && vblankCount >= haltAt) ctx.unwindToken = UNWIND_HALT;
+		else {}
 	}
+
+	/**
+		The frame a headless run stops at, or 0 to run until the host gives up.
+
+		A frame boundary is the only place a comparison between two targets means anything: it is
+		the one moment the whole machine is in a state both of them agree on having reached.
+	**/
+	public static var haltAt = 0;
 
 	/** The spec every hardware-interrupt event is opened with. */
 	public static inline var SPEC_INTERRUPTED = 0x0002;

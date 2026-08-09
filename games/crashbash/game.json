@@ -6,10 +6,49 @@
   "exePath": "\\SCUS_945.70;1",
   "exeSha256": "fd5727a18feb2a2d5a6359a55966f0266284d1e50f64ee9b8a127a97091bd516",
 
-  "overlays": [],
+  "_overlays": "Code the game loads from the disc. The runtime names these when it misses: it reports the span the disc was read into and the sector it came from, and CRASHBSH.DAT starts at LBA 236, so offset = (sector - 236) * 2048. Addresses decimal, per the schema rule.",
+  "overlays": [
+    {
+      "id": "boot",
+      "_loadAddr": "0x80078c90",
+      "loadAddr": 2147978384,
+      "length": 387072,
+      "source": {
+        "kind": "discFile",
+        "path": "\\CRASHBSH\\CRASHBSH.DAT;1",
+        "offset": 72833024,
+        "length": 387072
+      },
+      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c.",
+      "entryHints": [2148084700, 2148084640, 2148084604],
+      "hashWords": 64
+    },
+    {
+      "id": "stage",
+      "_note": "Loaded into the middle of boot's window and displaces it. Two overlays sharing memory is the ordinary case, not an edge one.",
+      "_loadAddr": "0x800b32b4",
+      "loadAddr": 2148217524,
+      "length": 32768,
+      "source": {
+        "kind": "discFile",
+        "path": "\\CRASHBSH\\CRASHBSH.DAT;1",
+        "offset": 57225216,
+        "length": 32768
+      },
+      "_entryHints": "0x800b5244, 0x800b5218, 0x800b51ec.",
+      "entryHints": [2148225604, 2148225560, 2148225516],
+      "hashWords": 64
+    }
+  ],
 
   "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md.",
   "functionHints": [
+    2147566472,
+    2147603920,
+    2147607944,
+    2147607960,
+    2147608884,
+    2147682796,
     2147687720,
     2147724864,
     2147725416,

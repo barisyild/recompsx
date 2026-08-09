@@ -27,7 +27,9 @@ class Iso9660 {
 	/** Where the primary volume descriptor lives, on every ISO9660 disc ever made. */
 	static inline var PVD_LBA = 16;
 
-	static inline var USER_BYTES = 2048;
+	/** User bytes in a sector, whatever the image wraps them in. Public because tracking a load
+	    back to the disc is arithmetic in these units (`kernel.OverlayMgr`). */
+	public static inline var USER_BYTES = 2048;
 
 	/** Candidate (sector size, offset of user data) pairs, most common first. */
 	static inline var RAW_SIZE = 2352;
@@ -151,7 +153,7 @@ class Iso9660 {
 
 	/** Scans one directory extent for a name, leaving its extent in `foundLba`/`foundSize`. */
 	static function step(name:String, dirLba:Int, dirSize:Int):Bool {
-		final sectors = Std.int((dirSize + USER_BYTES - 1) / USER_BYTES);
+		final sectors = IntMath.div(dirSize + USER_BYTES - 1, USER_BYTES);
 		for (s in 0...sectors) {
 			if (!readSector(dirLba + s)) return false;
 			else {}
@@ -292,7 +294,7 @@ class Iso9660 {
 	public static function totalSectors():Int {
 		if (!mounted) return 0;
 		else {}
-		return Std.int(Backend.fileSize(slot) / sectorSize);
+		return IntMath.div(Backend.fileSize(slot), sectorSize);
 	}
 
 	/** Reads one sector's user data into the scratch buffer. */
@@ -312,7 +314,7 @@ class Iso9660 {
 		var done = 0;
 		while (done < len) {
 			final abs = offset + done;
-			final lba = fileLba + Std.int(abs / USER_BYTES);
+			final lba = fileLba + IntMath.div(abs, USER_BYTES);
 			final within = abs % USER_BYTES;
 			var chunk = USER_BYTES - within;
 			if (chunk > len - done) chunk = len - done;

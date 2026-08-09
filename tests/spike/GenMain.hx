@@ -14,6 +14,7 @@ class GenMain {
 		final ctx = new CpuState();
 		Runtime.bindDispatch(FnTable.call);
 		Runtime.boot(ctx);
+		kernel.Kernel.haltAt = headlessFrames();
 		// Which windows this game loads code into. After boot, because it fills in state the
 		// runtime clears on the way up.
 		Overlays.register();
@@ -64,6 +65,84 @@ class GenMain {
 			+ " | cycles " + ctx.cycles);
 		shim.Backend.log(shim.Backend.LOG_INFO,
 			"distinct unimplemented things reached: " + Runtime.reportedGaps);
+		if (kernel.Kernel.haltAt > 0) reportDigest(ctx);
+		else {}
+	}
+
+	/**
+		What the machine had done by the frame it was told to stop at, as one comparable number.
+
+		Two things go in, because either alone can agree while the machine differs. VRAM says what
+		was drawn — the whole of it, not the visible window, since a game composes offscreen and a
+		digest that ignored that would call two different pictures identical. The counters say what
+		was *done* to arrive there, which catches a run that reached the same picture by a
+		different road: a dropped interrupt, a sector served twice, an overlay that activated on
+		one target and not the other.
+
+		Every input is emulated state. Nothing here reads host time, host input or iteration order,
+		so JavaScript and C++ must print the same value or one of them is wrong.
+	**/
+	static function reportDigest(ctx:CpuState):Void {
+		var d = core.Hash.rect(core.Hash.FNV_OFFSET, gpu.Vram.data, gpu.Vram.WIDTH,
+			0, 0, gpu.Vram.WIDTH, gpu.Vram.HEIGHT);
+		d = core.Hash.word(d, kernel.Kernel.vblankCount);
+		d = core.Hash.word(d, core.Scheduler.fired);
+		d = core.Hash.word(d, core.Irq.delivered);
+		d = core.Hash.word(d, kernel.KHandlers.calls);
+		d = core.Hash.word(d, kernel.KEvents.delivered);
+		d = core.Hash.word(d, kernel.KEvents.callbacks);
+		d = core.Hash.word(d, gpu.Gpu.wordsReceived);
+		d = core.Hash.word(d, gpu.Gpu.commandsReceived);
+		d = core.Hash.word(d, gpu.Gpu.primitives);
+		d = core.Hash.word(d, gpu.Gpu.uploaded);
+		d = core.Hash.word(d, dma.Dma.listsWalked);
+		d = core.Hash.word(d, dma.Dma.wordsFromCd);
+		d = core.Hash.word(d, dma.Dma.wordsToSpu);
+		d = core.Hash.word(d, cd.Cdrom.commands);
+		d = core.Hash.word(d, cd.Cdrom.sectorsDelivered);
+		d = core.Hash.word(d, cd.Cdrom.raised);
+		d = core.Hash.word(d, cd.Cdrom.swallowed);
+		d = core.Hash.word(d, spu.Spu.keyedOn);
+		d = core.Hash.word(d, spu.Spu.samplesOut);
+		d = core.Hash.word(d, spu.Spu.nonSilent);
+		d = core.Hash.word(d, kernel.OverlayMgr.activations);
+		d = core.Hash.word(d, kernel.OverlayMgr.evictions);
+		d = core.Hash.word(d, ctx.cycles);
+		// The same shape scripts/test.sh greps for, so a game digest quotes like a demo one.
+		shim.Backend.log(shim.Backend.LOG_INFO,
+			"frames=" + kernel.Kernel.vblankCount + " digest=" + core.Hash.hex(d));
+	}
+
+	/**
+		`--headless-hash <frames>`, wherever it appears among the paths.
+
+		Scanned rather than positional: the exe and the disc are already positional, and a third
+		positional argument that is sometimes a number and sometimes absent is the kind of
+		interface that eventually runs the wrong thing.
+	**/
+	static function headlessFrames():Int {
+		final argc = shim.Backend.argCount();
+		var i = 0;
+		while (i + 1 < argc) {
+			if (shim.Backend.arg(i) == "--headless-hash") return parseInt(shim.Backend.arg(i + 1));
+			else {}
+			i++;
+		}
+		return 0;
+	}
+
+	/** Small non-negative integer parser; `Std.parseInt` pulls in machinery a runtime need not carry. */
+	static function parseInt(s:String):Int {
+		var v = 0;
+		var i = 0;
+		while (i < s.length) {
+			final c = s.charCodeAt(i);
+			if (c == null || c < 48 || c > 57) return v;
+			else {}
+			v = v * 10 + (c - 48);
+			i++;
+		}
+		return v;
 	}
 
 	static function mountDisc(path:String):Void {

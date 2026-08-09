@@ -135,9 +135,13 @@ lui/addiu/addu folding (gp-relative folds with `initialGp`); bound N from the do
 text) else reject. On success: mark `[base, base+4N)` as data-in-text, attach Switch edges.
 `jumpTableHints[]` force `{jrAddr, tableBase, count}` when hand-written asm defeats the matcher.
 
-**Call analysis** — `jal T`: static if T in same universe (or overlay→base), **dynamic
-(`Runtime.call`) if T inside any configured overlay VA window**, kernel vectors (0xA0/B0/C0, low
-RAM < 0x10000), or unclassified. `jalr`: recorded in the indirect-call inventory (drives coverage
+**Call analysis** — `jal T`: **dynamic (`Runtime.call`) if T is inside any configured overlay VA
+window**, static if T is in the calling universe outside every window, kernel vectors
+(0xA0/B0/C0, low RAM < 0x10000), or unclassified. The window test comes *first*, and the one case
+that makes it matter is the executable's own functions inside a window: windows overlap the
+executable's tail, those bytes are gone the moment an overlay loads, and a direct call would run
+them anyway. An overlay's calls into *its own* window stay static — the caller running proves the
+callee is resident, since they arrived together. `jalr`: recorded in the indirect-call inventory (drives coverage
 report). `j` to another function's entry = tail call.
 
 **Symbol import** — `syms.txt` (committed; `0xADDR name [func|obj]`), GNU ld `.map` subset,
@@ -242,9 +246,12 @@ and keep the one that identifies the most functions consistently.
 - Also generated: `GameInfo.hx` (initial pc/gp/sp, load ranges, memfill, exe payload reference),
   `Overlays.hx` (per overlay: id, VA range, source sectors/file extent, FNV-1a content hash,
   entries) — consumed by runtime CD-tracking activation + hash-fallback.
-- **Overlay call policy**: static direct calls only within same universe or overlay→base;
-  anything targeting a configured overlay window goes through `Runtime.call` (activation state
-  decides which module answers).
+- **Overlay call policy**: anything targeting a configured overlay window goes through
+  `Runtime.call` (activation state decides which module answers) — including from the executable
+  to its own in-window functions; static direct calls elsewhere in the calling universe, and from
+  an overlay into its own window. Fingerprint length is validated against overlay length at gen
+  time: a window shorter than its own fingerprint would hash differently in the tool and the
+  runtime and never activate. See ADR-0006.
 - **Deliberate non-fidelity** (documented): add/addi/sub never trap on overflow; load delay off
   by default (per-function `loadDelayAccurate` opt-in: emitter pre-captures old rt into a temp
   for the single successor instruction); hi/lo latency invisible; i-cache invisible (stale-cache
@@ -309,8 +316,10 @@ hatch + modding hook — registered in FnTable instead of generated code; origin
 for coverage), `setjmpFns[]/longjmpFns[]` (→ `Runtime.setjmp/longjmp` per the unwind design),
 `symsFile`, `mapFile`. Addresses are decimal u32 in JSON (no hex in JSON); the tool prints hex
 everywhere. `memdump` source covers compressed overlays: the user captures the post-decompression
-RAM region once (external emulator dump), commits it under `games/<game>/dumps/`; runtime
-activation uses hash-fallback only for these.
+RAM region once (external emulator dump) and keeps it **local and gitignored** — overlay bytes are
+game code, which golden rule 4 keeps out of the repository. This corrects the master plan's
+`games/<game>/dumps/` proposal; see ADR-0006. Runtime activation uses hash-fallback only for
+these.
 
 `games/<game>/local.json` (gitignored, machine-local) supplies exactly one of `cue`, `iso`,
 `filesDir` or `exeFile` as an absolute path — see §1.1. A committed `local.json.example`

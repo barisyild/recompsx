@@ -175,7 +175,7 @@ class Gpu {
 		if (xferI >= xferW * xferH) return;
 		else {}
 		final x = (xferX + (xferI % xferW)) & 1023;
-		final y = (xferY + Std.int(xferI / xferW)) & 511;
+		final y = (xferY + shim.IntMath.div(xferI, xferW)) & 511;
 		Vram.set(x, y, p);
 		xferI++;
 		uploaded++;
@@ -193,7 +193,7 @@ class Gpu {
 		else {}
 		xferI = 0;
 		// Two pixels to a word, rounded up: an odd-width rectangle pads its last word.
-		xferLeft = Std.int((xferW * xferH + 1) / 2);
+		xferLeft = (xferW * xferH + 1) >> 1;
 	}
 
 	static function push(v:Int):Void {

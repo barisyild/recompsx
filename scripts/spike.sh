@@ -53,8 +53,8 @@ clang++ "${CXXFLAGS[@]}" -w -Iout/_spike/ifbody/include out/_spike/ifbody/src/*.
 IFBODY_OUT="$(out/_spike/ifbody/run)"
 echo "$IFBODY_OUT"
 if echo "$IFBODY_OUT" | grep -q '2 stmts       : "B1B2"'; then
-  say "  multi-statement branches survive — upstream defect 8 appears FIXED; the `else {}`"
-  say "  workarounds in src/ and tests/ can be revisited"
+  say '  multi-statement branches survive — upstream defect 8 appears FIXED; the "else {}"'
+  say '  workarounds in src/ and tests/ can be revisited'
 else
   say "  multi-statement branches still deleted without an else (upstream defect 8)"
 fi
