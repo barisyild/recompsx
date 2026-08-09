@@ -38,8 +38,8 @@ tests/spike/*/out/
 isolate-*.log
 *.heapsnapshot
 vram.bin
-# What a bring-up session leaves lying around: a captured frame, a captured machine, and the
-# sound it was making. All derived from someone's own dump, none of it ours to carry.
+# What a bring-up session leaves lying around: a captured frame and the sound it was making.
+# Both derived from someone's own dump, neither ours to carry.
 *.pcm
 *.wav
 *.png

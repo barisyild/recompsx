@@ -140,43 +140,7 @@ class Runtime {
 		// The address-less form hid N distinct misses behind one identical line — and an
 		// unresolved call is a black hole: it does nothing, silently, so whatever side effects
 		// the callee had (installing a handler, unmasking a line) simply never happen.
-		else if (dma.Dma.wasLoaded(addr)) missedOverlay(ctx, addr);
 		else reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra) + ")");
-	}
-
-	/**
-		A call into code the disc brought in — an overlay, whatever the game calls it.
-
-		Worth telling apart from an ordinary miss, because the fix is different in kind. A missed
-		function inside the executable is a defect in the analysis. An overlay was never in the
-		executable at all, so no amount of sweeping will find it: the tool has to be given the
-		bytes.
-
-		So this writes them out. The one artifact that cannot be reconstructed later is the memory
-		image at the moment the call was made, and it is free to take here — RAM is already a flat
-		buffer. What comes back is a report that carries its own remedy: the range, and the command
-		that turns it into code.
-	**/
-	static function missedOverlay(ctx:CpuState, addr:Int):Void {
-		// Once per *new* address, not once per run. A game loads several overlays over its life,
-		// often into the same memory, so a single capture taken at the first miss shows the first
-		// overlay and data where the later ones will be. Rewriting it each time a new address is
-		// missed leaves the file describing the most recent one, which is the one still being
-		// asked for.
-		if (!alreadyReported(addr)) dumpRam();
-		else {}
-		reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra)
-			+ ") — this address was read in from the disc, into "
-			+ hex(0x80000000 | dma.Dma.loadedLo) + ".." + hex(0x80000000 | dma.Dma.loadedHi)
-			+ ", so it is an overlay: code the executable never held and the tool never saw."
-			+ " RAM has been written to ram.bin. Recompile it in by adding:  --ram ram.bin"
-			+ " --ram-range " + hex(0x80000000 | dma.Dma.loadedLo)
-			+ ".." + hex(0x80000000 | dma.Dma.loadedHi)
-			+ " --seed " + hex(addr));
-	}
-
-	static function dumpRam():Void {
-		Backend.storageWrite("ram.bin", mem.Memory.ram, mem.Memory.RAM_SIZE);
 	}
 
 	static function kernelStub(ctx:CpuState, index:Int):Void {
