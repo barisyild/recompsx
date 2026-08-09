@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-demo",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/private/tmp/claude-501/-Users-bariscagriyildirim-Desktop-Project-recompsx/2dba6620-aa6f-4f69-9e7f-8e48556c755e/scratchpad/web/serve.js"
+      ],
+      "port": 8791
+    }
+  ]
+}

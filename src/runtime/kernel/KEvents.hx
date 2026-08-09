@@ -70,6 +70,9 @@ class KEvents {
 		evMode = [for (_ in 0...COUNT) 0];
 		evHandler = [for (_ in 0...COUNT) 0];
 		evFlags = [for (_ in 0...COUNT) FREE];
+		postedClass = [for (_ in 0...POST_MAX) 0];
+		postedSpec = [for (_ in 0...POST_MAX) 0];
+		postedCount = 0;
 		delivered = 0;
 		callbacks = 0;
 	}
@@ -87,6 +90,12 @@ class KEvents {
 		evHandler[slot] = handler;
 		// Opened but not listening: a game calls EnableEvent when it is ready to hear about it.
 		evFlags[slot] = DISABLED;
+		// What a game listens for is the shortest description of what it expects to happen, and a
+		// game stuck waiting is stuck on one of these. Named once each, so the list is the set of
+		// promises the kernel has made.
+		Runtime.noteOnce(0x55100000 | slot, "OpenEvent " + hex(DESCRIPTOR_BASE | slot)
+			+ ": class " + hex(cls) + " spec " + hex(spec) + " mode " + hex(mode)
+			+ (handler != 0 ? " callback " + hex(handler) : " polled"));
 		return DESCRIPTOR_BASE | slot;
 	}
 
@@ -198,6 +207,48 @@ class KEvents {
 	static function runCallback(ctx:CpuState, slot:Int):Void {
 		callbacks++;
 		Runtime.call(ctx, evHandler[slot]);
+	}
+
+	/**
+		An event raised by a device rather than by the kernel's own interrupt handling.
+
+		Queued rather than delivered, because the device that raised it has no `CpuState` to hand:
+		a DMA transfer runs inside a store instruction in recompiled code, and an event in callback
+		mode has to be able to call back into that same code. Doing it there would re-enter the
+		game from the middle of one of its own instructions. So it waits for the next pump, which
+		is the same rule every other re-entry in this runtime follows.
+
+		Fixed capacity, and a full queue reports rather than growing: nothing allocates after boot,
+		and a device raising more than a handful of events between two pump points is a fault worth
+		hearing about rather than absorbing.
+	**/
+	public static function post(cls:Int, spec:Int):Void {
+		if (postedCount >= POST_MAX) return postOverflow();
+		else {}
+		postedClass[postedCount] = cls;
+		postedSpec[postedCount] = spec;
+		postedCount++;
+	}
+
+	/** Hands the queued device events to the game. Called from the pump, and nowhere else. */
+	public static function drain(ctx:CpuState):Void {
+		if (postedCount == 0) return;
+		else {}
+		final n = postedCount;
+		// Cleared first: a callback that raises another event must queue it, not be consumed by
+		// this loop and lose its place.
+		postedCount = 0;
+		for (i in 0...n) deliver(ctx, postedClass[i], postedSpec[i]);
+	}
+
+	static inline var POST_MAX = 16;
+	static var postedClass:Array<Int>;
+	static var postedSpec:Array<Int>;
+	static var postedCount = 0;
+
+	static function postOverflow():Void {
+		Runtime.reportOnce(0x57000000, "more than " + POST_MAX + " device events between two "
+			+ "pump points — one is being dropped");
 	}
 
 	/** `UnDeliverEvent` — take back a delivery the game has not consumed yet. */

@@ -560,6 +560,10 @@ class Kernel {
 	**/
 	public static function onFrame(ctx:CpuState):Void {
 		vblankCount++;
+		// The display latches its window here, which is where a game swaps buffers. A pure read of
+		// VRAM and two registers: it cannot change what the machine does, so a headless target
+		// dropping it on the floor stays bit-identical to one drawing it.
+		gpu.Scanout.present();
 		heartbeat(ctx);
 	}
 
@@ -586,7 +590,7 @@ class Kernel {
 	static function heartbeat(ctx:CpuState):Void {
 		// Late, not at the first pixel: the opening clear arrives thousands of frames before the
 		// rest of the display list, and a census taken at the clear describes only the clear.
-		if (vramDump && !dumped && vblankCount >= 30000) takeFrame();
+		if (vramDump && !dumped && vblankCount >= 8000) takeFrame();
 		else {}
 		if (vblankCount % 60 != 0) return;
 		else {}
@@ -600,7 +604,11 @@ class Kernel {
 			+ dma.Dma.wordsFromCd + "cdw"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
-			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
+			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop"
+			// Which code was last at a loop header. Every pump point records the return address,
+			// so this names the function the game is spending its time inside — the one number
+			// that turns "nothing is happening" into an address to disassemble.
+			+ " | in ra=" + hex8(mem.Memory.raHint));
 	}
 
 	/**

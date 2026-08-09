@@ -3,12 +3,21 @@ package shim;
 /**
 	The JavaScript platform facade — same API as the C++ one, so runtime code compiles unchanged.
 
-	Scope today is Node, headless: the point of this target is a fast, trustworthy feedback loop
-	while the emulator is being written, and the determinism digest is what it has to produce.
-	A browser backend (canvas + WebAudio + Gamepad) is a later addition; note that it will need
-	the main loop inverted — a browser cannot block in `while (!quit)`, so the runtime will have
-	to expose a `stepFrame()` that the platform drives. Consoles will want that shape too, so it
-	is worth doing properly rather than bolting on.
+	Two hosts, one build. Under Node it is headless and reads the disc with `fs`, which is the
+	fast, trustworthy feedback loop the development target exists to be, and the determinism
+	digest is its product. Under a browser there is no `fs` and no `process`, so the page supplies
+	a **host object** — `globalThis.recompsxHost` — carrying the files as byte arrays and a place
+	to put frames.
+
+	Detected rather than configured, and detected once. Neither host is a special case of the
+	other in the code below: every entry point asks whether a host object is present and takes one
+	of two paths, so the Node path is exactly what it was and the browser path never has to
+	pretend to be a filesystem.
+
+	The main loop is still the game's own — `main()` does not return, which a browser tab cannot
+	survive. So the page runs this in a **worker**, where blocking is allowed, and frames arrive
+	on the main thread through the host's `present`. Consoles will eventually want an inverted
+	`stepFrame()` shape for the same reason; a worker is what makes the browser not need it yet.
 **/
 class Backend {
 	public static inline var LOG_DEBUG = 0;
@@ -23,9 +32,23 @@ class Backend {
 	static var args:Array<String> = [];
 	static var quit = false;
 
+	/** The page's object, or null under Node. Asked for rather than assumed, once per call site. */
+	static inline function host():Dynamic {
+		return js.Syntax.code("(typeof globalThis !== 'undefined' ? globalThis.recompsxHost : null)");
+	}
+
+	static inline function hosted():Bool {
+		return js.Syntax.code("({0} != null)", host());
+	}
+
 	public static function init(title:String):Int {
-		args = js.Syntax.code("(typeof process !== 'undefined' ? process.argv.slice(2) : [])");
+		args = readArgs();
 		return 0;
+	}
+
+	static function readArgs():Array<String> {
+		if (hosted()) return js.Syntax.code("({0}.args || [])", host());
+		else return js.Syntax.code("(typeof process !== 'undefined' ? process.argv.slice(2) : [])");
 	}
 
 	public static function shutdown():Void {}
@@ -33,9 +56,8 @@ class Backend {
 	public static function caps(capId:Int):Int return capId == 0 ? 4 : 0;
 
 	public static function argCount():Int {
-		if (args.length == 0) {
-			args = js.Syntax.code("(typeof process !== 'undefined' ? process.argv.slice(2) : [])");
-		}
+		if (args.length == 0) args = readArgs();
+		else {}
 		return args.length;
 	}
 
@@ -44,8 +66,19 @@ class Backend {
 		return i >= 0 && i < args.length ? args[i] : "";
 	}
 
-	/** Headless: nothing to draw to. The digest, not the picture, is this target's product. */
-	public static function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void {}
+	/**
+		Under Node: nothing to draw to, and the digest rather than the picture is the product.
+
+		Under a browser: the window of VRAM, handed over as it is. No conversion here — the host
+		gets the same BGR555 halfwords the GPU wrote, because the moment this shim starts turning
+		them into RGBA it becomes a second renderer that can disagree with the first.
+	**/
+	public static function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void {
+		if (!hosted()) return;
+		else {}
+		js.Syntax.code("{0}.present({1}.u8, {2}, {3}, {4}, {5}, {6})",
+			host(), vram, sx, sy, sw, sh, flags);
+	}
 
 	public static function audioPush(frames:RawBuf, frameCount:Int):Void {}
 	public static function audioBuffered():Int return 0;
@@ -62,8 +95,13 @@ class Backend {
 	public static function quitRequested():Bool return quit;
 
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int return -1;
+
 	/** Writes a blob beside the program. Used by the VRAM dump, which is how a frame is looked at. */
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int {
+		if (hosted()) {
+			js.Syntax.code("{0}.storageWrite({1}, {2}.u8.subarray(0, {3}))", host(), name, buf, len);
+			return 0;
+		} else {}
 		js.Syntax.code("require('fs').writeFileSync({0}, Buffer.from({1}.u8.buffer, 0, {2}))",
 			name, buf, len);
 		return 0;
@@ -125,10 +163,18 @@ class Backend {
 
 	/** -1 if the path does not exist, rather than throwing: the caller reports, we do not. */
 	static function statSize(path:String):Int {
+		if (hosted()) {
+			return js.Syntax.code("(function(h,p){ var f = h.files[p]; return f ? f.length|0 : -1; })({0}, {1})",
+				host(), path);
+		} else {}
 		return js.Syntax.code("(function(p){ try { return require('fs').statSync(p).size|0; } catch (e) { return -1; } })({0})", path);
 	}
 
 	static function readInto(path:String, buf:RawBuf):Void {
+		if (hosted()) {
+			js.Syntax.code("{0}.u8.set({1}.files[{2}])", buf, host(), path);
+			return;
+		} else {}
 		js.Syntax.code("{0}.u8.set(require('fs').readFileSync({1}))", buf, path);
 	}
 
@@ -136,11 +182,19 @@ class Backend {
 	public static function paceFrame(targetUs:Int):Void {}
 
 	public static function log(level:Int, msg:String):Void {
-		js.Syntax.code("console.log({0})", (level >= LOG_WARN ? "[warn] " : "[info] ") + msg);
+		final line = (level >= LOG_WARN ? "[warn] " : "[info] ") + msg;
+		if (hosted()) js.Syntax.code("{0}.log({1}, {2})", host(), level, line);
+		else js.Syntax.code("console.log({0})", line);
 	}
 
 	public static function fatal(msg:String):Void {
-		js.Syntax.code("console.error({0})", "[fatal] " + msg);
+		final line = "[fatal] " + msg;
+		if (hosted()) {
+			js.Syntax.code("{0}.log({1}, {2})", host(), LOG_ERROR, line);
+			quit = true;
+			return;
+		} else {}
+		js.Syntax.code("console.error({0})", line);
 		js.Syntax.code("(typeof process !== 'undefined' ? process.exit(1) : null)");
 	}
 }

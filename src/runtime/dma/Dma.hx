@@ -27,6 +27,8 @@ class Dma {
 
 	static inline var CH_GPU = 2;
 	static inline var CH_CDROM = 3;
+	static inline var CH_SPU = 4;
+	static inline var CH_OTC = 6;
 
 	// CHCR bits.
 	static inline var CHCR_BUSY = 0x01000000;
@@ -55,6 +57,8 @@ class Dma {
 		wordsToGpu = 0;
 		listsWalked = 0;
 		wordsFromCd = 0;
+		wordsToSpu = 0;
+		tablesCleared = 0;
 		loadedLo = 0;
 		loadedHi = 0;
 	}
@@ -146,6 +150,8 @@ class Dma {
 		if (ch == CH_GPU && sync == 2) walkList();
 		else if (ch == CH_GPU) blockToGpu();
 		else if (ch == CH_CDROM) sectorToRam();
+		else if (ch == CH_SPU) ramToSpu();
+		else if (ch == CH_OTC) clearOrderingTable();
 		else unimplementedChannel(ch);
 		finish(ch);
 	}
@@ -286,6 +292,79 @@ class Dma {
 	static function notReadable():Void {
 		Runtime.reportOnce(0x6B000001, "DMA read from the GPU, which has no VRAM to give yet");
 	}
+
+	/**
+		Channel 4: wave data from RAM into sound RAM.
+
+		Slice mode, like the GPU's block transfers: BCR holds a block size and a block count, and
+		libspu sets both. Reads from the SPU are legal on hardware and not carried out here — a
+		game reading its own samples back is doing something no bring-up needs yet, and pretending
+		would be worse than saying so.
+	**/
+	static function ramToSpu():Void {
+		final size = bcr[CH_SPU] & 0xFFFF;
+		final blocks = (bcr[CH_SPU] >>> 16) & 0xFFFF;
+		final sync = (chcr[CH_SPU] >>> 9) & 3;
+		final total = sync == 0
+			? (size == 0 ? 0x10000 : size)
+			: size * (blocks == 0 ? 1 : blocks);
+		if ((chcr[CH_SPU] & 1) == 0) return spuNotReadable();
+		else {}
+		var addr = madr[CH_SPU] & 0x1FFFFC;
+		for (i in 0...total) {
+			spu.Spu.dmaWord(Memory.read32(addr));
+			addr += 4;
+		}
+		wordsToSpu += total;
+		madr[CH_SPU] = addr & 0xFFFFFF;
+		// libspu does not poll the channel; it waits on this. `SpuIsTransferCompleted` opens the
+		// SPU class with spec "completed" and blocks until it arrives, so a transfer that happens
+		// perfectly and never announces itself stops the game just as dead as no transfer at all —
+		// and more confusingly, because the wave data is right there in sound RAM.
+		kernel.KEvents.post(kernel.KEvents.CLASS_SPU, SPEC_COMPLETED);
+	}
+
+	/** "The thing you asked for has finished" — psx-spx, BIOS event specs. */
+	static inline var SPEC_COMPLETED = 0x0020;
+
+	/** Words of wave data uploaded. */
+	public static var wordsToSpu(default, null) = 0;
+
+	static function spuNotReadable():Void {
+		Runtime.reportOnce(0x6B000002, "DMA read from the SPU, which does not give samples back");
+	}
+
+	/**
+		Channel 6: writes the empty ordering table a game draws into.
+
+		The one channel that touches no device — it only writes RAM, and what it writes is a chain
+		of addresses each pointing at the word below it, ending in the same bit-23 terminator that
+		stops channel 2's walk. That chain *is* the ordering table: `ClearOTagR` is this transfer
+		and nothing else, and every frame begins with it.
+
+		Which makes its absence quietly total. A game clears its table, fills it with primitives,
+		and hands it to channel 2 — but a table that was never built holds whatever was in that
+		memory, so the walk either ends immediately or never, and either way nothing is drawn. Crash
+		Bash reports it in its own words, once per frame: "empty prims".
+
+		Runs downwards from MADR, as psx-spx describes, with the last word written — the lowest
+		address — carrying the end marker.
+	**/
+	static function clearOrderingTable():Void {
+		final count = bcr[CH_OTC] & 0xFFFF;
+		final n = count == 0 ? 0x10000 : count;
+		var addr = madr[CH_OTC] & 0x1FFFFC;
+		for (i in 0...n) {
+			// Every entry points at the one below it; the last one ends the list.
+			Memory.write32(addr, i == n - 1 ? 0x00FFFFFF : ((addr - 4) & 0xFFFFFF));
+			addr -= 4;
+		}
+		tablesCleared++;
+		madr[CH_OTC] = addr & 0xFFFFFF;
+	}
+
+	/** Ordering tables built. One per frame, in a game that is drawing. */
+	public static var tablesCleared(default, null) = 0;
 
 	static function unimplementedChannel(ch:Int):Void {
 		Runtime.reportOnce(0x6C000000 | ch, "DMA channel " + ch + " has no device behind it yet");

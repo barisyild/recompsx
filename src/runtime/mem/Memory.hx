@@ -276,6 +276,7 @@ class Memory {
 		else if (isCdrom(p)) return cd.Cdrom.read8(p) | (cd.Cdrom.read8(p + 1) << 8);
 		else if (isSio(p)) return sio.Sio0.read16(p);
 		else if (isTimer(p)) return timers.Timers.read(p, cycleHint) & 0xFFFF;
+		else if (spu.Spu.contains(p)) return spu.Spu.read16(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
 		else return unmapped8();
 	}
@@ -318,6 +319,7 @@ class Memory {
 		if (isScratch(p)) RawMem.set16(scratch, p - SCRATCH_BASE, v);
 		else if (isSio(p)) sio.Sio0.write16(p, v);
 		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
+		else if (spu.Spu.contains(p)) spu.Spu.write16(p, v & 0xFFFF);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		else unmappedAccesses++;
 	}
