@@ -246,6 +246,26 @@ class Memory {
 		cd.Cdrom.write8(p + 3, (v >>> 24) & 0xFF, cycleHint);
 	}
 
+	/**
+		A halfword write to the CD page: the low byte, then the high one.
+
+		Its absence was a seven-second stall at every boot. The CD registers are byte-wide, so the
+		byte and word paths both existed and this one did not — a `sh` to 1F801802 fell through to
+		the generic I/O fallback, which read a register that does not exist, merged into it, and
+		wrote the result nowhere. libcd enables the drive's interrupts with exactly that store, so
+		the enable never happened, the first answer was latched behind a closed gate, and the
+		library recovered the only way it could: by timing out and polling.
+
+		The shape of the bug is worth remembering because it is the second of its kind this month
+		(the SPU's main volume was a 32-bit store into halfword-only code). A device is not
+		"reachable" until every access width reaches it, and a missing width does not fail — it
+		silently goes somewhere else.
+	**/
+	static function cdHalfWrite(p:Int, v:Int):Void {
+		cd.Cdrom.write8(p, v & 0xFF, cycleHint);
+		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint);
+	}
+
 	/** A word read of the CD page: four byte registers, little-endian, each with its own effect. */
 	static function cdWord(p:Int):Int {
 		return cd.Cdrom.read8(p)
@@ -338,6 +358,7 @@ class Memory {
 		if (isScratch(p)) RawMem.set16(scratch, p - SCRATCH_BASE, v);
 		else if (isSio(p)) sio.Sio0.write16(p, v);
 		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
+		else if (isCdrom(p)) cdHalfWrite(p, v & 0xFFFF);
 		else if (spu.Spu.contains(p)) spu.Spu.write16(p, v & 0xFFFF);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		else unmappedAccesses++;
