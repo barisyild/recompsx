@@ -82,19 +82,17 @@ class Universe {
 		build time rather than misdispatching at run time.
 	**/
 	public function fingerprint():Int {
+		var n = overlay.hashWords * 4;
+		if (n > bytes.length) n = bytes.length;
 		var h = 0x811C9DC5;
-		final words = overlay.hashWords;
-		for (i in 0...words) {
-			final at = i * 4;
-			if (at + 4 > bytes.length) break;
-			final w = bytes.getInt32(at);
-			for (b in 0...4) {
-				h = (h ^ ((w >>> (b * 8)) & 0xFF)) | 0;
-				// The FNV prime, 16777619, as shifts: a multiply this wide loses bits on a target
-				// where Int is a double, and the tool must produce the same number everywhere.
-				h = (h + ((h << 1) | 0) + ((h << 4) | 0) + ((h << 7) | 0) + ((h << 8) | 0)
-					+ ((h << 24) | 0)) | 0;
-			}
+		for (i in 0...n) {
+			h = (h ^ bytes.get(i)) | 0;
+			// The FNV prime, 16777619, written as the shifts it is made of. A multiply that wide
+			// loses low bits wherever Int is a double, and this number has to come out the same
+			// here and in `kernel.OverlayMgr`, which computes it over emulated RAM — the two are
+			// deliberately the same seven lines.
+			h = (h + ((h << 1) | 0) + ((h << 4) | 0) + ((h << 7) | 0) + ((h << 8) | 0)
+				+ ((h << 24) | 0)) | 0;
 		}
 		return h;
 	}

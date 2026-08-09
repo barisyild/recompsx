@@ -330,6 +330,7 @@ class KFiles {
 			if (got < want) break;
 			else {}
 		}
+		OverlayMgr.noteLoad(dst, done);
 		return done;
 	}
 
@@ -350,6 +351,9 @@ class KFiles {
 			pos[fd] += got;
 			done += got;
 		}
+		// A game may load code with the kernel's own file API rather than driving the CD itself,
+		// so this path has to say so too (kernel.OverlayMgr).
+		OverlayMgr.noteLoad(dst, done);
 		return done;
 	}
 

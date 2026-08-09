@@ -236,6 +236,9 @@ class Dma {
 			addr += step;
 		}
 		wordsFromCd += total;
+		// Whatever was compiled for these addresses is no longer what is there. The disc is how a
+		// game replaces code, so this is where the mapping has to be told (kernel.OverlayMgr).
+		kernel.OverlayMgr.noteLoad(0x80000000 | (madr[CH_CDROM] & 0x1FFFFC), total * 4);
 		madr[CH_CDROM] = addr & 0xFFFFFF;
 	}
 

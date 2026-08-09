@@ -60,10 +60,12 @@ class Kernel {
 		else {}
 		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
 		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
-		// FlushCache: nothing to do under static recompilation — there is no instruction fetch to
-		// invalidate. Still worth logging: it marks where a game just copied code, so it is where
-		// overlay activation will hook in at M6.
-		else if (fn == 0x44) noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush");
+		// FlushCache: no cache to invalidate under static recompilation — but this is where a game
+		// says it has finished writing code, and on a real machine it has to, because code in RAM
+		// is invisible to the instruction cache until it does. That makes it the one point where
+		// looking at every window is *complete*: whatever the loader was, whatever it did, it ends
+		// here. See kernel.OverlayMgr.
+		else if (fn == 0x44) flushCache();
 		else if (fn == 0x13) ctx.v0 = KThreads.setjmp(ctx, ctx.a0);
 		else if (fn == 0x14) KThreads.longjmp(ctx, ctx.a0, ctx.a1);
 		else if (fn >= 0x46 && fn <= 0x4E) gpuHelper(ctx, fn);
@@ -400,6 +402,11 @@ class Kernel {
 		and honoured; the structure it points at is the game's, so we only keep the pointer.
 	**/
 	static var hookEntryInt = 0;
+
+	static function flushCache():Void {
+		noteOnce(0xA0044, "A0(44h) FlushCache — no cache to flush; looking at the overlay windows");
+		OverlayMgr.rescan();
+	}
 
 	static function hookEntry(ctx:CpuState):Int {
 		hookEntryInt = ctx.a0;

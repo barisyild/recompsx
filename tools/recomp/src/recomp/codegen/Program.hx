@@ -295,8 +295,22 @@ class Program {
 		}
 	}
 
-	/** Runs the code at an address. Used for everything the analysis left dynamic. */
+	/**
+		Runs the code at an address. Used for everything the analysis left dynamic.
+
+		A resident overlay is asked first, and wins: its window shadows these addresses for as
+		long as the game has it loaded, which is what the memory itself does. `OverlayMgr` knows
+		which one that is; `Overlays` knows what it contains.
+	**/
 	public static function call(addr:Int, ctx:CpuState):Bool {
+		final ovl = kernel.OverlayMgr.residentAt(addr);
+		if (ovl >= 0) {
+			final row = Overlays.lookup(ovl, addr);
+			if (row >= 0) {
+				dispatch(Overlays.handleAt(row), Overlays.blockAt(row), ctx);
+				return true;
+			}
+		}
 		final row = lookup(addr);
 		if (row < 0) return false;
 		dispatch(HANDLES[row], BLOCKS[row], ctx);
@@ -411,6 +425,19 @@ class Program {
 
 	public static function handleAt(row:Int):Int return HANDLES[row];
 	public static function blockAt(row:Int):Int return BLOCKS[row];
+
+	/**
+		Tells the runtime which overlays exist. Called once, at boot, after `Runtime.boot`.
+
+		Four numbers each, and no tables: the runtime decides *whether* an overlay is resident and
+		this class knows *what is in it*, which is what keeps `kernel.OverlayMgr` compilable with
+		no generated code present at all.
+	**/
+	public static function register():Void {
+		for (i in 0...COUNT) {
+			kernel.OverlayMgr.define(i, LO[i], HI[i], FINGERPRINT[i], HASH_WORDS[i]);
+		}
+	}
 
 	/** The overlay's name, for diagnostics. A switch rather than a table of strings: this is a
 	    cold path, and it keeps the generated tables to plain integers. */
