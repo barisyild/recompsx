@@ -467,7 +467,29 @@ class Discovery {
 
 			var atGapStart = lead < 0;
 			while (a + 8 <= end) {
-				if (looksLikePrologue(a, end, atGapStart)) {
+				// Alignment fill between two functions inside the same gap, exactly as at the gap's
+				// own start. Stepping over it makes the address after it a boundary candidate.
+				if (image.readWord(a) == 0 && !atGapStart) { a += 4; continue; }
+				else {}
+
+				// A wider window than the gap-start test uses. It can afford one: "the previous
+				// function returned" is corroboration the frame-setup test never has, so the
+				// prologue search is only there to tell code from the read-only data that also
+				// tends to follow a function's last return. Eight instructions is past anything
+				// GCC schedules ahead of a stack adjustment, and still far short of resembling data.
+				if (afterReturn(a) && prologueIndex(a, end, 8) >= 0) {
+					// Code that follows a return begins a function. That is not a heuristic in the
+					// way the frame-setup test is: the previous function said it was done, and the
+					// gap continues, so whatever is here is entered from somewhere else.
+					//
+					// It matters because it is the only test that tolerates a scheduled prologue.
+					// GCC hoists loads above the stack adjustment, so a function can open with
+					// `lui`/`lw` and reach `addiu sp` four instructions in — and a scan that insists
+					// on the adjustment coming first cannot see such an entry anywhere except at a
+					// gap's start. libcd is full of them, reached only through pointer tables.
+					addSeed(a, defaultName(a), Confidence.Swept);
+					a += 8;
+				} else if (looksLikePrologue(a, end, atGapStart)) {
 					addSeed(a, defaultName(a), Confidence.Swept);
 					// Skip ahead: the trace will claim what belongs to it, and re-sweeping
 					// inside a function we just queued would find its inner frames.
@@ -511,6 +533,24 @@ class Discovery {
 		there it must be backed by a `sw ra, N(sp)` within a few instructions — the non-leaf
 		prologue, which is unambiguous.
 	**/
+	/**
+		Do the two instructions before `addr` end a function?
+
+		`jr ra` plus its delay slot, which is how every MIPS function returns. Read two words back
+		rather than one because the delay slot sits between the jump and here, and it can be any
+		instruction at all — usually the stack being given back.
+
+		This says nothing about whether a function *starts* at `addr`; it says the previous one
+		stopped, which is the corroboration a scheduled prologue cannot supply for itself.
+	**/
+	function afterReturn(addr:Int):Bool {
+		final at = addr - 8;
+		if (!image.containsWord(at)) return false;
+		else {}
+		final jump = Decoder.decode(at, image.readWord(at));
+		return jump.op == Op.JR && jump.rs == 31;
+	}
+
 	function looksLikePrologue(addr:Int, limit:Int, atGapStart:Bool):Bool {
 		final first = Decoder.decode(addr, image.readWord(addr));
 		if (first.op != Op.ADDIU || first.rt != 29 || first.rs != 29 || first.immS >= 0) return false;

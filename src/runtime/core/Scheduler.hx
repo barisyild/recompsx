@@ -150,6 +150,14 @@ class Scheduler {
 
 	static function onVblankStart(ctx:CpuState):Void {
 		Irq.raise(ctx, Irq.VBLANK);
+		// The frame counter belongs here, at the event, not where the kernel delivers it.
+		//
+		// It used to be incremented in the kernel's own vblank handling, which is a fallback: it
+		// runs only for what the game did not deal with itself. So the better a game's interrupt
+		// handler works, the fewer frames the counter saw — and once Crash Bash's handler started
+		// acknowledging its own vblanks, the count stopped moving entirely while the game ran
+		// perfectly well. A frame happened whether or not anyone needed the kernel's help.
+		kernel.Kernel.onFrame(ctx);
 		// Re-arm immediately: this is the slot that guarantees the table is never empty.
 		schedule(ctx, VBLANK_START, TimeBase.nextVblankStart(ctx.cycles));
 	}

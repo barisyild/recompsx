@@ -57,7 +57,26 @@ class Cdrom {
 	static inline var ST_PLAYING = 0x80;
 
 	static inline var FIFO = 16;
-	static inline var SECTOR_BYTES = 2048;
+
+	/** The buffer holds the largest sector a game can ask for; how much of it is live varies. */
+	static inline var SECTOR_BYTES = Iso9660.WHOLE_BYTES;
+
+	/**
+		Setmode bit 5: hand over the whole sector from its address header, not just the user data.
+
+		The two sizes are 0x800 and 0x924, and which one a game chose decides what the first byte
+		out of the data FIFO means — file contents, or the minute of the sector's own address.
+	**/
+	static inline var MODE_WHOLE_SECTOR = 0x20;
+
+	/** How many bytes of the held sector are real, which depends on the mode it was read in. */
+	static var sectorLen = 2048;
+
+	/** Whether the data FIFO is loaded — the CPU's side of the "want data" handshake. */
+	static var fifoOpen = false;
+
+	/** Whether the held sector has reached the CPU, and so may be replaced by the next one. */
+	static var sectorTaken = false;
 
 	static var index = 0;
 	static var status = ST_MOTOR;
@@ -134,6 +153,9 @@ class Cdrom {
 		busy = false;
 		sectorPos = 0;
 		sectorReady = false;
+		sectorTaken = false;
+		fifoOpen = false;
+		sectorLen = 2048;
 		sectorsDelivered = 0;
 		commands = 0;
 		raised = 0;
@@ -210,7 +232,7 @@ class Cdrom {
 		s |= 0x10;                                   // room for a parameter
 		if (responseRead < responseCount) s |= 0x20; // a response byte is waiting
 		else {}
-		if (sectorReady && sectorPos < SECTOR_BYTES) s |= 0x40;   // data is waiting
+		if (sectorReady && sectorPos < sectorLen) s |= 0x40;   // data is waiting
 		else {}
 		// Bit 7, BUSYSTS: a command has been written and the controller has not answered it yet.
 		//
@@ -238,11 +260,31 @@ class Cdrom {
 	}
 
 	static function popData():Int {
-		if (!sectorReady || sectorPos >= SECTOR_BYTES) return 0;
+		if (!sectorReady || !fifoOpen || sectorPos >= sectorLen) return 0;
 		else {}
 		final b = RawMem.get8(sector, sectorPos);
 		sectorPos++;
 		return b;
+	}
+
+	/**
+		Four bytes of the held sector, for DMA channel 3.
+
+		The same FIFO the CPU would read a byte at a time through 1F801802, drained a word at a
+		time because that is the unit the channel counts in. Past the end it gives zeroes rather
+		than wrapping: a game that asks for more than a sector has miscounted, and repeating the
+		sector would hide that behind plausible-looking data.
+	**/
+	public static function dmaWord():Int {
+		// Four statements, not one expression. `a() | (b() << 8) | ...` reads left to right on
+		// JavaScript and in an unspecified order in C++, so the one-liner is a byte-swapped
+		// sector on one target and not the other — a divergence that would show up as corrupt
+		// texture data long after this function was last looked at (ADR-0003).
+		final b0 = popData();
+		final b1 = popData();
+		final b2 = popData();
+		final b3 = popData();
+		return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 	}
 
 	/** 1F801803 reads the interrupt enable on index 0 and the pending flags on index 1. */
@@ -290,10 +332,33 @@ class Cdrom {
 		else {}
 	}
 
+	/**
+		1F801803.Index0 bit 7 — "want data".
+
+		Two states, not one, and conflating them is why a good disc read as a bad one. Setting the
+		bit loads the *held* sector into the data FIFO; clearing it empties the FIFO. Neither
+		throws the sector away: the drive still has it, and the CPU may ask for it again. libcd's
+		idiom is exactly that — clear, then set, then transfer — so reading the clear as "done with
+		this sector" let the drive move on one sector early, and every transfer then delivered the
+		one after the one that was asked for.
+
+		Setting the bit when the FIFO is already loaded does nothing, which is what makes the
+		second of two consecutive requests harmless rather than a rewind to the sector header.
+	**/
 	static function requestData(v:Int):Void {
-		// Bit 7 loads the sector just delivered into the data FIFO; clearing it discards it.
-		if ((v & 0x80) != 0) sectorPos = 0;
-		else sectorReady = false;
+		tnote("request " + v + (sectorReady ? " (a sector is held)" : " (nothing held)"));
+		if ((v & 0x80) == 0) return closeFifo();
+		else {}
+		if (fifoOpen) return;   // already loaded; asking twice is not asking again
+		else {}
+		fifoOpen = true;
+		sectorPos = 0;
+		// The sector has now reached the CPU, so the drive is free to read the next one.
+		sectorTaken = true;
+	}
+
+	static function closeFifo():Void {
+		fifoOpen = false;
 	}
 
 	static function acknowledge(v:Int):Void {
@@ -340,7 +405,7 @@ class Cdrom {
 	**/
 	static function execute(cmd:Int, cycles:Int):Void {
 		busy = true;
-		tnote("cmd 0x" + StringTools.hex(cmd, 2) + " params=" + paramCount);
+		tnote("cmd 0x" + StringTools.hex(cmd, 2) + " params " + bytesOf(param, paramCount));
 		commands++;
 		if (cmd == 0x01) ackWith1(status);                      // Getstat
 		else if (cmd == 0x02) setloc();
@@ -543,26 +608,92 @@ class Cdrom {
 		now = ctx.cycles;
 		// The first answer, then the second, then sectors — each waits for the CPU to have
 		// acknowledged the one before, because only one interrupt is outstanding at a time.
-		if (pendingInt != 0 && currentInt == 0) return deliverPending();
-		else if (pendingInt != 0) return schedule(ctx.cycles, ACK);
-		else if (queuedInt != 0 && currentInt == 0) return releaseQueued();
-		else if (queuedInt != 0) return schedule(ctx.cycles, ACK);
+		if (pendingInt != 0) return answerPending(ctx);
+		else if (queuedInt != 0) return answerQueued(ctx);
 		else {}
 		if (reading) deliverSector(ctx);
 		else {}
 	}
 
+	static function answerPending(ctx:CpuState):Void {
+		if (currentInt != 0) return schedule(ctx.cycles, ACK);   // the CPU has not caught up
+		else {}
+		deliverPending();
+		afterAnswer(ctx);
+	}
+
+	static function answerQueued(ctx:CpuState):Void {
+		if (currentInt != 0) return schedule(ctx.cycles, ACK);
+		else {}
+		releaseQueued();
+		afterAnswer(ctx);
+	}
+
+	/**
+		Renews the controller's deadline after an answer — or after being made to wait for one.
+
+		Delivering is not the end of the drive's work, and this is the only place that can say so.
+		`ReadN`'s first answer is an INT3 meaning "started"; the sectors it promises come later, on
+		deadlines nothing else sets. Returning here without re-arming produced a drive that
+		acknowledged every read and then went silent — which a game reports as a read timeout, and
+		which looks nothing like the missing line of scheduling that it is.
+	**/
+	static function afterAnswer(ctx:CpuState):Void {
+		if (queuedInt != 0) return schedule(ctx.cycles, ACK);
+		else {}
+		if (reading) schedule(ctx.cycles, sectorInterval());
+		else {}
+	}
+
+	/**
+		One sector into the buffer, and an INT1 to say so.
+
+		No deadline is set here: `respond` defers the answer by the acknowledgement latency, and
+		re-arming for the *next* sector belongs after that answer has actually been handed over,
+		not before. Scheduling both from here made the two overwrite each other in the same slot.
+	**/
 	static function deliverSector(ctx:CpuState):Void {
 		if (currentInt != 0) return schedule(ctx.cycles, ACK);   // the CPU has not caught up
 		else {}
-		if (!Iso9660.rawSector(readLba, sector)) return readFailed();
+		// Nor does the drive overwrite a sector the CPU has not finished with.
+		//
+		// Acknowledging the interrupt is not the same as having taken the data, and libcd does the
+		// two in that order: it acknowledges inside its handler, then sets the request bit and
+		// starts the transfer. A controller that loads the next sector as soon as the
+		// acknowledgement arrives changes the bytes underneath that transfer, so the game reads
+		// sector N+1 where it asked for N — and since it checks the address header of every sector
+		// it reads, it rejects each one and retries forever. The disc looks unreadable; the disc is
+		// fine. Clearing the request bit is the game saying it is done, and `requestData` is where
+		// that arrives.
+		if (sectorReady && !sectorTaken) return schedule(ctx.cycles, ACK);
+		else {}
+		tnote("fetch sector " + readLba + " (seek was " + seekLba + ", mode "
+			+ StringTools.hex(mode, 2) + ")");
+		if (!fetchSector(readLba)) return readFailed();
 		else {}
 		sectorReady = true;
+		sectorTaken = false;
+		fifoOpen = false;
 		sectorPos = 0;
 		readLba++;
 		sectorsDelivered++;
 		respond(INT1_DATA, statusOnly());
-		schedule(ctx.cycles, sectorInterval());
+	}
+
+	/**
+		Loads one sector in whichever shape the current mode asks for.
+
+		`Setmode` decides this, and it is the only thing that does: the drive reads the same bytes
+		off the disc either way and differs only in where it starts handing them over.
+	**/
+	static function fetchSector(lba:Int):Bool {
+		if ((mode & MODE_WHOLE_SECTOR) != 0) {
+			sectorLen = Iso9660.WHOLE_BYTES;
+			return Iso9660.wholeSector(lba, sector);
+		} else {
+			sectorLen = 2048;
+			return Iso9660.rawSector(lba, sector);
+		}
 	}
 
 	static function readFailed():Void {

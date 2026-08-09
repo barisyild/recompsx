@@ -26,6 +26,7 @@ class Dma {
 	static inline var CHCR = 0x8;
 
 	static inline var CH_GPU = 2;
+	static inline var CH_CDROM = 3;
 
 	// CHCR bits.
 	static inline var CHCR_BUSY = 0x01000000;
@@ -53,6 +54,9 @@ class Dma {
 		dicr = 0;
 		wordsToGpu = 0;
 		listsWalked = 0;
+		wordsFromCd = 0;
+		loadedLo = 0;
+		loadedHi = 0;
 	}
 
 	public static inline function contains(p:Int):Bool {
@@ -141,6 +145,7 @@ class Dma {
 		final sync = (chcr[ch] >>> 9) & 3;
 		if (ch == CH_GPU && sync == 2) walkList();
 		else if (ch == CH_GPU) blockToGpu();
+		else if (ch == CH_CDROM) sectorToRam();
 		else unimplementedChannel(ch);
 		finish(ch);
 	}
@@ -195,6 +200,87 @@ class Dma {
 		}
 		wordsToGpu += total;
 		madr[CH_GPU] = addr & 0xFFFFFF;
+	}
+
+	/**
+		Channel 3: the sector the CD-ROM controller is holding, into RAM.
+
+		This is how a game actually reads a disc. libcd sets `Setloc`/`ReadN`, waits for the INT1
+		that says a sector has arrived, sets the request bit so the controller loads its data FIFO,
+		and then hands the copying to this channel — it never reads 1F801802 in a loop. So a
+		controller that answers every command correctly and a channel that quietly does nothing
+		produce a game that receives the interrupt, finds its buffer untouched, and reports a
+		sector error: everything works except the one step that moves the bytes.
+
+		Burst and slice are the same transfer here, since it completes instantly either way; the
+		difference on hardware is only how the channel shares the bus. Words rather than bytes
+		because BCR counts words, and the address step follows CHCR bit 1 — backwards transfers are
+		legal and cost one comparison to honour.
+	**/
+	static function sectorToRam():Void {
+		final size = bcr[CH_CDROM] & 0xFFFF;
+		final blocks = (bcr[CH_CDROM] >>> 16) & 0xFFFF;
+		final sync = (chcr[CH_CDROM] >>> 9) & 3;
+		// Burst mode counts words in BCR's low half, and zero there means the full 0x10000.
+		final total = sync == 0
+			? (size == 0 ? 0x10000 : size)
+			: size * (blocks == 0 ? 1 : blocks);
+		final step = (chcr[CH_CDROM] & 2) != 0 ? -4 : 4;
+		var addr = madr[CH_CDROM] & 0x1FFFFC;
+		for (i in 0...total) {
+			Memory.write32(addr, cd.Cdrom.dmaWord());
+			addr += step;
+		}
+		wordsFromCd += total;
+		// Where the disc's contents land, so a call into code that was not in the executable can
+		// be recognised for what it is. See `Runtime.notInProgram`.
+		if (total > 16) noteLoaded(madr[CH_CDROM] & 0x1FFFFC, addr & 0x1FFFFC);
+		else {}
+		madr[CH_CDROM] = addr & 0xFFFFFF;
+	}
+
+	/** Words the disc has handed over. The first evidence a game is loading anything. */
+	public static var wordsFromCd(default, null) = 0;
+
+	/**
+		The span of RAM the disc has been read into — the game's overlays, whatever it calls them.
+
+		A recompiled program only contains the code that was in the executable. Everything a game
+		loads afterwards is machine code the tool never saw, and a call into it arrives as "no
+		function at 0x...", which on its own is indistinguishable from a missed function inside the
+		executable — a bug in the analysis. These two numbers tell the two apart: an address inside
+		this range was not missed, it was never there, and the answer is an overlay entry in
+		game.json rather than a fix to the sweep.
+
+		Deliberately one span rather than a list. It is a diagnostic, and the question it answers is
+		"was this address loaded from the disc"; a game that loads into several places will report a
+		range that covers them all, which still answers that question.
+	**/
+	public static var loadedLo(default, null) = 0;
+	public static var loadedHi(default, null) = 0;
+
+	static function noteLoaded(from:Int, to:Int):Void {
+		if (loadedHi == 0) { loadedLo = from; loadedHi = to; }
+		else {
+			if (from < loadedLo) loadedLo = from;
+			else {}
+			if (to > loadedHi) loadedHi = to;
+			else {}
+		}
+	}
+
+	/** Whether an address was read in from the disc rather than being part of the executable. */
+	public static function wasLoaded(addr:Int):Bool {
+		final p = addr & 0x1FFFFF;
+		return loadedHi != 0 && p >= loadedLo && p < loadedHi;
+	}
+
+	static function hex(v:Int):String {
+		final digits = "0123456789abcdef";
+		var out = "";
+		var s = 28;
+		while (s >= 0) { out += digits.charAt((v >>> s) & 0xF); s -= 4; }
+		return "0x" + out;
 	}
 
 	static function notReadable():Void {

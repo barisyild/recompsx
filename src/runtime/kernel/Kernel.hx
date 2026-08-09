@@ -403,7 +403,11 @@ class Kernel {
 
 	static function hookEntry(ctx:CpuState):Int {
 		hookEntryInt = ctx.a0;
-		noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook");
+		// The buffer's address alone says nothing; where it resumes names the function, which is
+		// what turns "the hook did not do what I expected" into a disassembly question.
+		noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook at "
+			+ hex8(ctx.a0) + ", resuming at " + hex8(mem.Memory.read32(ctx.a0))
+			+ " with sp " + hex8(mem.Memory.read32(ctx.a0 + 4)));
 		return 0;
 	}
 
@@ -542,11 +546,21 @@ class Kernel {
 		re-delivered on the next pump, forever.
 	**/
 	static function vblank(ctx:CpuState):Void {
-		vblankCount++;
-		heartbeat(ctx);
 		KEvents.deliver(ctx, KEvents.CLASS_VBLANK, SPEC_INTERRUPTED);
 		KEvents.deliver(ctx, CLASS_RCNT3, SPEC_INTERRUPTED);
 		Irq.writeStat(~(1 << Irq.VBLANK));
+	}
+
+	/**
+		A frame boundary, counted at the event rather than at delivery.
+
+		Called by the scheduler for every vblank the machine has, including the ones a game handles
+		entirely by itself. Everything that measures progress hangs off this: the heartbeat, and
+		the one VRAM dump that says what was actually drawn.
+	**/
+	public static function onFrame(ctx:CpuState):Void {
+		vblankCount++;
+		heartbeat(ctx);
 	}
 
 	/** The spec every hardware-interrupt event is opened with. */
@@ -572,7 +586,7 @@ class Kernel {
 	static function heartbeat(ctx:CpuState):Void {
 		// Late, not at the first pixel: the opening clear arrives thousands of frames before the
 		// rest of the display list, and a census taken at the clear describes only the clear.
-		if (vramDump && !dumped && vblankCount >= 200000) takeFrame();
+		if (vramDump && !dumped && vblankCount >= 30000) takeFrame();
 		else {}
 		if (vblankCount % 60 != 0) return;
 		else {}
@@ -582,7 +596,8 @@ class Kernel {
 			+ " | handlers " + KHandlers.calls
 			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
-			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list"
+			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list/"
+			+ dma.Dma.wordsFromCd + "cdw"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
 			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop");
@@ -680,6 +695,14 @@ class Kernel {
 		if (v == 0xB0) return "B0";
 		if (v == 0xC0) return "C0";
 		return "vector " + v;
+	}
+
+	static function hex8(v:Int):String {
+		final digits = "0123456789abcdef";
+		var out = "";
+		var s = 28;
+		while (s >= 0) { out += digits.charAt((v >>> s) & 0xF); s -= 4; }
+		return "0x" + out;
 	}
 
 	static function hex2(v:Int):String {

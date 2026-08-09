@@ -2,6 +2,7 @@ package cd;
 
 import core.Runtime;
 import shim.Backend;
+import shim.IntMath;
 import shim.RawBuf;
 import shim.RawMem;
 
@@ -224,6 +225,67 @@ class Iso9660 {
 		if (!mounted) return false;
 		else {}
 		return Backend.fileRead(slot, lba * sectorSize + userOffset, dst, USER_BYTES) == USER_BYTES;
+	}
+
+	/** Where a raw sector's own 4-byte address header sits, after the 12 sync bytes. */
+	static inline var HEADER_AT = 12;
+
+	/** Everything from the header to the end of the sector — Setmode bit 5's unit. */
+	public static inline var WHOLE_BYTES = 0x924;
+
+	/**
+		A sector as the drive presents it with `Setmode` bit 5 set: header first, then the data.
+
+		Not a fussy option. libcd reads whole sectors precisely so it can look at the four header
+		bytes — minute, second, frame, mode — and check that the sector it was handed is the one it
+		asked for. Serving it 2048 bytes of user data instead puts file contents where the address
+		belongs, so every sector reads as the wrong sector and a perfectly good read reports a
+		sector error.
+
+		On a 2352-byte image the bytes are simply there. On a cooked 2048-byte one they are not, and
+		they have to be built: the header is a function of the LBA, and a disc that has thrown away
+		its addresses has thrown away nothing that cannot be recomputed. The EDC/ECC tail is left
+		zero — it is not checked by anything on this side of a real drive.
+	**/
+	public static function wholeSector(lba:Int, dst:RawBuf):Bool {
+		if (!mounted) return false;
+		else if (sectorSize == RAW_SIZE) {
+			return Backend.fileRead(slot, lba * RAW_SIZE + HEADER_AT, dst, WHOLE_BYTES)
+				== WHOLE_BYTES;
+		} else return synthesizeWhole(lba, dst);
+	}
+
+	static function synthesizeWhole(lba:Int, dst:RawBuf):Bool {
+		writeHeader(lba, dst);
+		// Subheader, twice as the format requires: file 0, channel 0, submode "data", coding 0.
+		for (i in 0...2) {
+			RawMem.set8(dst, 4 + i * 4, 0);
+			RawMem.set8(dst, 5 + i * 4, 0);
+			RawMem.set8(dst, 6 + i * 4, 0x08);
+			RawMem.set8(dst, 7 + i * 4, 0);
+		}
+		for (i in 0...WHOLE_BYTES - 12 - USER_BYTES) RawMem.set8(dst, 12 + USER_BYTES + i, 0);
+		// Staged through the scratch sector because the backend always fills a buffer from its
+		// start — `bp_file_read` has no destination offset, deliberately, since every extra
+		// parameter in that header is one more thing each console port has to get right.
+		if (!readSector(lba)) return false;
+		else {}
+		for (i in 0...USER_BYTES) RawMem.set8(dst, 12 + i, RawMem.get8(sector, i));
+		return true;
+	}
+
+	/** The sector's address, in the minutes/seconds/frames the drive counts in. */
+	static function writeHeader(lba:Int, dst:RawBuf):Void {
+		// LBA 0 is 00:02:00 on the disc: the first 150 frames are the lead-in.
+		final total = lba + 150;
+		RawMem.set8(dst, 0, toBcd(IntMath.div(total, 60 * 75)));
+		RawMem.set8(dst, 1, toBcd(IntMath.mod(IntMath.div(total, 75), 60)));
+		RawMem.set8(dst, 2, toBcd(IntMath.mod(total, 75)));
+		RawMem.set8(dst, 3, 2);   // Mode 2, which is what a PlayStation disc carries
+	}
+
+	static inline function toBcd(v:Int):Int {
+		return (IntMath.mod(IntMath.div(v, 10), 10) << 4) | IntMath.mod(v, 10);
 	}
 
 	/** How many sectors the image holds — the disc's length, for `GetTD`. */

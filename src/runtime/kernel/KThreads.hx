@@ -122,6 +122,21 @@ class KThreads {
 		ctx.s6 = Memory.read32(buf + JB_S0 + 24);
 		ctx.s7 = Memory.read32(buf + JB_S0 + 28);
 		ctx.gp = Memory.read32(buf + JB_GP);
+
+		// `longjmp(buf, 1)`, not a bare jump — and the 1 is the whole point.
+		//
+		// A game installs this buffer by calling `setjmp` and handing the result to
+		// `HookEntryInt`, so the landing site is a `setjmp` return and is read as one: zero means
+		// "I have just installed myself, carry on with initialisation", non-zero means "an
+		// interrupt brought me here, dispatch it". Arriving with whatever `v0` the interrupted
+		// code happened to hold makes that test a coin toss — and when it comes up zero the hook
+		// re-runs the tail of the installer instead of the interrupt handler, which is not a
+		// missed interrupt but an init sequence executing at 60 Hz underneath a running game.
+		//
+		// Crash Bash reads it exactly that way at 0x80031ae8, and its CD driver is registered on
+		// the non-zero branch, so nothing the controller said was ever heard.
+		ctx.v0 = 1;
+
 		final target = Memory.read32(buf + JB_RA);
 		if (target == 0) return;
 		else {}

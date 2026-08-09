@@ -39,10 +39,23 @@ class Emitter {
 		this.discovery = discovery;
 	}
 
+	/**
+		A function's blocks in the order the switch cases are emitted, so case `i` is `blockOrder(fn)[i]`.
+
+		Public because the dispatch table needs the same numbering: an address that lands *inside*
+		a function has to become a case index, and the only way for that to be right is for the
+		table and the switch to be built from one definition of the order rather than two that
+		happen to agree.
+	**/
+	public static function blockOrder(fn:Func):Array<Int> {
+		final addrs = [for (k in fn.blocks.keys()) k];
+		addrs.sort((a, b) -> a - b);
+		return addrs;
+	}
+
 	public function emitFunction(fn:Func):String {
 		final buf = new StringBuf();
-		final blockAddrs = [for (k in fn.blocks.keys()) k];
-		blockAddrs.sort((a, b) -> a - b);
+		final blockAddrs = blockOrder(fn);
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.

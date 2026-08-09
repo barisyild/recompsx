@@ -136,6 +136,12 @@ class Runtime {
 		// The address-less form hid N distinct misses behind one identical line — and an
 		// unresolved call is a black hole: it does nothing, silently, so whatever side effects
 		// the callee had (installing a handler, unmasking a line) simply never happen.
+		else if (dma.Dma.wasLoaded(addr)) reportOnce(addr, "no function at " + hex(addr)
+			+ " (ra=" + hex(ctx.ra) + ") — but this address was read in from the disc, into "
+			+ hex(0x80000000 | dma.Dma.loadedLo) + ".." + hex(0x80000000 | dma.Dma.loadedHi)
+			+ ". It is an overlay: code the executable never contained, so the tool never saw it. "
+			+ "Add it to games/<id>/game.json as an overlay rather than looking for a missed "
+			+ "function.");
 		else reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra) + ")");
 	}
 
