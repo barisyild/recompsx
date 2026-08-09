@@ -655,7 +655,7 @@ class Kernel {
 			+ " | delivered " + KEvents.delivered + "/" + KEvents.callbacks + "cb"
 			+ " | dma " + dma.Dma.wordsToGpu + "w/" + dma.Dma.listsWalked + "list/"
 			+ dma.Dma.wordsFromCd + "cdw"
-			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up"
+			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up/" + gpu.Gpu.flips + "flip"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
 			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop"
 			// Which code was last at a loop header. Every pump point records the return address,
