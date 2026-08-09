@@ -144,9 +144,26 @@ class Cdrom {
 		responseCount = 0;
 		responseRead = 0;
 		currentInt = 0;
+		firedCurrent = false;
 		queuedInt = 0;
 		queuedCount = 0;
-		irqEnable = 0;
+		// Every answer allowed through, because the BIOS has already been here.
+		//
+		// This is a handover, not a power-on reset. A real machine runs its BIOS before a game
+		// sees the hardware, and the BIOS's CD driver arms the controller — it writes the enable
+		// register, spins the motor up, and leaves both that way. `status = ST_MOTOR` above is
+		// the same kind of inheritance and has been here since the beginning.
+		//
+		// A game's own library does not re-arm it. Crash Bash's `CD_init` reads the pending
+		// flags, clears the data FIFO, and issues `CdlNop` — never touching the enable, because
+		// on the machine it was written for there is nothing to touch. Starting at zero left its
+		// first answer latched behind a closed gate, and libcd recovered the only way it can: by
+		// timing out after seven seconds and resetting the controller itself. Seven seconds of
+		// every boot, spent reproducing a state we had simply never established.
+		irqEnable = 0x1F;
+		volLL = 0x80; volLR = 0; volRL = 0; volRR = 0x80;
+		appliedLL = 0x80; appliedLR = 0; appliedRL = 0; appliedRR = 0x80;
+		adpcmMuted = false;
 		seekLba = 0;
 		readLba = 0;
 		reading = false;
@@ -299,18 +316,72 @@ class Cdrom {
 
 	static function write1801(v:Int, cycles:Int):Void {
 		if (index == 0) execute(v, cycles);
+		else if (index == 3) volRR = v & 0xFF;
 		else Runtime.reportOnce(0x64000000 | index, "CD write to 1801 with index " + index);
 	}
 
 	static function write1802(v:Int):Void {
 		if (index == 0) pushParam(v);
 		else if (index == 1) setIrqEnable(v);
-		else {}   // the volume registers, which mean nothing without audio
+		else if (index == 2) volLL = v & 0xFF;
+		else volRL = v & 0xFF;
 	}
 
+	// ---- the CD audio mixer ---------------------------------------------------------------------
+	//
+	// Four volumes and a latch, spread across three registers and two indices because the
+	// controller has eight bits of bus and needed somewhere to put them. Each disc channel can be
+	// sent to each speaker, so a game can pan its CD audio, swap the channels, or fold them to
+	// mono — and libcd's `CdMix` writes all four and then applies them as one.
+	//
+	// Nothing consumes these yet: the SPU's CD input is where they would be heard, and this disc
+	// has no audio tracks to hear. They are kept because they are *state a game can read back and
+	// reason about*, and because storing them is what makes the eventual audio path a matter of
+	// reading four numbers rather than discovering that nobody wrote them down. Pending and
+	// applied are separate exactly as the hardware keeps them: writing a volume changes nothing
+	// until bit 5 of 1F801803.Index3 says so.
+
+	static var volLL = 0x80;
+	static var volLR = 0;
+	static var volRL = 0;
+	static var volRR = 0x80;
+
+	public static var appliedLL(default, null) = 0x80;
+	public static var appliedLR(default, null) = 0;
+	public static var appliedRL(default, null) = 0;
+	public static var appliedRR(default, null) = 0x80;
+
+	/** Bit 0 of the apply register: CD-XA ADPCM silenced without disturbing the volumes. */
+	public static var adpcmMuted(default, null) = false;
+
+	static function applyVolume(v:Int):Void {
+		adpcmMuted = (v & 0x01) != 0;
+		if ((v & 0x20) == 0) return;
+		else {}
+		appliedLL = volLL;
+		appliedLR = volLR;
+		appliedRL = volRL;
+		appliedRR = volRR;
+	}
+
+	/**
+		1F801802.Index1 — which answers are allowed to reach the CPU.
+
+		Enabling is retroactive. The controller latches an answer whether or not anyone is
+		listening: `currentInt` is set, the response FIFO is loaded, and the game can read and
+		acknowledge both. What it cannot do is *notice*, because the interrupt line was gated off.
+		So a game that answers a command before enabling — which libcd does, once, during
+		`CD_init` — would wait for a bell that already rang and only recover through its own
+		timeout, seven seconds later.
+
+		Hardware has no such hole: the flag is the state, the enable is a gate over it, and
+		un-gating a set flag drives the line. This does the same, once per latched answer.
+	**/
 	static function setIrqEnable(v:Int):Void {
 		irqEnable = v & 0x1F;
 		tnote("irqEnable := " + irqEnable);
+		if (currentInt != 0 && !firedCurrent && (irqEnable & currentInt) != 0) fire();
+		else {}
 	}
 
 	static function pushParam(v:Int):Void {
@@ -329,7 +400,8 @@ class Cdrom {
 	static function write1803(v:Int):Void {
 		if (index == 0) requestData(v);
 		else if (index == 1) acknowledge(v);
-		else {}
+		else if (index == 2) volLR = v & 0xFF;
+		else applyVolume(v);
 	}
 
 	/**
@@ -369,6 +441,7 @@ class Cdrom {
 		if ((v & 0x07) == 0) return;
 		else {}
 		currentInt = 0;
+		firedCurrent = false;
 		// The queued second answer goes through the scheduler like the first, and for the same
 		// reason: releasing it here delivers it *inside* the driver's acknowledging write, before
 		// that driver has finished handling the answer it was acknowledging. The first response
@@ -390,6 +463,7 @@ class Cdrom {
 		for (i in 0...queuedCount) response[i] = queuedResponse[i];
 		currentInt = queuedInt;
 		queuedInt = 0;
+		firedCurrent = false;
 		raise();
 	}
 
@@ -409,7 +483,9 @@ class Cdrom {
 		commands++;
 		if (cmd == 0x01) ackWith1(status);                      // Getstat
 		else if (cmd == 0x02) setloc();
+		else if (cmd == 0x03) play();
 		else if (cmd == 0x06 || cmd == 0x1B) startReading(cycles);
+		else if (cmd == 0x08) stop();
 		else if (cmd == 0x09) pause(cycles);
 		else if (cmd == 0x0A) initCommand(cycles);
 		else if (cmd == 0x0B || cmd == 0x0C) ackWith1(status);  // Mute / Demute
@@ -464,6 +540,51 @@ class Cdrom {
 		return status;
 	}
 
+	/**
+		`CdlPlay` — CD-DA playback, from `Setloc`'s destination or a track number.
+
+		The answer is the whole of what most games need from it. A game starts its music, gets an
+		INT3 saying the drive is playing, and goes on with its frame; the audio itself arrives on
+		the SPU's CD input, which is a separate path. Answering with an error instead — which is
+		what an unimplemented command does — is not a missing feature but a *wrong* one: libcd
+		takes INT5 as a fault, retries, and keeps retrying. Crash Bash spent 1500 frames issuing
+		this command 150 times a second and never reaching its menu.
+
+		Playback here is silent, and on this disc that is also correct: the image has one MODE2
+		data track and no audio tracks, so there is nothing to sound. A disc with real CD-DA needs
+		the track table and the SPU input path, which are their own work and are not pretended at
+		here — the drive reports playing because it is, and delivers nothing because there is
+		nothing.
+	**/
+	static function play():Void {
+		// A track number, if given, is where to play from; `Setloc`'s destination if not. Either
+		// way the head is somewhere legitimate, which is all the status byte claims.
+		if (paramCount >= 1 && param[0] != 0) readLba = seekLba;
+		else {}
+		reading = false;
+		status = (status | ST_MOTOR | ST_PLAYING) & ~(ST_READING | ST_SEEKING);
+		// Mode bit 2 asks for a position report every so often while playing. Nothing needs one
+		// yet, and a game that did would hang waiting rather than misbehave visibly.
+		if ((mode & 0x04) != 0) Runtime.reportOnce(0x67000001,
+			"CD play with reports enabled — position INT1s are not sent");
+		else {}
+		ackWith1(status);
+	}
+
+	/**
+		`CdlStop` — playback off, motor off.
+
+		Two answers like `Init` and `Pause`: the acknowledgement, then the completion once the
+		drive has actually spun down. A game that waits for the second and never gets it is stuck
+		as surely as one that gets an error.
+	**/
+	static function stop():Void {
+		reading = false;
+		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING | ST_MOTOR);
+		queue(INT2_DONE, status, 1);
+		ackWith1(status);
+	}
+
 	static function startReading(cycles:Int):Void {
 		readLba = seekLba;
 		reading = true;
@@ -486,11 +607,57 @@ class Cdrom {
 		ackWith1(status);
 	}
 
-	/** `Test 20h` reports the controller's date and version, which is all any game asks it for. */
+	/**
+		`Test` — a family of sub-commands selected by the first parameter.
+
+		Two matter here. `20h` reports the controller's date and version, which is what a game asks
+		when it wants to know what drive it is talking to. `04h` tells the drive to begin its
+		periodic check of the disc's wobble data and zero the counters that record it; the answer
+		is the status byte and nothing more, because the command starts a process rather than
+		reporting one.
+
+		`04h` is not optional decoration: it is part of the sequence libcd runs when it starts CD
+		audio, after seeking the head off the data track. Answering it with an error made Crash
+		Bash abandon its whole audio startup — GetTN, Init, GetTD, ReadTOC, GetID, Setloc, Setmode,
+		SeekP, Mute, Play — and begin it again, three times a second, forever. The music never
+		started and the game never moved on.
+
+		Everything else answers INT5, which is also what the hardware does for an undefined
+		sub-command, and says so once so the next one is named rather than guessed at.
+	**/
 	static function test():Void {
-		if (paramCount >= 1 && param[0] == 0x20) return testVersion();
+		if (paramCount < 1) return errorWith(0x20);
 		else {}
+		final sub = param[0];
+		if (sub == 0x20) return testVersion();
+		else {}
+		if (sub == 0x04) return ackWith1(status);
+		else {}
+		if (sub == 0x05) return testScexCounters();
+		else {}
+		Runtime.reportOnce(0x65001900 | sub, "CD Test sub-command " + sub + " is not implemented");
 		errorWith(0x10);
+	}
+
+	/**
+		`Test 05h` — how much wobble data the drive has read since `04h` reset the counters.
+
+		Two bytes: how many strings were seen, and how many of those were complete. The drive
+		reports what it observed; the *decision* about what that means belongs to whatever asked.
+
+		The answer here follows from a decision this emulator already made, years of code before
+		this function: `GetID` reports the disc in the drive as a licensed one, because a mounted
+		image is modelled as an ordinary disc and there is no other coherent thing for a drive to
+		say about it. Reporting counters that contradict `GetID` would describe a machine that
+		exists nowhere — a drive simultaneously certain and unsure about the same disc — and the
+		games it would break are the ones asking a routine question during audio setup, which is
+		exactly what Crash Bash is doing here.
+	**/
+	static function testScexCounters():Void {
+		response[0] = status;
+		response[1] = 0x01;   // strings seen
+		response[2] = 0x01;   // of which complete
+		respond(INT3_ACK, 3);
 	}
 
 	static function testVersion():Void {
@@ -763,6 +930,7 @@ class Cdrom {
 		for (i in 0...pendingCount) response[i] = pendingResponse[i];
 		currentInt = pendingInt;
 		pendingInt = 0;
+		firedCurrent = false;
 		raise();
 	}
 
@@ -778,21 +946,31 @@ class Cdrom {
 
 	static function raise():Void {
 		if ((irqEnable & currentInt) != 0) fire();
-		else dropped();
+		else deferred();
 	}
 
 	static function fire():Void {
 		raised++;
+		firedCurrent = true;
 		Irq.raiseLine(Irq.CDROM);
 	}
 
-	/** An answer nobody will hear. Worth counting: it is the difference between a controller that
-		is silent and one that is shouting into a disconnected wire. */
-	static function dropped():Void {
+	/**
+		An answer that is latched but gated off — it reaches the CPU when the enable does.
+
+		Counted rather than reported: with `setIrqEnable` driving the line for a latched answer
+		this is an ordinary state a game passes through, not a fault. It stays visible in the
+		heartbeat because a *rising* count means a game is answering into a gate it never opens,
+		which is a different bug and still worth seeing.
+	**/
+	static function deferred():Void {
 		swallowed++;
-		Runtime.reportOnce(0x67000000,
-			"CD interrupt dropped: level " + currentInt + " but irqEnable is " + irqEnable);
 	}
+
+	/** Whether the latched answer has already driven the line, so enabling cannot ring it twice. */
+	static var firedCurrent = false;
+
+
 
 	public static var raised(default, null) = 0;
 	public static var swallowed(default, null) = 0;

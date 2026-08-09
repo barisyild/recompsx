@@ -46,6 +46,16 @@ main loop never returns, by sending a halt down the same road a `longjmp` travel
 digest over VRAM plus twenty-two deterministic counters. That is what makes a *game* — not just a
 demo — comparable between JavaScript and reflaxe.CPP.
 
+**The CD dialogue is now correct end to end, and the boot has no dead time in it.** Four separate
+causes had been hiding behind one symptom each. The controller's interrupt enable belongs to the
+BIOS, not to the game — starting it at zero cost seven seconds of every boot while libcd timed
+out and re-armed a controller nobody had armed. Halfword stores to the CD page reached no device
+at all, because `slowWrite16` had a branch for every peripheral except that one. `CdlPlay` and
+`CdlStop` answered with errors. And `Test 04h`/`05h` — two sub-commands in libcd's CD-audio
+startup — answered with errors too, which made the game abandon and restart a ten-command
+sequence three times a second for as long as it ran. None of these announced itself; each was
+found by asking the machine what it actually did, one register write at a time.
+
 ## Next up (ordered)
 
 1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
@@ -651,6 +661,18 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] CD protocol + interrupt correctness — **the boot stall and the command storm are
+  both gone**. Four causes, none of them the one the log named. The controller's interrupt enable
+  starts at 0x1F because the BIOS leaves it there and a game's library never re-arms it (seven
+  seconds of every boot were libcd timing out and resetting a controller we had never armed);
+  `slowWrite16` had no CD branch at all, so every halfword store to the CD page was read-modify-
+  written into a register that does not exist; `Test 04h`/`05h` are part of libcd's CD-audio
+  startup and answering them with INT5 made Crash Bash restart that whole ten-command sequence
+  three times a second forever; and `CdlPlay`/`CdlStop` existed only as errors. Also: an interrupt
+  raised inside a handler is now delivered before `Irq.dispatch` returns instead of waiting an
+  unbounded time for the next pump. Frame 900 went from 1289 CD commands and 1705 dropped answers
+  to 52 and 17. Next: S2, the GTE.
 
 2026-08-09 [fable] Overlay S4 closes the milestone: two overlays from disc offsets in committed
   config, no capture anywhere; the audit's four defects fixed and tested (resident overlays

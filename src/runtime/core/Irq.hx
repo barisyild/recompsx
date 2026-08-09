@@ -177,13 +177,36 @@ class Irq {
 	public static function dispatch(ctx:CpuState):Void {
 		if (!deliverable(ctx)) return blocked(ctx);
 		else {}
-		inHandler = true;
-		delivered++;
-		saveRegisters(ctx);
-		ctx.cause = (ctx.cause & ~CAUSE_IP_HW) | causeBits();
-		Kernel.onInterrupt(ctx);
-		restoreRegisters(ctx);
-		inHandler = false;
+		// A line raised *during* a handler used to wait for the next pump, which is an unbounded
+		// delay: pumps happen where recompiled code happens to check, and a game sitting in a
+		// wait loop between them can leave a controller's answer undelivered for thousands of
+		// cycles. Hardware has no gap — returning from the exception with a line still pending
+		// and unmasked re-enters the vector immediately — so this loops instead.
+		var rounds = 0;
+		while (true) {
+			inHandler = true;
+			delivered++;
+			saveRegisters(ctx);
+			ctx.cause = (ctx.cause & ~CAUSE_IP_HW) | causeBits();
+			Kernel.onInterrupt(ctx);
+			restoreRegisters(ctx);
+			inHandler = false;
+			rounds++;
+			if (!deliverable(ctx)) return;
+			else {}
+			// A handler that leaves its own line asserted would otherwise spin here forever. Eight
+			// is far past any real chain — the machine has six lines — so reaching it means a
+			// handler is not clearing what it was called for, which is worth saying once.
+			if (rounds >= MAX_ROUNDS) return handlerStorm();
+			else {}
+		}
+	}
+
+	static inline var MAX_ROUNDS = 8;
+
+	static function handlerStorm():Void {
+		Runtime.reportOnce(0x5A000005, MAX_ROUNDS + " interrupt deliveries without the lines "
+			+ "clearing — a handler is not acknowledging what it was called for");
 	}
 
 	/**
@@ -201,9 +224,11 @@ class Irq {
 			"interrupt pending but SR.IEc is clear — the CPU is not listening");
 		else if ((ctx.sr & SR_IM_HW) == 0) Runtime.reportOnce(0x5A000003,
 			"interrupt pending but SR bit 10 is clear — the hardware line is masked off");
-		else if (inHandler) Runtime.reportOnce(0x5A000004,
-			"interrupt pending while already inside a handler");
 		else {}
+		// `inHandler` is deliberately not a reason any more. It was reported when a line raised
+		// inside a handler had to wait for the next pump; `dispatch` now delivers it before it
+		// returns, so reaching here re-entrantly is a pump from inside emulated handler code —
+		// ordinary, and nothing to say about.
 	}
 
 	// A handler is an ordinary recompiled function and will use registers freely. On hardware the
