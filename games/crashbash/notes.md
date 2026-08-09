@@ -213,3 +213,67 @@ Two readings, and they are not equally likely:
 
 Reading 2 is worth ruling out first because it costs one scan and would be embarrassing to miss.
 If it comes back empty, reading 1 stands, and the boot screen is behind the disc after all.
+
+
+## The boot screen, and the seven things between it and us (2026-08-09)
+
+The game shows "Sony Computer Entertainment America Presents". Getting there corrected a reading
+recorded twice above, and then found six more defects, each of which only became visible once the
+one before it was fixed.
+
+**`f_8003ebf8` was never waiting on anything.** The branch is `slti $v0, $v0, 2` then
+`bne $v0, $zero` — when `[0x8006DBBC] < 2` it *skips* a printf and carries on. It is a debug
+verbosity level, and nothing writes it because zero is the right value. Both scans above were
+answering a question that did not need asking; the two commits that recorded the "stalled loop"
+are wrong and this supersedes them.
+
+**The exception hook was entered with whatever `v0` the interrupted code held.** The game calls
+its own `setjmp` at `0x8003acec`, hands the buffer to `HookEntryInt`, and reads the landing site
+at `0x80031ae8` as a `setjmp` return: zero means "carry on with initialisation", non-zero means
+"an interrupt brought me here, dispatch it". `KThreads.enterJmpBuf` restored every saved register
+and left `v0` alone, so that test was a coin toss — and the CD driver is registered on the
+non-zero branch. This is why libcd polled its way through `CD_init` and still reported
+`Sync=NoIntr`: the protocol was working, the driver was not running.
+
+Its interrupt callbacks live in the game's own table at `0x80067B00`, indexed by IRQ number,
+installed through a vtable at `[0x80068B84]`. After the fix: IRQ0 `0x80036d2c` (libetc vblank),
+IRQ2 `0x8003f5f0` (libcd), IRQ3 `0x8003aee8` (DMA).
+
+**`0x80031ae8` is mid-function**, which is the general point: a `longjmp` lands after a `jal` by
+construction, never on a prologue. A dispatch table of function entries answers "no function
+there" to every resume, and the jump silently does nothing.
+
+**The sweep could not see a scheduled prologue.** GCC hoists loads above the stack adjustment, so
+`0x8003add4` and `0x8003c790` open with `lui`/`lw` and reach `addiu sp` two and four instructions
+in. Code that follows a return is now taken as a function: 91 more of them.
+
+**The CD-ROM, three defects.** It never re-armed after answering — `ReadN`'s first answer is an
+INT3 meaning "started", and nothing scheduled the sectors it promised. It ignored Setmode bit 5,
+while libcd asks for whole sectors (`Setmode A0`) precisely so it can check each sector's own
+address header. And clearing the request bit resets the data FIFO; it does not discard the
+drive's sector. Reading it as "done" moved the drive on one sector early, so every transfer
+delivered sector N+1 where N was asked for — which the game correctly rejected as a sector error.
+
+**Three DMA channels did not exist.** Channel 3 is how a sector reaches RAM; channel 4 is how
+wave data reaches the SPU, and libspu waits on an event for it; channel 6 builds the ordering
+table, without which `DrawOTag` walks uninitialised memory. The game says so itself: "empty
+prims".
+
+**GP0(80h) was sized and skipped.** VRAM-to-VRAM blits are how this game draws — 6931 of them
+against a single rectangle in 8000 frames. Uploads put the artwork in VRAM; the blits put it on
+the screen.
+
+### Overlays
+
+`CRASHBSH.DAT` is loaded into `0x80076288..0x800d7490` and called through a vtable. The runtime
+now recognises a miss into anything the disc wrote and writes RAM out with the command to
+recompile it (`--ram ram.bin --ram-range <lo>..<hi> --seed <addr>`), and the tool lays that slice
+in above the executable. Two limits are already visible and are the next work:
+
+- **A capture describes one overlay.** The game loads several into the same memory, so addresses
+  that were code when the capture was taken are data later, and the reverse. Seeds are validated
+  before being believed, and a function traced into data above the executable is abandoned rather
+  than being a hard error — but that only makes the tool survive the ambiguity, it does not
+  resolve it. Plan section 6.4's per-overlay identification is what does.
+- **The sweep stops at the executable's end.** Above it the tool is reading a memory image where
+  code and assets are adjacent, and sweeping finds functions in texture data.

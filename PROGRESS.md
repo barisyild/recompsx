@@ -21,6 +21,19 @@ Scope reminders that shape every decision: **all PS1 games are the target** (Cra
 bring-up vehicle, Spyro 3 demo is the anti-overfitting check), and **consoles are the
 destination** (PC/SDL2 first; PS2 and derivatives, plus JVM, behind the same backend ABI).
 
+**2026-08-09: the bring-up game boots to its first screen.** Crash Bash NTSC-U reaches "Sony
+Computer Entertainment America Presents" — it initialises libcd, reads its own filesystem, loads
+`CRASHBSH.DAT`, runs code out of it, uploads artwork to VRAM and composites it. The same build
+runs headless under Node and live in a browser: one JavaScript shim, two hosts, chosen by whether
+the page supplied `globalThis.recompsxHost`.
+
+The last stretch was a chain of seven defects where each one hid the next, and the shape of it is
+worth keeping: **every layer worked except the one below it**, so the symptom never named the
+cause. A CD that answered every command but never streamed a sector; a driver that was never
+installed because a `setjmp` return value was left to chance; ordering tables walked faithfully
+after being built out of uninitialised memory; a game waiting not on sound but on being told that
+sound had finished. Nothing here was a missing feature that announced itself.
+
 ## Next up (ordered)
 
 1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
@@ -422,6 +435,17 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] **BOOT SCREEN.** Crash Bash NTSC-U shows "Sony Computer Entertainment America
+  Presents", on Node and in a browser. Seven fixes in a chain, each hidden by the one after it:
+  `enterJmpBuf` left `v0` alone, so the game's exception hook — installed via `setjmp` — could
+  not tell "just installed" from "an interrupt brought me here" and never dispatched its CD
+  driver; FnTable now maps every basic block, since a longjmp lands after a `jal` and never on a
+  prologue; the sweep takes code following a return as a function (GCC hoists loads above the
+  stack adjust); the CD re-arms after answering, honours Setmode bit 5, and clearing the request
+  bit resets the FIFO rather than discarding the drive's sector; DMA 3/4/6 and GP0(80h) exist.
+  Next: overlays are transient — a RAM capture describes one, and the game loads several into the
+  same memory, so `--ram` wants the per-overlay identification of plan section 6.4.
 
 2026-08-08 [opus] THE GAME RENDERS. Two blockers, neither the CD: DMA channel 2 (Psy-Q draws via
   ordering tables, so every display list went nowhere) and GP0(A0h) CPU-to-VRAM uploads (an
