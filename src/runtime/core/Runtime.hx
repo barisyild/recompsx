@@ -95,6 +95,10 @@ class Runtime {
 		call(ctx, addr);
 		var guard = 0;
 		while (ctx.unwindToken != 0) {
+			// A halt is the one token nobody resumes from: a headless run has reached the frame it
+			// was told to stop at, and the emulated stack has just been left behind on purpose.
+			if (ctx.unwindToken == kernel.Kernel.UNWIND_HALT) return;
+			else {}
 			ctx.unwindToken = 0;
 			guard++;
 			// A longjmp loop that never settles would otherwise hang with no explanation.

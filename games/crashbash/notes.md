@@ -277,3 +277,31 @@ in above the executable. Two limits are already visible and are the next work:
   resolve it. Plan section 6.4's per-overlay identification is what does.
 - **The sweep stops at the executable's end.** Above it the tool is reading a memory image where
   code and assets are adjacent, and sweeping finds functions in texture data.
+
+
+## Overlays, from nothing to config (2026-08-09)
+
+The workflow that produced the two stanzas in game.json, recorded because it is the workflow for
+every game:
+
+1. Generate from the config with `overlays: []` and run. A dispatch miss into memory the disc
+   wrote is reported with the span, the sector it came from, and the numbers to paste:
+   `loadAddr 2147978384 length 387072 ... from disc sector 35799`.
+2. Turn the sector into a file offset — CRASHBSH.DAT starts at LBA 236, so
+   `(35799 - 236) * 2048 = 72833024` — and write the stanza. The `boot` overlay is the last
+   387072 bytes of the file exactly, which is a good sign the span was coalesced correctly.
+3. Regenerate, run again. The next miss named the second overlay the same way: `stage`,
+   32 KB into the middle of boot's window, sector 28178. Two rounds, two overlays, no captures.
+4. Misses whose `ra` is *inside* an overlay are base functions reached through the overlay's
+   pointers — they go into `functionHints`, not into a stanza.
+
+What the game taught the model: `stage` does not replace `boot`, it nests inside it — both are
+genuinely present, and the smaller window answers for the addresses they share. Exclusive
+windows were the first implementation and the real game refused them within a minute.
+
+The audit after bring-up (session log 2026-08-09) tightened three things worth knowing when
+reading the code: a resident overlay shadows the executable even where it has no code (no
+fallthrough to stale base functions); the executable's own functions inside a window are always
+dispatched, never direct-called, for the same reason; and a window shorter than its own
+fingerprint is a build error, because the tool and the runtime would hash different lengths and
+the overlay would silently never activate.

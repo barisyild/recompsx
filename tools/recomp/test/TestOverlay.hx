@@ -28,8 +28,14 @@ import sys.io.File;
 **/
 class TestOverlay {
 	static inline var BASE = 0x80010000;
+
+	/** Inside the executable's own image, deliberately: windows overlap the executable's tail on
+	    real games, and the calls into that overlap are where the policy is easiest to get wrong. */
 	static inline var WINDOW = 0x80020000;
 	static inline var WINDOW_BYTES = 0x80;
+
+	/** A base function *inside* the window — the executable's bytes there, before any load. */
+	static inline var BASE_IN_WINDOW = WINDOW + 0x60;
 
 	// Encodings, named so the programs below read as programs.
 	static inline var NOP = 0x00000000;
@@ -63,25 +69,34 @@ class TestOverlay {
 	}
 
 	/**
-		The executable: one function that calls another, and one that calls into the window.
+		The executable: a function of its own, a call into the window, and — the treacherous case —
+		a function of its own *inside* the window.
 
-		The second call is the interesting one. At the moment it is emitted, nothing can know which
-		overlay will be sitting there — that is decided when the game loads one — so it has to
-		become a dispatch by address.
+		The last one exists in the executable's bytes and runs fine before anything is loaded, but
+		the moment an overlay arrives its bytes are gone. So even the executable's own call to it
+		cannot be direct: at the moment it is emitted, nothing knows what will be sitting there.
 	**/
 	static function baseProgram():Bytes {
 		final w = [];
-		for (i in 0...68) w.push(NOP);
-		w[0] = jal(BASE + 0x100);   // a function in the executable: always resident
+		final total = ((WINDOW + WINDOW_BYTES) - BASE) >> 2;
+		for (i in 0...total) w.push(NOP);
+		w[0] = jal(BASE + 0x100);        // a function in the executable: always resident
 		w[1] = NOP;
-		w[2] = jal(WINDOW);         // into the window: whoever is loaded there
+		w[2] = jal(WINDOW);              // into the window: whoever is loaded there
 		w[3] = NOP;
-		w[4] = JR_RA;
+		w[4] = jal(BASE_IN_WINDOW);      // the executable's own code, but in the window
 		w[5] = NOP;
+		w[6] = JR_RA;
+		w[7] = NOP;
 		// 0x80010100
 		w[64] = ADDU_V0_ZZ;
 		w[65] = JR_RA;
 		w[66] = NOP;
+		// The base function inside the window.
+		final at = (BASE_IN_WINDOW - BASE) >> 2;
+		w[at] = ADDU_V0_ZZ;
+		w[at + 1] = JR_RA;
+		w[at + 2] = NOP;
 		return words(w);
 	}
 
@@ -109,9 +124,9 @@ class TestOverlay {
 		return words(w);
 	}
 
-	static function overlayConfig(id:String):OverlayConfig {
+	static function overlayConfig(id:String, hashWords:Int = 16):OverlayConfig {
 		return new OverlayConfig(id, WINDOW, WINDOW_BYTES,
-			recomp.config.GameConfig.OverlaySource.MemDump("unused-in-this-test"), [], 64);
+			recomp.config.GameConfig.OverlaySource.MemDump("unused-in-this-test"), [], hashWords);
 	}
 
 	static function build(overlayIds:Array<String>, markers:Array<Int>):Program {
@@ -159,6 +174,23 @@ class TestOverlay {
 				"a call inside the executable is a direct call");
 			Assert.isTrue(base.indexOf("Runtime.call(ctx, 0x80020000)") >= 0,
 				"a call into an overlay window is dispatched by address");
+			// The executable's own function inside the window: its bytes are gone the moment an
+			// overlay loads, so even its own caller cannot bind to it statically.
+			Assert.isTrue(base.indexOf("Runtime.call(ctx, 0x80020060)") >= 0,
+				"the executable's own code inside a window is dispatched too");
+			Assert.isTrue(base.indexOf(".f_80020060(ctx);") < 0,
+				"and never called directly");
+		}
+
+		Assert.group("overlay: a resident overlay shadows the executable, with no fallthrough");
+		{
+			final t = files.get("FnTable.hx");
+			Assert.isTrue(t.indexOf("shadows the executable here: no fallthrough") >= 0,
+				"the dispatch entry refuses to answer with shadowed base code");
+			// The base rows still carry the in-window function: with nothing resident, the
+			// executable's bytes are what is there, and it must dispatch.
+			Assert.isTrue(t.indexOf("0x80020060") >= 0,
+				"but the base table still serves it while nothing is loaded");
 		}
 
 		Assert.group("overlay: an overlay calls the base directly and itself directly");
@@ -242,5 +274,39 @@ class TestOverlay {
 			}
 			Assert.isTrue(refused, "identical overlays are a build error, not a coin toss");
 		}
+
+		Assert.group("overlay: a fingerprint longer than the overlay is refused");
+		{
+			// The tool would clamp its hash to the bytes it has while the runtime hashed the full
+			// count — two different numbers, an overlay that silently never activates. Refused at
+			// build time instead, where the fix is one number.
+			var refused = false;
+			try {
+				buildWithHashWords(WINDOW_BYTES);   // four bytes per word: four times too long
+			} catch (e:recomp.analysis.AnalysisError) {
+				refused = e.message.indexOf("fingerprint covers") >= 0;
+			}
+			Assert.isTrue(refused, "an unfillable fingerprint is a build error, not silence");
+		}
+	}
+
+	/** One overlay whose declared fingerprint is longer than its bytes. */
+	static function buildWithHashWords(hashWords:Int):Program {
+		final exe = exeOf(baseProgram());
+		final baseImage = Image.ofExe("test", exe);
+		final baseDiscovery = new Discovery(baseImage);
+		baseDiscovery.addSeed(BASE, "entry", Confidence.Entry);
+		baseDiscovery.run();
+
+		final cfg = overlayConfig("h", hashWords);
+		final bytes = overlayProgram(ADDU_V0_ZZ);
+		final image = Image.ofExeWithOverlay("test:h", exe, bytes, cfg.loadAddr);
+		final d = new Discovery(image, cfg.loadAddr, cfg.endAddr(), true);
+		d.addSeed(WINDOW, "ovl_entry", Confidence.Entry);
+		d.run();
+		return new Program([
+			new Universe(null, baseImage, baseDiscovery, null),
+			new Universe(cfg, image, d, bytes),
+		], exe);
 	}
 }

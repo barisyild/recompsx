@@ -548,8 +548,8 @@ class Cdrom {
 		final lba = track == 0 ? discSectors() : 0;
 		final total = lba + 150;                     // back to absolute MSF, lead-in included
 		response[0] = status;
-		response[1] = toBcd(Std.int(total / (60 * 75)));
-		response[2] = toBcd(Std.int(total / 75) % 60);
+		response[1] = toBcd(shim.IntMath.div(total, 60 * 75));
+		response[2] = toBcd(shim.IntMath.mod(shim.IntMath.div(total, 75), 60));
 		respond(INT3_ACK, 3);
 	}
 
@@ -559,7 +559,7 @@ class Cdrom {
 	}
 
 	static inline function toBcd(v:Int):Int {
-		return Std.int(v / 10) * 16 + (v % 10);
+		return shim.IntMath.div(v, 10) * 16 + shim.IntMath.mod(v, 10);
 	}
 
 	/**
@@ -675,10 +675,22 @@ class Cdrom {
 		sectorTaken = false;
 		fifoOpen = false;
 		sectorPos = 0;
+		heldLba = readLba;
 		readLba++;
 		sectorsDelivered++;
 		respond(INT1_DATA, statusOnly());
 	}
+
+	/**
+		Which sector the buffer is holding.
+
+		`readLba` has already moved on to the next one by the time anybody asks, and the question
+		that matters is where the bytes about to be transferred came *from* — that is the
+		provenance a person needs to point an overlay stanza at a file on the disc.
+	**/
+	static var heldLba = 0;
+
+	public static inline function currentLba():Int return heldLba;
 
 	/**
 		Loads one sector in whichever shape the current mode asks for.

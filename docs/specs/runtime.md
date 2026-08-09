@@ -196,6 +196,37 @@ marks *can-unwind*; frames peel back to the `Runtime.call` trampoline holding th
 anchor, which clears the token and resumes at the restored ra. Zero cost in unwind-free
 functions.
 
+Two tokens are reserved and travel the same road without being caught by a `setjmp` anchor:
+`Kernel.UNWIND_FROM_EXCEPTION` ('RFEX'), cleared by `KHandlers` when a chain element claims its
+interrupt or by `KThreads` when the game's hook returns; and `Kernel.UNWIND_HALT` ('HALT'), which
+nothing clears — `Runtime.callAndResume` stops instead of resuming, which is how a headless run
+bounded by frames ends a main loop that never returns.
+
+### 3.8 Overlay residency (`OverlayMgr`)
+
+A game larger than RAM loads code into fixed windows from the disc. Overlays are identified at
+build time as *(disc extent, window)* and resolved at run time by fingerprint; the full decision
+is ADR-0006. What the runtime owes:
+
+- **Install nothing.** The game loads its own overlays through emulated hardware (DMA channel 3,
+  `KFiles`), so RAM already holds the right bytes; only the address-to-code mapping follows.
+- **`define(index, lo, hi, fingerprint, hashWords)`** is called once per overlay at boot by the
+  generated `Overlays.register()`. All addresses are canonicalised to KSEG0 on the way in, so
+  residency never depends on which segment a caller happened to hold.
+- **Three activation signals.** `noteLoad(dest, len, lba)` evicts any overlay whose *fingerprint
+  region* the write overlaps (and remembers the span for diagnostics); `rescan()` at `FlushCache`
+  (A0:44) identifies every non-resident window by FNV-1a over its first `hashWords` words; a
+  dispatch miss inside a window rescans once, then reports.
+- **Nesting, not exclusion.** Several resident windows may cover one address; `residentAt`
+  returns the smallest. Eviction watches only the fingerprint region *because* of this.
+- **No fallthrough.** While an overlay is resident, only its table answers for its window —
+  including when it has no row, which is a miss naming the entry hint to add.
+
+The fingerprint is the same seven lines in `recomp.codegen.Universe`, `kernel.OverlayMgr` and
+`tests/conformance/Overlay.hx`, written as shifts rather than a multiply: a 32-bit multiply loses
+its low bits where `Int` is a double, and a fingerprint that differs by one bit between targets
+activates an overlay on one and not the other.
+
 ## 4. GPU
 
 VRAM `vram:RawMem` 1024×512×u16. **Instant-draw model**: GP0 packets rasterize synchronously at

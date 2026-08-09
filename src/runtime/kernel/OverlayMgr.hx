@@ -39,6 +39,17 @@ import mem.Memory;
 	Recognition is a fingerprint: FNV-1a over the first words of the window, compared against the
 	value the tool computed from the overlay's bytes at build time. The tool refuses to build a
 	program whose overlays share one, so a match is an identification rather than a guess.
+
+	**Residency is attested by the fingerprint region only.** "Resident" means the first
+	`hashWords` words of the window hold the overlay's bytes — nothing has checked the rest, and
+	eviction watches only that region, because overlays nest: a game loads a small piece into the
+	middle of a large one, and the large one must keep answering everywhere else. The cost of that
+	choice is deliberate and known: a load into the *tail* of a resident window leaves the overlay
+	resident, and its rows there would dispatch code whose bytes are gone. In practice the piece a
+	game swaps is itself an overlay with its own stanza — the nested window then answers, and the
+	stale rows are shadowed. A game that streams artwork over the tail of live code with no
+	corresponding stanza would be mis-dispatched; none has been met, and the miss diagnostics
+	would name the window if one ever is.
 **/
 class OverlayMgr {
 	/** Enough for any PlayStation game; more would mean a design nobody has met. */
@@ -66,6 +77,7 @@ class OverlayMgr {
 		resident = [for (_ in 0...MAX) false];
 		loadFrom = [for (_ in 0...TRACKED) 0];
 		loadTo = [for (_ in 0...TRACKED) 0];
+		loadLba = [for (_ in 0...TRACKED) -1];
 		loadCount = 0;
 		loadNext = 0;
 		count = 0;
@@ -82,12 +94,27 @@ class OverlayMgr {
 		That keeps this file compilable — and testable — with no generated code present at all,
 		which is what lets a conformance test drive it.
 	**/
+	/**
+		One address form everywhere inside this class.
+
+		The same RAM byte has four names on this machine — KUSEG, KSEG0, KSEG1, and the mirrors —
+		and the callers of this class use whichever their code happened to hold: the DMA engine
+		reconstructs a KSEG0 address, the kernel's file API passes through whatever the game gave
+		it. Comparing windows in mixed forms would make residency depend on which segment a game
+		likes, so everything is folded to KSEG0 on the way in.
+	**/
+	static inline function canon(a:Int):Int {
+		return 0x80000000 | (a & 0x1FFFFF);
+	}
+
 	public static function define(index:Int, windowLo:Int, windowHi:Int, print:Int,
 			hashWords:Int):Void {
 		if (index < 0 || index >= MAX) return tooMany(index);
 		else {}
-		lo[index] = windowLo;
-		hi[index] = windowHi;
+		// The end is kept as start plus length rather than canonicalised itself: a window ending
+		// exactly at the top of RAM would fold to the bottom.
+		lo[index] = canon(windowLo);
+		hi[index] = lo[index] + ((windowHi - windowLo) | 0);
 		fingerprint[index] = print;
 		hashBytes[index] = hashWords * 4;
 		resident[index] = false;
@@ -110,17 +137,30 @@ class OverlayMgr {
 		could not resolve — never on a direct call.
 	**/
 	public static function residentAt(addr:Int):Int {
+		// The most specific one wins. Overlays nest: a game loads a large region once and then
+		// swaps a smaller piece of it in and out, so several resident windows can cover the same
+		// address and the smallest is the one that was most recently made true of it. Anything
+		// else would answer with the code the small overlay replaced.
+		final a = canon(addr);
+		var best = -1;
+		var bestSize = 0;
 		for (i in 0...count) {
-			if (resident[i] && addr >= lo[i] && addr < hi[i]) return i;
+			if (!resident[i] || a < lo[i] || a >= hi[i]) continue;
 			else {}
+			final size = hi[i] - lo[i];
+			if (best >= 0 && size >= bestSize) continue;
+			else {}
+			best = i;
+			bestSize = size;
 		}
-		return -1;
+		return best;
 	}
 
 	/** Any window containing an address, resident or not — for deciding whether to look again. */
 	public static function windowOf(addr:Int):Int {
+		final a = canon(addr);
 		for (i in 0...count) {
-			if (addr >= lo[i] && addr < hi[i]) return i;
+			if (a >= lo[i] && a < hi[i]) return i;
 			else {}
 		}
 		return -1;
@@ -143,19 +183,23 @@ class OverlayMgr {
 		What is certain immediately is the negative: the code that used to be at those addresses is
 		not there any more.
 	**/
-	public static function noteLoad(dest:Int, length:Int):Void {
+	public static function noteLoad(dest:Int, length:Int, lba:Int = -1):Void {
 		if (length <= 0) return;
 		else {}
-		final from = dest;
-		final to = dest + length;
+		final from = canon(dest);
+		final to = from + length;
 		for (i in 0...count) {
 			if (!resident[i]) continue;
 			else {}
-			if (to <= lo[i] || from >= hi[i]) continue;
+			// Only a write over the bytes an overlay is *recognised by* unseats it. A write
+			// elsewhere in its window does not: overlays nest, and a game swapping a small piece
+			// into a large resident region is the ordinary case — the large one is still there,
+			// still identifiable, and still the right answer everywhere the small one is not.
+			if (to <= lo[i] || from >= lo[i] + hashBytes[i]) continue;
 			else {}
 			evict(i);
 		}
-		remember(from, to);
+		remember(from, to, lba);
 	}
 
 	// ---- remembering where the disc landed ---------------------------------------------------
@@ -172,16 +216,30 @@ class OverlayMgr {
 	static inline var TRACKED = 8;
 	static var loadFrom:Array<Int>;
 	static var loadTo:Array<Int>;
+	/** The disc sector the lowest address of this span came from, or -1 if nothing said. */
+	static var loadLba:Array<Int>;
 	static var loadCount = 0;
 	static var loadNext = 0;
 
-	static function remember(from:Int, to:Int):Void {
+	static function remember(from:Int, to:Int, lba:Int):Void {
 		for (i in 0...loadCount) {
 			// Adjacent or overlapping runs are one load: a game reads an overlay a few sectors at
 			// a time, and eight separate ranges would describe none of it.
 			if (from > loadTo[i] || to < loadFrom[i]) continue;
 			else {}
-			if (from < loadFrom[i]) loadFrom[i] = from;
+			if (!continues(i, from, lba)) {
+				// Same memory, different part of the disc — so this is the *next* overlay, not
+				// more of the last one. Merging them would report the first overlay's sector for
+				// the second's addresses, which is precisely the number a person would then use
+				// to read the wrong bytes.
+				loadFrom[i] = from;
+				loadTo[i] = to;
+				loadLba[i] = lba;
+				return;
+			} else {}
+			// The sector belonging to the span's *lowest* address, since that is the one an
+			// overlay stanza's offset is measured from.
+			if (from < loadFrom[i]) { loadFrom[i] = from; loadLba[i] = lba; }
 			else {}
 			if (to > loadTo[i]) loadTo[i] = to;
 			else {}
@@ -189,9 +247,29 @@ class OverlayMgr {
 		}
 		loadFrom[loadNext] = from;
 		loadTo[loadNext] = to;
+		loadLba[loadNext] = lba;
 		loadNext = (loadNext + 1) % TRACKED;
 		if (loadCount < TRACKED) loadCount++;
 		else {}
+	}
+
+	/**
+		Whether a load is more of the span it overlaps, or the start of a different one.
+
+		A game reads an overlay as a run of sectors into a run of addresses, so within one load the
+		two advance together: an address this far into the span came from a sector that far past
+		its first. When they disagree, the same memory is being filled from somewhere else on the
+		disc — a different overlay — and it deserves its own record.
+
+		A load whose sector nobody knows (the kernel's file API, which reports no LBA) is taken as
+		continuing, because guessing otherwise would split one load into eight.
+	**/
+	static function continues(i:Int, from:Int, lba:Int):Bool {
+		if (lba < 0 || loadLba[i] < 0) return true;
+		else {}
+		final ahead = (from - loadFrom[i]) | 0;
+		if (ahead < 0) return true;
+		return loadLba[i] + shim.IntMath.div(ahead, cd.Iso9660.USER_BYTES) == lba;
 	}
 
 	/** The span the disc was read into that covers this address, or -1. */
@@ -210,13 +288,6 @@ class OverlayMgr {
 			+ "answers for its window");
 	}
 
-	/** The other way an overlay stops answering: something it shares memory with arrived. */
-	static function displace(i:Int, by:Int):Void {
-		resident[i] = false;
-		evictions++;
-		Runtime.noteOnce(0x6E300000 | i, "overlay " + i + " gave up its window to overlay " + by
-			+ ", which overlaps it");
-	}
 
 	/**
 		Looks at every window and says what is in it.
@@ -235,9 +306,9 @@ class OverlayMgr {
 			else {}
 			if (hashOf(lo[i], hashBytes[i]) != fingerprint[i]) continue;
 			else {}
-			// Two overlays cannot share a fingerprint — the tool refuses to emit that — but two
-			// *windows* may overlap, and only one thing can be at an address.
-			evictOverlapping(i);
+			// Nothing is displaced. Two overlays whose windows overlap can both be genuinely
+			// present — a small one loaded inside a large one's region — and `residentAt` settles
+			// which answers for a shared address by taking the smaller window.
 			resident[i] = true;
 			activations++;
 			found++;
@@ -249,15 +320,6 @@ class OverlayMgr {
 		return found;
 	}
 
-	static function evictOverlapping(index:Int):Void {
-		for (j in 0...count) {
-			if (j == index || !resident[j]) continue;
-			else {}
-			if (hi[index] <= lo[j] || lo[index] >= hi[j]) continue;
-			else {}
-			displace(j, index);
-		}
-	}
 
 	/**
 		FNV-1a over emulated RAM, byte for byte identical to what the tool computed.
@@ -290,12 +352,28 @@ class OverlayMgr {
 		says.
 	**/
 	public static function reportMiss(addr:Int, ra:Int):Bool {
+		// The two window cases point at different fixes, and conflating them sends a person
+		// hunting for a second overlay when the first one is sitting right there.
+		final r = residentAt(addr);
+		if (r >= 0) {
+			// The overlay is present and identified; it just has no code at this address. That is
+			// an entry the analysis was never given — overlays are all reached through pointers,
+			// so the sweep misses some — and the fix is a hint on *this* overlay.
+			Runtime.reportOnce(addr, "overlay " + r + " is resident but has no code at "
+				+ hex(addr) + " (ra=" + hex(ra) + "). Add " + udec(addr)
+				+ " to its entryHints.");
+			return true;
+		} else {}
 		final w = windowOf(addr);
 		if (w >= 0) {
+			// A window with nothing resident is the ordinary way a *second* overlay announces
+			// itself: the game reused the memory, and what is there now was never described. The
+			// span and sector of the load that covers it are what the new stanza is made of, so
+			// they are said here too rather than only when no window matches.
 			Runtime.reportOnce(addr, "no code resident at " + hex(addr) + " (ra=" + hex(ra) + "), "
 				+ "which is inside overlay " + w + "'s window " + hex(lo[w]) + ".." + hex(hi[w])
-				+ ". Either the game loaded something this build does not describe, or that window "
-				+ "currently holds an overlay the config does not list.");
+				+ ". The window holds something this build does not describe — most likely another "
+				+ "overlay that shares it." + provenance(addr));
 			return true;
 		} else {}
 
@@ -303,15 +381,48 @@ class OverlayMgr {
 		// nobody has described yet, and the span that was read is the window to describe. This is
 		// the whole of how a new game's config gets written: run it, and the misses say where to
 		// look.
-		final l = loadCovering(addr);
-		if (l < 0) return false;
+		if (loadCovering(addr) < 0) return false;
 		else {}
 		Runtime.reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ra) + ") — but the "
-			+ "disc was read into " + hex(loadFrom[l]) + ".." + hex(loadTo[l]) + ", which covers "
-			+ "it. That is an overlay: code the executable never held, so the tool never saw it. "
-			+ "Add it to games/<id>/game.json with loadAddr " + (loadFrom[l] >>> 0)
-			+ " length " + (loadTo[l] - loadFrom[l]) + " and entryHint " + (addr >>> 0) + ".");
+			+ "disc was read here. That is an overlay: code the executable never held, so the tool "
+			+ "never saw it." + provenance(addr));
 		return true;
+	}
+
+	/**
+		The numbers a person needs to write the stanza, appended to whichever diagnostic ran.
+
+		Not a separate recording mode, because the moment you want them is the moment something
+		missed — and a message you are already reading beats a file you have to remember to open.
+		The sector is what turns a window into a place on the disc: a file's own starting sector
+		subtracted from this one, times 2048, is the offset to read from.
+	**/
+	static function provenance(addr:Int):String {
+		final l = loadCovering(addr);
+		if (l < 0) return "";
+		else {}
+		return " Add it to games/<id>/game.json with loadAddr " + udec(loadFrom[l])
+			+ " length " + (loadTo[l] - loadFrom[l]) + " and entryHint " + udec(canon(addr))
+			+ (loadLba[l] >= 0 ? ", from disc sector " + loadLba[l] : "") + ".";
+	}
+
+	/**
+		An address as the unsigned decimal the config wants.
+
+		`Std.string` on a KSEG0 address prints a minus sign, and `value >>> 0` only helps on
+		JavaScript — on C++ a zero-bit shift is the same signed integer, so the number a person was
+		told to paste would be negative on exactly one target. Division by ten is done as a
+		halved-then-fifth, which is exact for every unsigned 32-bit value and never needs a type
+		wider than Int.
+	**/
+	static function udec(v:Int):String {
+		if (v >= 0) return Std.string(v);
+		else {}
+		// floor(u / 10) where u is v reinterpreted as unsigned: shift out one bit first so the
+		// intermediate stays positive, then divide by five.
+		final q = shim.IntMath.div(v >>> 1, 5);
+		final r = (v - ((q * 10) | 0)) | 0;
+		return Std.string(q) + Std.string(r);
 	}
 
 	static function hex(v:Int):String {

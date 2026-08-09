@@ -63,7 +63,7 @@ class KTables {
 		final off = (addr - STUB_BASE);
 		if (off < 0 || (off % STUB_STRIDE) != 0) return -1;
 		else {}
-		final index = Std.int(off / STUB_STRIDE);
+		final index = shim.IntMath.div(off, STUB_STRIDE);
 		if (index >= 0x300) return -1;
 		else return index;
 	}

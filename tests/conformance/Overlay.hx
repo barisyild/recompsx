@@ -17,11 +17,13 @@ import mem.Memory;
 	separately by the synthetic overlay tests under `tools/recomp/test`.
 **/
 class Overlay {
-	// Two windows: one on its own, and one overlapping it, so eviction has something to do.
+	// A large region, and a small one loaded inside it. That nesting is the shape overlays
+	// actually have — a game loads a level's worth of code once and then swaps a piece of it —
+	// and it is the case that decides which of two resident overlays answers for an address.
 	static inline var WIN_A = 0x80100000;
-	static inline var WIN_A_END = 0x80100400;
+	static inline var WIN_A_END = 0x80100800;
 	static inline var WIN_B = 0x80100200;
-	static inline var WIN_B_END = 0x80100600;
+	static inline var WIN_B_END = 0x80100400;
 
 	static inline var HASH_WORDS = 16;
 
@@ -53,63 +55,88 @@ class Overlay {
 
 		// ---- recognising ------------------------------------------------------------------------
 		//
-		// Window A holds A's bytes; window B holds B's. Both should be found, and they overlap, so
-		// finding the second must displace the first.
+		// Window A holds A's bytes and window B holds B's, so both are found. They overlap, and
+		// both stay resident: overlays nest. A game loads a large region and then swaps a smaller
+		// piece of it, and the large one is still there everywhere the small one is not.
 		final found = OverlayMgr.rescan();
 		Conf.feed(found);
 		Conf.feed(OverlayMgr.activations);
-		Conf.feed(OverlayMgr.evictions);
-		// Only one of two overlapping windows can be the answer for the addresses they share.
-		Conf.expect("the later one owns the overlap", OverlayMgr.residentAt(WIN_B), 1);
+		Conf.expect("both are resident at once", OverlayMgr.isResident(0) ? 1 : 0, 1);
+		Conf.expect("nesting is not exclusion", OverlayMgr.isResident(1) ? 1 : 0, 1);
 
-		// ---- a load takes it away -----------------------------------------------------------------
+		// Where they overlap, the smaller window answers: it is the more recent truth about those
+		// addresses. Where only the larger one reaches, it still does.
+		Conf.expect("the smaller window owns the overlap", OverlayMgr.residentAt(WIN_B), 1);
+		Conf.expect("the larger one keeps the rest", OverlayMgr.residentAt(WIN_A), 0);
+
+		// ---- a load takes one away ------------------------------------------------------------
 		//
-		// Whatever the game wrote there, the code that was compiled for those addresses is gone.
-		// This is the half a fingerprint cannot see: a window full of artwork matches nothing and
-		// must still stop answering.
-		final residentBefore = OverlayMgr.residentAt(WIN_B);
+		// Only a write over the bytes an overlay is *recognised by* unseats it. That is the half a
+		// fingerprint cannot see — a window filled with artwork matches nothing and must still
+		// stop answering — and it is deliberately narrow, because a write elsewhere in a window is
+		// how nesting happens in the first place.
 		OverlayMgr.noteLoad(WIN_B, 64);
-		Conf.feed(residentBefore);
-		Conf.expect("a load evicts what it overwrote", OverlayMgr.residentAt(WIN_B), -1);
+		Conf.expect("a load over what identifies it evicts it", OverlayMgr.isResident(1) ? 1 : 0, 0);
+		Conf.expect("and the window beneath answers again", OverlayMgr.residentAt(WIN_B), 0);
 		Conf.feed(OverlayMgr.evictions);
 
-		// A load that misses a window leaves it alone.
-		final untouched = OverlayMgr.residentAt(WIN_A);
+		// A load elsewhere in a resident window does not unseat it — this is the nesting case.
+		OverlayMgr.noteLoad(WIN_A_END - 16, 16);
+		Conf.expect("a load past what identifies it does not", OverlayMgr.isResident(0) ? 1 : 0, 1);
+
+		// A load that misses every window changes nothing at all.
 		OverlayMgr.noteLoad(0x80200000, 4096);
-		Conf.expect("a load elsewhere changes nothing", OverlayMgr.residentAt(WIN_A), untouched);
+		Conf.expect("a load elsewhere entirely changes nothing",
+			OverlayMgr.isResident(0) ? 1 : 0, 1);
 
 		// ---- looking again ---------------------------------------------------------------------
 		//
-		// B's identifying bytes are overwritten with something nothing was compiled for, so B is
-		// not found. A's are untouched — the write landed past where A is recognised from — so A
-		// is, and since the windows overlap, A now answers for the addresses they share.
-		//
-		// That is not a quirk to work around. Two overlays overlapping means the game reuses the
-		// memory, and at any moment exactly one thing is in it; "whichever one's bytes are
-		// actually there" is the only answer that can be right.
+		// B's identifying bytes now hold something nothing was compiled for, so looking finds
+		// nothing and says so rather than guessing.
 		fill(WIN_B, HASH_WORDS * 4, 0x33);
 		Conf.feed(OverlayMgr.rescan());
 		Conf.expect("bytes nothing was compiled for do not become an overlay",
 			OverlayMgr.isResident(1) ? 1 : 0, 0);
-		Conf.expect("the overlay whose bytes are still there owns the overlap",
-			OverlayMgr.residentAt(WIN_B), 0);
 		Conf.feed(OverlayMgr.fruitlessRescans);
 
-		// Put B's bytes back and it is recognised again, displacing A from the shared addresses.
-		// A game reloading an overlay it had before is the ordinary case, not a special one.
+		// Put B's bytes back and it is recognised again, and takes the shared addresses back with
+		// it. A game reloading an overlay it had before is the ordinary case, not a special one.
 		fill(WIN_B, HASH_WORDS * 4, 0x22);
 		Conf.feed(OverlayMgr.rescan());
 		Conf.expect("the same overlay is recognised again", OverlayMgr.residentAt(WIN_B), 1);
-		Conf.expect("and displaces the one it overlaps", OverlayMgr.isResident(0) ? 1 : 0, 0);
+		Conf.expect("without disturbing the one it sits inside",
+			OverlayMgr.isResident(0) ? 1 : 0, 1);
+
+		// ---- one byte, four names --------------------------------------------------------------
+		//
+		// The same RAM byte is reachable as KUSEG, KSEG0 or KSEG1, and callers use whichever
+		// their code held: the DMA engine reconstructs one form, the kernel's file API passes
+		// through the game's own. Residency must not depend on the spelling.
+		Conf.expect("KSEG1 names the same window", OverlayMgr.residentAt(0xA0100200), 1);
+		Conf.expect("so does KUSEG", OverlayMgr.residentAt(0x00100200), 1);
+		OverlayMgr.noteLoad(0xA0100200, 64);
+		Conf.expect("a KSEG1 load evicts all the same", OverlayMgr.isResident(1) ? 1 : 0, 0);
+		fill(WIN_B, HASH_WORDS * 4, 0x22);
+		Conf.feed(OverlayMgr.rescan());
+		Conf.expect("and the window recovers as before", OverlayMgr.residentAt(WIN_B), 1);
 
 		// ---- the boundaries --------------------------------------------------------------------
 		//
 		// Off-by-one at a window's edge would dispatch one instruction of a function to the wrong
 		// program, which is a failure with no symptom where the mistake is.
-		Conf.expect("the first address is inside", OverlayMgr.windowOf(WIN_A) >= 0 ? 1 : 0, 1);
+		Conf.expect("the first address is inside", OverlayMgr.windowOf(WIN_A), 0);
 		Conf.expect("one before it is not", OverlayMgr.windowOf(WIN_A - 1), -1);
-		Conf.expect("the last address is inside", OverlayMgr.windowOf(WIN_B_END - 1), 1);
-		Conf.expect("one past the end is not", OverlayMgr.windowOf(WIN_B_END), -1);
+		Conf.expect("the last address is inside", OverlayMgr.windowOf(WIN_A_END - 1), 0);
+		Conf.expect("one past the end is not", OverlayMgr.windowOf(WIN_A_END), -1);
+		// The nested window's own edges, where an off-by-one would send one instruction of a
+		// function to the program it replaced.
+		Conf.expect("the inner window starts where it says", OverlayMgr.residentAt(WIN_B), 1);
+		Conf.expect("one before it belongs to the outer one",
+			OverlayMgr.residentAt(WIN_B - 1), 0);
+		Conf.expect("its last address is still its own",
+			OverlayMgr.residentAt(WIN_B_END - 1), 1);
+		Conf.expect("one past its end is the outer one again",
+			OverlayMgr.residentAt(WIN_B_END), 0);
 
 		// ---- the hash itself ---------------------------------------------------------------------
 		//

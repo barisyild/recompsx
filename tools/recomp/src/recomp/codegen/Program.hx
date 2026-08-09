@@ -80,7 +80,10 @@ class Program {
 	**/
 	function staticTargetFor(from:Universe, addr:Int):String {
 		final a = Vaddr.canonRam(addr);
-		if (from.shards.has(a)) return from.shards.classOf(a);
+		// An overlay's own functions first: the caller running proves they are resident. This
+		// must not apply to the executable — the executable can have functions *inside* a window
+		// (windows overlap its tail), and those are exactly the ones whose bytes may be gone.
+		if (!from.isBase() && from.shards.has(a)) return from.shards.classOf(a);
 		if (inSomeWindow(a)) return null;
 		final base = universes[0];
 		return base.shards.has(a) ? base.shards.classOf(a) : null;
@@ -298,18 +301,21 @@ class Program {
 	/**
 		Runs the code at an address. Used for everything the analysis left dynamic.
 
-		A resident overlay is asked first, and wins: its window shadows these addresses for as
-		long as the game has it loaded, which is what the memory itself does. `OverlayMgr` knows
-		which one that is; `Overlays` knows what it contains.
+		A resident overlay is asked first, and wins — including when it has nothing there. Its
+		window shadows these addresses for as long as the game has it loaded, which is what the
+		memory itself does: the executable's bytes at a shadowed address are *gone*, so falling
+		back to the executable's table would run code whose bytes the game overwrote. An address
+		the resident overlay has no row for is data, or an entry the analysis has not been given
+		yet, and either way the honest answer is a miss that names it.
 	**/
 	public static function call(addr:Int, ctx:CpuState):Bool {
 		final ovl = kernel.OverlayMgr.residentAt(addr);
 		if (ovl >= 0) {
+			// The resident overlay shadows the executable here: no fallthrough.
 			final row = Overlays.lookup(ovl, addr);
-			if (row >= 0) {
-				dispatch(Overlays.handleAt(row), Overlays.blockAt(row), ctx);
-				return true;
-			}
+			if (row < 0) return false;
+			dispatch(Overlays.handleAt(row), Overlays.blockAt(row), ctx);
+			return true;
 		}
 		final row = lookup(addr);
 		if (row < 0) return false;
@@ -475,6 +481,18 @@ class Program {
 	**/
 	function checkFingerprintsDistinct():Void {
 		final overlays = universes.slice(1);
+		for (u in overlays) {
+			// The tool clamps its hash to the bytes it has; the runtime hashes the full
+			// `hashWords`. An overlay shorter than its own fingerprint would therefore hash
+			// differently in the two places and never be recognised — silently. Refusing here
+			// turns a game that mysteriously never activates into one number in a config.
+			if (u.overlay.length < u.overlay.hashWords * 4) {
+				throw new recomp.analysis.AnalysisError('overlay "${u.overlay.id}" is '
+					+ '${u.overlay.length} bytes but its fingerprint covers '
+					+ '${u.overlay.hashWords * 4}. Lower hashWords to at most '
+					+ '${Std.int(u.overlay.length / 4)}.');
+			}
+		}
 		for (i in 0...overlays.length) {
 			for (j in 0...i) {
 				if (overlays[i].fingerprint() != overlays[j].fingerprint()) continue;

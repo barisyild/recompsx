@@ -61,8 +61,11 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
     ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)            [from M1]
     ./scripts/build-pc.sh crashbash # cmake+ninja
     ./scripts/run-pc.sh crashbash [--headless-hash 600]
-    haxe build/game-js.hxml && node out/_gen/game.js   # run a generated game (JS = reference)
-    haxe build/game-cpp.hxml                            # the same game through reflaxe.CPP
+    ./scripts/recompsx.sh gen games/<id>/game.json      # generate from disc + config (overlays)
+    haxe build/game-js.hxml && node out/_gen/game.js <exe> <disc.bin>   # run it (JS = reference)
+    haxe build/game-cpp.hxml && ./scripts/build-pc.sh _gen --null       # the same, reflaxe.CPP
+    <run> --headless-hash 600    # stop at frame 600, print one digest; the cross-target compare
+                                 # for a GAME (test.sh's 329de455 is the demo's, and stays put)
     ./scripts/test.sh               # THE gate: spikes + conformance + both target digests
     ./scripts/conformance.sh [name] # run cross-target conformance tests (add one = add a file)
     ./scripts/spike.sh              # reflaxe.CPP behaviour regression — run after pin changes
