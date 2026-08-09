@@ -12,8 +12,15 @@ import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
 import recomp.mips.Disasm;
+import recomp.config.GameConfig;
+import recomp.config.GameConfig.Hint;
+import recomp.loader.DiscImage;
+import recomp.loader.IsoWalk;
 import recomp.mips.Instr;
 import sys.io.File;
+
+/** What `gen` works from, whichever way it was invoked. */
+typedef GenInput = {exe:PsxExe, name:String, seeds:Array<Hint>};
 
 /**
 	The recompiler's command line.
@@ -72,6 +79,11 @@ usage:
   recompsx dis <file.exe> [--at <addr>] [--count <n>]
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
+
+  recompsx gen <games/<id>/game.json | file.exe> [--out <dir>] [--seed <addr>]
+      Emit a recompiled program. Given a config, the executable is read from the disc
+      that game's gitignored local.json names, and its hints are used as seeds. Given a
+      bare executable, seeds come from --seed.
 
 exit codes: 0 ok · 2 usage · 3 could not load the input");
 	}
@@ -234,16 +246,19 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			i++;
 		}
 
-		final exe = loadExe(path);
-		final image = Image.ofExe(nameOf(path), exe);
+		// Two ways in, one pipeline. A config names a disc and carries the game's hints; a bare
+		// executable is the homebrew and fixture path, where there is no disc to name. Everything
+		// after this point sees the same executable and the same seeds either way.
+		final input = StringTools.endsWith(path.toLowerCase(), ".json")
+			? fromConfig(path) : fromBareExe(path, seeds);
+
+		final exe = input.exe;
+		final image = Image.ofExe(input.name, exe);
 		final discovery = new Discovery(image);
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
 		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
 		// had named them.
-		for (sd in seeds) {
-			final a = parseAddr(sd);
-			discovery.addSeed(a, 'f_${StringTools.hex(a, 8).toLowerCase()}', Confidence.Entry);
-		}
+		for (h in input.seeds) discovery.addSeed(h.addr, h.name, Confidence.Entry);
 		discovery.run();
 
 		final program = new Program(image, discovery, exe, limit);
@@ -253,6 +268,63 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		Sys.println('${Lambda.count(discovery.functions)} functions, '
 			+ '${Lambda.count(discovery.tables)} switch tables');
 		return EXIT_OK;
+	}
+
+	/** What `gen` needs, however it was asked for: an executable, a name for it, and seeds. */
+	static function fromBareExe(path:String, seeds:Array<String>):GenInput {
+		final hints = [];
+		for (sd in seeds) {
+			final a = parseAddr(sd);
+			hints.push({addr: a, name: 'f_${StringTools.hex(Vaddr.canonRam(a), 8).toLowerCase()}'});
+		}
+		return {exe: loadExe(path), name: nameOf(path), seeds: hints};
+	}
+
+	/**
+		The same, read out of a game's config and the disc it names.
+
+		The executable is pulled from the disc rather than from a file somebody extracted, which
+		is the point: extraction is a step that can be done differently on two machines, and a
+		build that reads the disc has one less way to disagree with itself. The name given to the
+		image is the executable's own — `\SCUS_945.70;1` is `SCUS_945.70` — so generated output
+		says where it came from without saying anything about whose disk it was read from.
+	**/
+	static function fromConfig(path:String):GenInput {
+		final config = GameConfig.load(path);
+		if (config.exeFile != null) {
+			// Homebrew: local.json names a loose executable and there is no disc at all.
+			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
+				seeds: config.functionHints};
+		}
+		if (config.discPath == null) {
+			throw new LoaderError('${config.dir}/local.json does not say where the disc is. '
+				+ 'Copy local.json.example to local.json and set "cue" (or "exeFile" for a game '
+				+ 'with no disc). It is gitignored: dumps stay on your machine.');
+		}
+		if (config.exePath == null) {
+			throw new LoaderError('${config.path} has no exePath, so there is no way to know '
+				+ 'which file on the disc is the executable');
+		}
+
+		final disc = DiscImage.open(config.discPath);
+		final found = new IsoWalk(disc).find(config.exePath);
+		if (found == null) {
+			disc.close();
+			throw new LoaderError('${config.discPath} has no ${config.exePath}. Either the config '
+				+ 'names the wrong file or this is not the right disc.');
+		}
+		final bytes = disc.readExtent(found.lba, 0, found.length);
+		disc.close();
+		return {exe: PsxExe.parse(bytes), name: isoName(config.exePath),
+			seeds: config.functionHints};
+	}
+
+	/** The last component of an ISO9660 path, without its version suffix. */
+	static function isoName(path:String):String {
+		final parts = StringTools.replace(path, "\\", "/").split("/");
+		final leaf = parts[parts.length - 1];
+		final semi = leaf.indexOf(";");
+		return semi >= 0 ? leaf.substr(0, semi) : leaf;
 	}
 
 	static function nameOf(path:String):String {

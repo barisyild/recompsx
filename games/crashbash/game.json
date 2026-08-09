@@ -7,7 +7,16 @@
   "exeSha256": "fd5727a18feb2a2d5a6359a55966f0266284d1e50f64ee9b8a127a97091bd516",
 
   "overlays": [],
-  "functionHints": [],
+
+  "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md.",
+  "functionHints": [
+    2147687720,
+    2147724864,
+    2147725416,
+    2147725756,
+    2147725860,
+    2147746740
+  ],
   "jumpTableHints": [],
   "nativeReplacements": [],
   "setjmpFns": [],

@@ -309,6 +309,49 @@ sound had finished. Nothing here was a missing feature that announced itself.
         Reduced to `tests/spike/bbswitch/` — a four-block state machine assigning to fields — so
         `scripts/spike.sh` reports if upstream fixes it.
 
+- [~] **MO (L): overlays** — the design is in the approved plan; four stages, each gated on its
+      own acceptance output being pasted here before the next begins.
+
+  - [x] **S1 config + disc access** — accept: config-driven `gen` is byte-identical to the
+        flag-driven invocation it replaces, and idempotent ✔ 2026-08-09
+
+        `games/<id>/game.json` now carries the seeds that were living in a command line in
+        notes.md, and `gen` reads the executable out of the disc that the gitignored `local.json`
+        names — so a build depends on the repository plus somebody's own dump, and on nothing
+        that was extracted by hand. New: `config/GameConfig.hx`, `loader/DiscImage.hx`,
+        `loader/IsoWalk.hx`; `gen` takes either a config or a bare executable.
+
+        Evidence:
+
+            $ recompsx gen <SCUS_945.70> --out out/gen_baseline --seed 0x80031d28 ... (6 seeds)
+            wrote 12 files, 106129 lines to out/gen_baseline
+            957 functions, 17 switch tables
+
+            $ recompsx gen games/crashbash/game.json
+            wrote 12 files, 106129 lines to out/gen
+            957 functions, 17 switch tables
+
+            $ diff -r out/gen_baseline out/gen
+            IDENTICAL: config mode == flag-driven, byte for byte
+
+            $ recompsx gen games/crashbash/game.json --out out/gen_twice && diff -r out/gen ...
+            IDEMPOTENT: two runs, identical trees
+
+            check.sh: clean
+            conformance: 6 tests x 2 targets, all agree
+            js digest = c++ digest = 329de455
+
+        Two notes for later stages. The tool's disc reader deliberately duplicates the layout
+        detection in `src/runtime/cd/Iso9660.hx` rather than sharing it: one reads through the
+        backend ABI into a `RawBuf` under the portable subset, the other through `sys.io` into
+        `haxe.io.Bytes`, and unifying them means building the byte-buffer abstraction
+        `shared/psxdisc` was meant to be — worth doing as its own change, not inside this one.
+        And overlay stanzas parse and validate now but nothing reads them until S2.
+
+  - [ ] S2 universes + emission (tool)
+  - [ ] S3 runtime activation (`OverlayMgr`)
+  - [ ] S4 Crash Bash end-to-end + ADR-0006
+
 ## [M0-VERIFY] checklist
 
 Each item is one small experiment under `tests/spike/`. Record **YES/NO + one-line evidence**.
@@ -435,6 +478,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] Overlay S1: `gen` reads a game config and pulls the executable off the disc
+  itself. `config/GameConfig.hx` (game.json + gitignored local.json, overlay stanzas, hints —
+  decimal addresses folded into the tool's signed representation), `loader/DiscImage.hx`
+  (CD001 probe picks 2048 / 2352+16 / 2352+24), `loader/IsoWalk.hx`. Crash Bash's six seeds moved
+  out of a notes.md command line into `functionHints`. Byte-identical to the flag-driven output
+  it replaces and idempotent across two runs; gate green. Next: S2, patched-image universes.
 
 2026-08-09 [opus] **SOUND.** Twenty-four ADPCM voices, ADSR, one stereo pair every 768 cycles.
   The bug that would have hidden all of it: the SPU was reachable by halfword only, and libspu
