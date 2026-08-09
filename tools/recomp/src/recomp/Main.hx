@@ -12,15 +12,25 @@ import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
 import recomp.mips.Disasm;
+import recomp.codegen.Universe;
 import recomp.config.GameConfig;
 import recomp.config.GameConfig.Hint;
+import recomp.config.GameConfig.OverlayConfig;
+import recomp.config.GameConfig.OverlaySource;
 import recomp.loader.DiscImage;
 import recomp.loader.IsoWalk;
 import recomp.mips.Instr;
 import sys.io.File;
 
 /** What `gen` works from, whichever way it was invoked. */
-typedef GenInput = {exe:PsxExe, name:String, seeds:Array<Hint>};
+typedef GenInput = {
+	exe:PsxExe,
+	name:String,
+	seeds:Array<Hint>,
+	overlays:Array<OverlayConfig>,
+	/** Each overlay's bytes, read while the disc was open, keyed by id. */
+	overlayBytes:Map<String, Bytes>,
+};
 
 /**
 	The recompiler's command line.
@@ -253,21 +263,66 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			? fromConfig(path) : fromBareExe(path, seeds);
 
 		final exe = input.exe;
-		final image = Image.ofExe(input.name, exe);
-		final discovery = new Discovery(image);
+		final base = Image.ofExe(input.name, exe);
+		final discovery = new Discovery(base);
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
 		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
 		// had named them.
 		for (h in input.seeds) discovery.addSeed(h.addr, h.name, Confidence.Entry);
 		discovery.run();
 
-		final program = new Program(image, discovery, exe, limit);
+		final universes = [new Universe(null, base, discovery, null)];
+		for (o in input.overlays) universes.push(analyseOverlay(input, exe, o));
+
+		final program = new Program(universes, exe, limit);
 		program.writeTo(outDir);
 
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
 		Sys.println('${Lambda.count(discovery.functions)} functions, '
 			+ '${Lambda.count(discovery.tables)} switch tables');
+		for (i in 1...universes.length) {
+			final u = universes[i];
+			Sys.println('overlay ${u.overlay.describe()}: '
+				+ '${Lambda.count(u.discovery.functions)} functions'
+				+ (u.discovery.rejected > 0 ? ', ${u.discovery.rejected} rejected as data' : ''));
+		}
+		if (program.deduplicated > 0) {
+			Sys.println('${program.deduplicated} function bodies shared between universes');
+		}
 		return EXIT_OK;
+	}
+
+	/**
+		One overlay, analysed against the memory it will actually see.
+
+		Its bytes are laid over the executable so that a jump table inside the overlay reads the
+		overlay's data, and the pass is scoped to the window: the base has already been analysed
+		once, and re-tracing it here would emit every base function a second time under an
+		overlay's name. Calls out of the window are left for the emitter to resolve against the
+		base pass.
+	**/
+	static function analyseOverlay(input:GenInput, exe:PsxExe, o:OverlayConfig):Universe {
+		final bytes = input.overlayBytes.get(o.id);
+		if (bytes == null) {
+			throw new LoaderError('overlay "${o.id}" has no bytes; its source could not be read');
+		}
+		if (bytes.length != o.length) {
+			throw new LoaderError('overlay "${o.id}" declares ${o.length} bytes but its source '
+				+ 'gave ${bytes.length}');
+		}
+		final image = Image.ofExeWithOverlay('${input.name}:${o.id}', exe, bytes, o.loadAddr);
+		final d = new Discovery(image, o.loadAddr, o.endAddr(), true);
+		for (h in o.entryHints) {
+			// A hint here is a guess recovered from a run, and a window holds artwork as well as
+			// code, so it is read before it is believed.
+			if (d.plausibleEntry(h.addr)) d.addSeed(h.addr, h.name, Confidence.Entry);
+			else {
+				Sys.stderr().writeString('gen: overlay "${o.id}" hint ${Vaddr.hex(h.addr)} does '
+					+ 'not read as code — ignoring it\n');
+			}
+		}
+		d.run();
+		return new Universe(o, image, d, bytes);
 	}
 
 	/** What `gen` needs, however it was asked for: an executable, a name for it, and seeds. */
@@ -277,7 +332,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			final a = parseAddr(sd);
 			hints.push({addr: a, name: 'f_${StringTools.hex(Vaddr.canonRam(a), 8).toLowerCase()}'});
 		}
-		return {exe: loadExe(path), name: nameOf(path), seeds: hints};
+		return {exe: loadExe(path), name: nameOf(path), seeds: hints, overlays: [],
+			overlayBytes: new Map()};
 	}
 
 	/**
@@ -294,7 +350,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		if (config.exeFile != null) {
 			// Homebrew: local.json names a loose executable and there is no disc at all.
 			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
-				seeds: config.functionHints};
+				seeds: config.functionHints, overlays: config.overlays,
+				overlayBytes: memDumpsOnly(config)};
 		}
 		if (config.discPath == null) {
 			throw new LoaderError('${config.dir}/local.json does not say where the disc is. '
@@ -314,9 +371,77 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				+ 'names the wrong file or this is not the right disc.');
 		}
 		final bytes = disc.readExtent(found.lba, 0, found.length);
+		final overlayBytes = readOverlays(config, disc);
 		disc.close();
 		return {exe: PsxExe.parse(bytes), name: isoName(config.exePath),
-			seeds: config.functionHints};
+			seeds: config.functionHints, overlays: config.overlays,
+			overlayBytes: overlayBytes};
+	}
+
+	/**
+		Each overlay's bytes, read while the disc is open.
+
+		Three shapes. `discFile` names a file and an offset into it, which is how a game that keeps
+		its overlays in one archive describes them; `sectors` names raw sectors, for a game with a
+		layout of its own; `memdump` names a file on this machine, which is the only way to analyse
+		an overlay that is compressed on the disc — the bytes that run are not the bytes that are
+		stored, and nothing but a capture has them.
+
+		A memdump path is relative to the config, and is never committed: it is game code, and
+		golden rule 4 keeps that out of the repository. The master plan once said to commit these
+		under `games/<id>/dumps/`; that was wrong for the same reason, and ADR-0006 records the
+		correction.
+	**/
+	static function readOverlays(config:GameConfig, disc:DiscImage):Map<String, Bytes> {
+		final out = new Map<String, Bytes>();
+		if (config.overlays.length == 0) return out;
+		final iso = new IsoWalk(disc);
+		for (o in config.overlays) {
+			out.set(o.id, switch (o.source) {
+				case DiscFile(p, offset, length):
+					final f = iso.find(p);
+					if (f == null) {
+						throw new LoaderError('overlay "${o.id}" wants $p, which is not on this disc');
+					}
+					disc.readExtent(f.lba, offset, length > 0 ? length : o.length);
+				case Sectors(lba, count):
+					disc.readExtent(lba, 0, count * DiscImage.USER_BYTES);
+				case MemDump(p):
+					readMemDump(config, o, p);
+			});
+		}
+		return out;
+	}
+
+	/** The overlays a game with no disc can still have: captures, and nothing else. */
+	static function memDumpsOnly(config:GameConfig):Map<String, Bytes> {
+		final out = new Map<String, Bytes>();
+		for (o in config.overlays) {
+			switch (o.source) {
+				case MemDump(p): out.set(o.id, readMemDump(config, o, p));
+				case _:
+					throw new LoaderError('overlay "${o.id}" reads from the disc, but local.json '
+						+ 'names a bare executable and there is no disc to read');
+			}
+		}
+		return out;
+	}
+
+	static function readMemDump(config:GameConfig, o:OverlayConfig, p:String):Bytes {
+		final at = StringTools.startsWith(p, "/") ? p : '${config.dir}/$p';
+		if (!sys.FileSystem.exists(at)) {
+			throw new LoaderError('overlay "${o.id}" needs the capture $at, which is not there. '
+				+ 'Captures are never committed — record one on this machine.');
+		}
+		final all = File.getBytes(at);
+		// A capture may be a whole memory image; the window says which part of it is the overlay.
+		if (all.length == o.length) return all;
+		final within = Vaddr.canonRam(o.loadAddr) & 0x1FFFFF;
+		if (within + o.length > all.length) {
+			throw new LoaderError('the capture $at is ${all.length} bytes, too small to hold '
+				+ 'overlay "${o.id}" at ${Vaddr.hex(o.loadAddr)}');
+		}
+		return all.sub(within, o.length);
 	}
 
 	/** The last component of an ISO9660 path, without its version suffix. */

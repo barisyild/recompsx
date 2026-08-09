@@ -348,7 +348,50 @@ sound had finished. Nothing here was a missing feature that announced itself.
         `shared/psxdisc` was meant to be — worth doing as its own change, not inside this one.
         And overlay stanzas parse and validate now but nothing reads them until S2.
 
-  - [ ] S2 universes + emission (tool)
+  - [x] **S2 universes + emission** — accept: synthetic tool tests cover the call policy, two
+        universes' tables, sharing and determinism ✔ 2026-08-09
+
+        The executable is one *universe*; each overlay is another — the executable with that
+        overlay's bytes laid over its window, analysed on its own, because while it is resident
+        that is what the memory holds. Overlay passes are scoped to their window (the base is
+        analysed once) and lenient inside it (code and artwork are adjacent with no linker map, so
+        a wrong boundary costs one dropped function rather than the build). Shard indices are
+        program-wide, classes are prefixed `Ovl_<id>_`, and a generated `Overlays.hx` carries each
+        window, its FNV-1a fingerprint and its own dispatch rows as flat integer arrays.
+
+        The call policy is the whole cost model, and it is three cases: a call inside the
+        executable stays a direct call; a call *into* a window becomes a dispatch, because nothing
+        at build time knows which overlay is loaded; a call from an overlay into its **own** window
+        stays direct, because the caller running proves the callee is resident. Identical function
+        bodies in two universes are emitted once and forwarded to, which is where a console gets
+        its size back.
+
+        Evidence:
+
+            $ haxe build/tests-tool.hxml
+              overlay: a call into a window is dispatched, one inside the base is not
+              overlay: an overlay calls the base directly and itself directly
+              overlay: two overlays in one window keep their own classes
+              overlay: identical code is emitted once and shared
+              overlay: the generated table describes both windows
+              overlay: the executable's own table excludes overlay code
+              overlay: generation is deterministic
+              overlay: two overlays the runtime could not tell apart are refused
+            all 175 checks passed          (150 before; 25 new)
+
+            $ recompsx gen games/crashbash/game.json --out out/gen_s2 && diff -r out/gen out/gen_s2
+            wrote 13 files, 106232 lines
+            957 functions, 17 switch tables
+            (only difference: the new Overlays.hx, and two doc lines in FnTable)
+
+            check.sh: clean
+            conformance: 6 tests x 2 targets, all agree
+            js digest = c++ digest = 329de455
+
+        A game with no overlays configured therefore generates what it generated before, which is
+        the property that made this safe to land ahead of any real overlay. Nothing dispatches
+        into `Overlays` yet — that is S3, and until then the file is written and unread.
+
   - [ ] S3 runtime activation (`OverlayMgr`)
   - [ ] S4 Crash Bash end-to-end + ADR-0006
 
@@ -478,6 +521,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] Overlay S2: universes. Each overlay is the executable with its bytes over its
+  window, analysed on its own — scoped so the base is analysed once, lenient inside the window
+  because code and artwork are adjacent there. Program-wide shard indices, `Ovl_<id>_` classes, a
+  generated `Overlays.hx` of windows, fingerprints and per-overlay dispatch rows. Call policy:
+  direct inside the executable, dispatched into a window, direct from an overlay into its own
+  window. Identical bodies emitted once. 175 tool checks (25 new); a game with no overlays
+  generates what it did before. Next: S3, `OverlayMgr` and activation.
 
 2026-08-09 [opus] Overlay S1: `gen` reads a game config and pulls the executable off the disc
   itself. `config/GameConfig.hx` (game.json + gitignored local.json, overlay stanzas, hints —

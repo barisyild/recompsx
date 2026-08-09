@@ -2,12 +2,17 @@ package recomp.codegen;
 
 import recomp.Vaddr;
 import recomp.analysis.Discovery;
+import recomp.analysis.Func;
 import recomp.analysis.Image;
 import recomp.loader.PsxExe;
 import recomp.codegen.Shards;
 import recomp.codegen.Shards.Shard;
+import recomp.codegen.Universe;
 import sys.FileSystem;
 import sys.io.File;
+
+/** One universe's dispatch rows: sorted addresses, and what each resolves to. */
+typedef Rows = {addrs:Array<Int>, handle:Map<Int, Int>, block:Map<Int, Int>};
 
 /**
 	Writes a whole recompiled program: one file per shard, plus the dispatch table and the
@@ -19,22 +24,71 @@ import sys.io.File;
 	`git diff` on generated code shows what actually changed rather than what happened to move.
 **/
 class Program {
-	final image:Image;
-	final discovery:Discovery;
 	final exe:PsxExe;
-	final shards:Shards;
-	final emitter:Emitter;
+
+	/** Universe 0 is the executable; the rest are overlays, in config order. */
+	final universes:Array<Universe>;
+
+	/** Function bodies already emitted, keyed by their text, mapped to the class holding them. */
+	final emitted:Map<String, String> = [];
 
 	public var filesWritten(default, null) = 0;
 	public var linesWritten(default, null) = 0;
 
-	public function new(image:Image, discovery:Discovery, exe:PsxExe, limit:Int = 0) {
-		this.image = image;
-		this.discovery = discovery;
+	/** Function bodies a second universe did not need to emit because the first had them. */
+	public var deduplicated(default, null) = 0;
+
+	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0) {
+		this.universes = universes;
 		this.exe = exe;
-		this.shards = new Shards(discovery, limit);
-		this.emitter = new Emitter(image, discovery);
-		emitter.shardOf = a -> shards.classOf(a);
+
+		// Shard indices are program-wide: the base takes the first block and each overlay
+		// continues from where the last stopped, so a handle names one shard in the whole program.
+		var nextIndex = 0;
+		for (u in universes) {
+			u.shards = new Shards(u.discovery, limit, nextIndex, u.classPrefix());
+			nextIndex += u.shards.shards.length;
+		}
+		if (nextIndex > MAX_SHARDS) {
+			throw new recomp.analysis.AnalysisError('this program needs $nextIndex shards; a '
+				+ 'handle has room for $MAX_SHARDS (ADR-0002: the top eleven bits of an Int)');
+		}
+
+		for (u in universes) {
+			u.emitter = new Emitter(u.image, u.discovery);
+			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
+		}
+		checkFingerprintsDistinct();
+	}
+
+	/** A handle packs the shard index into the bits above the slot; this is what fits. */
+	static inline var MAX_SHARDS = 2047;
+
+	/**
+		Where a call from `from` to `addr` should go, or null to dispatch it by address.
+
+		Three answers, and the middle one is the whole overlay design:
+
+		- Inside the calling universe's own scope, if it found a function there: a direct call.
+		  An overlay calling into itself is safe because the caller running proves the callee is
+		  resident — they arrived on the disc together.
+		- Inside *some other* universe's window: by address. From the executable, nothing knows
+		  which overlay is loaded; from one overlay into another's window, the same. That is not a
+		  limitation to work around, it is what the hardware does, and the runtime's table is where
+		  the answer lives.
+		- In the executable, outside every window: a direct call. The base is always resident.
+	**/
+	function staticTargetFor(from:Universe, addr:Int):String {
+		final a = Vaddr.canonRam(addr);
+		if (from.shards.has(a)) return from.shards.classOf(a);
+		if (inSomeWindow(a)) return null;
+		final base = universes[0];
+		return base.shards.has(a) ? base.shards.classOf(a) : null;
+	}
+
+	function inSomeWindow(addr:Int):Bool {
+		for (u in universes) if (u.contains(addr)) return true;
+		return false;
 	}
 
 	public function writeTo(dir:String):Void {
@@ -48,25 +102,30 @@ class Program {
 		for (name in FileSystem.readDirectory(dir)) {
 			if (StringTools.endsWith(name, ".hx")) FileSystem.deleteFile('$dir/$name');
 		}
-		for (s in shards.shards) write('$dir/${s.className}.hx', shardSource(s));
+		for (u in universes) {
+			for (s in u.shards.shards) write('$dir/${s.className}.hx', shardSource(u, s));
+		}
 		write('$dir/FnTable.hx', fnTableSource());
+		write('$dir/Overlays.hx', overlaysSource());
 		write('$dir/GameInfo.hx', gameInfoSource());
 	}
 
 	// ---- one shard --------------------------------------------------------------------------
 
-	function shardSource(shard:Shard):String {
+	function shardSource(u:Universe, shard:Shard):String {
 		final buf = new StringBuf();
 		buf.add(header());
 		buf.add('/**\n');
 		buf.add('\tFunctions ${Vaddr.hex(shard.functions[0].entry)}'
 			+ '..${Vaddr.hex(shard.functions[shard.functions.length - 1].endAddr - 1)}'
-			+ ' — ${shard.functions.length} of them.\n');
+			+ ' — ${shard.functions.length} of them');
+		if (!u.isBase()) buf.add(', from overlay "${u.overlay.id}"');
+		buf.add('.\n');
 		buf.add('**/\n');
 		buf.add('class ${shard.className} {\n');
 
 		for (fn in shard.functions) {
-			buf.add(emitter.emitFunction(fn));
+			buf.add(bodyOf(u, shard, fn));
 			buf.add("\n");
 		}
 
@@ -91,11 +150,44 @@ class Program {
 		return buf.toString();
 	}
 
+	/**
+		A function's body, or a note saying where the identical one already is.
+
+		Overlays are linked from the same libraries as each other and as the executable, so the
+		same routine appears at the same address in several universes, byte for byte. Emitting it
+		once matters most where it costs most — a console links every overlay into one binary — and
+		it is free to detect: the emitted *text* is compared, not the bytes.
+
+		Text rather than bytes because two identical byte sequences do not always compile to the
+		same thing here. A call inside a window resolves to the calling universe's own class, so
+		the same instructions in two overlays can name two different callees. Comparing what was
+		actually written cannot get that wrong, and the cases it does merge are exactly the ones
+		that are genuinely the same code — usually library routines that only call into the base.
+	**/
+	function bodyOf(u:Universe, shard:Shard, fn:Func):String {
+		final text = u.emitter.emitFunction(fn);
+		final owner = emitted.get(text);
+		if (owner != null) {
+			deduplicated++;
+			return '\t/** Identical to `${owner}.${fn.name}`; one body serves both. */\n'
+				+ '\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n'
+				+ '\t\t${owner}.${fn.name}(ctx, entry);\n'
+				+ '\t}\n';
+		}
+		emitted.set(text, shard.className);
+		return text;
+	}
+
 	// ---- the dispatch table -------------------------------------------------------------------
 
-	function fnTableSource():String {
-		// Every basic-block leader, not just every function entry. Only the functions that were
-		// actually emitted: under --limit the rest do not exist.
+	/**
+		Every addressable block in one universe, as three parallel columns.
+
+		The rows are what dispatch searches: an address, the handle of the function that owns it,
+		and which of that function's blocks it is. Built the same way for the executable and for
+		every overlay, because they answer the same question about different memory.
+	**/
+	function rowsOf(shards:Shards):Rows {
 		final addrs = [];
 		final handle:Map<Int, Int> = [];
 		final block:Map<Int, Int> = [];
@@ -118,6 +210,16 @@ class Program {
 			}
 		}
 		addrs.sort((a, b) -> a - b);
+		return {addrs: addrs, handle: handle, block: block};
+	}
+
+	function fnTableSource():String {
+		// Only the executable's own code. An overlay's blocks live in `Overlays`, because at any
+		// moment at most one overlay answers for a window and a single flat table cannot say which.
+		final rows = rowsOf(universes[0].shards);
+		final addrs = rows.addrs;
+		final handle = rows.handle;
+		final block = rows.block;
 
 		final buf = new StringBuf();
 		buf.add(header());
@@ -141,7 +243,9 @@ class Program {
 		buf.add('\tsupport it because every block already assigns its own locals.\n\n');
 		buf.add('\tLookup is a binary search over a sorted address array rather than a flat table\n');
 		buf.add('\tindexed by address: ${addrs.length} entries against 512K slots, which matters on a\n');
-		buf.add('\tconsole with 32 MB of RAM and costs about ${bits(addrs.length)} comparisons here.\n');
+		buf.add('\tconsole with 32 MB of RAM and costs about ${bits(addrs.length)} comparisons here.\n\n');
+		buf.add('\tThese rows are the executable\'s. Code the game loads from its disc lives in\n');
+		buf.add('\t`Overlays`, whose windows shadow these addresses while they are resident.\n');
 		buf.add('**/\n');
 		buf.add('class FnTable {\n');
 
@@ -180,8 +284,12 @@ class Program {
 		final slot = handle & 0xFFFFF;
 		switch (handle >>> 20) {
 ");
-		for (s in shards.shards) {
-			buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, entry, ctx);\n');
+		// Every shard in the program, overlays included: a handle is program-wide, and an overlay's
+		// table hands its handles to this same switch.
+		for (u in universes) {
+			for (s in u.shards.shards) {
+				buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, entry, ctx);\n');
+			}
 		}
 		buf.add("			default: Runtime.badHandle(ctx, \"table\", handle >>> 20, slot);
 		}
@@ -203,6 +311,152 @@ class Program {
 }
 ");
 		return buf.toString();
+	}
+
+	// ---- the overlays --------------------------------------------------------------------------
+
+	/**
+		What the runtime needs to know about code the game loads from its disc.
+
+		Two halves. The **descriptors** say which overlays exist, where each one goes and how to
+		recognise it: a window, and a fingerprint over the first words of its bytes. The **rows**
+		are the same address/handle/block columns `FnTable` has, one set per overlay, concatenated
+		into single arrays with a start and end index per overlay.
+
+		Concatenated rather than nested because `Array<Array<Int>>` is a shape nothing in this
+		project has put through reflaxe.CPP, and a flat array of integers is the shape everything
+		else already uses. A slice is two more integers and no new risk.
+
+		This file knows nothing about *when* an overlay is resident — that is `OverlayMgr`'s, and
+		it asks these questions. Emitted even when a game has no overlays, so that the runtime can
+		be written once against a table that is sometimes empty.
+	**/
+	function overlaysSource():String {
+		final buf = new StringBuf();
+		buf.add(header());
+		buf.add('/**\n');
+		buf.add('\tCode this game loads from its disc: where it goes, how to recognise it, and\n');
+		buf.add('\twhich function answers for each address while it is there.\n\n');
+		buf.add('\tAn overlay is bytes from the disc placed at a fixed address. PlayStation overlays\n');
+		buf.add('\tare linked at their final address — nothing relocates them at load time — so an\n');
+		buf.add('\toverlay is identified by exactly two things, its window and its contents, and both\n');
+		buf.add('\tare here. The fingerprint is FNV-1a over the first words of the overlay, which is\n');
+		buf.add('\tits own code and so differs between overlays built from the same libraries; the\n');
+		buf.add('\ttool checks at generation time that no two collide.\n');
+		buf.add('**/\n');
+		buf.add('class Overlays {\n');
+
+		final overlays = universes.slice(1);
+		buf.add('\tpublic static inline var COUNT = ${overlays.length};\n\n');
+
+		final allAddrs = [];
+		final allHandles = [];
+		final allBlocks = [];
+		final starts = [];
+		final ends = [];
+		for (u in overlays) {
+			final rows = rowsOf(u.shards);
+			starts.push(allAddrs.length);
+			for (a in rows.addrs) {
+				allAddrs.push(a);
+				allHandles.push(rows.handle.get(a));
+				allBlocks.push(rows.block.get(a));
+			}
+			ends.push(allAddrs.length);
+		}
+
+		emitTable(buf, "LO", "Where each overlay's window begins.",
+			[for (u in overlays) u.overlay.loadAddr], a -> hex(a));
+		emitTable(buf, "HI", "One past where it ends.",
+			[for (u in overlays) u.overlay.endAddr()], a -> hex(a));
+		emitTable(buf, "FINGERPRINT", "FNV-1a over the overlay's first words.",
+			[for (u in overlays) u.fingerprint()], a -> hex(a));
+		emitTable(buf, "HASH_WORDS", "How many words that fingerprint covers.",
+			[for (u in overlays) u.overlay.hashWords], a -> Std.string(a));
+		emitTable(buf, "ROW_START", "First row of this overlay's slice of the columns below.",
+			starts, a -> Std.string(a));
+		emitTable(buf, "ROW_END", "One past its last row.", ends, a -> Std.string(a));
+		emitTable(buf, "ADDRS", "Every addressable block, ascending within each overlay.",
+			allAddrs, a -> hex(a));
+		emitTable(buf, "HANDLES", "The function that owns each, program-wide.", allHandles,
+			a -> Std.string(a));
+		emitTable(buf, "BLOCKS", "Which block of that function it is.", allBlocks,
+			a -> Std.string(a));
+
+		buf.add("	/**
+		The row for an address within one overlay, or -1 if that overlay has no code there.
+
+		A binary search over that overlay's slice. An address inside a window is not necessarily
+		code: a window holds whatever the game loaded into it, and the parts that are artwork have
+		no rows.
+	**/
+	public static function lookup(overlay:Int, addr:Int):Int {
+		if (overlay < 0 || overlay >= COUNT) return -1;
+		var lo = ROW_START[overlay];
+		var hi = ROW_END[overlay] - 1;
+		while (lo <= hi) {
+			final mid = (lo + hi) >> 1;
+			final at = ADDRS[mid];
+			if (at == addr) return mid;
+			if (at < addr) lo = mid + 1;
+			else hi = mid - 1;
+		}
+		return -1;
+	}
+
+	/** Whether an address falls inside an overlay's window, resident or not. */
+	public static function inWindow(overlay:Int, addr:Int):Bool {
+		return overlay >= 0 && overlay < COUNT && addr >= LO[overlay] && addr < HI[overlay];
+	}
+
+	public static function handleAt(row:Int):Int return HANDLES[row];
+	public static function blockAt(row:Int):Int return BLOCKS[row];
+
+	/** The overlay's name, for diagnostics. A switch rather than a table of strings: this is a
+	    cold path, and it keeps the generated tables to plain integers. */
+	public static function name(overlay:Int):String {
+		switch (overlay) {
+");
+		for (i in 0...overlays.length) {
+			buf.add('\t\t\tcase $i: return "${overlays[i].overlay.id}";\n');
+		}
+		buf.add("			default: return \"?\";
+		}
+	}
+}
+");
+		return buf.toString();
+	}
+
+	/** One named table, with its comment. Empty arrays still emit, so the runtime compiles. */
+	function emitTable(buf:StringBuf, name:String, doc:String, values:Array<Int>,
+			render:Int -> String):Void {
+		buf.add('\t/** $doc */\n');
+		buf.add('\tstatic final $name:Array<Int> = [\n');
+		emitIntArray(buf, values, render);
+		buf.add('\t];\n\n');
+	}
+
+	/**
+		No two overlays may look alike where the runtime looks.
+
+		Recognition is a fingerprint over the first words of an overlay's bytes, so two overlays
+		that begin with the same prologue would be indistinguishable — and the runtime would
+		activate whichever it checked first, dispatching an address to the wrong code. That is a
+		failure with no symptom at the point of the mistake, so it is caught here instead, where
+		the fix is one number in a config.
+	**/
+	function checkFingerprintsDistinct():Void {
+		final overlays = universes.slice(1);
+		for (i in 0...overlays.length) {
+			for (j in 0...i) {
+				if (overlays[i].fingerprint() != overlays[j].fingerprint()) continue;
+				throw new recomp.analysis.AnalysisError(
+					'overlays "${overlays[i].overlay.id}" and "${overlays[j].overlay.id}" have the '
+					+ 'same fingerprint over their first ${overlays[i].overlay.hashWords} words, so '
+					+ 'the runtime could not tell them apart. Raise hashWords on one of them.');
+			}
+		}
 	}
 
 	/** Comparisons a binary search over `n` rows costs, for the doc comment. */
@@ -241,8 +495,10 @@ class Program {
 		buf.add('\tpublic static inline var LOAD_ADDR   = ${hex(exe.loadAddr)};\n');
 		buf.add('\tpublic static inline var LOAD_SIZE   = ${hex(exe.fileSize)};\n');
 		buf.add('\tpublic static inline var INITIAL_SP  = ${hex(exe.initialSp())};\n');
-		buf.add('\tpublic static inline var FUNCTIONS   = ${shards.totalFunctions()};\n');
-		buf.add('\tpublic static inline var SHARDS      = ${shards.shards.length};\n');
+		// The executable's own, not the whole program's: this is what the loader places in RAM,
+		// and an overlay is not there until the game fetches it.
+		buf.add('\tpublic static inline var FUNCTIONS   = ${universes[0].shards.totalFunctions()};\n');
+		buf.add('\tpublic static inline var SHARDS      = ${universes[0].shards.shards.length};\n');
 		buf.add('}\n');
 		return buf.toString();
 	}
@@ -250,7 +506,9 @@ class Program {
 	// ---- plumbing -------------------------------------------------------------------------------
 
 	function header():String {
-		return "// Generated by recompsx from " + image.name + ". Do not edit.\n"
+		// The executable's name, on every file. An overlay's shards say which overlay they came
+		// from in their own class comment; the program as a whole came from one game.
+		return "// Generated by recompsx from " + universes[0].image.name + ". Do not edit.\n"
 			+ "//\n"
 			+ "// A defect here is a defect in tools/recomp; fix the generator and regenerate.\n"
 			+ "// Generation is deterministic: the same input and tool version give the same bytes.\n\n"

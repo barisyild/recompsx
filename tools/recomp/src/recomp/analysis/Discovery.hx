@@ -63,8 +63,35 @@ class Discovery {
 	    all of them, which reproduces the same functions plus whatever the new knowledge reveals. */
 	final allSeeds:Array<Seed> = [];
 
-	public function new(image:Image) {
+	/**
+		The stretch of addresses this pass is responsible for, and how sure it is about them.
+
+		A base pass owns the whole image and is strict: the bytes are a linked program, so an
+		instruction that cannot exist means the analysis took a wrong turn, and stopping is better
+		than emitting a program with a hole in it.
+
+		An overlay pass owns only its window and is lenient. Two things change. It does not trace
+		outside the window — the base is analysed once, by the base pass, and re-tracing it here
+		would emit every base function a second time under an overlay's name. And inside the
+		window it cannot be strict: overlay code sits directly against the artwork it was loaded
+		with, no linker map says where one ends, so a wrong guess about a boundary is expected and
+		must cost one dropped function rather than the whole build.
+	**/
+	public final scopeLo:Int;
+	public final scopeHi:Int;
+	public final lenient:Bool;
+
+	public function new(image:Image, ?scopeLo:Int, ?scopeHi:Int, ?lenient:Bool = false) {
 		this.image = image;
+		this.scopeLo = scopeLo == null ? image.baseAddr : Vaddr.canonRam(scopeLo);
+		this.scopeHi = scopeHi == null ? image.endAddr() : Vaddr.canonRam(scopeHi);
+		this.lenient = lenient;
+	}
+
+	/** Whether an address is this pass's to discover. */
+	public inline function inScope(addr:Int):Bool {
+		final a = Vaddr.canonRam(addr);
+		return a >= scopeLo && a < scopeHi;
 	}
 
 	public function addSeed(addr:Int, name:String, confidence:Confidence):Void {
@@ -72,6 +99,11 @@ class Discovery {
 		if (seen.exists(a)) return;
 		if (!image.containsWord(a)) {
 			// Calls out of the image are normal: kernel vectors, and code in another overlay.
+			return;
+		}
+		if (!inScope(a)) {
+			// Someone else's to find. An overlay calling into the executable is the ordinary case,
+			// and the emitter resolves it against the base pass's functions.
 			return;
 		}
 		if ((a & 3) != 0) {
@@ -150,7 +182,10 @@ class Discovery {
 		while (pending.length > 0) {
 			final seed = pending.shift();
 			final fn = traceFunction(seed);
-			functions.set(fn.entry, fn);
+			// A function the tracer gave up on is not a function. Keeping it would emit a body
+			// built out of whatever the data happened to decode to, which runs, and does something.
+			if (fn.abandoned) rejected++;
+			else functions.set(fn.entry, fn);
 		}
 	}
 
@@ -243,7 +278,10 @@ class Discovery {
 				}
 
 				final instr = Decoder.decode(addr, image.readWord(addr));
-				if (instr.op == Op.INVALID) throw new AnalysisError(invalidInstructionMessage(fn, instr));
+				if (instr.op == Op.INVALID) {
+					if (!strict()) return abandon(fn, instr.addr, "does not decode");
+					throw new AnalysisError(invalidInstructionMessage(fn, instr));
+				}
 
 				reachable.set(addr, true);
 				if (addr + 4 > maxEnd) maxEnd = addr + 4;
@@ -257,8 +295,16 @@ class Discovery {
 				final slotAddr = addr + 4;
 				if (image.containsWord(slotAddr)) {
 					final slot = Decoder.decode(slotAddr, image.readWord(slotAddr));
-					if (slot.op.hasDelaySlot) throw new AnalysisError(delaySlotBranchMessage(fn, instr, slot));
-					if (slot.op == Op.INVALID) throw new AnalysisError(invalidInstructionMessage(fn, slot));
+					if (slot.op.hasDelaySlot) {
+						if (!strict()) {
+							return abandon(fn, slot.addr, "is a branch in another branch's delay slot");
+						}
+						throw new AnalysisError(delaySlotBranchMessage(fn, instr, slot));
+					}
+					if (slot.op == Op.INVALID) {
+						if (!strict()) return abandon(fn, slot.addr, "does not decode");
+						throw new AnalysisError(invalidInstructionMessage(fn, slot));
+					}
 					reachable.set(slotAddr, true);
 					if (slotAddr + 4 > maxEnd) maxEnd = slotAddr + 4;
 				}
@@ -443,8 +489,13 @@ class Discovery {
 	**/
 	function sweepForPrologues():Void {
 		for (run in image.unknownRuns(2)) {
-			var a = run.addr;
-			final end = run.addr + run.words * 4;
+			// Only this pass's stretch. An overlay pass sweeping the executable would rediscover
+			// the whole base program under overlay names; a base pass sweeping an overlay window
+			// would find functions in bytes that are not resident while it runs.
+			var a = run.addr < scopeLo ? scopeLo : run.addr;
+			var end = run.addr + run.words * 4;
+			if (end > scopeHi) end = scopeHi;
+			if (a + 8 > end) continue;
 
 			// Leading zero words are the previous function's alignment fill, not the gap's code —
 			// and they must not be mistaken for an entry's opening instructions.
@@ -533,6 +584,55 @@ class Discovery {
 		there it must be backed by a `sw ra, N(sp)` within a few instructions — the non-leaf
 		prologue, which is unambiguous.
 	**/
+	/**
+		Could a function begin here at all?
+
+		For seeds that are guesses. A hint in `game.json` is a person asserting something and is
+		worth a hard error when it is wrong. A seed recovered from a runtime miss is not: a game
+		reaches those by jumping through pointers, and a pointer sometimes holds rubbish — feeding
+		that back would have the tool trace artwork until two branches share a delay slot, and
+		refuse to build a program because of one wild jump the game itself never took twice.
+
+		So a lenient pass reads a seed before it believes it. Anything that cannot decode, and
+		anything with a branch in a delay slot, is not code: no compiler emits either, which is the
+		same test the tracer applies — just applied early, and answered with "no" instead of a stop.
+	**/
+	public function plausibleEntry(addr:Int):Bool {
+		if (!image.containsWord(addr)) return false;
+		var previousHadSlot = false;
+		for (i in 0...32) {
+			final a = addr + i * 4;
+			if (!image.containsWord(a)) return i > 0;
+			final instr = Decoder.decode(a, image.readWord(a));
+			if (instr.op == Op.INVALID) return false;
+			if (previousHadSlot && instr.op.hasDelaySlot) return false;
+			previousHadSlot = instr.op.hasDelaySlot;
+		}
+		return true;
+	}
+
+	/**
+		Whether being wrong here is the tool's fault.
+
+		In the executable it is: every function is reached by something, and an impossible
+		instruction means a wrong turn worth stopping for. In an overlay window it is not — those
+		bytes are code and assets side by side, and the boundary between them is exactly what
+		nothing has told us.
+	**/
+	inline function strict():Bool {
+		return !lenient;
+	}
+
+	/** Gives up on one function, recording why, and keeps the rest of the program. */
+	function abandon(fn:Func, at:Int, why:String):Func {
+		fn.abandoned = true;
+		fn.warnings.push('abandoned at ${Vaddr.hex(at)}: it ${why}, so this is data');
+		return fn;
+	}
+
+	/** Functions dropped because a window turned out to hold data there. */
+	public var rejected(default, null) = 0;
+
 	/**
 		Do the two instructions before `addr` end a function?
 

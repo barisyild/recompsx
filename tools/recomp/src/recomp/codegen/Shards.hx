@@ -10,9 +10,9 @@ class Shard {
 	public final className:String;
 	public final functions:Array<Func> = [];
 
-	public function new(index:Int, firstAddr:Int) {
+	public function new(index:Int, firstAddr:Int, prefix:String) {
 		this.index = index;
-		this.className = "Fns_" + pad2(index) + "_" + hex(firstAddr);
+		this.className = prefix + "_" + pad2(index) + "_" + hex(firstAddr);
 	}
 
 	public inline function startAddr():Int return functions[0].entry;
@@ -65,7 +65,17 @@ class Shards {
 		builds. Not a feature of the pipeline — a diagnostic that would otherwise mean editing
 		generated files by hand.
 	**/
-	public function new(discovery:Discovery, limit:Int = 0) {
+	/**
+		`firstIndex` and `prefix` place this set within a whole program.
+
+		Shard indices are the top eleven bits of every handle and so are program-wide, not
+		per-universe: the base takes 0..N and each overlay's shards continue from there, in config
+		order. The prefix keeps the class names apart — `Fns_…` for the executable, `Ovl_<id>_…`
+		for an overlay — because two universes can hold a function at the same address and their
+		classes cannot both be called the same thing.
+	**/
+	public function new(discovery:Discovery, limit:Int = 0, firstIndex:Int = 0,
+			prefix:String = "Fns") {
 		var entries = [for (k in discovery.functions.keys()) k];
 		entries.sort((a, b) -> a - b);
 		if (limit > 0 && limit < entries.length) entries = entries.slice(0, limit);
@@ -82,7 +92,7 @@ class Shards {
 				&& current.functions.length > 0;
 
 			if (current == null || tooMany || tooBig) {
-				current = new Shard(shards.length, addr);
+				current = new Shard(firstIndex + shards.length, addr, prefix);
 				shards.push(current);
 				instructions = 0;
 			}
@@ -91,6 +101,11 @@ class Shards {
 			instructions += size;
 			shardOfAddr.set(addr, current);
 		}
+	}
+
+	/** Whether this set has a function starting at an address. */
+	public inline function has(addr:Int):Bool {
+		return shardOfAddr.exists(Vaddr.canonRam(addr));
 	}
 
 	/** The class a function lives in, for emitting a call. */
