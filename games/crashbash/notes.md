@@ -104,6 +104,42 @@ documentation for this game's data files. It is a legitimate reference for *data
 disc rebuilding. It says nothing about executable code layout, which is what recompsx needs — do
 not assume overlap.
 
+## The anti-piracy screen, and why its text is missing (2026-08-09)
+
+The game reaches its "SOFTWARE TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED" screen and draws the
+red circle correctly — 65 flat quads in a ring, centred at (160, 120), which the GP0 census shows
+as `0x28 x65` and which account for 130 of the frame's 132 primitives. **The three lines of text
+are absent entirely**: nothing in VRAM, no primitives, no uploads.
+
+They are absent because they are not the game's own glyphs. The screen calls **`B0(51h)`
+`Krom2RawAdd` fifty-six times** — one per character of the message, which is exactly its length —
+asking the BIOS for the address of each character's bitmap in the font ROM. We answer nothing, so
+the game has nothing to upload.
+
+That makes the missing text a *kernel* gap, not a GPU one, and an interesting one: golden rule 4
+keeps a real BIOS out of the repository, so the honest fix is a font of our own in the BIOS stub
+region — the kernel is HLE anyway, and its font may be too. `Krom2Offset` (B0:53h) is the sibling
+that will want the same table.
+
+Worth noting separately: the screen appearing at all means the machine fails a check the game
+makes. That is a question about our emulation's fidelity, not about the disc — the same run
+identifies as a licensed disc through `GetID` and answers the drive's `Test 04h`/`05h`
+sub-commands. Which check it is has not been traced yet.
+
+## Three functions in a row, one found (2026-08-09)
+
+`0x800309ec`, `0x80030a00` and `0x80030a08` are consecutive one-line functions — a setter, an
+empty stub (`jr $ra; nop`), and a display-list helper — reached as slots of the table at
+`[0x8006794c]`. The sweep found the first and stopped, so a call through slot +20 landed on
+nothing and the game's list-building silently did half its work.
+
+Worth remembering as a shape, not a one-off: **after-return sweeping stops at a stub whose body
+is a single `nop`**, because a lone zero word is indistinguishable from the padding rule that
+keeps the sweep out of data. Two hints fixed it; the general fix would be to let the sweep cross
+a `jr $ra` + zero-slot pair when the words after it decode as a plausible entry.
+
+The evidence it was worth chasing: primitives per run went from 1 to 132.
+
 ## Indirect-call seeds (2026-08-08)
 
 libcd reaches parts of itself through function-pointer tables the static analysis cannot read.

@@ -41,7 +41,7 @@
     }
   ],
 
-  "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md.",
+  "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first.",
   "functionHints": [
     2147566472,
     2147603920,
@@ -49,6 +49,8 @@
     2147607960,
     2147608884,
     2147682796,
+    2147682816,
+    2147682824,
     2147687720,
     2147724864,
     2147725416,

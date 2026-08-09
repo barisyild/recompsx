@@ -657,10 +657,33 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
-- None blocking. Known unknowns are tracked as `[M0-VERIFY]` items above and as the open
+- **The kernel has no font.** `B0(51h) Krom2RawAdd` and `B0(53h) Krom2Offset` return the address
+  of a character's bitmap in the BIOS font ROM, and a game that draws text through them gets
+  nothing from us. Crash Bash's anti-piracy screen calls it once per character — fifty-six times —
+  which is why that screen renders its circle and none of its words. A real BIOS cannot be in the
+  repository (golden rule 4), so the answer is a font of our own in the BIOS stub region; the
+  kernel is HLE, and its font may be too. Sizes and the Shift-JIS mapping are in psx-spx.
+- Why Crash Bash reaches an anti-piracy screen at all is untraced. It is a fidelity question
+  about our machine, not about the disc: the same run answers `GetID` as a licensed disc and
+  handles the drive's `Test 04h`/`05h` sub-commands.
+- Otherwise none blocking. Known unknowns are tracked as `[M0-VERIFY]` items above and as the open
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] GTE, first half: `shim.I64` (the 44-bit accumulator ADR-0004 specified and
+  nobody had written), the whole register file with its side effects — SXY FIFO push on the mirror
+  write, IRGB/ORGB, LZCS/LZCR, H's sign-extend-on-read bug, FLAG's computed bit 31 — the UNR
+  division, and the projection ops RTPS/RTPT/NCLIP/AVSZ3/AVSZ4. Tool side needed nothing: all
+  seven COP2 forms already compiled to these calls. Two new conformance tests, both agreeing
+  across targets: `Acc64` 0deeafe0 (carry chains and the exact ±2^43 / ±2^31 fenceposts) and
+  `GteOps` 6a9d8047 (1304 values; hand-computed identity transforms, permutation matrices, NCLIP
+  areas, one vector per FLAG bit, the divider's edges). The GTE register warnings are gone from
+  the game's log. **A null check on `Array<Int>` cost a segfault C++-only**: the type is not
+  nullable, so the guard folded away on one target and not the other — the table was never built.
+  With two more `functionHints` (three one-line functions sit in a row at 0x800309ec/0a00/0a08 and
+  the sweep found only the first), **the game draws geometry for the first time: 132 primitives
+  where there was 1.** Next: MVMVA and the lighting family.
 
 2026-08-09 [opus] CD protocol + interrupt correctness — **the boot stall and the command storm are
   both gone**. Four causes, none of them the one the log named. The controller's interrupt enable

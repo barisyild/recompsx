@@ -63,6 +63,7 @@ class Runtime {
 		Irq.init();
 		gpu.Gpu.init();
 		gpu.Scanout.init();
+		gte.Gte.init();
 		spu.Spu.init();
 		cd.Iso9660.init();
 		cd.Cdrom.init();
