@@ -65,6 +65,15 @@ class Func {
 	public var endAddr:Int = 0;
 	public final warnings:Array<String> = [];
 
+	/**
+		Set when the tracer decided this is not a function after all.
+
+		Only reachable outside the executable, where the tool is reading a memory capture and
+		cannot know where the code ends and the assets begin. Inside the executable the same
+		discovery is a hard error, because there it means the analysis is wrong.
+	**/
+	public var abandoned:Bool = false;
+
 	public function new(entry:Int, name:String, confidence:Confidence) {
 		this.entry = entry;
 		this.name = name;

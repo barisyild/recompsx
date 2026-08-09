@@ -13,6 +13,7 @@ import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
 import recomp.mips.Disasm;
 import recomp.mips.Instr;
+import recomp.Vaddr;
 import sys.io.File;
 
 /**
@@ -221,27 +222,56 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		var outDir = "out/gen";
 		var limit = 0;
+		// A captured RAM image, and which part of it holds code the executable did not. The
+		// runtime writes both out when a call lands in something the disc brought in.
+		var ramPath:String = null;
+		var ramFrom = 0;
+		var ramTo = 0;
 		var i = 1;
 		while (i < args.length) {
 			switch (args[i]) {
 				case "--out" if (i + 1 < args.length): outDir = args[i + 1]; i++;
 				case "--limit" if (i + 1 < args.length): limit = Std.parseInt(args[i + 1]); i++;
 				case "--seed" if (i + 1 < args.length): seeds.push(args[i + 1]); i++;
+				case "--ram" if (i + 1 < args.length): ramPath = args[i + 1]; i++;
+				case "--ram-range" if (i + 1 < args.length):
+					final parts = args[i + 1].split("..");
+					if (parts.length != 2) {
+						Sys.stderr().writeString('gen: --ram-range wants <lo>..<hi>\n');
+						return EXIT_USAGE;
+					}
+					ramFrom = parseAddr(parts[0]);
+					ramTo = parseAddr(parts[1]);
+					i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
 					return EXIT_USAGE;
 			}
 			i++;
 		}
+		if (ramPath != null && ramTo == 0) {
+			Sys.stderr().writeString("gen: --ram needs --ram-range <lo>..<hi>\n");
+			return EXIT_USAGE;
+		}
 
 		final exe = loadExe(path);
-		final image = Image.ofExe(nameOf(path), exe);
+		final image = ramPath == null
+			? Image.ofExe(nameOf(path), exe)
+			: Image.ofExeAndRam(nameOf(path), exe, File.getBytes(ramPath), ramFrom, ramTo);
 		final discovery = new Discovery(image);
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
 		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
 		// had named them.
+		var rejected = 0;
 		for (sd in seeds) {
 			final a = parseAddr(sd);
+			if (!discovery.plausibleEntry(a)) {
+				Sys.stderr().writeString('gen: seed ${Vaddr.hex(a)} does not read as code — '
+					+ 'ignoring it. A runtime miss at that address was a jump through a pointer '
+					+ 'that did not hold one.\n');
+				rejected++;
+				continue;
+			}
 			discovery.addSeed(a, 'f_${StringTools.hex(a, 8).toLowerCase()}', Confidence.Entry);
 		}
 		discovery.run();
