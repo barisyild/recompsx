@@ -290,8 +290,27 @@ class Memory {
 		// zero — a drive that reports nothing, to a driver that reads it that way.
 		else if (isCdrom(p)) return cdWord(p);
 		else if (dma.Dma.contains(p)) return dma.Dma.read(p);
+		else if (spu.Spu.contains(p)) return spuWord(p);
 		else if (isIo(p)) return ioRead32(p);
 		else return unmapped8();
+	}
+
+	/**
+		The SPU is a bank of 16-bit registers, and libspu writes pairs of them at once.
+
+		Volume comes in twos — left beside right, in that order and adjacent — so a library sets
+		both with a single word store, and the main volume is the pair that matters most: with it
+		unwritten every voice is multiplied by zero. That is what an SPU reachable only by halfword
+		produced. Twenty-four voices playing, four hundred thousand samples of correctly decoded
+		ADPCM, and silence.
+	**/
+	static function spuWord(p:Int):Int {
+		return spu.Spu.read16(p) | (spu.Spu.read16(p + 2) << 16);
+	}
+
+	static function spuWordWrite(p:Int, v:Int):Void {
+		spu.Spu.write16(p, v & 0xFFFF);
+		spu.Spu.write16(p + 2, (v >>> 16) & 0xFFFF);
 	}
 
 	static function slowWrite8(p:Int, v:Int):Void {
@@ -329,6 +348,7 @@ class Memory {
 		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
 		else if (isCdrom(p)) cdWordWrite(p, v);
 		else if (dma.Dma.contains(p)) dma.Dma.write(p, v);
+		else if (spu.Spu.contains(p)) spuWordWrite(p, v);
 		else if (isIo(p)) ioWrite32(p, v);
 		else unmappedAccesses++;
 	}

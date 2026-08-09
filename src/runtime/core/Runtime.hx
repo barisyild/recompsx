@@ -71,6 +71,8 @@ class Runtime {
 		dma.Dma.init();
 		kernel.Kernel.init();
 		Scheduler.init(ctx);
+		// After the scheduler, because the mixer's first deadline is one of its slots.
+		spu.Spu.start(ctx.cycles);
 	}
 
 	/**
