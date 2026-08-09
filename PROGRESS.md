@@ -436,6 +436,22 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-09 [opus] **SOUND.** Twenty-four ADPCM voices, ADSR, one stereo pair every 768 cycles.
+  The bug that would have hidden all of it: the SPU was reachable by halfword only, and libspu
+  sets volume pairs — including the main volume — with one word store, so every voice was
+  multiplied by zero. `tests/conformance/SpuVoice` writes a waveform by hand, keys a voice on and
+  listens, then keys it off and listens for nothing; both targets agree at `d7680e93`. The game
+  reaches real audio at 15.4s emulated: 92% of samples non-silent, peak 79% of full scale, and
+  114–535 zero-crossings per half second, which is notes rather than noise. Browser plays it live
+  through a SharedArrayBuffer ring that also paces the machine — a full ring means the game is
+  ahead of what anyone can hear. Missing and written down: gaussian interpolation, noise, pitch
+  modulation, reverb, gliding volume sweeps. **Overlay support was written this session and then
+  reverted at the user's instruction** — it is a sensitive area and its design is theirs to plan,
+  not something to arrive at sideways while chasing a symptom. Nothing overlay-shaped is to be
+  written until they say so. One consequence, recorded rather than hidden: the boot screen and the
+  audio above both depended on code the disc loaded, so the tool can no longer produce the program
+  that showed them. Open on the runtime side: timers still run dotclock and hblank at system clock.
+
 2026-08-09 [opus] **BOOT SCREEN.** Crash Bash NTSC-U shows "Sony Computer Entertainment America
   Presents", on Node and in a browser. Seven fixes in a chain, each hidden by the one after it:
   `enterJmpBuf` left `v0` alone, so the game's exception hook — installed via `setjmp` — could
