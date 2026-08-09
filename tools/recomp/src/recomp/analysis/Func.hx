@@ -65,6 +65,15 @@ class Func {
 	public var endAddr:Int = 0;
 	public final warnings:Array<String> = [];
 
+	/**
+		Set when the tracer decided this is not a function after all.
+
+		Only reachable in a lenient pass — an overlay window, where the tool is reading code and
+		artwork side by side and was never told where one ends. In the executable the same
+		discovery is still a hard error, because there it means the analysis is wrong.
+	**/
+	public var abandoned:Bool = false;
+
 	public function new(entry:Int, name:String, confidence:Confidence) {
 		this.entry = entry;
 		this.name = name;

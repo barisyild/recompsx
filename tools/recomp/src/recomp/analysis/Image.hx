@@ -45,6 +45,37 @@ class Image {
 		return new Image(name, exe.loadAddr, exe.payload);
 	}
 
+	/**
+		The executable with an overlay's bytes laid over it — one *universe*.
+
+		An overlay is code the game loads from its disc into a fixed window of RAM, and while it is
+		resident that window holds its bytes and not the executable's. Analysis has to see the same
+		thing: a jump table inside the overlay indexes the overlay's data, and a function there
+		reads the overlay's constants. Analysing overlay code against the executable's bytes would
+		be reading one program through another's memory.
+
+		So each overlay gets its own image, and the base gets its own, and they are analysed
+		separately. The window may extend past the executable's end — usually does, since that is
+		where a game has room — so the image grows to hold it.
+	**/
+	public static function ofExeWithOverlay(name:String, exe:PsxExe, overlay:Bytes,
+			loadAddr:Int):Image {
+		final base = Vaddr.canonRam(exe.loadAddr);
+		final at = Vaddr.canonRam(loadAddr);
+		if (at < base) {
+			throw new LoaderError('an overlay at ${Vaddr.hex(at)} starts below the executable '
+				+ '(${Vaddr.hex(base)}); windows below the load address are not supported');
+		}
+		final end = at + overlay.length;
+		final exeEnd = base + exe.payload.length;
+		final size = end > exeEnd ? end - base : exeEnd - base;
+
+		final combined = Bytes.alloc(size);
+		combined.blit(0, exe.payload, 0, exe.payload.length);
+		combined.blit(at - base, overlay, 0, overlay.length);
+		return new Image(name, exe.loadAddr, combined);
+	}
+
 	public inline function endAddr():Int return baseAddr + size;
 
 	public inline function contains(addr:Int):Bool {

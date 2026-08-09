@@ -31,8 +31,19 @@ class Emitter {
 	final image:Image;
 	final discovery:Discovery;
 
-	/** Names for shards, so a call can be written as `Fns_03_80012340.f_80012340(ctx)`. */
-	public var shardOf:Int -> String = _ -> "Fns";
+	/**
+		The class a call to this address should go to, or null to dispatch it by address.
+
+		Set by `Program`, because the answer depends on the whole program and not on the function
+		being emitted. Two things make an address undecidable at emission time: it may be inside an
+		overlay window, where what is resident is a run-time fact; or it may be code this build
+		never found, where the runtime's table is the only thing that could know.
+
+		Returning a class name means "this target is always this code" — the executable outside
+		every window, or an overlay's own window seen from inside that overlay, where the caller
+		running at all proves the callee is resident.
+	**/
+	public var staticTargetOf:Int -> String = _ -> null;
 
 	public function new(image:Image, discovery:Discovery) {
 		this.image = image;
@@ -322,11 +333,13 @@ class Emitter {
 
 	function emitCall(buf:StringBuf, ind:String, target:Int):Void {
 		final t = Vaddr.canonRam(target);
-		if (discovery.functions.exists(t)) {
-			buf.add('$ind${shardOf(t)}.${Discovery.defaultName(t)}(ctx);\n');
+		final cls = staticTargetOf(t);
+		if (cls != null) {
+			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
 			buf.add(ind + UNWIND_LINE + "\n");
 		} else {
-			// Outside this image — another overlay, or the kernel.
+			// The kernel, code this build never found, or a window whose occupant is decided at
+			// run time. All three are the same instruction here: ask by address.
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
 			buf.add(ind + UNWIND_LINE + "\n");
