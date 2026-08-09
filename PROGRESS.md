@@ -657,19 +657,50 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
-- **The kernel has no font.** `B0(51h) Krom2RawAdd` and `B0(53h) Krom2Offset` return the address
-  of a character's bitmap in the BIOS font ROM, and a game that draws text through them gets
-  nothing from us. Crash Bash's anti-piracy screen calls it once per character — fifty-six times —
-  which is why that screen renders its circle and none of its words. A real BIOS cannot be in the
-  repository (golden rule 4), so the answer is a font of our own in the BIOS stub region; the
-  kernel is HLE, and its font may be too. Sizes and the Shift-JIS mapping are in psx-spx.
-- Why Crash Bash reaches an anti-piracy screen at all is untraced. It is a fidelity question
-  about our machine, not about the disc: the same run answers `GetID` as a licensed disc and
-  handles the drive's `Test 04h`/`05h` sub-commands.
+- **Why Crash Bash reaches an anti-piracy screen at all is untraced**, and it is the one thing
+  standing between the boot sequence and the game. It is a fidelity question about our machine,
+  not about the disc: the same run answers `GetID` as a licensed disc, handles the drive's
+  `Test 04h`/`05h` sub-commands, and now reports a console region. One wrong answer has already
+  been found and fixed this way — the console had no region at all, so the game drew the Japanese
+  message — and the method that found it (measure what the game reads before it decides, one
+  register at a time) is what to run again.
+- **The kernel has no font**, and will need one the moment a game draws text through the ROM.
+  `B0(51h) Krom2RawAdd` and `B0(53h) Krom2Offset` hand out addresses of glyphs in the BIOS font
+  ROM. Measured from a real ROM's structure (a format, not its data): 16×16 glyphs, 32 bytes
+  each, two bytes a row, most significant bit leftmost. A real BIOS cannot be in the repository
+  (golden rule 4) and neither can anything derived from its bitmaps, so the answer is either
+  glyphs of our own or a freely-licensed bitmap font — and if the text needed is Japanese, only
+  the second is realistic. Crash Bash stopped asking once it knew what console it was on, so this
+  is no longer blocking anything.
 - Otherwise none blocking. Known unknowns are tracked as `[M0-VERIFY]` items above and as the open
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] The console now says what it is, and has a font. The ROM window at 0x1FC00000
+  was not in the memory map at all — every read returned zero — so the region letter games test
+  at `0x1FC7FF52` said nothing and Crash Bash NTSC-U drew its anti-piracy message in *Japanese*
+  (the glyph codes decode to 強制終了しました。本体が…). Serving that one byte as 'A' ended fifty-six
+  `Krom2RawAdd` calls. The English branch then reads glyphs straight out of the ROM —
+  `0xBFC7F8DE + (char-33)*15`, measured from the game's own disassembly — so `mem.RomFont` serves
+  ninety-four 8×15 glyphs drawn for this project. Uploads went 13 → 3733 and three lines of text
+  appear. They rendered as strokes at first, and the font was ruled out — payload correct per
+  pixel, and the real ROM's glyphs render identically — so it was the rasteriser. The warning
+  screen writes text in two passes (white letters with bit 15 set, then a black pass over the
+  cell), and on hardware a CPU-to-VRAM upload obeys the mask bits exactly as a drawn primitive
+  does, so the black pass skips the letters. `putTexel` ignored the check and erased them.
+  Implementing mask-check/mask-set in the upload path restored the text — and then a photograph
+  of the real screen showed the circle should pass *behind* the words, which is the same rule a
+  layer up: `plot()`, the primitive path, ignored the mask too, so the circle painted over the
+  text. Three writers into VRAM (`plot`, `putTexel`, `blend`) and only one of them obeyed
+  GP0(E6). The text then sat left of the original, which turned out not to be a placement bug at
+  all: the game's message table is data in the executable — `{x, y, text}` per region at
+  0x800678A0, x=36 for America, short lines centred by literal spaces in the string — so we were
+  drawing exactly where it asked. The font was too narrow, five ink columns against fourteen
+  rows, so every line ended early and read as shifted. Stretched to seven columns, the longest
+  line lands at 36..296 against a screen centre of 160. **The screen now reads "SOFTWARE
+  TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED / CALL 1-888-780-7690" with the circle behind it,
+  laid out as the original.**
 
 2026-08-09 [opus] The `unimplemented:` list is down to one line. Memory-control registers
   (1F801000-1020, RAM_SIZE, cache control) stored with the BIOS's reset values — bus timing is

@@ -47,6 +47,7 @@ class Memory {
 		ram = RawMem.alloc(RAM_SIZE);
 		scratch = RawMem.alloc(SCRATCH_SIZE);
 		resetMemControl();
+		RomFont.init();
 	}
 
 	/** Strips the segment. The three cached/uncached views collapse to one physical address. */
@@ -159,6 +160,58 @@ class Memory {
 
 	static inline function isIo(p:Int):Bool
 		return p >= IO_BASE && p < IO_BASE + IO_SIZE;
+
+	// ---- the ROM window ---------------------------------------------------------------------------
+	//
+	// 0x1FC00000 is where a real machine's BIOS sits. There is none here and there never will be
+	// (golden rule 4) — the kernel is emulated at the call level, so nothing needs to execute from
+	// this region. But a game still *reads* it, and until now every such read returned zero
+	// because the window was not served at all: not stubbed, not reported, simply absent from the
+	// map.
+	//
+	// One byte of it decides a great deal. Games identify which console they are running on by
+	// reading the region letter at the end of the ROM's version string — 'A' for America, 'E' for
+	// Europe, 'I' for Japan — and a zero there matches none of them, so the check falls through to
+	// its first case. Crash Bash NTSC-U was drawing its "console may have been modified" screen in
+	// *Japanese*: the glyph codes it asked the font ROM for decode to 強制終了しました。本体が…,
+	// which is the Japanese text of the same message. A disc that says SCEA in a console that says
+	// nothing is a mismatch, and the game is right to complain.
+	//
+	// So the window answers with what this machine is, which is a thing we are entitled to say
+	// about ourselves — the same statement `Cdrom.getId` already makes when it reports the disc
+	// region. Nothing here is copied from any ROM: it is a short identification written for this
+	// emulator, in the layout games look for.
+
+	static inline var ROM_BASE = 0x1FC00000;
+	static inline var ROM_SIZE = 0x80000;
+
+	/** Where the region letter lives, at the tail of the version string. */
+	static inline var ROM_REGION_BYTE = 0x1FC7FF52;
+
+	/**
+		Which console this claims to be: 'A' America, 'E' Europe, 'I' Japan.
+
+		Set from the game's configured region — a recompiled program is one machine running one
+		game, so the console's region is the game's. America is the default because a value is
+		needed before anything sets one, and a wrong-but-consistent answer is easier to trace than
+		a zero that means "no console at all".
+	**/
+	public static var romRegion = 0x41;   // 'A'
+
+	/** Where the ASCII glyph table begins — the game-measured `0xBFC7F8DE`, physically. */
+	static inline var ROM_FONT_BASE = 0x1FC7F8DE;
+
+	static function romRead8(p:Int):Int {
+		if (p == ROM_REGION_BYTE) return romRegion & 0xFF;
+		else {}
+		if (p >= ROM_FONT_BASE && p < ROM_FONT_BASE + RomFont.COUNT * RomFont.BYTES_PER_GLYPH)
+			return RomFont.byteAt(p - ROM_FONT_BASE);
+		else {}
+		return 0;
+	}
+
+	static inline function isRom(p:Int):Bool
+		return p >= ROM_BASE && p < ROM_BASE + ROM_SIZE;
 
 	/**
 		The hardware registers.
@@ -288,6 +341,7 @@ class Memory {
 		else if (isCdrom(p)) return cd.Cdrom.readPolled(p, raHint);
 		else if (isSio(p)) return sio.Sio0.read8(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
+		else if (isRom(p)) return romRead8(p);
 		else return unmapped8();
 	}
 
@@ -350,6 +404,7 @@ class Memory {
 		else if (isTimer(p)) return timers.Timers.read(p, cycleHint) & 0xFFFF;
 		else if (spu.Spu.contains(p)) return spu.Spu.read16(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
+		else if (isRom(p)) return romRead8(p) | (romRead8(p + 1) << 8);
 		else return unmapped8();
 	}
 
@@ -365,6 +420,8 @@ class Memory {
 		else if (spu.Spu.contains(p)) return spuWord(p);
 		else if (isIo(p)) return ioRead32(p);
 		else if (p == CACHE_CONTROL_REG) return cacheControl;
+		else if (isRom(p)) return romRead8(p) | (romRead8(p + 1) << 8)
+			| (romRead8(p + 2) << 16) | (romRead8(p + 3) << 24);
 		else return unmapped8();
 	}
 

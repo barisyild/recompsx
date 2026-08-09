@@ -93,6 +93,9 @@ class Gpu {
 	/** Pixels delivered by upload rather than by rasterisation. */
 	public static var uploaded(default, null) = 0;
 
+	/** GP1(05h) writes — how often the game moves the displayed window. */
+	public static var flips(default, null) = 0;
+
 	/** The command word and its parameters, gathered until the packet is whole. */
 	static var packet:Array<Int>;
 	static var packetLen = 0;
@@ -171,12 +174,29 @@ class Gpu {
 		putTexel((v >>> 16) & 0xFFFF);
 	}
 
+	/**
+		One pixel of a CPU-to-VRAM upload, obeying the mask settings.
+
+		A copy is affected by GP0(E6) exactly as a drawn primitive is — psx-spx, "Mask/Round" — and
+		this is not a fine point for the game that needs it. Crash Bash's warning screen writes its
+		text in two passes: the letters first, in white with bit 15 set, then a black pass over the
+		whole cell. On hardware the second pass is a masked copy: with mask-check on, it skips every
+		pixel whose bit 15 is already set, so the white letters survive and the black only fills the
+		gaps around them. Ignore the check — as this did — and the black pass erases the letters,
+		leaving one stray column per glyph. The text was there in VRAM the whole time, drawn and
+		then overwritten, which is why it read as thin strokes rather than as nothing.
+	**/
 	static function putTexel(p:Int):Void {
 		if (xferI >= xferW * xferH) return;
 		else {}
 		final x = (xferX + (xferI % xferW)) & 1023;
 		final y = (xferY + shim.IntMath.div(xferI, xferW)) & 511;
-		Vram.set(x, y, p);
+		if (maskCheck && (Vram.get(x, y) & 0x8000) != 0) {
+			xferI++;
+			uploaded++;
+			return;
+		} else {}
+		Vram.set(x, y, maskSet ? p | 0x8000 : p);
 		xferI++;
 		uploaded++;
 	}
@@ -403,10 +423,23 @@ class Gpu {
 		}
 	}
 
+	/**
+		One pixel of a drawn primitive, obeying the mask settings.
+
+		A polygon, rectangle or line respects GP0(E6) the same way an upload does — bit-15-check
+		skips a pixel the game has protected, bit-15-set marks each written pixel. Crash Bash's
+		warning screen is where it shows: it draws the text first, with the mask bit set on every
+		letter, and then draws the red "no" circle straight over it with mask-check on. On hardware
+		the circle skips the letters and passes behind them; without the check the circle painted
+		over the text, cutting each word where it crossed. Same rule as `putTexel` and `blend`,
+		which is why they now share it.
+	**/
 	static inline function plot(x:Int, y:Int, colour:Int):Void {
 		if (x >= 0 && x < 1024 && y >= 0 && y < 512) {
-			Vram.set(x, y, colour);
-			pixels++;
+			if (!(maskCheck && (Vram.get(x, y) & 0x8000) != 0)) {
+				Vram.set(x, y, maskSet ? colour | 0x8000 : colour);
+				pixels++;
+			} else {}
 		} else {}
 	}
 
@@ -513,7 +546,7 @@ class Gpu {
 		else if (op == 0x02) irqPending = false;
 		else if (op == 0x03) displayDisabled = (arg & 1) != 0;
 		else if (op == 0x04) dmaDirection = arg & 3;
-		else if (op == 0x05) displayStart = arg & 0x7FFFF;
+		else if (op == 0x05) { displayStart = arg & 0x7FFFF; flips++; }
 		else if (op == 0x06) displayRangeH = arg;
 		else if (op == 0x07) displayRangeV = arg;
 		else if (op == 0x08) displayMode = arg & 0xFF;

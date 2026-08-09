@@ -104,6 +104,96 @@ documentation for this game's data files. It is a legitimate reference for *data
 disc rebuilding. It says nothing about executable code layout, which is what recompsx needs — do
 not assume overlap.
 
+## The console had no region, so the game thought it was Japanese (2026-08-09)
+
+The characters the anti-piracy screen asked the font ROM for decode, as Shift-JIS, to
+**強制終了しました。本体が…** — the *Japanese* text of "software terminated, the console may have
+been modified". An NTSC-U disc, drawing the Japanese message.
+
+Because our machine had no region. Games read the letter at the tail of the BIOS ROM's version
+string — `0x1FC7FF52`, 'A' America, 'E' Europe, 'I' Japan — and the ROM window was not served at
+all: not stubbed, not reported, simply absent from the memory map, so every read returned zero and
+the region test fell through to its first case. Serving that one byte as 'A' stopped the Japanese
+glyph requests dead: fifty-six calls to `Krom2RawAdd` became none, and the sixteen hundred uploads
+that went with them became thirteen.
+
+**It did not stop the screen.** The circle is still drawn and the game still concludes something
+is wrong — so the region byte was one wrong answer, not the wrong answer. Whatever check decides
+"modified" is still unidentified, and the next round of the same method (measure what the game
+reads before it decides) is where to look.
+
+## How the English text is drawn, measured to the byte (2026-08-09)
+
+Why did the American branch draw *nothing*, not even blanks? Scanning the executable for every
+`lui` that builds a ROM-window address answers it completely — there are exactly two:
+
+- `0x8002d488`: `lbu 0xBFC7FF52` — the region letter, compared against 'E' (69) then 'A' (65),
+  with ≥'F' branching to the Japanese path. This is the *whole* region check: one byte, the one
+  we serve. Serving 'A' stores 1 in `[0x80067894]`.
+- `0x8002e324`: the text renderer computes `0xBFC7F8DE + (char - 33) * 15` and reads the glyph
+  **directly from the ROM window** — no kernel call. Fifteen bytes per glyph, one per row. The
+  helper at `0x8002e584` proves the geometry: it walks `t0 = 14..0` rows, one `lbu` per row,
+  scanning bits 7..0 to measure the glyph's used column range for proportional spacing.
+
+That extent scan is also why nothing at all was drawn: our ROM answered zero for every glyph
+byte, the measured extent came back empty, and the renderer skipped the character entirely.
+So the Japanese path asks the kernel (`Krom2RawAdd`) and the English path reads the ROM raw —
+two different mechanisms, and the region byte switched us from the first to the second.
+
+The fix is `mem.RomFont`: our own 8×15 ASCII glyphs served at `0x1FC7F8DE`. The three interface
+numbers (base, stride 15, index origin '!') come from the game's own disassembly above, and the
+pixel art is drawn for this project — nothing is copied from any ROM. The format was confirmed
+against a real ROM at that exact address before the glyphs were drawn: fifteen bytes, one row
+each, eight wide, most significant bit leftmost, `'!'` first. Uploads went from 13 to 3733, and
+three lines of text appear where the message belongs.
+
+**The strokes were a mask bug, now fixed.** The glyphs first rendered as thin strokes, and the
+font was ruled out three ways: the upload payload is correct per pixel; the geometry is correct
+(`5x1` transfers, `x` alternating 76/77 for the game's one-pixel double-strike, `y` advancing per
+row); and *serving the real ROM's glyphs rendered identically*. So it was the renderer.
+
+Measuring the upload payloads settled it. The warning screen draws its text in two passes:
+letters first, in white (`0xFFFF`, bit 15 set), then a black pass (`0x8000`) over the whole cell.
+On hardware the second pass is a mask-checked copy — GP0(A0) uploads obey GP0(E6) exactly as
+drawn primitives do (psx-spx, "Mask/Round") — so it skips every pixel whose bit 15 is already set,
+and the white letters survive. `putTexel` ignored the check, so the black pass erased the letters
+down to one stray column each. The text had been in VRAM and then overwritten, which is why it
+read as strokes. Implementing mask-check and mask-set in `putTexel` (matching `blend()`, which
+copies already do) restored it: white pixels in the region went 454 → 2161, and the message reads
+"SOFTWARE TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED / CALL 1-888-780-7690".
+
+**And the same rule again, one layer up.** Comparing against a photograph of the real screen
+showed the remaining difference: on hardware the red "no" circle passes *behind* the words, and
+ours painted over them, cutting each line where it crossed. Same cause — the game draws the text
+with the mask bit set, then draws the circle with mask-check on so it skips protected pixels —
+and `plot()`, the primitive path, ignored the check exactly as `putTexel` had. Three writers into
+VRAM, three copies of the same rule; two of them were missing it. With `plot()` fixed the text
+sits in front of the circle, matching the original.
+
+## The message table, and why the text looked shifted (2026-08-09)
+
+The text then sat left of where the real screen puts it, and it was tempting to hunt for a
+centring bug. There is none: **the game does not centre anything.** Its message table is data in
+the executable, one twelve-byte record per region, indexed by the same region index the ROM byte
+sets:
+
+    0x800678A0 + idx*12   →   { u16 x, u16 y, char* text }      (and a scale byte at +0x789C)
+
+    idx 0  x=80  y=92  scale=2   "強制終了しました。\n本体が改造されている\nおそれがあります。"
+    idx 1  x=36  y=92  scale=1   "     SOFTWARE TERMINATED\nCONSOLE MAY HAVE BEEN MODIFIED\n     CALL 1-888-780-7690"
+
+So x is a constant, a newline resets the pen to that same x (`sh $s5, 0($s1)`), and the short
+lines are centred **by five literal spaces in the string**. The scale byte is the horizontal
+repeat count — two for the wide Japanese glyphs, one for ASCII. We were drawing at exactly the x
+the game asked for.
+
+What differed was the font's proportions. The cell is 8x15, and the first draft put a 5x7 design
+in it doubled vertically only — 5 wide against 14 tall, far narrower than the ROM's glyphs. Since
+every line is pinned at the left and each glyph advances by its own measured ink width, a narrow
+font makes every line end early, and the eye reads a short line pinned at the left as one shifted
+left. Widening the designs to seven ink columns (stretching each row 5→7 rather than re-drawing)
+put the longest line at 36..296, centre 166 against the screen's 160 — the original's layout.
+
 ## The anti-piracy screen, and why its text is missing (2026-08-09)
 
 The game reaches its "SOFTWARE TERMINATED / CONSOLE MAY HAVE BEEN MODIFIED" screen and draws the
