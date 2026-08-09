@@ -150,7 +150,10 @@ class Discovery {
 		while (pending.length > 0) {
 			final seed = pending.shift();
 			final fn = traceFunction(seed);
-			functions.set(fn.entry, fn);
+			// A function the tracer gave up on is not a function. Keeping it would emit a body
+			// built from whatever the data decoded to, which runs, and does something.
+			if (fn.abandoned) rejected++;
+			else functions.set(fn.entry, fn);
 		}
 	}
 
@@ -243,7 +246,11 @@ class Discovery {
 				}
 
 				final instr = Decoder.decode(addr, image.readWord(addr));
-				if (instr.op == Op.INVALID) throw new AnalysisError(invalidInstructionMessage(fn, instr));
+				if (instr.op == Op.INVALID) {
+					if (!strictAt(fn.entry)) return abandon(fn, instr.addr, "does not decode");
+					else {}
+					throw new AnalysisError(invalidInstructionMessage(fn, instr));
+				} else {}
 
 				reachable.set(addr, true);
 				if (addr + 4 > maxEnd) maxEnd = addr + 4;
@@ -257,8 +264,17 @@ class Discovery {
 				final slotAddr = addr + 4;
 				if (image.containsWord(slotAddr)) {
 					final slot = Decoder.decode(slotAddr, image.readWord(slotAddr));
-					if (slot.op.hasDelaySlot) throw new AnalysisError(delaySlotBranchMessage(fn, instr, slot));
-					if (slot.op == Op.INVALID) throw new AnalysisError(invalidInstructionMessage(fn, slot));
+					if (slot.op.hasDelaySlot) {
+						if (!strictAt(fn.entry)) {
+							return abandon(fn, slot.addr, "is a branch in another branch's delay slot");
+						} else {}
+						throw new AnalysisError(delaySlotBranchMessage(fn, instr, slot));
+					} else {}
+					if (slot.op == Op.INVALID) {
+						if (!strictAt(fn.entry)) return abandon(fn, slot.addr, "does not decode");
+						else {}
+						throw new AnalysisError(invalidInstructionMessage(fn, slot));
+					} else {}
 					reachable.set(slotAddr, true);
 					if (slotAddr + 4 > maxEnd) maxEnd = slotAddr + 4;
 				}
@@ -443,8 +459,13 @@ class Discovery {
 	**/
 	function sweepForPrologues():Void {
 		for (run in image.unknownRuns(2)) {
+			if (run.addr >= image.sweepEnd) continue;
+			else {}
 			var a = run.addr;
-			final end = run.addr + run.words * 4;
+			var end = run.addr + run.words * 4;
+			// A run that straddles the boundary is swept up to it and no further.
+			if (end > image.sweepEnd) end = image.sweepEnd;
+			else {}
 
 			// Leading zero words are the previous function's alignment fill, not the gap's code —
 			// and they must not be mistaken for an entry's opening instructions.
@@ -533,6 +554,65 @@ class Discovery {
 		there it must be backed by a `sw ra, N(sp)` within a few instructions — the non-leaf
 		prologue, which is unambiguous.
 	**/
+	/**
+		Whether being wrong about this address is the tool's fault.
+
+		Inside the executable it is. The bytes are a linked program, every function in it is reached
+		by something, and an instruction that cannot exist means the analysis took a wrong turn —
+		which is worth stopping for, because the alternative is emitting a program with a hole in it
+		and finding out at run time.
+
+		Above the executable it is not. Those bytes are a memory capture: code the game loaded,
+		sitting next to the assets it loaded with it, and the boundary between them is exactly what
+		the tool does not know. A `jal` reached from there can land in a texture, and the honest
+		answer is to drop that one function and carry on rather than to refuse to build anything.
+	**/
+	inline function strictAt(addr:Int):Bool {
+		return Vaddr.canonRam(addr) < image.sweepEnd;
+	}
+
+	/** Gives up on one function, recording why, and keeps the rest of the program. */
+	function abandon(fn:Func, at:Int, why:String):Func {
+		fn.abandoned = true;
+		fn.warnings.push('abandoned at ${Vaddr.hex(at)}: it ${why}, so this is data');
+		return fn;
+	}
+
+	/** Functions dropped because a memory capture turned out to hold data there. */
+	public var rejected(default, null) = 0;
+
+	/**
+		Could a function begin here at all?
+
+		For seeds, which are guesses. A hint in `game.json` is a person asserting something and is
+		worth a hard error when it is wrong; a `--seed` is an address the *runtime* failed to
+		dispatch, and a game reaches those by jumping through pointers — including, once, a pointer
+		holding rubbish. Feeding that back makes the tool trace texture data until two branches sit
+		in one delay slot and it stops, refusing to build a program because of one wild jump the
+		game itself probably never took twice.
+
+		So a seed gets read before it is believed. Anything that cannot decode, and anything with a
+		branch in a delay slot, is not code — no compiler emits either, which is the same test the
+		tracer applies, just applied early and answered with "no" instead of an abort.
+	**/
+	public function plausibleEntry(addr:Int):Bool {
+		if (!image.containsWord(addr)) return false;
+		else {}
+		var previousHadSlot = false;
+		for (i in 0...32) {
+			final a = addr + i * 4;
+			if (!image.containsWord(a)) return i > 0;
+			else {}
+			final instr = Decoder.decode(a, image.readWord(a));
+			if (instr.op == Op.INVALID) return false;
+			else {}
+			if (previousHadSlot && instr.op.hasDelaySlot) return false;
+			else {}
+			previousHadSlot = instr.op.hasDelaySlot;
+		}
+		return true;
+	}
+
 	/**
 		Do the two instructions before `addr` end a function?
 

@@ -25,6 +25,21 @@ class Image {
 	public final size:Int;
 	public final bytes:Bytes;
 
+	/**
+		Where guessing at function boundaries stops making sense.
+
+		The prologue sweep is a heuristic, and heuristics need a prior. Inside an executable it is a
+		good one: the layout is text and then data, both written by a compiler, and a frame setup
+		after a return really is a function nine times out of ten. A RAM capture appended above the
+		executable is not that — it is mostly the game's assets, and sweeping it finds "functions"
+		in texture data, whose first branch lands in a number.
+
+		So the sweep stops here, and code above it is reached the honest way: from a seed, or from
+		a call by something already known. Defaults to the whole image, which is what a plain
+		executable wants.
+	**/
+	public var sweepEnd(default, null):Int;
+
 	/** One entry per word. Indexed by `(addr - baseAddr) >> 2`. */
 	final kinds:Array<Kind>;
 
@@ -37,12 +52,51 @@ class Image {
 		this.bytes = bytes;
 		this.size = bytes.length;
 		final words = size >> 2;
+		this.sweepEnd = this.baseAddr + size;
 		kinds = [for (_ in 0...words) Kind.Unknown];
 		owner = [for (_ in 0...words) 0];
 	}
 
+	function limitSweepTo(addr:Int):Image {
+		sweepEnd = Vaddr.canonRam(addr);
+		return this;
+	}
+
 	public static function ofExe(name:String, exe:PsxExe):Image {
 		return new Image(name, exe.loadAddr, exe.payload);
+	}
+
+	/**
+		The executable with a slice of a captured RAM image laid in above it.
+
+		This is how overlays are analysed. A game that loads code from its disc runs machine code
+		the executable never contained, so no amount of sweeping the executable will find it — the
+		bytes have to be supplied. The runtime writes them out the first time a call lands in
+		something it read from the disc, and this is where they come back in.
+
+		The slice starts at the executable's end, never inside it. The captured RAM also holds the
+		executable's own text, and it would be *almost* the same — but only almost, and letting a
+		capture rewrite the code being analysed would make the tool's output depend on the state of
+		a running game. Above the executable there was nothing to disagree with.
+	**/
+	public static function ofExeAndRam(name:String, exe:PsxExe, ram:Bytes, from:Int, to:Int):Image {
+		final base = Vaddr.canonRam(exe.loadAddr);
+		final exeEnd = base + exe.payload.length;
+		final lo = Vaddr.canonRam(from) < exeEnd ? exeEnd : Vaddr.canonRam(from);
+		final hi = Vaddr.canonRam(to);
+		if (hi <= lo) return ofExe(name, exe);
+
+		final combined = Bytes.alloc(hi - base);
+		combined.blit(0, exe.payload, 0, exe.payload.length);
+		// The capture is indexed by physical address: RAM is 2 MB and mirrors every 2 MB.
+		final at = lo & 0x1FFFFF;
+		final len = hi - lo;
+		if (at + len > ram.length) {
+			throw new LoaderError('the RAM capture is ${ram.length} bytes, too small to hold '
+				+ '${Vaddr.hex(from)}..${Vaddr.hex(to)}');
+		}
+		combined.blit(lo - base, ram, at, len);
+		return new Image(name, exe.loadAddr, combined).limitSweepTo(exeEnd);
 	}
 
 	public inline function endAddr():Int return baseAddr + size;
