@@ -41,7 +41,7 @@
     }
   ],
 
-  "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first.",
+  "_functionHints": "Entry points nothing calls statically: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first.",
   "functionHints": [
     2147566472,
     2147603920,
@@ -56,7 +56,15 @@
     2147725416,
     2147725756,
     2147725860,
-    2147746740
+    2147746740,
+    2147774860,
+    2147774880,
+    2147774900,
+    2147774920,
+    2147774940,
+    2147774960,
+    2147774980,
+    2147775000
   ],
   "jumpTableHints": [],
   "nativeReplacements": [],

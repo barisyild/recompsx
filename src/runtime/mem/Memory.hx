@@ -46,6 +46,7 @@ class Memory {
 		// first run differs from the second and every determinism guarantee is void.
 		ram = RawMem.alloc(RAM_SIZE);
 		scratch = RawMem.alloc(SCRATCH_SIZE);
+		resetMemControl();
 	}
 
 	/** Strips the segment. The three cached/uncached views collapse to one physical address. */
@@ -174,7 +175,56 @@ class Memory {
 		else if (p == 0x1F801074) return core.Irq.readMask();
 		else if (p == 0x1F801810) return gpu.Gpu.readData();
 		else if (p == 0x1F801814) return gpu.Gpu.readStatus(cycleHint);
+		else if (isMemControl(p)) return memControl[(p - MEMCTRL_BASE) >> 2];
+		else if (p == RAM_SIZE_REG) return ramSizeReg;
 		else return ioUnknownRead(p);
+	}
+
+	// ---- the memory-control registers ---------------------------------------------------------
+	//
+	// Nine words at 1F801000h that say where the expansion regions live and how many cycles the
+	// bus should wait for each device, plus RAM_SIZE at 1F801060h and the cache-control word up at
+	// FFFE0130h. Every game's startup writes some of them — usually copying the same values the
+	// BIOS already put there, because Sony's own library does it unconditionally.
+	//
+	// Stored and handed back, and nothing more. Bus timing is not modelled: this emulator charges
+	// a fixed cost per instruction and pacing is cosmetic (golden rule 3), so a game that widens
+	// the CD-ROM's access window changes a number it can read back and nothing else. That is the
+	// honest implementation rather than a stub — the values a game writes here it also *reads*,
+	// and a register that returns zero to a game that just wrote 0x200931E1 is a lie that shows up
+	// somewhere far away.
+	//
+	// The reset values are the BIOS's, from psx-spx "Memory Control": what a game finds if it
+	// looks before it writes.
+
+	static inline var MEMCTRL_BASE = 0x1F801000;
+	static inline var MEMCTRL_COUNT = 9;
+	static inline var RAM_SIZE_REG = 0x1F801060;
+
+	/** FFFE0130h, outside the I/O page entirely — the only register in its own address space. */
+	static inline var CACHE_CONTROL_REG = 0x1FFE0130;
+
+	static var memControl:Array<Int>;
+	static var ramSizeReg = 0;
+	static var cacheControl = 0;
+
+	static inline function isMemControl(p:Int):Bool
+		return p >= MEMCTRL_BASE && p < MEMCTRL_BASE + MEMCTRL_COUNT * 4;
+
+	static function resetMemControl():Void {
+		memControl = [
+			0x1F000000,   // 1000 expansion 1 base
+			0x1F802000,   // 1004 expansion 2 base
+			0x0013243F,   // 1008 expansion 1 delay/size
+			0x00003022,   // 100C expansion 3 delay/size
+			0x0013243F,   // 1010 BIOS ROM delay/size
+			0x200931E1,   // 1014 SPU delay/size
+			0x00020843,   // 1018 CD-ROM delay/size
+			0x00070777,   // 101C expansion 2 delay/size
+			0x00031125    // 1020 common delay
+		];
+		ramSizeReg = 0x00000B88;
+		cacheControl = 0;
 	}
 
 	/**
@@ -194,6 +244,8 @@ class Memory {
 		else if (p == 0x1F801074) core.Irq.writeMask(v);
 		else if (p == 0x1F801810) gpu.Gpu.writeGp0(v);
 		else if (p == 0x1F801814) gpu.Gpu.writeGp1(v);
+		else if (isMemControl(p)) memControl[(p - MEMCTRL_BASE) >> 2] = v;
+		else if (p == RAM_SIZE_REG) ramSizeReg = v;
 		else ioUnknownWrite(p, v);
 	}
 
@@ -312,6 +364,7 @@ class Memory {
 		else if (dma.Dma.contains(p)) return dma.Dma.read(p);
 		else if (spu.Spu.contains(p)) return spuWord(p);
 		else if (isIo(p)) return ioRead32(p);
+		else if (p == CACHE_CONTROL_REG) return cacheControl;
 		else return unmapped8();
 	}
 
@@ -371,6 +424,10 @@ class Memory {
 		else if (dma.Dma.contains(p)) dma.Dma.write(p, v);
 		else if (spu.Spu.contains(p)) spuWordWrite(p, v);
 		else if (isIo(p)) ioWrite32(p, v);
+		// The cache-control word. Nothing here has a cache, so this is storage — but it is the
+		// register a game uses to enable the scratchpad, and one that read back zero after being
+		// written would be a machine no game has ever run on.
+		else if (p == CACHE_CONTROL_REG) cacheControl = v;
 		else unmappedAccesses++;
 	}
 

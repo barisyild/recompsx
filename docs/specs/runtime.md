@@ -33,6 +33,12 @@ Address map (physical, after `p = a & 0x1FFFFFFF`; KSEG2 detected on unmasked `(
 | 0x1FC00000–0x1FC7FFFF | 512KB | BIOS window | HLE stub region (§3.6); writes ignored+log |
 | KSEG2 0xFFFE0130 | 4B | Cache control | store/readback; semantics ignored (no I-cache) |
 
+Memory control — nine words at 0x1F801000 (expansion bases, BIOS/SPU/CD-ROM/common delays) plus
+RAM_SIZE at 0x1F801060 — is **store/readback with the BIOS's reset values**, same posture as cache
+control. Bus timing is not modelled (fixed cost per instruction; pacing is cosmetic, golden rule
+3), but a game's startup writes these unconditionally and reads them back, so a register that
+answers zero is a machine that does not exist.
+
 Fast path (codegen inlines): `(p & 0xFF800000) == 0` ⇔ RAM window → one AND + one branch for
 ~99% of accesses; `slow32` branch order: scratchpad → I/O (`p - 0x1F801000` in [0, 0x3000)) →
 KSEG2 → BIOS window → Exp1 → bus error (log-once, return 0 — never host garbage; strict mode
@@ -339,6 +345,13 @@ vLOUT/vROUT, 0x1D88 KON, 0x1D8C KOFF, 0x1D90 PMON, 0x1D94 NON, 0x1D98 EON, 0x1D9
 0x1DAE SPUSTAT (echo CNT 5–0, 6 IRQ flag, 8/9 DMA req, 10 busy=0, 11 capture-half), 0x1DB0 CD vol
 L/R, 0x1DB8 current main vol, 0x1DC0–0x1DFF reverb block.
 
+The mix and reverb registers (0x1D84–86, 0x1DB0–B6, 0x1DC0–DFF) are **stored and read back but
+inert**: no reverb pass and no CD/external input reach the mixer yet. That is a deliberate half —
+libspu writes a reverb preset as a block and reads parts of it back, so the register file has to
+answer even while the DSP does not exist. 0x1DB8/BA return the set main volume, which is the true
+current volume in an SPU without sweeps, and 0x1E00–7F return each voice's envelope times its
+volume for the same reason.
+
 **Voice pipeline per tick** (integer only): (1) ADPCM 16-byte blocks — byte0 shift(s>12→9)/filter
 f; byte1 flags (bit0 loop-end → jump repeat, set ENDX, +bit1=0 → release env=0; bit2 loop-start →
 repeat=current); `t = sext4(nib) << (12−s); sample = clamp16(t + ((old*F0[f] + older*F1[f] + 32)
@@ -487,7 +500,14 @@ config knob `dmaPacing=cycles-per-word` reuses the same completion path for DMA-
 Three counters at 0x1F801100+N*0x10: value (R/W), mode (R/W; write resets value + sets bit10),
 target. Mode: 0 sync enable, 1–2 sync mode, 3 reset@target, 4 IRQ@target, 5 IRQ@0xFFFF, 6 repeat,
 7 toggle-vs-pulse (bit10), 8–9 source, 10 IRQ-request (inverted, R), 11/12 reached target/overflow
-(read-reset). Sources: T0 sysclk/dotclock (exact rational 11/(7·div)); T1 sysclk/hblank;
+(read-reset). Sources: T0 sysclk/dotclock, T1 sysclk/hblank — the dot clock is the **same rational
+the beam uses**, `videoNumerator/VIDEO_DEN` per region (715909/451584 NTSC, 709379/451584 PAL),
+divided by {10,8,7,5,4} for the 256/320/368/512/640 modes. Not the rounder 11/7 that appears in
+some tables: two counters derived from different ratios drift apart against each other, which is
+worse than either being slightly wrong. Implemented by folding whole periods (`VIDEO_DEN · div`
+cycles is exactly `numerator` dots, one line's cycles is exactly one hblank) out of the elapsed
+count with no remainder, then converting the residue with the numerator split as `hi·1024 + lo`
+so no intermediate reaches 2^31. T1 sysclk/hblank;
 T2 sysclk / sysclk÷8. Sync modes T0/T1: pause-in-blank / reset-at-blank / reset+pause-outside /
 pause-until-first; T2: 0/3 stop, 1/2 free-run. **No per-tick stepping**: `{anchorCycle,
 anchorValue, fracRem}` per counter; reads compute closed-form; target/overflow solved exactly and

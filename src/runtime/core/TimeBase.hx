@@ -60,6 +60,20 @@ class TimeBase {
 	**/
 	public static function cyclesPerLine():Int return perLine;
 
+	/**
+		The video clock as an exact ratio of the CPU clock: `videoNumerator / VIDEO_DEN`.
+
+		Exposed because the dotclock counter needs the same ratio the scanline geometry is built
+		from. A second, rounder figure for the GPU clock is in circulation (11/7, from the nominal
+		53.2 MHz), and using it here while the beam used this one would make two counters that are
+		each individually plausible and disagree with each other by a part in three hundred — a
+		game that times a fade against the dotclock and a wipe against the beam would drift them
+		apart over a few seconds.
+	**/
+	public static function videoNumerator():Int return pal ? PAL_NUM : NTSC_NUM;
+
+	public static inline var VIDEO_DEN = DEN;
+
 	/** CPU cycles in one whole frame. */
 	public static function cyclesPerFrame():Int return perFrame;
 

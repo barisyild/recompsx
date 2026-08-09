@@ -671,6 +671,20 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-08-09 [opus] The `unimplemented:` list is down to one line. Memory-control registers
+  (1F801000-1020, RAM_SIZE, cache control) stored with the BIOS's reset values — bus timing is
+  not modelled, but a register a game writes and reads back must answer. Every SPU register that
+  was reporting itself as "reverb, not yet" now stores and returns: reverb output volume, the CD
+  and external *input* volumes (which were never reverb at all), the 32-word reverb block, and
+  the current-volume registers, which without sweeps are the set volume. Timers 0 and 1 count
+  real dot clocks and scanlines: whole periods fold out exactly — `VIDEO_DEN * divider` cycles is
+  exactly `numerator` dots — and the residue converts with the numerator split so nothing passes
+  2^31. `A0(ABh) _card_info` answers for an empty slot by posting the timeout event, which
+  **fired the kernel's callback path for the first time since it was written** (`delivered
+  590/6cb`) and exposed eight more functions nothing calls statically. Left: `B0(51h)
+  Krom2RawAdd`, which needs a font of our own — it is why the anti-piracy screen draws its circle
+  and none of its words.
+
 2026-08-09 [opus] GTE, first half: `shim.I64` (the 44-bit accumulator ADR-0004 specified and
   nobody had written), the whole register file with its side effects — SXY FIFO push on the mirror
   write, IRGB/ORGB, LZCS/LZCR, H's sign-extend-on-read bug, FLAG's computed bit 31 — the UNR

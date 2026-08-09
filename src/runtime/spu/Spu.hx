@@ -144,6 +144,9 @@ class Spu {
 		ram = RawMem.alloc(RAM_BYTES);
 		out = RawMem.alloc(OUT_PAIRS * 4);
 
+		mixRegs = [for (_ in 0...MIX_COUNT) 0];
+		reverbRegs = [for (_ in 0...REVERB_COUNT) 0];
+
 		volL = [for (_ in 0...VOICES) 0];
 		volR = [for (_ in 0...VOICES) 0];
 		pitch = [for (_ in 0...VOICES) 0];
@@ -209,7 +212,67 @@ class Spu {
 		else if (p == REG_CONTROL) return control;
 		else if (p == REG_TRANSFER_CTRL) return transferControl;
 		else if (p == REG_STATUS) return status();
+		else if (p == REG_CUR_VOL_L) return mainVolL;
+		else if (p == REG_CUR_VOL_R) return mainVolR;
+		else if (isMixReg(p)) return mixRegs[(p - MIX_BASE) >> 1];
+		else if (isReverbReg(p)) return reverbRegs[(p - REVERB_BASE_REG) >> 1];
+		else if (isVoiceCurrentVol(p)) return voiceCurrentVol(p);
 		else return quietRead(p);
+	}
+
+	// ---- the registers the mixer does not read yet ------------------------------------------------
+	//
+	// Reverb output volume, CD input volume, external input volume, and the thirty-two words that
+	// configure the reverb itself. Stored and handed back, exactly as written.
+	//
+	// Storing them is not the same as implementing reverb, and the difference is worth being clear
+	// about: none of these change a sample yet. What they change is what a game *sees*. libspu
+	// writes a reverb preset as a block and then reads parts of it back — `SpuGetReverbDepth` is a
+	// read — and a register file that answers zero to a game that just wrote to it is a machine
+	// that does not exist. The warnings these replaced were also misleading: half of these
+	// addresses are not reverb at all, they are the CD and external audio inputs.
+	//
+	// The two "current main volume" registers are the same idea with a real answer available:
+	// there are no volume sweeps in this SPU, so the current volume *is* the set volume.
+
+	static inline var REG_CUR_VOL_L = 0x1F801DB8;
+	static inline var REG_CUR_VOL_R = 0x1F801DBA;
+
+	/**
+		1D84..1DB6: reverb output volume, the CD input volume, the external input volume.
+
+		Covered as one span rather than three, because the named registers that sit between them —
+		KON, KOFF, PMON, NON, EON, ENDX and the addresses — are matched earlier in the chain and
+		never reach here. Twenty-six halfwords, of which six are real and the rest unreachable.
+	**/
+	static inline var MIX_BASE = 0x1F801D84;
+	static inline var MIX_COUNT = 26;
+
+	/** 1DC0..1DFF: the reverb configuration block. */
+	static inline var REVERB_BASE_REG = 0x1F801DC0;
+	static inline var REVERB_COUNT = 32;
+
+	static var mixRegs:Array<Int>;
+	static var reverbRegs:Array<Int>;
+
+	static inline function isMixReg(p:Int):Bool
+		return p >= MIX_BASE && p < MIX_BASE + MIX_COUNT * 2;
+
+	static inline function isReverbReg(p:Int):Bool
+		return p >= REVERB_BASE_REG && p < REVERB_BASE_REG + REVERB_COUNT * 2;
+
+	/** 1E00..1E7F — each voice's current volume, which without sweeps is its envelope level. */
+	static inline function isVoiceCurrentVol(p:Int):Bool
+		return p >= 0x1F801E00 && p < 0x1F801E80;
+
+	static function voiceCurrentVol(p:Int):Int {
+		final v = (p - 0x1F801E00) >> 2;
+		if (v < 0 || v >= VOICES) return 0;
+		else {}
+		final level = envLevel[v];
+		// The left word of the pair, then the right; both are the same here because a voice's
+		// two volumes are applied at mix time rather than tracked separately.
+		return ((level * volumeOf((p & 2) == 0 ? volL[v] : volR[v])) >> 15) & 0xFFFF;
 	}
 
 	public static function write16(p:Int, v:Int):Void {
@@ -237,6 +300,12 @@ class Spu {
 		else if (p == REG_FIFO) pushHalfword(w);
 		else if (p == REG_CONTROL) control = w;
 		else if (p == REG_TRANSFER_CTRL) transferControl = w;
+		else if (isMixReg(p)) mixRegs[(p - MIX_BASE) >> 1] = w;
+		else if (isReverbReg(p)) reverbRegs[(p - REVERB_BASE_REG) >> 1] = w;
+		// The current-volume registers are read-only on hardware; a write is not an error, it is
+		// simply ignored, and saying so once would be noise.
+		else if (p == REG_CUR_VOL_L || p == REG_CUR_VOL_R) {}
+		else if (isVoiceCurrentVol(p)) {}
 		else quietWrite(p);
 	}
 
@@ -729,7 +798,7 @@ class Spu {
 	static function quietRead(p:Int):Int {
 		final key = 0x12000000 | (p & 0xFFFF);
 		if (!Runtime.alreadyReported(key)) {
-			Runtime.reportOnce(key, "read from SPU register " + hex(p) + " — reverb, not yet");
+			Runtime.reportOnce(key, "read from SPU register " + hex(p) + " — no such register here");
 		} else {}
 		return 0;
 	}
@@ -737,7 +806,7 @@ class Spu {
 	static function quietWrite(p:Int):Void {
 		final key = 0x13000000 | (p & 0xFFFF);
 		if (!Runtime.alreadyReported(key)) {
-			Runtime.reportOnce(key, "write to SPU register " + hex(p) + " — reverb, not yet");
+			Runtime.reportOnce(key, "write to SPU register " + hex(p) + " — no such register here");
 		} else {}
 	}
 

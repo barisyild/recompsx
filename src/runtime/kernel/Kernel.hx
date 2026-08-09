@@ -76,9 +76,34 @@ class Kernel {
 		else if (fn == 0x55 || fn == 0x70) ctx.v0 = buInit();
 		else if (fn == 0x56 || fn == 0x72) ctx.v0 = removeCdDevice();
 		else if (fn == 0x40 || fn == 0x4F || fn == 0x50 || fn == 0x53) systemError(ctx, 0xA0, fn);
+		else if (fn == 0xAB) ctx.v0 = cardInfo(ctx);
 		else if (returnsZero(fn)) ctx.v0 = 0;
 		else reportCall(ctx, 0xA0, fn);
 	}
+
+	/**
+		`_card_info(port)` — is there a card in that slot, and is it readable?
+
+		Asynchronous on hardware: the call queues a query and returns immediately, and the answer
+		arrives later as an event on the card classes — done, error, or timed out. A game does not
+		wait on the return value; it waits on the event, which is why answering only the call and
+		never delivering anything leaves a game waiting forever for something it was told to
+		expect.
+
+		Our port is empty by construction (`sio.Sio0` models a machine with nothing plugged in), so
+		the answer is a timeout — the same one a real machine gives for a slot with no card in it.
+		Both classes get it, because a game may listen on either and Crash Bash opened all four
+		specs on both.
+	**/
+	static function cardInfo(ctx:CpuState):Int {
+		noteOnce(0xA00AB, "A0(ABh) _card_info — no card in the slot, so the query times out");
+		KEvents.post(KEvents.CLASS_BU, SPEC_TIMEOUT);
+		KEvents.post(KEvents.CLASS_CARD, SPEC_TIMEOUT);
+		return 1;
+	}
+
+	/** `EvSpTIMOUT`, the spec a card query reports when the slot answers nothing. */
+	static inline var SPEC_TIMEOUT = 0x0100;
 
 	// ---- B0 ------------------------------------------------------------------------------------
 

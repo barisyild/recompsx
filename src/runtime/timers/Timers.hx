@@ -1,6 +1,7 @@
 package timers;
 
 import core.Runtime;
+import core.TimeBase;
 import shim.IntMath;
 
 /**
@@ -12,11 +13,11 @@ import shim.IntMath;
 	a timeout that never expires, and the pad probe that should conclude "no controller" in
 	microseconds spins forever instead.
 
-	Implemented: free-running value reads for all three, the divide-by-8 source on timer 2, reset
-	on mode write, reset-at-target (mode bit 3), and the reached-target/overflow flags. Reported
-	and left honest-zero: dotclock and hblank sources (they need the video clock chain), and timer
-	IRQs (they need someone to wait on them). Register map from psx-spx "Timers", as recorded in
-	docs/specs/runtime.md §7.10.
+	Implemented: free-running value reads for all three, every source — system clock, system clock
+	over eight, the dot clock and the horizontal blank — reset on mode write, reset-at-target (mode
+	bit 3), and the reached-target/overflow flags. Still missing and still reported: timer IRQs,
+	and the sync modes that gate a counter on the blanking intervals. Register map from psx-spx
+	"Timers", as recorded in docs/specs/runtime.md §10.
 **/
 class Timers {
 	static var anchor:Array<Int>;
@@ -31,7 +32,6 @@ class Timers {
 		mode = [0, 0, 0];
 		target = [0, 0, 0];
 		reached = [0, 0, 0];
-		sourceReported = [false, false, false];
 	}
 
 	public static function read(addr:Int, cycles:Int):Int {
@@ -76,8 +76,9 @@ class Timers {
 		// A logical shift is the whole fix: it treats the difference as the unsigned quantity it
 		// is, and because 2^32 divides exactly by both dividers and by the 65536 wrap, the answer
 		// stays congruent across as many wraps as the machine cares to do.
+		fold(t, cycles);
 		final elapsed = (cycles - anchor[t]) | 0;
-		final ticks = (base[t] + (elapsed >>> dividerShift(t))) | 0;
+		final ticks = (base[t] + ticksIn(t, elapsed)) | 0;
 		final wrapAt = wrapPoint(t);
 		if (ticks >= wrapAt || ticks < 0) markWrapped(t);
 		else {}
@@ -124,8 +125,120 @@ class Timers {
 	static function dividerShift(t:Int):Int {
 		final src = (mode[t] >> 8) & 3;
 		if (t == 2) return src >= 2 ? 3 : 0;               // sysclk/8 or sysclk
-		else if (src == 1 || src == 3) return unusualSource(t);
 		else return 0;
+	}
+
+	// ---- the video sources --------------------------------------------------------------------
+	//
+	// Timer 0 can count dots and timer 1 can count scanlines, and neither divider is a power of
+	// two — the dot clock is the CPU clock times 715909/451584 (NTSC) divided by 4, 5, 7, 8 or 10
+	// depending on how wide the display is. Both used to fall back to the system clock and say so,
+	// which made a game timing against them run several times too fast.
+	//
+	// Two steps, because neither the product nor the elapsed count fits in an Int on its own.
+	// First **fold**: in exactly `VIDEO_DEN * divider` cycles exactly `numerator` dots pass, and in
+	// exactly one line's cycles exactly one hblank passes, so whole periods are moved out of the
+	// elapsed count and into the counter's base with no remainder and no drift. What is left is
+	// less than one period. Then the residue is converted with the numerator split into
+	// `high * 1024 + low`, which keeps every intermediate under 2^31 — the same shape `TimeBase`
+	// uses for its own frame arithmetic, and for the same reason.
+
+	static inline function isDotClock(t:Int):Bool {
+		return t == 0 && ((mode[t] >> 8) & 1) != 0;
+	}
+
+	static inline function isHblank(t:Int):Bool {
+		return t == 1 && ((mode[t] >> 8) & 1) != 0;
+	}
+
+	/** How many CPU cycles a whole period of the source takes, and how many ticks that is. */
+	static function periodCycles(t:Int):Int {
+		if (isDotClock(t)) return IntMath.mul(TimeBase.VIDEO_DEN, dotDivider());
+		else if (isHblank(t)) return TimeBase.cyclesPerLine();
+		else return 0;
+	}
+
+	static function periodTicks(t:Int):Int {
+		if (isDotClock(t)) return TimeBase.videoNumerator();
+		else return 1;
+	}
+
+	/**
+		The dot clock's divider, from the display width the GPU is set to.
+
+		psx-spx: 256, 320, 512, 640 and 368-pixel modes divide the video clock by 10, 8, 5, 4 and
+		7. The bits are the ones `gpu.Scanout` reads to pick a width, which is why the rule is
+		written the same way in both places — they are one decision seen from two sides.
+	**/
+	static function dotDivider():Int {
+		final m = gpu.Gpu.displayModeBits();
+		if ((m & 0x40) != 0) return 7;
+		else if ((m & 3) == 0) return 10;
+		else if ((m & 3) == 1) return 8;
+		else if ((m & 3) == 2) return 5;
+		else return 4;
+	}
+
+	/** Moves whole periods out of the elapsed cycles and into the counter, exactly. */
+	static function fold(t:Int, cycles:Int):Void {
+		final period = periodCycles(t);
+		if (period <= 0) return;
+		else {}
+		final elapsed = (cycles - anchor[t]) | 0;
+		final n = unsignedDiv(elapsed, period);
+		if (n <= 0) return;
+		else {}
+		final wrapAt = wrapPoint(t);
+		base[t] = IntMath.mod((base[t] + IntMath.mul(n, periodTicks(t))) | 0, wrapAt);
+		anchor[t] = (anchor[t] + IntMath.mul(n, period)) | 0;
+	}
+
+	/** Ticks in a *folded* elapsed count — less than one period, so the arithmetic is small. */
+	static function ticksIn(t:Int, elapsed:Int):Int {
+		if (isDotClock(t)) return dotsIn(elapsed);
+		else if (isHblank(t)) return IntMath.div(elapsed, TimeBase.cyclesPerLine());
+		else return elapsed >>> dividerShift(t);
+	}
+
+	static function dotsIn(elapsed:Int):Int {
+		return IntMath.div(videoClocksIn(elapsed), dotDivider());
+	}
+
+	/**
+		`elapsed * numerator / VIDEO_DEN`, without ever forming the product.
+
+		The numerator splits into `high * 1024 + low` so that no intermediate passes 2^31: the
+		largest is the low part's `remainder * 1024`, which is under 2^29 for any residue this is
+		called with.
+	**/
+	static function videoClocksIn(elapsed:Int):Int {
+		final num = TimeBase.videoNumerator();
+		final den = TimeBase.VIDEO_DEN;
+		final hi = num >> 10;
+		final lo = num & 0x3FF;
+		final q = IntMath.div(elapsed, den);
+		final r = IntMath.mod(elapsed, den);
+		final b = IntMath.mul(r, hi);
+		final b1 = IntMath.div(b, den);
+		final b2 = IntMath.mod(b, den);
+		final low = (IntMath.mul(b2, 1024) + IntMath.mul(r, lo)) | 0;
+		return (IntMath.mul(q, num) + IntMath.mul(b1, 1024) + IntMath.div(low, den)) | 0;
+	}
+
+	/**
+		`v / m` reading `v` as unsigned, for the same reason `unsignedMod` exists.
+
+		Halve, divide, and put the halving back: `u = 2*(u>>>1) + (u&1)`, so the quotient is twice
+		the halved quotient plus whatever the doubled remainder contributes. Every intermediate
+		stays inside 32 bits because `m` is at most a few million.
+	**/
+	static function unsignedDiv(v:Int, m:Int):Int {
+		if (v >= 0) return IntMath.div(v, m);
+		else {}
+		final half = v >>> 1;
+		final q = IntMath.div(half, m);
+		final r = (half - IntMath.mul(q, m)) | 0;
+		return (IntMath.mul(q, 2) + IntMath.div((IntMath.mul(r, 2) + (v & 1)) | 0, m)) | 0;
 	}
 
 	/**
@@ -150,19 +263,7 @@ class Timers {
 		helper is only cheap where the *call* is rare, and on a hot path the guard has to be
 		cheaper than the thing it guards.
 	**/
-	static var sourceReported:Array<Bool>;
 
-	static function unusualSource(t:Int):Int {
-		if (!sourceReported[t]) reportSource(t);
-		else {}
-		return 0;
-	}
-
-	static function reportSource(t:Int):Void {
-		sourceReported[t] = true;
-		Runtime.reportOnce(0x68000000 | t, "timer " + t
-			+ " uses a dotclock/hblank source — running at sysclk until the video chain exists");
-	}
 
 	static function readMode(t:Int, cycles:Int):Int {
 		value(t, cycles);   // fold any pending wrap into the flags first
