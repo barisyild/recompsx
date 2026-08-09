@@ -608,6 +608,9 @@ class Kernel {
 			// Which code was last at a loop header. Every pump point records the return address,
 			// so this names the function the game is spending its time inside — the one number
 			// that turns "nothing is happening" into an address to disassemble.
+			+ " | spu " + spu.Spu.written + "hw/" + spu.Spu.keyedOn + "kon/"
+			+ spu.Spu.samplesOut + "smp/" + spu.Spu.nonSilent + "loud "
+			+ spu.Spu.settings()
 			+ " | in ra=" + hex8(mem.Memory.raHint));
 	}
 

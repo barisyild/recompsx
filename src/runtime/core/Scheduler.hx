@@ -145,6 +145,7 @@ class Scheduler {
 		if (slot == VBLANK_START) onVblankStart(ctx);
 		else if (slot == VBLANK_END) onVblankEnd(ctx);
 		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
+		else if (slot == SPU_BATCH) spu.Spu.onBatch(ctx.cycles);
 		else unimplemented(ctx, slot);
 	}
 

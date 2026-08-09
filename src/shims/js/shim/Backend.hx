@@ -80,7 +80,36 @@ class Backend {
 			host(), vram, sx, sy, sw, sh, flags);
 	}
 
-	public static function audioPush(frames:RawBuf, frameCount:Int):Void {}
+	/**
+		Stereo 16-bit pairs, 44100 a second, as the SPU produced them.
+
+		Under a browser they go to the page, which owns the only clock that matters for sound.
+		Under Node there is nobody listening, so they are appended to `audio.pcm` — a raw file is
+		the honest artifact for a headless target: it can be measured, converted and listened to,
+		and it does not require this shim to have an opinion about playback.
+
+		Batched before touching the disc. A push arrives every 128 samples, which is about three
+		milliseconds of sound and far too often to be a filesystem call.
+	**/
+	public static function audioPush(frames:RawBuf, frameCount:Int):Void {
+		if (hosted()) {
+			js.Syntax.code("{0}.audioPush({1}.u8.slice(0, {2} * 4))", host(), frames, frameCount);
+			return;
+		} else {}
+		js.Syntax.code("(function(u8, n){
+			if (typeof require === 'undefined') return;
+			globalThis.__recompsxPcm = globalThis.__recompsxPcm || [];
+			var q = globalThis.__recompsxPcm;
+			q.push(Buffer.from(u8.slice(0, n * 4)));
+			var total = 0;
+			for (var i = 0; i < q.length; i++) total += q[i].length;
+			if (total >= 1 << 20) {
+				require('fs').appendFileSync('audio.pcm', Buffer.concat(q));
+				q.length = 0;
+			}
+		})({0}.u8, {1})", frames, frameCount);
+	}
+
 	public static function audioBuffered():Int return 0;
 
 	public static function inputPoll():Void {}
