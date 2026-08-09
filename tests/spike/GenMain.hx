@@ -14,6 +14,9 @@ class GenMain {
 		final ctx = new CpuState();
 		Runtime.bindDispatch(FnTable.call);
 		Runtime.boot(ctx);
+		// Which windows this game loads code into. After boot, because it fills in state the
+		// runtime clears on the way up.
+		Overlays.register();
 
 		// The image the recompiler was built from. Without it every load returns zero, so the
 		// game runs on empty memory and its kernel arguments are meaningless.

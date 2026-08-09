@@ -70,6 +70,7 @@ class Runtime {
 		timers.Timers.init();
 		dma.Dma.init();
 		kernel.Kernel.init();
+		kernel.OverlayMgr.init();
 		Scheduler.init(ctx);
 		// After the scheduler, because the mixer's first deadline is one of its slots.
 		spu.Spu.start(ctx.cycles);
@@ -109,11 +110,17 @@ class Runtime {
 
 	public static function call(ctx:CpuState, addr:Int):Void {
 		final d = dispatcher;
-		if (d != null && d(addr, ctx)) {
-			// Dispatched.
-		} else {
-			notInProgram(ctx, addr);
-		}
+		if (d != null && d(addr, ctx)) return;
+		else {}
+		// Nothing answered. If this address is inside a window the game loads code into, what is
+		// sitting there may have changed without anything telling us — a loader that writes
+		// through the CPU rather than a DMA channel leaves no trace to watch. Looking once is
+		// cheap and turns an unrecognised loader into a working program.
+		if (kernel.OverlayMgr.windowOf(addr) >= 0 && kernel.OverlayMgr.rescan() > 0
+				&& d != null && d(addr, ctx)) {
+			return;
+		} else {}
+		notInProgram(ctx, addr);
 	}
 
 	/**
@@ -140,6 +147,10 @@ class Runtime {
 		// The address-less form hid N distinct misses behind one identical line — and an
 		// unresolved call is a black hole: it does nothing, silently, so whatever side effects
 		// the callee had (installing a handler, unmasking a line) simply never happen.
+		// An address the disc wrote to is a different failure in kind: not a function the analysis
+		// missed, but code the executable never held. `OverlayMgr` knows which of those this is
+		// and answers with the window — which is what a person needs to write the config.
+		else if (kernel.OverlayMgr.reportMiss(addr, ctx.ra)) {}
 		else reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra) + ")");
 	}
 

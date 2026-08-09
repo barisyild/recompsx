@@ -392,7 +392,56 @@ sound had finished. Nothing here was a missing feature that announced itself.
         the property that made this safe to land ahead of any real overlay. Nothing dispatches
         into `Overlays` yet — that is S3, and until then the file is written and unread.
 
-  - [ ] S3 runtime activation (`OverlayMgr`)
+  - [x] **S3 runtime activation** — accept: a conformance test drives the whole state machine and
+        both targets agree ✔ 2026-08-09
+
+        `kernel.OverlayMgr` decides which code is in a window. The runtime installs nothing: the
+        game loads its own overlays through hardware that is already emulated, so RAM already
+        holds the right bytes and only the address-to-code mapping has to follow. Three signals:
+        a load into a window **evicts** (what was compiled for those addresses is gone, even if
+        what replaced it is artwork — the half a fingerprint cannot see); `FlushCache` **rescans**
+        (a real machine cannot see newly written code until then, so every loader ends there,
+        which makes it the one complete checkpoint); and a dispatch that misses inside a window
+        rescans **once** before reporting.
+
+        Recognition is FNV-1a over the window's first words against the value the tool computed.
+        The same seven lines exist in three places — `recomp.codegen.Universe`,
+        `kernel.OverlayMgr` and the test — deliberately, because a fingerprint that differs by one
+        bit between targets activates an overlay on one and not the other.
+
+        Evidence:
+
+            $ ./scripts/conformance.sh Overlay
+              ok   Overlay    7564ec5d   values=43
+            conformance: all targets agree
+
+            $ ./scripts/test.sh
+            conformance: 7 test(s) x 2 targets — all agree
+            js digest = c++ digest = 329de455
+            check.sh: clean
+
+        The test found one thing worth recording: when two windows overlap and the bytes of the
+        second are overwritten, the *first* is recognised again and takes back the shared
+        addresses. That is correct — at any moment exactly one thing is in memory, and "whichever
+        one's bytes are actually there" is the only answer that can be right — and it was the
+        assertion that was wrong, not the code.
+
+        **Two deviations from the plan, both deliberate.** There is no `--record-overlays` flag
+        and no `overlays.suggested.json`: instead a miss reports the span the disc was read into
+        that covers it, with the numbers to paste. Same information, no new flag, no new file, and
+        it is the form that actually got used when this problem was first met. And load *matching*
+        by disc key is not implemented — a load only evicts, and the fingerprint at `FlushCache`
+        is the sole authority on identity. It is complete on its own, and the LBA plumbing would
+        have bought a second, weaker answer to a question already settled.
+
+        On the real game, with no overlays configured yet, the diagnostic now reads:
+
+            no function at 0x80092bdc (ra=0x80010478) — but the disc was read into
+            0x80078c90..0x800d7490, which covers it. That is an overlay: code the executable
+            never held, so the tool never saw it. Add it to games/<id>/game.json with
+            loadAddr 2147978384 length 387072 and entryHint 2148084700.
+
+  - [ ] S4 Crash Bash end-to-end + ADR-0006
   - [ ] S4 Crash Bash end-to-end + ADR-0006
 
 ## [M0-VERIFY] checklist
@@ -521,6 +570,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-08-09 [opus] Overlay S3: `kernel.OverlayMgr` decides which code is in a window. The runtime
+  installs nothing — the game loads its own overlays through hardware already emulated, so only
+  the mapping has to follow. A load evicts; `FlushCache` rescans and identifies by FNV-1a over the
+  window's first words; a miss inside a window rescans once. A miss *outside* every window now
+  quotes the span the disc was read into, with the numbers to paste into game.json, which is how a
+  new game's config gets written. New conformance test `Overlay` — both targets agree at
+  `7564ec5d`; 7 tests x 2 targets. Next: S4, Crash Bash end-to-end and ADR-0006.
 
 2026-08-09 [opus] Overlay S2: universes. Each overlay is the executable with its bytes over its
   window, analysed on its own — scoped so the base is analysed once, lenient inside the window
