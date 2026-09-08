@@ -79,7 +79,7 @@ class TableFinder {
 	**/
 	public function analyze(jrAddr:Int, codeStart:Int, codeEnd:Int):JumpKind {
 		final jr = Decoder.decode(jrAddr, image.readWord(jrAddr));
-		if (jr.op != Op.JR || jr.rs == 31) return JumpKind.Unresolved;
+		if (!jr.isRegisterJump || jr.rs == 31) return JumpKind.Unresolved;
 
 		final regs = propagate(jrAddr);
 

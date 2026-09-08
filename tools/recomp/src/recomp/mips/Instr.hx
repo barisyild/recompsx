@@ -49,6 +49,10 @@ class Instr {
 	public var isNop(get, never):Bool;
 	function get_isNop():Bool return raw == 0;
 
+	/** JALR with rd=$zero discards the link and transfers exactly like JR. */
+	public var isRegisterJump(get, never):Bool;
+	function get_isRegisterJump():Bool return op == Op.JR || (op == Op.JALR && rd == 0);
+
 	/** The MIPS ABI names, indexed by register number. These appear in every listing and every
 	    diagnostic; the numeric form appears nowhere a person is expected to read. */
 	public static final REG_NAMES = [

@@ -1,0 +1,36 @@
+diff --git a/src/reflaxe/preprocessors/implementations/RemoveReassignedVariableDeclarationsImpl.hx b/src/reflaxe/preprocessors/implementations/RemoveReassignedVariableDeclarationsImpl.hx
+index 6543916..cd30f58 100644
+--- a/src/reflaxe/preprocessors/implementations/RemoveReassignedVariableDeclarationsImpl.hx
++++ b/src/reflaxe/preprocessors/implementations/RemoveReassignedVariableDeclarationsImpl.hx
+@@ -42,6 +42,8 @@ class RemoveReassignedVariableDeclarationsImpl {
+ 			final expr = exprList[i++];
+ 			switch(expr.expr) {
+ 				case TVar(tvar, e): {
++					// An initializer can read a previously declared local.
++					if(e != null) removableVars = filterRemovableVars(e, removableVars);
+ 					if(!isModifyingExpr(e)) {
+ 						removableVars.push({ tvar: tvar, index: i - 1 });
+ 					}
+@@ -69,10 +71,15 @@ class RemoveReassignedVariableDeclarationsImpl {
+ 						}
+ 					}
+ 					if(successful) {
++						// This declaration has already moved. Keeping the original candidate would
++						// turn a second write-before-read into another TVar with the same id.
++						removableVars = removableVars.filter(v -> v.tvar.id != tvar.id);
+ 						continue;
+ 					}
+ 				}
+ 				case TBlock(el): {
++					// Reads in a nested block also constrain declarations in this scope.
++					removableVars = filterRemovableVars(expr, removableVars);
+ 					final copyExpr = expr.copy();
+ 					copyExpr.expr = TBlock(process(el));
+ 					result.push(copyExpr);
+@@ -142,4 +149,4 @@ class RemoveReassignedVariableDeclarationsImpl {
+ 	}
+ }
+ 
+-#end
+\ No newline at end of file
++#end

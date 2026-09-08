@@ -7,11 +7,19 @@ is backed up with the rest of the repository and can be reapplied to any checkou
 
 ## Applying
 
-    cd vendor/reflaxe.CPP
-    git checkout -b recompsx-fixes <pinned-upstream-commit>
-    git am ../../vendor/patches/*.patch
+0001 targets `vendor/reflaxe.CPP`; 0002–0005 target `vendor/reflaxe`. Do not apply the whole
+directory to one submodule. Check whether a patch is already present before applying it;
+several earlier fixes are included in the existing pins. Plain diffs (0004/0005) use `git apply`.
 
-Then re-pin the submodule in the parent repository.
+The scalar-register emitter requires 0005; `scripts/setup.sh` applies it idempotently. To apply
+it manually from the repository root, on a checkout missing it:
+
+    git -C vendor/reflaxe apply --check ../patches/0005-reflaxe-reassigned-local-declarations.patch
+    git -C vendor/reflaxe apply ../patches/0005-reflaxe-reassigned-local-declarations.patch
+    ./scripts/conformance.sh Codegen
+
+Keep existing local patches when updating the compiler. No submodule pin change is needed to
+apply a working-tree patch.
 
 ## What is here
 
@@ -24,10 +32,14 @@ Then re-pin the submodule in the parent repository.
 
   Worth offering upstream. See PROGRESS.md upstream defect 1.
 
-## What is not here, and still hurts
-
-Upstream defect 8 — an `if` with no `else` and more than one statement in its body is deleted
-whole — is not fixed. The root cause is somewhere in reflaxe's preprocessor pipeline rather than
-in `compileIf`, which looks correct. `tests/spike/ifbody` holds a minimal reproduction, and
-`scripts/spike.sh` reports if a future upstream version fixes it. Until then the workarounds are
-in AGENTS.md's golden rules.
+- **0002–0004 — side effects, block traversal and continue.** Fix the inverted side-effect
+  predicate, recursive traversal that overflowed on game-sized blocks, and discarded statements
+  preceding `continue`. See PROGRESS.md for the original failures and verification.
+- **0005 — moved local declarations are consumed once.** Constant propagation can leave
+  multiple assignments before a local's first remaining read. The declaration-moving pass kept
+  the old candidate after moving it and converted another assignment into a second declaration
+  with the same variable id. `MarkUnusedVariablesImpl` then threw `Logic error`. Remove the
+  candidate once it moves, and account for reads in initializers and nested blocks before
+  moving anything. `TestCodegen.constantStores`, `loadThenRedefine` and `storeThenRedefine`
+  are synthetic MIPS reproductions;
+  `scripts/conformance.sh Codegen` must build and pass on both targets (ADR-0007).
