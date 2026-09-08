@@ -258,5 +258,26 @@ class TestDiscovery {
 			Assert.equals(Lambda.count(d.functions), 1, "no phantom function is created");
 			Assert.equals(d.functions.get(BASE).calls.length, 1, "but the call site is kept");
 		}
+
+		Assert.group("discovery: jalr zero is a jump, without a call-return block");
+		{
+			final d = discover([0x01000009, NOP, ADDU_V0_ZZ, JR_RA, NOP]);
+			final fn = d.functions.get(BASE);
+			Assert.equals(fn.calls.length, 0, "no link means no call");
+			Assert.equals(fn.unresolvedJumps.length, 1, "target needs JR-style recovery");
+			Assert.isTrue(!fn.blocks.exists(BASE + 8), "no fallthrough after a tail jump");
+			Assert.equals(fn.instructionCount(), 2, "only jump and delay slot are reachable");
+		}
+
+		Assert.group("discovery: jalr zero participates in jump-table recovery");
+		{
+			final d = discover([
+				0x2C820003, 0x10400007, 0x00041080, 0x3C018001, 0x00220821, 0x8C220030,
+				NOP, 0x00400009, NOP, JR_RA, NOP, NOP,
+				BASE + 60, BASE + 68, BASE + 76, JR_RA, NOP, JR_RA, NOP, JR_RA, NOP
+			]);
+			Assert.equals(Lambda.count(d.tables), 1, "non-linking JALR recovers the table");
+			Assert.equals(d.functions.get(BASE).unresolvedJumps.length, 0, "all switch arms resolved");
+		}
 	}
 }

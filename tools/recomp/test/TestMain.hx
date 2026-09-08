@@ -13,6 +13,7 @@ class TestMain {
 		TestDecoder.run();
 		TestDiscovery.run();
 		TestOverlay.run();
+		TestCodegen.run();
 		Sys.exit(Assert.summary());
 	}
 }

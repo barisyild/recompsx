@@ -2,6 +2,55 @@
 
 ## Status snapshot
 
+**2026-09-08: scalar-register and structured code generation is verified (ADR-0007).**
+GPRs become Haxe locals, with publication/reload at calls and due pumps. Linear chains and
+conditional self-loops use native control flow while retaining every block's resume index and
+a single copy of its body. Crash Bash's 1358 functions now contain 916 block dispatchers instead
+of 1212, plus 231 native loops. `gen --no-opt` retains the context-field/dispatcher reference.
+Both modes also correct JALR-zero tail transfers, conditional linked calls, cycle wrapping and
+immediate halt/unwind propagation. The halt correction changes this checkout's 3000-frame game
+digest from `d8ab3d52` to `6bd5e3fd`; optimized/reference JS and optimized C++ agree. This does
+not add load-delay accuracy or overflow exceptions. Spyro 3's 633 functions / 47 switch tables
+also generate and compile to JS (not a full-game execution check).
+
+Acceptance output, 2026-09-08:
+
+    ./scripts/check.sh
+      check.sh: clean
+    ./scripts/test.sh
+      all 194 checks passed
+      conformance: 11 test(s) x 2 targets
+      Codegen    818e2901   values=13907
+      conformance: all targets agree
+      test.sh: both targets agree — 329de455
+    node out/_gen/game.js web/boot.exe web/disc.bin --headless-hash 3000
+    ./out/_gen/build/recompsx web/boot.exe web/disc.bin --headless-hash 3000
+      [info] distinct unimplemented things reached: 0
+      [info] frames=3000 digest=6bd5e3fd
+
+Scalar locals exposed reflaxe's declaration mover producing duplicate declarations and moving
+declarations past reads. Three synthetic MIPS reproductions now pass on both targets; patch
+0005 is exported and applied idempotently by `scripts/setup.sh`, with existing pins preserved.
+
+Measured on macOS 26.5.2 / ARM64, five-run medians after warm-up, alternating modes, no builds
+running during timing. `./scripts/bench-codegen.sh` regenerates and checks both loop variants;
+each reports `result=2120718581 cycles=450000010` on both targets.
+
+| Workload | Target / baseline | Baseline | Optimized | Result |
+|---|---|---:|---:|---|
+| 50M MIPS xorshift iterations | JS / `--no-opt` | 0.6747 s | 0.1603 s | 4.21x |
+| 50M MIPS xorshift iterations | C++ / `--no-opt` | 0.0896 s | 0.0871 s | 1.03x; small |
+| Crash Bash, 3000 frames | JS / corrected `--no-opt` | 4.026 s | 4.036 s | no measurable gain |
+| Crash Bash, 3000 frames | C++ / pre-change build | 3.009 s | 2.839 s | 1.06x in this run |
+
+The original JS game took 4.095 s. The C++ whole-game comparison includes the halt/call fixes;
+it is not an isolated optimization comparison. Do not extrapolate the loop speedup to a game.
+Release/null binary size: 5,495,880 → 5,545,416 bytes (+0.9%). JS size:
+14,594,319 → 15,228,737 bytes (+4.3%; corrected reference 15,045,100). Generated Haxe grows
+6,623,130 → 8,436,743 bytes versus the reference because boundary synchronization is explicit.
+Raw samples and structure counts are in ignored `out/_codegen/{game-benchmark,structure}.json`
+and `out/_codegen_bench/results.json`.
+
 Phase: **M0 complete.** Toolchain pinned, specs committed, walking skeleton running on two
 targets, and cross-target determinism verified — `./scripts/test.sh` builds the JavaScript and
 the reflaxe.CPP builds and asserts their headless digests match (currently `329de455` over 300
@@ -57,6 +106,9 @@ sequence three times a second for as long as it ran. None of these announced its
 found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
+
+Codegen follow-up: profile multi-block hot loops before extending CFG structuring; reduce
+boundary synchronization only with proven liveness and callback/resume tests (ADR-0007).
 
 1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
    and syscall it reaches is handled, and both targets produce identical output across 238 lines.
@@ -655,6 +707,16 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
    plain call — the C++ compiler inlines it anyway, and none of this is a hot path in the sense
    that would justify the risk.
 
+9. **FIXED in our fork: statements before `continue` were deleted.** The block walker cleared
+   its accumulated statements instead of returning them. Patch 0004 and the `bbswitch` spike
+   retain the reduction; the M1.5 section above records the game-sized failure and acceptance.
+10. **FIXED by patch 0005: declaration motion loses reads or duplicates variable ids.**
+    `RemoveReassignedVariableDeclarationsImpl` reused a candidate after moving it and missed
+    reads in initializers/nested blocks. Scalar GPR locals exposed both `Logic error` during
+    Haxe-to-C++ generation and undeclared C++ identifiers. `constantStores`, `loadThenRedefine`
+    and `storeThenRedefine` in `TestCodegen` reproduce the failures; the Codegen conformance
+    test passes on JS and C++ after the fix. Setup applies the exported patch (ADR-0007).
+
 ## Blockers & open questions
 
 - **Why Crash Bash reaches an anti-piracy screen at all is untraced**, and it is the one thing
@@ -676,6 +738,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-08 [codex] Added scalar GPR lowering and structured chains/self-loops (ADR-0007),
+  corrected call/unwind semantics, and exported reproducible reflaxe declaration patch 0005.
+  Gate: 194 tool checks, 11 conformance groups x2; game JS/C++ 3000-frame digest 6bd5e3fd.
+  Loop JS 4.21x; whole-game JS unchanged, native 1.06x measured; next profile multi-block CFGs.
 
 2026-08-09 [opus] The console now says what it is, and has a font. The ROM window at 0x1FC00000
   was not in the memory map at all — every read returned zero — so the region letter games test

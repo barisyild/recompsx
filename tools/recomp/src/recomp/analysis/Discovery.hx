@@ -312,7 +312,7 @@ class Discovery {
 
 				running = false;
 				switch (instr.op) {
-					case JR:
+					case JR | JALR if (instr.isRegisterJump):
 						if (instr.rs == 31) {
 							// A return: control leaves the function.
 						} else if (tables.exists(instr.addr)) {
@@ -404,7 +404,7 @@ class Discovery {
 						block.length++;
 						image.claim(addr + 4, Kind.Code, fn.entry);
 					}
-					block.exits = !instr.op.fallsThrough || instr.op == Op.JR;
+					block.exits = !instr.op.fallsThrough || instr.isRegisterJump;
 					recordSuccessors(block, instr, addr + 8, leaders);
 					break;
 				}
@@ -425,7 +425,7 @@ class Discovery {
 	/** Records where control can go from a block ending in `instr`. */
 	function recordSuccessors(block:Block, instr:Instr, afterSlot:Int, leaders:Map<Int, Bool>):Void {
 		switch (instr.op) {
-			case JR:
+			case JR | JALR if (instr.isRegisterJump):
 				if (instr.rs != 31 && tables.exists(instr.addr)) {
 					for (t in tables.get(instr.addr).targets) {
 						if (leaders.exists(t)) block.successors.push(t);

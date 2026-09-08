@@ -38,7 +38,7 @@ class Program {
 	/** Function bodies a second universe did not need to emit because the first had them. */
 	public var deduplicated(default, null) = 0;
 
-	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0) {
+	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0, optimize:Bool = true) {
 		this.universes = universes;
 		this.exe = exe;
 
@@ -55,7 +55,7 @@ class Program {
 		}
 
 		for (u in universes) {
-			u.emitter = new Emitter(u.image, u.discovery);
+			u.emitter = new Emitter(u.image, u.discovery, optimize);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
 		}
 		checkFingerprintsDistinct();

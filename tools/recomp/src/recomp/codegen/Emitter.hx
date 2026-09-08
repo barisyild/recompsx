@@ -12,11 +12,14 @@ import recomp.mips.Op;
 /**
 	Turns analysed MIPS into Haxe.
 
-	The shape of the output is set by two facts about the target language. Haxe has no `goto`, so
-	a function's control flow becomes a state machine — `while (true) switch (bb)` with each basic
-	block a case that assigns the next block and continues. And Haxe's `Int` does not wrap on
-	overflow everywhere (JavaScript's does not), so every arithmetic result that can overflow is
-	written `| 0`, which JS needs and C++ folds away (ADR-0004).
+	Registers become scalar Haxe locals, giving the Haxe analyzer ordinary values to propagate
+	and eliminate. CpuState is synchronised at calls, returns and scheduler safe points. Linear
+	CFGs become sequences, single-block loops become native loops, and remaining control flow
+	uses `while (true) switch (bb)`. Every guest block stays addressable without duplicating its
+	body. See ADR-0007 for the state/entry contract.
+
+	Every arithmetic result that can overflow is written `| 0`, which JS needs and C++ folds
+	away (ADR-0004). Eliminated instructions still contribute to the guest cycle count.
 
 	The subtle part is the delay slot. On MIPS the instruction after a branch executes *before*
 	the branch takes effect, so it cannot simply be emitted in program order. The rule here is to
@@ -24,12 +27,16 @@ import recomp.mips.Op;
 	transfer — which preserves the semantics even when the slot writes a register the condition
 	read. For a `jal` the same ordering applies to the link register.
 
-	Functions with a single straight-line block skip the state machine and emit a flat body. Most
-	leaf functions are that shape, and it costs nothing to read better.
+	`optimize=false` keeps context fields and the block dispatcher as a differential reference.
 **/
 class Emitter {
 	final image:Image;
 	final discovery:Discovery;
+	final optimize:Bool;
+	var registers:Null<RegisterPlan>;
+	// A native loop consumes transfers to this block instead of re-entering the dispatcher.
+	var nativeLoop:Null<Int>;
+	var linearNext:Null<Int>;
 
 	/**
 		The class a call to this address should go to, or null to dispatch it by address.
@@ -45,13 +52,14 @@ class Emitter {
 	**/
 	public var staticTargetOf:Int -> String = _ -> null;
 
-	public function new(image:Image, discovery:Discovery) {
+	public function new(image:Image, discovery:Discovery, optimize:Bool = true) {
 		this.image = image;
 		this.discovery = discovery;
+		this.optimize = optimize;
 	}
 
 	/**
-		A function's blocks in the order the switch cases are emitted, so case `i` is `blockOrder(fn)[i]`.
+		Stable block entry indices, shared by the dispatch tables and both output shapes.
 
 		Public because the dispatch table needs the same numbering: an address that lands *inside*
 		a function has to become a case index, and the only way for that to be right is for the
@@ -67,6 +75,9 @@ class Emitter {
 	public function emitFunction(fn:Func):String {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
+		registers = optimize ? new RegisterPlan(fn, image) : null;
+		nativeLoop = null;
+		linearNext = null;
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.
@@ -86,22 +97,42 @@ class Emitter {
 		buf.add('\t**/\n');
 		buf.add('\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n');
 		buf.add(PUMP_ENTRY);
+		if (registers != null) registers.declare(buf, '\t\t');
 
-		final flat = blockAddrs.length == 1;
-		if (!flat) {
+		// Even a one-block CFG needs a loop if it has an edge to itself.
+		final flat = blockAddrs.length == 1 && fn.blocks.get(blockAddrs[0]).successors.length == 0;
+		final linear = optimize && linearChain(fn, blockAddrs);
+		final dispatch = !flat && !linear;
+		if (linear && !flat) buf.add('\t\tif (entry < 0 || entry >= ${blockAddrs.length}) return;\n');
+		if (dispatch) {
 			buf.add('\t\tvar bb = entry;\n');
 			buf.add('\t\twhile (true) switch (bb) {\n');
 		}
 
 		for (i in 0...blockAddrs.length) {
 			final addr = blockAddrs[i];
-			final indent = flat ? "\t\t" : "\t\t\t\t";
-			if (!flat) buf.add('\t\t\tcase $i: // ${Vaddr.hex(addr)}\n');
-			if (pumpAt.exists(addr)) buf.add(indent + PUMP_LINE + "\n");
-			emitBlock(buf, fn, addr, indexOf, indent);
+			final guarded = linear && i + 1 < blockAddrs.length;
+			final indent = dispatch ? "\t\t\t\t" : (guarded ? "\t\t\t" : "\t\t");
+			linearNext = guarded ? blockAddrs[i + 1] : null;
+			if (dispatch) buf.add('\t\t\tcase $i: // ${Vaddr.hex(addr)}\n');
+			else if (guarded) buf.add('\t\tif (entry <= $i) { // ${Vaddr.hex(addr)}\n');
+			final loopExit = optimize ? selfLoopExit(fn, addr) : null;
+			if (loopExit != null) {
+				nativeLoop = addr;
+				buf.add(indent + 'while (true) {\n');
+				emitPump(buf, indent + '\t');
+				emitBlock(buf, fn, addr, indexOf, indent + '\t');
+				buf.add(indent + '}\n');
+				nativeLoop = null;
+				emitGoto(buf, indent, loopExit, indexOf, addr);
+			} else {
+				if (pumpAt.exists(addr)) emitPump(buf, indent);
+				emitBlock(buf, fn, addr, indexOf, indent);
+			}
+			if (guarded) buf.add('\t\t} else {}\n');
 		}
 
-		if (!flat) {
+		if (dispatch) {
 			buf.add('\t\t\tdefault: return;   // unreachable; keeps the switch total\n');
 			buf.add('\t\t}\n');
 		}
@@ -110,24 +141,95 @@ class Emitter {
 	}
 
 	/**
-		The pump check, as it appears in generated code.
+		A sequence, optionally containing single-block loops, needs no block dispatcher. Initial
+		entry guards skip the prefix on a resume; ordinary edges become Haxe fallthrough. Each
+		block is emitted once, including call-return sites. No code-size trade for a second body.
+	**/
+	function linearChain(fn:Func, order:Array<Int>):Bool {
+		for (i in 0...order.length) {
+			final at = order[i];
+			final successors = fn.blocks.get(at).successors;
+			if (i + 1 == order.length) return successors.length == 0;
+			final next = order[i + 1];
+			if (successors.indexOf(next) < 0) return false;
+			final block = fn.blocks.get(at);
+			if (block.length >= 2) {
+				final end = block.endAddr() - 8;
+				final transfer = Decoder.decode(end, image.readWord(end));
+				switch (transfer.op) {
+					// Even a one-target recovered table needs its computed-target check.
+					case JR | JALR if (transfer.isRegisterJump && transfer.rs != 31): return false;
+					case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ:
+						if (transfer.target != next && selfLoopExit(fn, at) != next) return false;
+					case _:
+				}
+			}
+			for (to in successors) {
+				if (to != next && (to != at || selfLoopExit(fn, at) != next)) return false;
+			}
+		}
+		return false;
+	}
+
+	/** A conditional single-block loop, with one distinct exit. Other CFGs keep the dispatcher. */
+	function selfLoopExit(fn:Func, addr:Int):Null<Int> {
+		final block = fn.blocks.get(addr);
+		if (block.length < 2 || block.successors.indexOf(addr) < 0) return null;
+		final at = block.endAddr() - 8;
+		final branch = Decoder.decode(at, image.readWord(at));
+		return switch (branch.op) {
+			case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ if (branch.target == addr):
+				block.successors.indexOf(at + 8) >= 0 ? at + 8 : null;
+			case _: null;
+		}
+	}
+
+	function publish(buf:StringBuf, ind:String):Void {
+		if (registers != null) registers.publish(buf, ind);
+	}
+
+	function reload(buf:StringBuf, ind:String):Void {
+		if (registers != null) registers.reload(buf, ind);
+	}
+
+	function emitReturn(buf:StringBuf, ind:String):Void {
+		publish(buf, ind);
+		buf.add(ind + 'return;\n');
+	}
+
+	function emitPump(buf:StringBuf, ind:String):Void {
+		buf.add('${ind}Memory.cycleHint = ctx.cycles; Memory.raHint = ${reg(31)};\n');
+		buf.add('${ind}if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n');
+		publish(buf, ind + '\t');
+		buf.add(ind + '\tRuntime.pump(ctx);\n');
+		// A nonlocal jump has already restored CpuState: never publish stale locals over it.
+		buf.add(ind + '\t' + UNWIND_LINE + '\n');
+		reload(buf, ind + '\t');
+		buf.add(ind + '} else {}\n');
+	}
+
+	/**
+		The function-entry pump check, before register locals have been loaded.
 
 		`| 0` is not decoration. The comparison is a subtraction so that it stays correct when the
 		cycle counter passes 2^31, and that only works if the subtraction wraps — which C++ does
 		and JavaScript does not (ADR-0004). Without it a deadline just past the wrap reads as long
 		overdue on one target and correctly future on the other, and the two builds diverge.
 
-		Deliberately one statement in the `if` body and no `else`: an `if` with a multi-statement
-		body and no `else` was silently deleted by reflaxe.CPP (upstream defect 8, fixed in our
-		fork), and generated code should not depend on that fix being present.
+		The due path also checks for halt/nonlocal unwind. Keep its explicit `else {}`: reflaxe.CPP
+		used to delete multi-statement `if` bodies without one (upstream defect 8), and generated
+		code should not depend on that fix being present.
 	**/
 	// The cycleHint store is not decoration: memory-mapped registers whose value derives from
 	// the clock — the root counters above all — read it, and a poll loop that only updated it
 	// inside pump() would watch a frozen timer for a whole scheduler interval between deadlines.
-	static inline final PUMP_LINE =
-		"Memory.cycleHint = ctx.cycles; Memory.raHint = ctx.ra; if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) Runtime.pump(ctx);";
-
-	static inline final PUMP_ENTRY = "\t\t" + PUMP_LINE + "\n";
+	// Direct callers have already checked every operation that can unwind. Runtime.call guards
+	// external entries. At a function entry only a due pump can introduce a new token, so keep
+	// its check on that path instead of paying a second branch on every ordinary function call.
+	static inline final PUMP_ENTRY =
+		"\t\tMemory.cycleHint = ctx.cycles; Memory.raHint = ctx.ra;\n"
+		+ "\t\tif (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n"
+		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
 
 	/**
 		What makes `longjmp` able to leave.
@@ -138,7 +240,7 @@ class Emitter {
 		call — carries the return all the way out. The top of the runtime then dispatches afresh
 		to the saved address, with `sp` and `ra` already correct.
 
-		One statement and no `else`, for the same reason the pump check is.
+		A single return needs no `else` workaround for upstream defect 8.
 	**/
 	static inline final UNWIND_LINE = "if (ctx.unwindToken != 0) return;";
 
@@ -180,8 +282,7 @@ class Emitter {
 			final instr = Decoder.decode(addr, image.readWord(addr));
 
 			if (!instr.op.hasDelaySlot) {
-				final line = simple(instr);
-				if (line != "") buf.add('$ind$line\n');
+				emitSimple(buf, ind, instr);
 				cycles++;
 				addr += 4;
 				remaining--;
@@ -199,40 +300,37 @@ class Emitter {
 		}
 
 		// The block ran out without a transfer: it falls through to the next one.
-		if (cycles > 0) buf.add('${ind}ctx.cycles += $cycles;\n');
+		if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
 		if (block.successors.length == 1) {
 			emitGoto(buf, ind, block.successors[0], indexOf, addr);
 		} else {
-			buf.add('${ind}return;   // no successor: analysis stopped here\n');
+			emitReturn(buf, ind);
 		}
 	}
 
 	function emitTransfer(buf:StringBuf, fn:Func, instr:Instr, slot:Null<Instr>, blockAddr:Int,
 			indexOf:Map<Int, Int>, ind:String, cycles:Int, tempCounter:Int):Void {
 		final retAddr = instr.addr + 8;
-		final slotLine = slot == null ? "" : simple(slot);
-
 		inline function emitSlot():Void {
 			if (slot == null) return;
-			if (slotLine == "") buf.add('$ind// delay slot: nop\n');
-			else buf.add('$ind$slotLine   // delay slot\n');
+			emitSimple(buf, ind, slot, true);
 		}
 
 		inline function bump():Void {
-			if (cycles > 0) buf.add('${ind}ctx.cycles += $cycles;\n');
+			if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
 		}
 
 		switch (instr.op) {
-			case JR if (instr.rs == 31):
+			case JR | JALR if (instr.isRegisterJump && instr.rs == 31):
 				emitSlot();
 				bump();
-				buf.add('${ind}return;\n');
+				emitReturn(buf, ind);
 
-			case JR:
+			case JR | JALR if (instr.isRegisterJump):
 				final table = discovery.tables.get(instr.addr);
 				final constant = discovery.constantJumps.get(instr.addr);
 				if (table != null) {
-					final t = 't${tempCounter}';
+					final t = 'target_${tempCounter}';
 					buf.add('${ind}final $t = ${reg(instr.rs)};\n');
 					emitSlot();
 					bump();
@@ -246,21 +344,25 @@ class Emitter {
 							buf.add('$ind\tcase ${hex(target)}: bb = ${indexOf.get(target)}; continue;\n');
 						}
 					}
-					buf.add('$ind\tdefault: ctx.pc = $t; Runtime.call(ctx, $t); return;\n');
+					buf.add('$ind\tdefault:\n');
+					publish(buf, ind + '\t\t');
+					buf.add('$ind\t\tctx.pc = $t; Runtime.call(ctx, $t); return;\n');
 					buf.add('$ind}\n');
 				} else if (constant != null && isKernelVector(constant.target)) {
 					emitSlot();
 					bump();
+					publish(buf, ind);
 					buf.add('${ind}ctx.pc = ${hex(instr.addr)};\n');
 					buf.add('${ind}Kernel.call(ctx, ${hex(constant.target)}, ctx.t1);'
 						+ '   // BIOS ${vectorName(constant.target)}('
 						+ (constant.fnNumber >= 0 ? hex16(constant.fnNumber) : "?") + ')\n');
 					buf.add('${ind}return;\n');
 				} else {
-					final t = 't${tempCounter}';
+					final t = 'target_${tempCounter}';
 					buf.add('${ind}final $t = ${reg(instr.rs)};\n');
 					emitSlot();
 					bump();
+					publish(buf, ind);
 					buf.add('${ind}ctx.pc = $t;\n');
 					buf.add('${ind}Runtime.call(ctx, $t);   // computed jump, dispatched by address\n');
 					buf.add('${ind}return;\n');
@@ -268,22 +370,24 @@ class Emitter {
 
 			case JAL:
 				// The link is written before the slot runs, which matters when the slot reads $ra.
-				buf.add('${ind}ctx.ra = ${hex(retAddr)};\n');
+				buf.add('${ind}${reg(31)} = ${hex(retAddr)};\n');
 				emitSlot();
 				bump();
 				emitCall(buf, ind, instr.target);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case JALR:
-				final t = 't${tempCounter}';
+				final t = 'target_${tempCounter}';
 				// The target is latched before the link is written, so `jalr $ra, $ra` works.
 				buf.add('${ind}final $t = ${reg(instr.rs)};\n');
-				buf.add('${ind}${reg(instr.rd)} = ${hex(retAddr)};\n');
+				if (instr.rd != 0) buf.add('${ind}${reg(instr.rd)} = ${hex(retAddr)};\n');
 				emitSlot();
 				bump();
+				publish(buf, ind);
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}Runtime.call(ctx, $t);\n');
 				buf.add(ind + UNWIND_LINE + "\n");
+				reload(buf, ind);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case J:
@@ -291,21 +395,21 @@ class Emitter {
 				emitSlot();
 				bump();
 				if (indexOf.exists(target)) {
-					buf.add('${ind}bb = ${indexOf.get(target)}; continue;\n');
+					emitGoto(buf, ind, target, indexOf, instr.addr);
 				} else {
-					emitCall(buf, ind, target);        // a tail call
+					emitCall(buf, ind, target, false);        // a tail call
 					buf.add('${ind}return;\n');
 				}
 
 			case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ | BLTZAL | BGEZAL:
-				final cond = 'c${tempCounter}';
+				final cond = 'branch_${tempCounter}';
 				// The condition is evaluated before the slot, because the slot may overwrite one
 				// of the registers it reads. This is the single most common way to get delay
 				// slots wrong.
 				buf.add('${ind}final $cond = ${condition(instr)};\n');
 				if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
 					// The link happens whether or not the branch is taken.
-					buf.add('${ind}ctx.ra = ${hex(retAddr)};   // linked even when not taken\n');
+					buf.add('${ind}${reg(31)} = ${hex(retAddr)};   // linked even when not taken\n');
 				}
 				emitSlot();
 				bump();
@@ -315,25 +419,39 @@ class Emitter {
 				final takenIdx = indexOf.exists(taken) ? indexOf.get(taken) : -1;
 				final notTakenIdx = indexOf.exists(notTaken) ? indexOf.get(notTaken) : -1;
 
-				if (takenIdx >= 0 && notTakenIdx >= 0) {
+				if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
+					buf.add('${ind}if ($cond) {\n');
+					emitCall(buf, ind + '\t', taken);
+					buf.add('${ind}} else {}\n');
+					emitFallThrough(buf, fn, ind, indexOf, retAddr);
+				} else if (nativeLoop != null && taken == nativeLoop) {
+					buf.add('${ind}if (!$cond) break;\n');
+				} else if (linearNext != null && taken == linearNext && notTaken == linearNext) {
+					// Both outcomes are the following block; the slot and cycles already ran.
+				} else if (takenIdx >= 0 && notTakenIdx >= 0) {
 					buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
 				} else if (takenIdx >= 0) {
-					buf.add('${ind}if ($cond) { bb = $takenIdx; continue; } else { return; }\n');
+					buf.add('${ind}if ($cond) { bb = $takenIdx; continue; } else {\n');
+					emitReturn(buf, ind + '\t');
+					buf.add('${ind}}\n');
 				} else if (notTakenIdx >= 0) {
-					buf.add('${ind}if ($cond) { return; } else { bb = $notTakenIdx; continue; }\n');
+					buf.add('${ind}if ($cond) {\n');
+					emitReturn(buf, ind + '\t');
+					buf.add('${ind}} else { bb = $notTakenIdx; continue; }\n');
 				} else {
-					buf.add('${ind}return;\n');
+					emitReturn(buf, ind);
 				}
 
 			case _:
 				buf.add('$ind// unhandled transfer: ${Disasm.text(instr)}\n');
-				buf.add('${ind}return;\n');
+				emitReturn(buf, ind);
 		}
 	}
 
-	function emitCall(buf:StringBuf, ind:String, target:Int):Void {
+	function emitCall(buf:StringBuf, ind:String, target:Int, resumes:Bool = true):Void {
 		final t = Vaddr.canonRam(target);
 		final cls = staticTargetOf(t);
+		publish(buf, ind);
 		if (cls != null) {
 			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
 			buf.add(ind + UNWIND_LINE + "\n");
@@ -344,21 +462,35 @@ class Emitter {
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
 			buf.add(ind + UNWIND_LINE + "\n");
 		}
+		if (resumes) reload(buf, ind);
 	}
 
 	function emitFallThrough(buf:StringBuf, fn:Func, ind:String, indexOf:Map<Int, Int>,
 			addr:Int):Void {
+		if (linearNext != null && addr == linearNext) return;
 		if (indexOf.exists(addr)) buf.add('${ind}bb = ${indexOf.get(addr)}; continue;\n');
-		else buf.add('${ind}return;\n');
+		else emitReturn(buf, ind);
 	}
 
 	function emitGoto(buf:StringBuf, ind:String, target:Int, indexOf:Map<Int, Int>,
 			fallback:Int):Void {
+		if (linearNext != null && target == linearNext) return;
 		if (indexOf.exists(target)) buf.add('${ind}bb = ${indexOf.get(target)}; continue;\n');
-		else buf.add('${ind}return;\n');
+		else emitReturn(buf, ind);
 	}
 
 	// ---- instructions without a delay slot -------------------------------------------------------
+
+	function emitSimple(buf:StringBuf, ind:String, i:Instr, slot:Bool = false):Void {
+		final barrier = i.op == Op.SYSCALL || i.op == Op.BREAK;
+		if (barrier) publish(buf, ind);
+		final line = simple(i);
+		if (line != "") buf.add(ind + line + (slot ? '   // delay slot' : '') + '\n');
+		if (barrier) {
+			buf.add(ind + UNWIND_LINE + '\n');
+			reload(buf, ind);
+		}
+	}
 
 	/** The Haxe statement for one non-branching instruction, or "" for a nop. */
 	function simple(i:Instr):String {
@@ -463,6 +595,7 @@ class Emitter {
 	/** An assignment, dropped entirely when the destination is $zero. */
 	function assign(dest:Int, expr:String, wraps:Bool):String {
 		if (dest == 0) return "";
+		if (!wraps && expr == reg(dest)) return "";
 		return '${reg(dest)} = ' + (wraps ? '($expr) | 0;' : '$expr;');
 	}
 
@@ -488,7 +621,7 @@ class Emitter {
 
 	/** `$zero` is a literal, not a field: it is the most-read register and costs nothing. */
 	inline function reg(n:Int):String
-		return n == 0 ? "0" : "ctx." + Instr.regName(n);
+		return n == 0 ? "0" : (registers != null && registers.used.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n);
 
 	static function hex(v:Int):String {
 		final digits = "0123456789abcdef";

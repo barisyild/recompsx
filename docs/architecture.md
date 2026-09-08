@@ -52,11 +52,13 @@ RUN TIME (portable subset: reflaxe.CPP C++17 now, JVM later)
 - **No instruction fetch.** Each MIPS function becomes a static Haxe function
   `(ctx:CpuState)->Void`. `jal` to a known target is a direct static call;
   `jr $ra` is a return; indirect calls go through a generated address→function table.
-- **No goto in Haxe**, so intra-function control flow is a basic-block state machine:
-  `while (true) switch (bb) { ... bb = N; continue; }`. Simple linear functions emit a flat body.
-- **Branch delay slots** are resolved at build time by duplicating the slot instruction into
-  the taken and not-taken paths, with the branch condition latched into a temp beforehand.
-- **Cooperative scheduling.** Codegen adds `ctx.cycles += N` per basic block; at loop
+- **Scalar registers and structured regions** (ADR-0007): registers are Haxe locals, published
+  to `CpuState` before guest/kernel calls and due scheduler pumps, and reloaded afterwards.
+  Linear chains use Haxe fallthrough and single-block loops use native `while`; remaining CFGs
+  use `while (true) switch (bb)`. Every block retains its stable resume index, with one body.
+- **Branch delay slots** are resolved at build time: latch the condition/target, write any link,
+  execute the slot once, then transfer. The slot may overwrite the branch's input registers.
+- **Cooperative scheduling.** Codegen adds `ctx.cycles = (ctx.cycles + N) | 0` per basic block; at loop
   back-edges and function entries it emits a pump check. Hardware events (VBlank, timers, CD
   sectors, SPU ticks, SIO bytes) and interrupt delivery happen only at those sync points.
 - **Overlays** are recompiled as separate modules. The runtime activates/deactivates their

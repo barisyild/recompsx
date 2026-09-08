@@ -3,11 +3,10 @@ package core;
 /**
 	The R3000A's register file, as ordinary fields.
 
-	This is the single most important performance decision in the project, and it is made by
-	omission: there is no register *array*. Each register is a named field, so recompiled code
-	reads and writes them exactly as a hand-written program reads a local — and the C++ and
-	JavaScript compilers both keep hot ones in machine registers, which an array indexed by a
-	runtime value can never allow.
+	This is the shared register state at guest calls, returns and scheduler safe points. The
+	optimized emitter keeps a function's working registers in Haxe locals and synchronises them
+	here at those boundaries (ADR-0007). Named fields avoid runtime register indexing; locals
+	also let the host compiler propagate values without aliasing through this shared object.
 
 	`$zero` has no field. It reads as the literal 0 and writes to it are dropped, both decided at
 	build time by the emitter, so the most-used register in the instruction set costs nothing at

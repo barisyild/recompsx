@@ -114,6 +114,10 @@ class Runtime {
 	}
 
 	public static function call(ctx:CpuState, addr:Int):Void {
+		// A callback cannot enter guest code while a halt or nonlocal jump is leaving it.
+		// Direct generated callers check their own return boundaries; guard external entry here.
+		if (ctx.unwindToken != 0) return;
+		else {}
 		final d = dispatcher;
 		if (d != null && d(addr, ctx)) return;
 		else {}
@@ -194,9 +198,13 @@ class Runtime {
 		// Registers whose value follows the clock read it from here; see Memory.cycleHint.
 		mem.Memory.cycleHint = ctx.cycles;
 		Scheduler.runDue(ctx);
+		if (ctx.unwindToken != 0) return;
+		else {}
 		// Events a device raised from inside one of the game's own instructions, where there was
 		// no safe way back into game code. Here there is.
 		kernel.KEvents.drain(ctx);
+		if (ctx.unwindToken != 0) return;
+		else {}
 		Irq.dispatch(ctx);
 	}
 

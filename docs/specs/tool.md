@@ -214,14 +214,20 @@ and keep the one that identifies the most functions consistently.
   `div rs,0 → hi=rs, lo=(rs>=0?-1:1)`; `div 0x80000000,-1 → hi=0, lo=0x80000000` (C++ UB —
   special-cased); `divu rs,0 → hi=rs, lo=0xFFFFFFFF`);
   `Gte.execute/getData/setData/getCtrl/setCtrl`.
-- **Body template**: single-linear-chain CFGs emit a flat body (common leaf case — readability
-  + compile-time win); everything else emits `while(true) switch(bb)` with dense block indices
-  in address order, original VA as comment per case.
-- **Cycles & pump**: flat 1 cycle/instruction, `ctx.cycles += N` immediately before every
-  control transfer; `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);` at exactly
-  (a) function entry, (b) after the increment on every back-edge (target VA ≤ source block
-  start, incl. switch edges). Straight-line code carries no pump. The pump contract guarantees
-  forward progress (idle `b .` loops become pump-driven time advancement).
+- **Register lowering**: `RegisterPlan` identifies used/written GPRs. Used registers become
+  Haxe locals, written registers are published before calls, returns and due pumps; all used
+  locals are reloaded after a returning call/pump. An unwind returns before any stale local can
+  overwrite restored state. Memory, HI/LO and coprocessor helpers retain their existing ABI.
+  The Haxe analyzer can now propagate constants/copies and eliminate dead local writes.
+- **Body template**: linear chains, optionally containing single-block loops, emit sequences
+  with entry guards for resumption. Conditional self-loops emit native `while` even inside a
+  larger CFG. Other edges retain `while(true) switch(bb)` and dense address-ordered indices.
+  Each block is emitted once; calls, loops and arbitrary block resumes share the same body.
+- **Cycles & pump**: flat 1 cycle/instruction, `ctx.cycles = (ctx.cycles + N) | 0` immediately
+  before every control transfer. Instructions removed from host code still count. Function
+  entry and every target of an address-backward CFG edge carry a wrap-safe pump check, including
+  recovered switch edges. Register publish/reload is on the due-event path, outside the common
+  loop path. Halt/unwind tokens return immediately after the pump (ADR-0007).
 - **Sharding**: functions sorted by (universe, entry VA), greedily packed ≤150 funcs and ≤10k
   lines per file; stable split points; overlay boundaries force separate shard sets under
   `out/<game>/hx/ovl_<id>/`. Names: class `Fns_<seq>_<startVA>`, function `f_<VA8hex>` always
@@ -252,9 +258,9 @@ and keep the one that identifies the most functions consistently.
   an overlay into its own window. Fingerprint length is validated against overlay length at gen
   time: a window shorter than its own fingerprint would hash differently in the tool and the
   runtime and never activate. See ADR-0006.
-- **Deliberate non-fidelity** (documented): add/addi/sub never trap on overflow; load delay off
-  by default (per-function `loadDelayAccurate` opt-in: emitter pre-captures old rt into a temp
-  for the single successor instruction); hi/lo latency invisible; i-cache invisible (stale-cache
+- **Deliberate non-fidelity** (documented): add/addi/sub never trap on overflow; load delay is
+  not implemented (a per-function accurate mode remains future work); hi/lo latency invisible;
+  i-cache invisible (stale-cache
   self-patching games out of scope v1); misaligned access raises no AdEL/AdES.
 
 ## 3.1 Why memory stays a flat 2 MB array
@@ -264,8 +270,9 @@ array, could analysis recover *variables* — infer that a given address holds a
 field and emit a real Haxe variable for it? That is decompilation rather than recompilation, and
 the distinction decides what this project can promise.
 
-**Most accesses already avoid memory.** The 32 MIPS registers are Haxe fields on `CpuState`, not
-array slots. Compiled MIPS keeps locals, parameters and loop counters in registers, so the bulk
+**Most accesses already avoid memory.** GPRs are Haxe locals while a generated function runs,
+with named `CpuState` fields holding shared state at synchronization boundaries (ADR-0007).
+Compiled MIPS keeps locals, parameters and loop counters in registers, so the bulk
 of a function's data traffic is plain variable access with no array indexing at all. The flat
 array carries what genuinely lives in memory: the stack, globals, heap, and anything the hardware
 touches.

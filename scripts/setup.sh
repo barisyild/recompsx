@@ -118,6 +118,18 @@ git submodule update --init --recursive
 [ -f vendor/reflaxe/haxelib.json ]     || die "vendor/reflaxe is empty — submodule init failed"
 [ -f vendor/reflaxe.CPP/haxelib.json ] || die "vendor/reflaxe.CPP is empty — submodule init failed"
 
+# Scalar register codegen needs the declaration-mover fix (ADR-0007). Keep it reproducible on
+# fresh clones without changing pins or disturbing other local compiler patches.
+REASSIGN_PATCH=../patches/0005-reflaxe-reassigned-local-declarations.patch
+if git -C vendor/reflaxe apply --reverse --check "$REASSIGN_PATCH" 2>/dev/null; then
+  say "reflaxe declaration-mover patch already applied"
+elif git -C vendor/reflaxe apply --check "$REASSIGN_PATCH"; then
+  git -C vendor/reflaxe apply "$REASSIGN_PATCH"
+  say "applied reflaxe declaration-mover patch"
+else
+  die "cannot apply compiler patch 0005; see vendor/patches/README.md"
+fi
+
 # --- project-local haxelib repository ---------------------------------------------------------
 if [ ! -d "$ROOT/.haxelib" ]; then
   say "creating project-local haxelib repository"
