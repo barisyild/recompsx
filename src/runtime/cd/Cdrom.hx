@@ -118,6 +118,12 @@ class Cdrom {
 	static var seekLba = 0;
 	static var readLba = 0;
 	static var reading = false;
+	// SCEx is in the lead-in, not at data LBA 0. Setloc only changes the destination.
+	static var headInLeadIn = true;
+	static var scexReading = false;
+	static var scexSampleAt = 0;
+	static var scexTotal = 0;
+	static var scexSuccess = 0;
 
 	/** The sector just delivered, and how much of it the CPU has taken. */
 	static var sector:RawBuf;
@@ -167,6 +173,8 @@ class Cdrom {
 		seekLba = 0;
 		readLba = 0;
 		reading = false;
+		headInLeadIn = true;
+		beginScex();
 		busy = false;
 		sectorPos = 0;
 		sectorReady = false;
@@ -456,6 +464,12 @@ class Cdrom {
 		else {}
 	}
 
+	public static function acknowledgeUnhandled():Void {
+		if (currentInt == 0) return;
+		else {}
+		acknowledge(0x07);
+	}
+
 	static function releaseQueued():Void {
 		tnote("INT " + queuedInt + " released from the queue");
 		responseCount = queuedCount;
@@ -478,7 +492,11 @@ class Cdrom {
 		once would leave it waiting forever.
 	**/
 	static function execute(cmd:Int, cycles:Int):Void {
+		updateScex(cycles);
 		busy = true;
+		#if recompsx_cd_trace
+		Runtime.note("CD command " + StringTools.hex(cmd, 2) + " params " + bytesOf(param, paramCount));
+		#end
 		tnote("cmd 0x" + StringTools.hex(cmd, 2) + " params " + bytesOf(param, paramCount));
 		commands++;
 		if (cmd == 0x01) ackWith1(status);                      // Getstat
@@ -529,6 +547,7 @@ class Cdrom {
 
 	static function seek(cycles:Int):Void {
 		readLba = seekLba;
+		headInLeadIn = false;
 		status |= ST_SEEKING;
 		// The second answer follows the first; both go through the event, in order.
 		queue(INT2_DONE, seekDone(), 1);
@@ -561,6 +580,7 @@ class Cdrom {
 		// way the head is somewhere legitimate, which is all the status byte claims.
 		if (paramCount >= 1 && param[0] != 0) readLba = seekLba;
 		else {}
+		headInLeadIn = false;
 		reading = false;
 		status = (status | ST_MOTOR | ST_PLAYING) & ~(ST_READING | ST_SEEKING);
 		// Mode bit 2 asks for a position report every so often while playing. Nothing needs one
@@ -580,13 +600,23 @@ class Cdrom {
 	**/
 	static function stop():Void {
 		reading = false;
+		dropHeldSector();
 		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING | ST_MOTOR);
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
 	}
 
+	static function dropHeldSector():Void {
+		sectorReady = false;
+		sectorTaken = false;
+		fifoOpen = false;
+		sectorPos = 0;
+	}
+
 	static function startReading(cycles:Int):Void {
 		readLba = seekLba;
+		headInLeadIn = false;
+		dropHeldSector();
 		reading = true;
 		status = (status | ST_READING) & ~ST_SEEKING;
 		ackWith1(status);
@@ -594,6 +624,7 @@ class Cdrom {
 
 	static function pause(cycles:Int):Void {
 		reading = false;
+		dropHeldSector();
 		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING);
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
@@ -602,36 +633,20 @@ class Cdrom {
 	static function initCommand(cycles:Int):Void {
 		mode = 0;
 		reading = false;
+		dropHeldSector();
 		status = ST_MOTOR;
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
 	}
 
-	/**
-		`Test` — a family of sub-commands selected by the first parameter.
-
-		Two matter here. `20h` reports the controller's date and version, which is what a game asks
-		when it wants to know what drive it is talking to. `04h` tells the drive to begin its
-		periodic check of the disc's wobble data and zero the counters that record it; the answer
-		is the status byte and nothing more, because the command starts a process rather than
-		reporting one.
-
-		`04h` is not optional decoration: it is part of the sequence libcd runs when it starts CD
-		audio, after seeking the head off the data track. Answering it with an error made Crash
-		Bash abandon its whole audio startup — GetTN, Init, GetTD, ReadTOC, GetID, Setloc, Setmode,
-		SeekP, Mute, Play — and begin it again, three times a second, forever. The music never
-		started and the game never moved on.
-
-		Everything else answers INT5, which is also what the hardware does for an undefined
-		sub-command, and says so once so the next one is named rather than guessed at.
-	**/
+	/** Test sub-commands: controller version and the raw SCEx observation counters. */
 	static function test():Void {
 		if (paramCount < 1) return errorWith(0x20);
 		else {}
 		final sub = param[0];
 		if (sub == 0x20) return testVersion();
 		else {}
-		if (sub == 0x04) return ackWith1(status);
+		if (sub == 0x04) return testReadScex();
 		else {}
 		if (sub == 0x05) return testScexCounters();
 		else {}
@@ -639,25 +654,47 @@ class Cdrom {
 		errorWith(0x10);
 	}
 
+	static function beginScex():Void {
+		scexTotal = 0;
+		scexSuccess = 0;
+		scexReading = true;
+		scexSampleAt = (now + TimeBase.CPU_HZ) | 0;
+	}
+
 	/**
-		`Test 05h` — how much wobble data the drive has read since `04h` reset the counters.
-
-		Two bytes: how many strings were seen, and how many of those were complete. The drive
-		reports what it observed; the *decision* about what that means belongs to whatever asked.
-
-		The answer here follows from a decision this emulator already made, years of code before
-		this function: `GetID` reports the disc in the drive as a licensed one, because a mounted
-		image is modelled as an ordinary disc and there is no other coherent thing for a drive to
-		say about it. Reporting counters that contradict `GetID` would describe a machine that
-		exists nowhere — a drive simultaneously certain and unsure about the same disc — and the
-		games it would break are the ones asking a routine question during audio setup, which is
-		exactly what Crash Bash is doing here.
+		psx-spx, CDROM Drive, Test 19h/04h and 05h:
+		https://psx-spx.consoledev.net/cdromdrive/#19h04h-int3stat-read-scex-string-and-force-motor-on
+		SCEx exists only in the lead-in. GetID's license result does not imply finding it at
+		the current head position. Model one observation after one guest second (the documented
+		wait is 1–2 seconds); exact wobble pulses/servo timing are not modelled. Counters persist
+		until Test 04h or Reset, including after Test 05h has stopped the observation.
 	**/
+	static function updateScex(cycles:Int):Void {
+		if (!scexReading || ((cycles - scexSampleAt) | 0) < 0) return;
+		else {}
+		scexReading = false;
+		if (headInLeadIn && Iso9660.mounted) {
+			scexTotal = 1;
+			scexSuccess = 1;
+		} else {}
+	}
+
+	static function testReadScex():Void {
+		beginScex();
+		status |= ST_MOTOR;
+		ackWith1(status);
+	}
+
+	/** Test 05h returns exactly (total, success), WITHOUT a leading status byte. */
 	static function testScexCounters():Void {
-		response[0] = status;
-		response[1] = 0x01;   // strings seen
-		response[2] = 0x01;   // of which complete
-		respond(INT3_ACK, 3);
+		scexReading = false;
+		response[0] = scexTotal;
+		response[1] = scexSuccess;
+		#if recompsx_cd_trace
+		Runtime.note("CD SCEx total=" + scexTotal + " success=" + scexSuccess
+			+ " leadIn=" + headInLeadIn);
+		#end
+		respond(INT3_ACK, 2);
 	}
 
 	static function testVersion():Void {
@@ -743,13 +780,17 @@ class Cdrom {
 	static function resetCommand():Void {
 		mode = 0;
 		reading = false;
+		dropHeldSector();
 		sectorReady = false;
 		status = ST_MOTOR;
+		headInLeadIn = true;
+		beginScex();
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
 	}
 
 	static function readToc(cycles:Int):Void {
+		headInLeadIn = true;
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
 	}
@@ -773,6 +814,7 @@ class Cdrom {
 	**/
 	public static function onEvent(ctx:CpuState):Void {
 		now = ctx.cycles;
+		updateScex(now);
 		// The first answer, then the second, then sectors — each waits for the CPU to have
 		// acknowledged the one before, because only one interrupt is outstanding at a time.
 		if (pendingInt != 0) return answerPending(ctx);

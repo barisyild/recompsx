@@ -4,7 +4,8 @@ import recomp.Vaddr;
 import recomp.analysis.Discovery;
 import recomp.analysis.Func;
 import recomp.analysis.Image;
-import recomp.mips.Decoder;
+import recomp.ir.FunctionIR;
+import recomp.codegen.RegionPlan.Region;
 import recomp.mips.Disasm;
 import recomp.mips.Instr;
 import recomp.mips.Op;
@@ -14,9 +15,9 @@ import recomp.mips.Op;
 
 	Registers become scalar Haxe locals, giving the Haxe analyzer ordinary values to propagate
 	and eliminate. CpuState is synchronised at calls, returns and scheduler safe points. Linear
-	CFGs become sequences, single-block loops become native loops, and remaining control flow
-	uses `while (true) switch (bb)`. Every guest block stays addressable without duplicating its
-	body. See ADR-0007 for the state/entry contract.
+	CFGs become sequences, single-block loops become native loops, and single-entry regions
+	inside other CFGs become sequences and choices. Remaining control flow uses a region/block
+	dispatcher. Every guest block stays addressable without duplicating its body (ADR-0007/0008).
 
 	Every arithmetic result that can overflow is written `| 0`, which JS needs and C++ folds
 	away (ADR-0004). Eliminated instructions still contribute to the guest cycle count.
@@ -28,15 +29,24 @@ import recomp.mips.Op;
 	read. For a `jal` the same ordering applies to the link register.
 
 	`optimize=false` keeps context fields and the block dispatcher as a differential reference.
+	`structureRegions=false` isolates the scalar-register/simple-loop baseline.
 **/
 class Emitter {
 	final image:Image;
 	final discovery:Discovery;
 	final optimize:Bool;
+	final structureRegions:Bool;
 	var registers:Null<RegisterPlan>;
+	var ir:FunctionIR;
+	var functionAddr:Int;
+	/** Program substitutes a pinned handle after body deduplication; fixtures use addresses. */
+	public var continuationToken:Null<String> = null;
+	var continuation:Int;
 	// A native loop consumes transfers to this block instead of re-entering the dispatcher.
 	var nativeLoop:Null<Int>;
 	var linearNext:Null<Int>;
+	// A structured choice consumes its header's branch after latching it before the slot.
+	var capturedBranch:Null<Int>;
 
 	/**
 		The class a call to this address should go to, or null to dispatch it by address.
@@ -52,10 +62,11 @@ class Emitter {
 	**/
 	public var staticTargetOf:Int -> String = _ -> null;
 
-	public function new(image:Image, discovery:Discovery, optimize:Bool = true) {
+	public function new(image:Image, discovery:Discovery, optimize:Bool = true, structureRegions:Bool = true) {
 		this.image = image;
 		this.discovery = discovery;
 		this.optimize = optimize;
+		this.structureRegions = structureRegions;
 	}
 
 	/**
@@ -66,18 +77,17 @@ class Emitter {
 		table and the switch to be built from one definition of the order rather than two that
 		happen to agree.
 	**/
-	public static function blockOrder(fn:Func):Array<Int> {
-		final addrs = [for (k in fn.blocks.keys()) k];
-		addrs.sort((a, b) -> a - b);
-		return addrs;
-	}
+	public static function blockOrder(fn:Func):Array<Int> return FunctionIR.blockOrder(fn);
 
 	public function emitFunction(fn:Func):String {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
-		registers = optimize ? new RegisterPlan(fn, image) : null;
+		ir = new FunctionIR(fn, image);
+		functionAddr = fn.entry;
+		registers = optimize ? new RegisterPlan(ir) : null;
 		nativeLoop = null;
 		linearNext = null;
+		capturedBranch = null;
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.
@@ -96,12 +106,30 @@ class Emitter {
 		}
 		buf.add('\t**/\n');
 		buf.add('\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n');
+		buf.add('\t\t#if recompsx_cooperative\n');
+		buf.add('\t\tvar entryPump = true;\n');
+		buf.add('\t\tif (core.Cooperative.resumeEntry >= 0) {\n');
+		buf.add('\t\t\tentry = core.Cooperative.resumeEntry; entryPump = core.Cooperative.resumePump;\n');
+		buf.add('\t\t\tcore.Cooperative.resumeEntry = -1;\n\t\t} else {}\n');
+		buf.add('\t\tif (entryPump) {\n');
+		emitCheckpoint(buf, '\t\t\t', 'entry', true);
 		buf.add(PUMP_ENTRY);
+		buf.add('\t\t} else {}\n\t\t#else\n');
+		buf.add(PUMP_ENTRY);
+		buf.add('\t\t#end\n');
 		if (registers != null) registers.declare(buf, '\t\t');
 
 		// Even a one-block CFG needs a loop if it has an edge to itself.
 		final flat = blockAddrs.length == 1 && fn.blocks.get(blockAddrs[0]).successors.length == 0;
 		final linear = optimize && linearChain(fn, blockAddrs);
+		if (optimize && structureRegions && !flat && !linear) {
+			final regions = new RegionPlan(ir);
+			if (regions.sequences > 0 || regions.choices > 0) {
+				emitRegions(buf, fn, regions, indexOf);
+				buf.add('\t}\n');
+				return buf.toString();
+			}
+		}
 		final dispatch = !flat && !linear;
 		if (linear && !flat) buf.add('\t\tif (entry < 0 || entry >= ${blockAddrs.length}) return;\n');
 		if (dispatch) {
@@ -120,13 +148,13 @@ class Emitter {
 			if (loopExit != null) {
 				nativeLoop = addr;
 				buf.add(indent + 'while (true) {\n');
-				emitPump(buf, indent + '\t');
+				emitPump(buf, indent + '\t', i);
 				emitBlock(buf, fn, addr, indexOf, indent + '\t');
 				buf.add(indent + '}\n');
 				nativeLoop = null;
 				emitGoto(buf, indent, loopExit, indexOf, addr);
 			} else {
-				if (pumpAt.exists(addr)) emitPump(buf, indent);
+				if (pumpAt.exists(addr)) emitPump(buf, indent, i);
 				emitBlock(buf, fn, addr, indexOf, indent);
 			}
 			if (guarded) buf.add('\t\t} else {}\n');
@@ -138,6 +166,89 @@ class Emitter {
 		}
 		buf.add('\t}\n');
 		return buf.toString();
+	}
+
+	function emitRegions(buf:StringBuf, fn:Func, plan:RegionPlan, indexOf:Map<Int, Int>):Void {
+		final dispatch = plan.roots.length != 1 || plan.roots[0].successors.length != 0;
+		buf.add('\t\t// Regions: ${plan.roots.length}; ${plan.sequences} sequence / ${plan.choices} choice reductions.\n');
+		if (dispatch) {
+			buf.add('\t\tvar bb = entry;\n\t\twhile (true) switch (bb) {\n');
+		} else {
+			buf.add('\t\tif (entry < 0 || entry >= ${ir.blocks.length}) return;\n');
+		}
+		for (root in plan.roots) {
+			final ind = dispatch ? '\t\t\t\t' : '\t\t';
+			if (dispatch) buf.add('\t\t\tcase ${root.members.join(" | ")}:\n');
+			buf.add(ind + 'var resume = ${dispatch ? "bb" : "entry"};\n');
+			emitRegion(buf, fn, root, indexOf, ind, null);
+		}
+		if (dispatch) buf.add('\t\t\tdefault: return;\n\t\t}\n');
+	}
+
+	/**
+		`resume` is local entry routing, not a guest block dispatcher. -1 means ordinary flow.
+		Only a region's skipped prefix/choice examines it; internal transfers fall through.
+		Each block, its cycles and its safe point are emitted once, including resumed arms.
+	**/
+	function emitRegion(buf:StringBuf, fn:Func, region:Region, indexOf:Map<Int, Int>,
+			ind:String, follow:Null<Int>):Void {
+		switch (region.body) {
+			case Block(block):
+				linearNext = follow;
+				final loopExit = block.selfLoopExit();
+				if (loopExit != null) {
+					nativeLoop = block.addr;
+					buf.add(ind + 'while (true) {\n');
+					emitPump(buf, ind + '\t', block.resumeId);
+					emitBlock(buf, fn, block.addr, indexOf, ind + '\t');
+					buf.add(ind + '}\n');
+					nativeLoop = null;
+					emitGoto(buf, ind, loopExit, indexOf, block.addr);
+				} else {
+					if (block.pump) emitPump(buf, ind, block.resumeId);
+					emitBlock(buf, fn, block.addr, indexOf, ind);
+				}
+			case Sequence(parts):
+				for (i in 0...parts.length) {
+					final last = i + 1 == parts.length;
+					if (!last) buf.add(ind + 'if (resume < 0 || ${containsEntry(parts[i])}) {\n');
+					emitRegion(buf, fn, parts[i], indexOf, last ? ind : ind + '\t',
+						last ? follow : parts[i + 1].entry);
+					if (!last) buf.add(ind + '\tresume = -1;\n' + ind + '} else {}\n');
+				}
+			case Choice(head, taken, notTaken, join):
+				final branch = head.selector;
+				final name = 'take_${branch.resumeId}';
+				buf.add(ind + 'var $name = false;\n');
+				buf.add(ind + 'if (resume < 0 || ${containsEntry(head)}) {\n');
+				final previous = capturedBranch;
+				capturedBranch = branch.addr;
+				emitRegion(buf, fn, head, indexOf, ind + '\t', null);
+				capturedBranch = previous;
+				buf.add(ind + '\tresume = -1;\n' + ind + '} else {}\n');
+				buf.add(ind + 'if (resume < 0 ? $name : ${containsEntry(taken)}) {\n');
+				if (taken != null) emitRegion(buf, fn, taken, indexOf, ind + '\t', join);
+				buf.add(ind + '} else {\n');
+				if (notTaken != null) emitRegion(buf, fn, notTaken, indexOf, ind + '\t', join);
+				buf.add(ind + '}\n');
+				linearNext = follow;
+				if (join != null) emitGoto(buf, ind, join, indexOf, head.entry);
+		}
+	}
+
+	/** Consecutive stable IDs become ranges, keeping resume guards small without a host table. */
+	static function containsEntry(region:Null<Region>):String {
+		if (region == null) return 'false';
+		final tests = [];
+		var i = 0;
+		while (i < region.members.length) {
+			final first = region.members[i];
+			var last = first;
+			i++;
+			while (i < region.members.length && region.members[i] == last + 1) last = region.members[i++];
+			tests.push(first == last ? 'resume == $first' : '(resume >= $first && resume <= $last)');
+		}
+		return '(' + tests.join(' || ') + ')';
 	}
 
 	/**
@@ -152,10 +263,9 @@ class Emitter {
 			if (i + 1 == order.length) return successors.length == 0;
 			final next = order[i + 1];
 			if (successors.indexOf(next) < 0) return false;
-			final block = fn.blocks.get(at);
-			if (block.length >= 2) {
-				final end = block.endAddr() - 8;
-				final transfer = Decoder.decode(end, image.readWord(end));
+			final terminal = ir.byAddress.get(at).transfer;
+			if (terminal != null) {
+				final transfer = terminal.decoded;
 				switch (transfer.op) {
 					// Even a one-target recovered table needs its computed-target check.
 					case JR | JALR if (transfer.isRegisterJump && transfer.rs != 31): return false;
@@ -172,17 +282,7 @@ class Emitter {
 	}
 
 	/** A conditional single-block loop, with one distinct exit. Other CFGs keep the dispatcher. */
-	function selfLoopExit(fn:Func, addr:Int):Null<Int> {
-		final block = fn.blocks.get(addr);
-		if (block.length < 2 || block.successors.indexOf(addr) < 0) return null;
-		final at = block.endAddr() - 8;
-		final branch = Decoder.decode(at, image.readWord(at));
-		return switch (branch.op) {
-			case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ if (branch.target == addr):
-				block.successors.indexOf(at + 8) >= 0 ? at + 8 : null;
-			case _: null;
-		}
-	}
+	function selfLoopExit(fn:Func, addr:Int):Null<Int> return ir.byAddress.get(addr).selfLoopExit();
 
 	function publish(buf:StringBuf, ind:String):Void {
 		if (registers != null) registers.publish(buf, ind);
@@ -197,8 +297,16 @@ class Emitter {
 		buf.add(ind + 'return;\n');
 	}
 
-	function emitPump(buf:StringBuf, ind:String):Void {
-		buf.add('${ind}Memory.cycleHint = ctx.cycles; Memory.raHint = ${reg(31)};\n');
+	function emitCheckpoint(buf:StringBuf, ind:String, entry:String, entryPump:Bool):Void {
+		buf.add(ind + '#if recompsx_cooperative\n');
+		buf.add(ind + 'if (core.Cooperative.wantsYield(ctx)) {\n');
+		if (!entryPump) publish(buf, ind + '\t');
+		buf.add(ind + '\tcore.Cooperative.suspend(ctx, ${continuationId()}, $entry, $entryPump);\n');
+		buf.add(ind + '\treturn;\n' + ind + '} else {}\n' + ind + '#end\n');
+	}
+
+	function emitPump(buf:StringBuf, ind:String, entry:Int):Void {
+		emitCheckpoint(buf, ind, Std.string(entry), false);
 		buf.add('${ind}if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n');
 		publish(buf, ind + '\t');
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
@@ -220,15 +328,12 @@ class Emitter {
 		used to delete multi-statement `if` bodies without one (upstream defect 8), and generated
 		code should not depend on that fix being present.
 	**/
-	// The cycleHint store is not decoration: memory-mapped registers whose value derives from
-	// the clock — the root counters above all — read it, and a poll loop that only updated it
-	// inside pump() would watch a frozen timer for a whole scheduler interval between deadlines.
+	// Memory-mapped clocks read the bound CpuState directly.
 	// Direct callers have already checked every operation that can unwind. Runtime.call guards
 	// external entries. At a function entry only a due pump can introduce a new token, so keep
 	// its check on that path instead of paying a second branch on every ordinary function call.
 	static inline final PUMP_ENTRY =
-		"\t\tMemory.cycleHint = ctx.cycles; Memory.raHint = ctx.ra;\n"
-		+ "\t\tif (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n"
+		"\t\tif (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n"
 		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
 
 	/**
@@ -258,13 +363,7 @@ class Emitter {
 	**/
 	function loopHeaders(fn:Func, blockAddrs:Array<Int>):Map<Int, Bool> {
 		final headers:Map<Int, Bool> = [];
-		for (from in blockAddrs) {
-			final block = fn.blocks.get(from);
-			for (to in block.successors) {
-				// Backwards or to itself: the definition of a back-edge in an address-ordered CFG.
-				if (to <= from) headers.set(to, true);
-			}
-		}
+		for (block in ir.blocks) if (block.pump) headers.set(block.addr, true);
 		return headers;
 	}
 
@@ -272,52 +371,39 @@ class Emitter {
 
 	function emitBlock(buf:StringBuf, fn:Func, blockAddr:Int, indexOf:Map<Int, Int>,
 			ind:String):Void {
-		final block = fn.blocks.get(blockAddr);
-		var addr = blockAddr;
-		var remaining = block.length;
-		var cycles = 0;
-		var tempCounter = 0;
-
-		while (remaining > 0) {
-			final instr = Decoder.decode(addr, image.readWord(addr));
-
-			if (!instr.op.hasDelaySlot) {
-				emitSimple(buf, ind, instr);
-				cycles++;
-				addr += 4;
-				remaining--;
-				continue;
-			}
-
-			// A control transfer. Its delay slot is the next instruction and runs first.
-			final slotAddr = addr + 4;
-			final hasSlot = remaining > 1;
-			final slot = hasSlot ? Decoder.decode(slotAddr, image.readWord(slotAddr)) : null;
-			cycles += hasSlot ? 2 : 1;
-
-			emitTransfer(buf, fn, instr, slot, blockAddr, indexOf, ind, cycles, tempCounter);
-			return;   // a block ends at its transfer
-		}
-
-		// The block ran out without a transfer: it falls through to the next one.
-		if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
-		if (block.successors.length == 1) {
-			emitGoto(buf, ind, block.successors[0], indexOf, addr);
+		final block = ir.byAddress.get(blockAddr);
+		for (instruction in block.body) emitSimple(buf, ind, instruction.decoded);
+		if (block.transfer != null) {
+			emitTransfer(buf, fn, block.transfer.decoded,
+				block.delaySlot == null ? null : block.delaySlot.decoded,
+				blockAddr, indexOf, ind, block.cycles, block.instructions.length, block.resumeId);
 		} else {
-			emitReturn(buf, ind);
+			emitCharges(buf, ind, block.cycles, block.instructions.length);
+			if (block.successors.length == 1) emitGoto(buf, ind, block.successors[0], indexOf, blockAddr);
+			else emitReturn(buf, ind);
 		}
 	}
 
+	/** Charge every original instruction, including eliminated instructions and delay slots. */
+	static function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
+		if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
+		buf.add('${ind}#if recompsx_insns\n');
+		buf.add('${ind}Runtime.insns = (Runtime.insns + $insns) | 0;\n');
+		buf.add('${ind}Runtime.blocks = (Runtime.blocks + 1) | 0;\n');
+		buf.add('${ind}#end\n');
+	}
+
 	function emitTransfer(buf:StringBuf, fn:Func, instr:Instr, slot:Null<Instr>, blockAddr:Int,
-			indexOf:Map<Int, Int>, ind:String, cycles:Int, tempCounter:Int):Void {
+			indexOf:Map<Int, Int>, ind:String, cycles:Int, insns:Int, tempCounter:Int):Void {
 		final retAddr = instr.addr + 8;
+		continuation = indexOf.exists(retAddr) ? indexOf.get(retAddr) : -1;
 		inline function emitSlot():Void {
 			if (slot == null) return;
 			emitSimple(buf, ind, slot, true);
 		}
 
 		inline function bump():Void {
-			if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
+			emitCharges(buf, ind, cycles, insns);
 		}
 
 		switch (instr.op) {
@@ -386,7 +472,7 @@ class Emitter {
 				publish(buf, ind);
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}Runtime.call(ctx, $t);\n');
-				buf.add(ind + UNWIND_LINE + "\n");
+				emitCallUnwind(buf, ind, continuation);
 				reload(buf, ind);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
@@ -402,11 +488,12 @@ class Emitter {
 				}
 
 			case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ | BLTZAL | BGEZAL:
-				final cond = 'branch_${tempCounter}';
+				final captured = capturedBranch == blockAddr;
+				final cond = captured ? 'take_${tempCounter}' : 'branch_${tempCounter}';
 				// The condition is evaluated before the slot, because the slot may overwrite one
 				// of the registers it reads. This is the single most common way to get delay
 				// slots wrong.
-				buf.add('${ind}final $cond = ${condition(instr)};\n');
+				buf.add('${ind}${captured ? "" : "final "}$cond = ${condition(instr)};\n');
 				if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
 					// The link happens whether or not the branch is taken.
 					buf.add('${ind}${reg(31)} = ${hex(retAddr)};   // linked even when not taken\n');
@@ -419,7 +506,9 @@ class Emitter {
 				final takenIdx = indexOf.exists(taken) ? indexOf.get(taken) : -1;
 				final notTakenIdx = indexOf.exists(notTaken) ? indexOf.get(notTaken) : -1;
 
-				if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
+				if (captured) {
+					// The enclosing Choice owns both arms. Slot and cycles already ran.
+				} else if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
 					buf.add('${ind}if ($cond) {\n');
 					emitCall(buf, ind + '\t', taken);
 					buf.add('${ind}} else {}\n');
@@ -454,16 +543,23 @@ class Emitter {
 		publish(buf, ind);
 		if (cls != null) {
 			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
-			buf.add(ind + UNWIND_LINE + "\n");
 		} else {
 			// The kernel, code this build never found, or a window whose occupant is decided at
 			// run time. All three are the same instruction here: ask by address.
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
-			buf.add(ind + UNWIND_LINE + "\n");
 		}
+		emitCallUnwind(buf, ind, resumes ? continuation : -1);
 		if (resumes) reload(buf, ind);
 	}
+
+	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int):Void {
+		buf.add(ind + '#if recompsx_cooperative\n');
+		buf.add(ind + 'if (core.Cooperative.afterCall(ctx, ${continuationId()}, $entry)) return;\n');
+		buf.add(ind + '#else\n' + ind + UNWIND_LINE + '\n' + ind + '#end\n');
+	}
+
+	function continuationId():String return continuationToken == null ? hex(functionAddr) : continuationToken;
 
 	function emitFallThrough(buf:StringBuf, fn:Func, ind:String, indexOf:Map<Int, Int>,
 			addr:Int):Void {

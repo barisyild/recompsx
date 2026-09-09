@@ -201,7 +201,18 @@ class Timers {
 	}
 
 	static function dotsIn(elapsed:Int):Int {
-		return IntMath.div(videoClocksIn(elapsed), dotDivider());
+		// The divisor is one of five constants, but reaching it through a function makes it a
+		// runtime value — and SH-4 has no integer divide instruction, so that is a call to
+		// __sdivsi3 on every dot-clock read. Dividing inside the branches instead lets the
+		// compiler strength-reduce each one to a multiply-high and a shift. Exact integer
+		// arithmetic either way; this is the same division, spelled where the number is known.
+		final v = videoClocksIn(elapsed);
+		final m = gpu.Gpu.displayModeBits();
+		if ((m & 0x40) != 0) return IntMath.div(v, 7);
+		else if ((m & 3) == 0) return IntMath.div(v, 10);
+		else if ((m & 3) == 1) return IntMath.div(v, 8);
+		else if ((m & 3) == 2) return IntMath.div(v, 5);
+		else return IntMath.div(v, 4);
 	}
 
 	/**

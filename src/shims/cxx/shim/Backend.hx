@@ -39,10 +39,47 @@ class Backend {
 	public static inline function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void
 		BackendNative.bp_present(RawMem.u16Ptr(vram), sx, sy, sw, sh, flags);
 
+	/**
+		The hardware-drawing seam. Only reached when the runtime has been told to take it and this
+		backend answered `BP_CAP_GPU_DRAW` — see `gpu.Gpu.hw` and ADR-0008.
+	**/
+	public static inline function gpuVram(vram:RawBuf):Void
+		BackendNative.bp_gpu_vram(RawMem.u16Ptr(vram));
+
+	public static inline function gpuState(texBaseX:Int, texBaseY:Int, texDepth:Int,
+			clutX:Int, clutY:Int, semiMode:Int, flags:Int, texWindow:Int,
+			drawX:Int, drawY:Int):Void
+		BackendNative.bp_gpu_state(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode, flags,
+			texWindow, drawX, drawY);
+
+	public static inline function gpuTri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
+			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
+			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void
+		BackendNative.bp_gpu_tri(x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
+
+	public static inline function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
+			semiMode:Int):Void
+		BackendNative.bp_gpu_rect(x, y, w, h, bgr, semi, semiMode);
+
+	public static inline function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void
+		BackendNative.bp_gpu_dirty(x, y, w, h);
+
 	public static inline function audioPush(frames:RawBuf, frameCount:Int):Void
 		BackendNative.bp_audio_push(RawMem.s16Ptr(frames), frameCount);
 
 	public static inline function audioBuffered():Int return BackendNative.bp_audio_buffered();
+
+	/**
+		A native host has one thread and nothing to hand it back to, so a suspended program is
+		simply resumed until it ends.
+
+		The machinery still compiles and still works here — that is what the forced-yield test
+		proves on this target — but nothing in a PC or console build asks for a suspension, so in
+		practice this loop runs zero times.
+	**/
+	public static function driveYields(step:Void -> Bool):Void {
+		while (step()) {}
+	}
 
 	public static inline function inputPoll():Void BackendNative.bp_input_poll();
 	public static inline function padConnected(pad:Int):Bool return BackendNative.bp_pad_connected(pad) != 0;

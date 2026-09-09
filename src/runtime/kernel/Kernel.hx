@@ -45,10 +45,16 @@ class Kernel {
 
 	/** A BIOS call through one of the three vectors. `fn` is the value in $t1. */
 	public static function call(ctx:CpuState, vector:Int, fn:Int):Void {
+		#if recompsx_cooperative
+		core.Cooperative.blocked++;
+		#end
 		if (vector == 0xA0) a0(ctx, fn);
 		else if (vector == 0xB0) b0(ctx, fn);
 		else if (vector == 0xC0) c0(ctx, fn);
 		else reportCall(ctx, vector, fn);
+		#if recompsx_cooperative
+		core.Cooperative.blocked--;
+		#end
 	}
 
 	// ---- A0 ------------------------------------------------------------------------------------
@@ -566,6 +572,8 @@ class Kernel {
 	static function cdrom(ctx:CpuState):Void {
 		KEvents.deliver(ctx, KEvents.CLASS_CDROM, specForCdInt(cd.Cdrom.currentLevel()));
 		Irq.writeStat(~(1 << Irq.CDROM));
+		// The drive acknowledgement may raise the next answer, so it follows I_STAT.
+		cd.Cdrom.acknowledgeUnhandled();
 	}
 
 	static function specForCdInt(level:Int):Int {
@@ -664,7 +672,7 @@ class Kernel {
 			+ " | spu " + spu.Spu.written + "hw/" + spu.Spu.keyedOn + "kon/"
 			+ spu.Spu.samplesOut + "smp/" + spu.Spu.nonSilent + "loud "
 			+ spu.Spu.settings()
-			+ " | in ra=" + hex8(mem.Memory.raHint));
+			+ " | in ra=" + hex8(mem.Memory.raHint()));
 	}
 
 	/**

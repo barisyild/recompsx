@@ -90,11 +90,12 @@ usage:
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
 
-  recompsx gen <games/<id>/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt]
+  recompsx gen <games/<id>/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions]
       Emit a recompiled program. Given a config, the executable is read from the disc
       that game's gitignored local.json names, and its hints are used as seeds. Given a
       bare executable, seeds come from --seed.
       --no-opt keeps context registers and block dispatch for differential testing.
+      --no-regions keeps scalar registers and simple loops but disables region reductions.
 
 exit codes: 0 ok · 2 usage · 3 could not load the input");
 	}
@@ -245,6 +246,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		var outDir = "out/gen";
 		var limit = 0;
 		var optimize = true;
+		var structureRegions = true;
 		var i = 1;
 		while (i < args.length) {
 			switch (args[i]) {
@@ -252,6 +254,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				case "--limit" if (i + 1 < args.length): limit = Std.parseInt(args[i + 1]); i++;
 				case "--seed" if (i + 1 < args.length): seeds.push(args[i + 1]); i++;
 				case "--no-opt": optimize = false;
+				case "--no-regions": structureRegions = false;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
 					return EXIT_USAGE;
@@ -277,7 +280,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		final universes = [new Universe(null, base, discovery, null)];
 		for (o in input.overlays) universes.push(analyseOverlay(input, exe, o));
 
-		final program = new Program(universes, exe, limit, optimize);
+		final program = new Program(universes, exe, limit, optimize, structureRegions);
 		program.writeTo(outDir);
 
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');

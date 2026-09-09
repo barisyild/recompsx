@@ -33,6 +33,22 @@ clang++ "${CXXFLAGS[@]}" -Iout/_spike/verify/include -Itests/spike/verify \
 out/_spike/verify/verify
 say "  all checks passed"
 
+say "spike: nat64 (does cxx.num.Int64 keep 64 bits?)"
+rm -rf out/_spike/nat64
+haxe build/spike-nat64.hxml
+# The trap, and why this runs on every pin change: `cxx.num.Int64` is declared
+# `extern abstract Int64 to Int from Int`, so Haxe's typer resolves operators through `to Int`
+# and reflaxe emits a plain 32-bit multiply that is only widened AFTERWARDS. A product that
+# leaves 32 bits is lost before it is ever stored. Any future move of shim.I64 onto a native
+# int64 must therefore spell every operation with @:nativeFunctionCode, never with the
+# abstract's own operators. If this grep ever fails, upstream fixed it and that constraint
+# can be revisited.
+if grep -qE "int64_t wide = \(\(int64_t\)|int64_t wide = \(int64_t\)" out/_spike/nat64/src/*.cpp; then
+  say "  cxx.num.Int64 now widens BEFORE multiplying — upstream changed; revisit shim.I64"
+else
+  say "  confirmed: cxx.num.Int64 arithmetic truncates to 32 bits (use @:nativeFunctionCode)"
+fi
+
 say "spike: guard (does the compiler keep our branches?)"
 rm -rf out/_spike/guard
 haxe build/spike-guard.hxml

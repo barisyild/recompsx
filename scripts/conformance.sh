@@ -24,7 +24,7 @@ cd "$ROOT"
 # shellcheck source=scripts/env.sh
 source "$ROOT/scripts/env.sh"
 
-CXXFLAGS=(-std=c++17 -O2 -fwrapv)   # -fwrapv per ADR-0004
+CXXFLAGS=(-std=c++17 -O2 -fwrapv -fno-strict-aliasing)   # -fwrapv per ADR-0004
 OUT="out/_conf"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -50,8 +50,16 @@ FAILED=0
 
 # These fixtures must come from today's emitter, never from checked-in generated Haxe.
 for name in "${TESTS[@]}"; do
-  if [ "$name" = "Codegen" ]; then
+  if [ "$name" = "Codegen" ] || [ "$name" = "Regions" ] || [ "$name" = "Yielding" ]; then
     haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestCodegen --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "Dispatch" ]; then
+    haxe build/tests-tool.hxml > "$OUT/dispatch-fixtures.log" 2>&1 || exit 1
+    break
   fi
 done
 
@@ -62,11 +70,14 @@ say "conformance: ${#TESTS[@]} test(s) x 2 targets"
 for name in "${TESTS[@]}"; do
   src="tests/conformance/$name.hx"
   [ -f "$src" ] || { bad "$name" "no such test ($src)"; FAILED=1; continue; }
+  # Keep the array nonempty: macOS Bash 3.2 treats an empty array as unset under `set -u`.
+  DEFINES=(-D analyzer-optimize)
+  if [ "$name" = "Yielding" ]; then DEFINES+=(-D recompsx_cooperative); fi
 
   # ---- JavaScript ----
   js_log="$OUT/$name.js.log"
-  if ! haxe build/common.hxml -cp tests/conformance -cp out/_codegen/fixtures -cp src/runtime -cp src/shims/js -main "$name" \
-            -js "$OUT/$name.js" -D js-es=6 -D analyzer-optimize >"$js_log" 2>&1; then
+  if ! haxe build/common.hxml -cp tests/conformance -cp out/_codegen/fixtures -cp out/_tooltest_overlay -cp src/runtime -cp src/shims/js -main "$name" \
+            -js "$OUT/$name.js" -D js-es=6 "${DEFINES[@]}" >"$js_log" 2>&1; then
     bad "$name" "JS build failed — see $js_log"; FAILED=1; continue
   fi
   if ! js_out="$(node "$OUT/$name.js" 2>&1)"; then
@@ -78,15 +89,16 @@ for name in "${TESTS[@]}"; do
   cpp_dir="$OUT/$name.cpp"
   cpp_log="$OUT/$name.cpp.log"
   rm -rf "$cpp_dir"
-  if ! haxe build/common.hxml build/reflaxe-cpp.hxml -cp tests/conformance -cp out/_codegen/fixtures -cp src/runtime -cp src/shims/cxx \
+  if ! haxe build/common.hxml build/reflaxe-cpp.hxml -cp tests/conformance -cp out/_codegen/fixtures -cp out/_tooltest_overlay -cp src/runtime -cp src/shims/cxx \
             -D "mainClass=$name" -main "$name" \
-            -D "cpp-output=$cpp_dir" -D analyzer-optimize >"$cpp_log" 2>&1; then
+            -D "cpp-output=$cpp_dir" "${DEFINES[@]}" >"$cpp_log" 2>&1; then
     bad "$name" "C++ generation failed — see $cpp_log"; FAILED=1; continue
   fi
   # The null backend, not SDL: a conformance test needs logging and nothing else, and building
   # against it also keeps proving the ABI is substitutable.
   if ! clang++ "${CXXFLAGS[@]}" -w \
         -I"$cpp_dir/include" -I"$ROOT/src/backend/api" \
+        -I"$ROOT/src/shims/cxx/native" "$ROOT/src/shims/cxx/native/recompsx_arena.c" \
         "$cpp_dir"/src/*.cpp "$ROOT/src/backend/null/backend_null.c" \
         -o "$cpp_dir/run" >>"$cpp_log" 2>&1; then
     bad "$name" "C++ build failed — see $cpp_log"; FAILED=1; continue

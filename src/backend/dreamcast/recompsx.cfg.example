@@ -1,0 +1,22 @@
+# recompsx.cfg — launch parameters for the Dreamcast build.
+#
+# A Dreamcast booted from a disc has no command line, so this file is where the arguments come
+# from. The backend looks for it at /pc/recompsx.cfg (the development host, over dcload), then
+# /cd/RECOMPSX.CFG, then /cd/recompsx.cfg. Launched over dcload with a real command line, that
+# command line wins and this file is not read at all.
+#
+# One argument per line, in the order the program expects them. Nothing is split on spaces, so a
+# path with a space in it needs no quoting. Blank lines and lines starting with # are ignored.
+#
+# Copy this to the root of the disc (or next to dc-tool) as recompsx.cfg and edit the paths.
+
+# 1. the PS-EXE the recompiler was built from
+/cd/BOOT.EXE
+
+# 2. the disc image — a BIN/CUE or ISO, or a directory of files already extracted from one
+/cd/DISC.BIN
+
+# Options may follow, exactly as on a desktop command line. Uncomment to stop at frame 600 and
+# print one digest instead of playing, which is how a console is compared against JavaScript.
+# --headless-hash
+# 600

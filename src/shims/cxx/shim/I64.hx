@@ -27,177 +27,108 @@ package shim;
 	their digests must match.
 **/
 class I64 {
-	/** Bits 63..32, signed. */
-	public static var hi:Int = 0;
+	/** The accumulator itself. A declared `int64_t` — which is the one context where the type
+	    survives, as the spike shows. */
+	public static var acc:cxx.num.Int64 = 0;
 
-	/** Bits 31..0, read as unsigned. */
-	public static var lo:Int = 0;
+	/** Bits 63..32, signed. A property now, because the storage is no longer split — and
+	    writable because `tests/conformance/Acc64.hx` builds its cases by setting the words
+	    directly, and the gate is not something to bend so that it passes. */
+	public static var hi(get, set):Int;
+	static inline function get_hi():Int return N64.high(acc);
+	static inline function set_hi(v:Int):Int {
+		acc = N64.pair(v, N64.low(acc));
+		return v;
+	}
+
+	/** Bits 31..0, read as unsigned by every operation here. */
+	public static var lo(get, set):Int;
+	static inline function get_lo():Int return N64.low(acc);
+	static inline function set_lo(v:Int):Int {
+		acc = N64.pair(N64.high(acc), v);
+		return v;
+	}
 
 	/** The accumulator becomes a sign-extended 32-bit value. */
-	public static function set(v:Int):Void {
-		lo = v;
-		hi = v >> 31;
-	}
+	public static inline function set(v:Int):Void acc = N64.ext(v);
 
-	public static function setZero():Void {
-		lo = 0;
-		hi = 0;
-	}
+	public static inline function setZero():Void acc = N64.ext(0);
 
-	/**
-		The accumulator becomes `v << 12`, exactly.
-
-		This is how a translation vector enters an MAC accumulation: the GTE holds TR as a plain
-		32-bit value and adds it already scaled. `v << 12` overflows 32 bits for any v past 2^19,
-		so the shift is done across both words — the low word keeps what a 32-bit shift would give
-		and the high word takes the twelve bits that fell off the top, sign included.
-	**/
-	public static function setShl12(v:Int):Void {
-		lo = (v << 12) | 0;
-		hi = v >> 20;
-	}
+	/** The accumulator becomes `v << 12`, exactly — how a translation vector enters an MAC
+	    accumulation, and a shift that leaves 32 bits for any v past 2^19. */
+	public static inline function setShl12(v:Int):Void acc = N64.shl12(v);
 
 	/** Adds a sign-extended 32-bit value. */
-	public static function addSmall(p:Int):Void {
-		final sum = (lo + p) | 0;
-		// Carry out of bit 31, computed rather than compared: `lo` and `p` are both being read as
-		// unsigned here, and Haxe has no unsigned Int to compare them with. This is the standard
-		// identity — a carry happens when both inputs had the bit set, or when either did and the
-		// result did not.
-		final carry = ((lo & p) | ((lo | p) & ~sum)) >>> 31;
-		hi = (hi + (p >> 31) + carry) | 0;
-		lo = sum;
-	}
+	public static inline function addSmall(p:Int):Void acc = acc + N64.ext(p);
 
-	/**
-		Accumulates `a * b` where the product is known to fit in 32 bits.
+	/** Accumulates `a * b`. The narrow and wide cases are the same instruction now, so the
+	    distinction the hand-rolled version had to make — four multiplies or one — is gone. */
+	public static inline function addProduct16(a:Int, b:Int):Void acc = acc + N64.mul(a, b);
 
-		The GTE's matrix rows are this case and nothing else: a signed 16-bit matrix element times
-		a signed 16-bit vector element is at most 2^30. So is IR0 times IRn, and so is ZSF times
-		SZn — 32767 × 65535 = 2,147,385,345, which clears the 32-bit ceiling by 98,302 and is the
-		reason `AVSZ` accumulates four separate products instead of one product of a sum.
+	public static inline function addProductWide(a:Int, b:Int):Void acc = acc + N64.mul(a, b);
 
-		Callers that cannot promise that use `addProductWide`, which costs four multiplies.
-	**/
-	public static function addProduct16(a:Int, b:Int):Void {
-		addSmall(IntMath.mul(a, b));
-	}
+	/** Adds a 64-bit value given as a high word and an unsigned low word. */
+	public static inline function addPair(ahi:Int, alo:Int):Void acc = acc + N64.pair(ahi, alo);
 
-	/**
-		Accumulates `a * b` for any two signed 32-bit values.
+	/** Whether the accumulator has left the 44-bit signed range: +1 above, -1 below, 0 inside. */
+	public static inline function check44():Int return N64.check44(acc);
 
-		The unsigned product comes from 16-bit halves, then the sign is corrected: reading a
-		negative operand as unsigned adds 2^32 times the other operand, so subtracting that back
-		out of the high word is the whole of the difference between signed and unsigned here.
-	**/
-	public static function addProductWide(a:Int, b:Int):Void {
-		final al = a & 0xFFFF, ah = a >>> 16;
-		final bl = b & 0xFFFF, bh = b >>> 16;
+	/** The same question for 32 bits, which is what MAC0 is judged against. */
+	public static inline function check32():Int return N64.check32(acc);
 
-		final ll = IntMath.mul(al, bl);
-		final lh = IntMath.mul(al, bh);
-		final hl = IntMath.mul(ah, bl);
-		final hh = IntMath.mul(ah, bh);
+	/** Truncates to 44 bits, sign-extending from bit 43. The hardware wraps rather than
+	    saturating, and the flag is the only record that it happened. */
+	public static inline function wrap44():Void acc = N64.wrap44(acc);
 
-		final mid = ((ll >>> 16) + (lh & 0xFFFF) + (hl & 0xFFFF)) | 0;
-		final plo = ((ll & 0xFFFF) | (mid << 16)) | 0;
-		var phi = (hh + (lh >>> 16) + (hl >>> 16) + (mid >>> 16)) | 0;
+	public static inline function low32():Int return N64.low(acc);
+	public static inline function shr12():Int return N64.shr12(acc);
+	public static inline function shr16():Int return N64.shr16(acc);
 
-		if (a < 0) phi = (phi - b) | 0;
-		else {}
-		if (b < 0) phi = (phi - a) | 0;
-		else {}
+	/** `(a * b + 0x8000) >> 16` in full precision — the last step of the GTE's division, where
+	    a 17-bit quotient estimate times an 18-bit divisor genuinely exceeds 32 bits. Kept off the
+	    accumulator so it can be called while an accumulation is in progress. */
+	public static inline function mulShr16Round(a:Int, b:Int):Int return N64.mulRound(a, b);
+}
 
-		addPair(phi, plo);
-	}
+/**
+	The spellings themselves. Placeholders are parenthesised by hand because `@:nativeFunctionCode`
+	splices its arguments as raw text (golden rule 1), and the 64-bit constants carry `LL`/`ULL`
+	suffixes because a bare literal past 2^31 is not one on a 32-bit target.
+**/
+private extern class N64 {
+	@:nativeFunctionCode("((int64_t)({arg0}))")
+	public static function ext(v:Int):cxx.num.Int64;
 
-	/** Adds a 64-bit value given as its two words. */
-	public static function addPair(ahi:Int, alo:Int):Void {
-		final sum = (lo + alo) | 0;
-		final carry = ((lo & alo) | ((lo | alo) & ~sum)) >>> 31;
-		hi = (hi + ahi + carry) | 0;
-		lo = sum;
-	}
+	@:nativeFunctionCode("(((int64_t)({arg0})) * ((int64_t)({arg1})))")
+	public static function mul(a:Int, b:Int):cxx.num.Int64;
 
-	/**
-		Whether the accumulator has left the 44-bit signed range: +1 above, -1 below, 0 inside.
+	@:nativeFunctionCode("(((int64_t)({arg0})) << 12)")
+	public static function shl12(v:Int):cxx.num.Int64;
 
-		Only the high word is examined, and that is exact rather than an approximation. The largest
-		44-bit value is `0x7FF_FFFFFFFF`, whose high word is 0x7FF and whose low word is already
-		all ones — so any value above it has a high word above 0x7FF. The smallest is
-		`-0x800_00000000`, high word -0x800 with a low word of zero, so anything below it has a
-		high word below -0x800.
-	**/
-	public static function check44():Int {
-		if (hi > 0x7FF) return 1;
-		else {}
-		if (hi < -0x800) return -1;
-		else {}
-		return 0;
-	}
+	@:nativeFunctionCode("((((int64_t)({arg0})) << 32) | ((int64_t)((uint32_t)({arg1}))))")
+	public static function pair(ahi:Int, alo:Int):cxx.num.Int64;
 
-	/** The same question for the 32-bit signed range, which is what MAC0's flags are defined on. */
-	public static function check32():Int {
-		if (hi > 0) return 1;
-		else {}
-		if (hi == 0 && lo < 0) return 1;
-		else {}
-		if (hi < -1) return -1;
-		else {}
-		if (hi == -1 && lo >= 0) return -1;
-		else {}
-		return 0;
-	}
+	@:nativeFunctionCode("((int)(({arg0}) >> 32))")
+	public static function high(v:cxx.num.Int64):Int;
 
-	/**
-		Truncates to 44 bits, sign-extending from bit 43.
+	@:nativeFunctionCode("((int)({arg0}))")
+	public static function low(v:cxx.num.Int64):Int;
 
-		The hardware's accumulators are 44 bits wide, so an overflow does not saturate — it wraps,
-		and the flag is the only record that it happened. Every accumulation step does this after
-		its check, which is what makes a long chain of adds reproduce the hardware rather than
-		merely detecting that it would have differed.
-	**/
-	public static function wrap44():Void {
-		hi = ((hi & 0xFFF) << 20) >> 20;
-	}
+	@:nativeFunctionCode("((int)(({arg0}) >> 12))")
+	public static function shr12(v:cxx.num.Int64):Int;
 
-	/** The low 32 bits, which is the accumulator itself when no shift is asked for. */
-	public static function low32():Int {
-		return lo;
-	}
+	@:nativeFunctionCode("((int)(({arg0}) >> 16))")
+	public static function shr16(v:cxx.num.Int64):Int;
 
-	/** The low 32 bits of the value shifted right by 12 — the `sf=1` result. */
-	public static function shr12():Int {
-		return (lo >>> 12) | (hi << 20);
-	}
+	@:nativeFunctionCode("((({arg0}) > 0x7FFFFFFFFFFLL) ? 1 : ((({arg0}) < -0x80000000000LL) ? -1 : 0))")
+	public static function check44(v:cxx.num.Int64):Int;
 
-	/** The low 32 bits of the value shifted right by 16 — the screen-coordinate scale. */
-	public static function shr16():Int {
-		return (lo >>> 16) | (hi << 16);
-	}
+	@:nativeFunctionCode("((({arg0}) > 0x7FFFFFFFLL) ? 1 : ((({arg0}) < -0x80000000LL) ? -1 : 0))")
+	public static function check32(v:cxx.num.Int64):Int;
 
-	/**
-		`(a * b + 0x8000) >> 16` for non-negative operands, in full precision.
+	@:nativeFunctionCode("((int64_t)(((uint64_t)(({arg0}) & 0xFFFFFFFFFFFLL)) << 20) >> 20)")
+	public static function wrap44(v:cxx.num.Int64):cxx.num.Int64;
 
-		The last step of the GTE's division, where the product genuinely exceeds 32 bits: a
-		17-bit quotient estimate times an 18-bit divisor is up to 2^35. Kept off the accumulator
-		and out of its own locals so it can be called while an accumulation is in progress.
-	**/
-	public static function mulShr16Round(a:Int, b:Int):Int {
-		final al = a & 0xFFFF, ah = a >>> 16;
-		final bl = b & 0xFFFF, bh = b >>> 16;
-
-		final ll = IntMath.mul(al, bl);
-		final lh = IntMath.mul(al, bh);
-		final hl = IntMath.mul(ah, bl);
-		final hh = IntMath.mul(ah, bh);
-
-		final mid = ((ll >>> 16) + (lh & 0xFFFF) + (hl & 0xFFFF)) | 0;
-		final plo = ((ll & 0xFFFF) | (mid << 16)) | 0;
-		final phi = (hh + (lh >>> 16) + (hl >>> 16) + (mid >>> 16)) | 0;
-
-		final sum = (plo + 0x8000) | 0;
-		final carry = ((plo & 0x8000) | ((plo | 0x8000) & ~sum)) >>> 31;
-		return (sum >>> 16) | (((phi + carry) | 0) << 16);
-	}
+	@:nativeFunctionCode("((int)((((int64_t)({arg0})) * ((int64_t)({arg1})) + 0x8000LL) >> 16))")
+	public static function mulRound(a:Int, b:Int):Int;
 }

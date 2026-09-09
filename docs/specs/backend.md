@@ -23,7 +23,7 @@ shim directory. No runtime code changes.
 | **Dreamcast** | KallistiOS | SH-4 | LE | 16 MB | Tightest memory budget; binary-search FnTable mandatory |
 | **GameCube / Wii** | devkitPPC + libogc | PowerPC | **BE** | 24 / 88 MB | The only current target needing the byteswap path in `RawMem` |
 | **Switch** | devkitA64 + libnx | ARM64 | LE | ample | |
-| **JavaScript** | Haxe JS target + Node | — | — | ample | **The development and verification target (ADR-0003).** No C ABI: `shim.Backend` is pure Haxe. Node-headless today; a browser backend needs the main loop inverted (`stepFrame()` driven by the platform) since a browser cannot block in `while (!quit)` |
+| **JavaScript** | Haxe JS target + Node | — | — | ample | **The development and verification target (ADR-0003).** No C ABI: `shim.Backend` is pure Haxe. Node and browser main-thread execution through optional cooperative continuations (ADR-0010) |
 | **JVM family** | Haxe JVM target | — | — | ample | No C ABI either; same shape as the JS shim |
 
 Consequences captured in the design:
@@ -33,10 +33,9 @@ Consequences captured in the design:
 - **Memory budget matters.** Runtime state is fixed: 2 MB emulated RAM + 1 MB VRAM + 512 KB SPU
   RAM + 1 KB scratchpad ≈ 3.5 MB. The variable is generated code size (a PS1 game with ~500 K
   instructions is expected to compile to roughly 8–15 MB of machine code) plus the dispatch
-  table. The flat FnTable (512 K entries) costs ~4 MB with 64-bit pointers and is fine on PC; the
-  **sorted-array + binary-search variant is the console default** (`-D fntable=binary`, same API,
-  ~8 bytes per discovered function ≈ 100 KB). The M1.5 scale spike records real binary size
-  against these budgets.
+  table. The generated `FnTable` and `Overlays` already use sorted integer rows with binary
+  search and direct-mapped lookup caches; there is no `fntable=binary` switch. Aligned copies
+  are initialized before guest execution. Table size follows the discovered block count.
 - **Old or unusual toolchains** are the main console risk, not the architecture: the generated
   C++ is plain C++17 with no dependencies, but each SDK's compiler must actually support C++17.
   Verify per target before committing to it.
@@ -58,7 +57,7 @@ extern "C" {
 /* lifecycle */
 int  bp_init(const char* title);      /* 0 ok, nonzero fatal failure */
 void bp_shutdown(void);
-enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3 };
+enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4 };
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
@@ -122,6 +121,41 @@ up to 4 `SDL_GameController`s (hotplug); storage under `SDL_GetPrefPath("recomps
 Console implementations follow the same shape against their SDK: present = framebuffer copy or a
 textured quad, audio = the platform's streaming API, input = the platform's pad API, storage =
 memory card / SD / HDD, file = the platform's disc or mass-storage read. Nothing else changes.
+
+## 2.1 Dreamcast and optional hardware drawing
+
+The KallistiOS backend in `src/backend/dreamcast/`, its launcher and `scripts/build-dc.sh` are
+restored from commits `25d9a5d` / `6819782`. It implements video, audio, pads and file/storage
+access through the same ABI. The September reconciliation verifies the PC/null ABI and both
+Haxe targets; it does not constitute a new Dreamcast hardware acceptance run.
+
+`--video-hw` selects the optional primitive submission path only if `BP_CAP_GPU_DRAW` is
+available. Headless digest runs explicitly retain software rendering, even if both flags are
+passed. JS, PC and null backends report no primitive drawing capability. The extended ABI is:
+
+```c
+void bp_gpu_vram(const uint16_t* vram);
+void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
+                  int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
+                  int draw_x, int draw_y);
+void bp_gpu_tri(int x0,int y0,int c0,int u0,int v0,
+                int x1,int y1,int c1,int u1,int v1,
+                int x2,int y2,int c2,int u2,int v2);
+void bp_gpu_rect(int x,int y,int w,int h,int bgr,int semi,int semi_mode);
+void bp_gpu_dirty(int x,int y,int w,int h);
+```
+
+GP0 parsing, uploads, VRAM copies and device timing still run in the core. Rasterized pixels
+from this optional path are absent from emulated VRAM, so feedback/readback effects can differ;
+this is not a bit-exact substitute for the software renderer. The original decision and its
+measurements are preserved as [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md)
+(renumbered from that branch's ADR-0008 to preserve main's machine-IR decision).
+
+The native memory path uses a static aligned arena and `shim.MemA` for aligned accesses;
+byte-packed records stay on `RawMem`. Native builds pass `-fno-strict-aliasing` and `-fwrapv`.
+Big-endian shims select byte-composed access with `recompsx_bigendian`. `Memory.machine` binds
+the live CPU at boot so memory-mapped clocks see current guest cycles. `CpuState` remains a
+shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliases and calls.
 
 ## 3. Haxe side — `Backend` interface + externs
 

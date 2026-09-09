@@ -1,0 +1,8 @@
+# Run from the repository root:  haxe build/spike-nat64.hxml
+build/common.hxml
+build/reflaxe-cpp.hxml
+-cp tests/spike/nat64
+-D mainClass=Nat64
+-main Nat64
+-D cpp-output=out/_spike/nat64
+-dce full
