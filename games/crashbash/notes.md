@@ -3,6 +3,35 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-09-09: main reconciled with the committed console branch
+
+The earlier claim that working features existed only in an untracked JS bundle was incorrect.
+`25d9a5d` and `6819782` on `dreamcast-hardware-rendering` already contain the GTE operations,
+textured rasterizer, CD acknowledgements/held-sector reset, 7-cycle loads and additional entry
+metadata. `main` was based on the older `d731004` runtime when `2c80e68` added scalar codegen.
+Rebuilding that older source exposed the missing branch integration. No commit or media was lost.
+
+Those changes are now reconciled into the main working tree, keeping the new IR/regions and
+compiled-handle continuations. `game.json` again supplies 1004 executable functions, 324 boot,
+180 stage2 and 69 stage functions. These are per-game discoveries, not runtime address checks.
+The timed SCEx fixture added during diagnosis remains: Test 05 returns two persistent counters
+and does not infer head position from GetID licensing. Its one-observation timing is coarse.
+
+The observed protection check is SeekP → Play → Test 04 → delay → Test 05 with no GetlocP in
+its 1500-frame trace, i.e. [SCEx/modchip detection](https://psx-spx.consoledev.net/cdromformat/#stealth-hidden-modchip),
+not [LibCrypt subchannel-Q checking](https://psx-spx.consoledev.net/cdromformat/#cdrom-protection-libcrypt).
+The old main response exited around frame 600; the SCEx-only repair went further but hit 15
+missing paths and VSync timeouts. That `b542d57e` run was an intermediate failure, not a baseline.
+
+After reconciliation, optimized cooperative JS, forced yields every 31 checkpoints,
+`--no-opt` synchronous JS and full reflaxe.CPP (normal/forced yields) all reach frame 3000 with
+`0e180c28` and zero missing paths:
+28,871 scheduler events, 6,420 IRQs, 7,832,308 GPU words, 855,112 primitives and 1,714 sectors.
+The browser reaches Select Game Type with a rendered 3D character beyond frame 7366.
+The original old bundle's `8af4d44b` is historical; it has different runtime timing and unwind
+behavior. Current mode comparisons use the same sources and inputs. Logs are ignored under
+`out/_reconcile/`; the old artifact remains ignored at `out/_web/previous-game.js`.
+
 ## Dump shape
 
 The reference dump on the development machine is an **extracted-files directory**, not a BIN/CUE

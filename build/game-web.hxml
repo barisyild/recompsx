@@ -1,0 +1,11 @@
+# Source-built browser/Node bundle. The same optimized generator, with optional safe-point yields.
+build/common.hxml
+-cp src/runtime
+-cp src/shims/js
+-cp out/_web/gen
+-cp tests/spike
+-main GenMain
+-js out/_web/game.js
+-D js-es=6
+-D recompsx_cooperative
+-dce full

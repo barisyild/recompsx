@@ -38,7 +38,8 @@ class Program {
 	/** Function bodies a second universe did not need to emit because the first had them. */
 	public var deduplicated(default, null) = 0;
 
-	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0, optimize:Bool = true) {
+	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0, optimize:Bool = true,
+			structureRegions:Bool = true) {
 		this.universes = universes;
 		this.exe = exe;
 
@@ -55,7 +56,7 @@ class Program {
 		}
 
 		for (u in universes) {
-			u.emitter = new Emitter(u.image, u.discovery, optimize);
+			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
 		}
 		checkFingerprintsDistinct();
@@ -144,7 +145,7 @@ class Program {
 		buf.add('\t\tRuntime.lastSlot = slot;\n');
 		buf.add('\t\tswitch (slot) {\n');
 		for (i in 0...shard.functions.length) {
-			buf.add('\t\t\tcase $i: ${shard.functions[i].name}(ctx, entry);\n');
+			buf.add('\t\t\tcase $i: ${shard.className}.${shard.functions[i].name}(ctx, entry);\n');
 		}
 		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, "${shard.className}", ${shard.index}, slot);\n');
 		buf.add('\t\t}\n');
@@ -168,6 +169,10 @@ class Program {
 		that are genuinely the same code — usually library routines that only call into the base.
 	**/
 	function bodyOf(u:Universe, shard:Shard, fn:Func):String {
+		// Shared bodies retain the first owner's handle. Comparing before substitution preserves
+		// deduplication; resuming the handle cannot accidentally choose a new resident overlay.
+		final token = '__RECOMPSX_CONTINUATION_HANDLE__';
+		u.emitter.continuationToken = token;
 		final text = u.emitter.emitFunction(fn);
 		final owner = emitted.get(text);
 		if (owner != null) {
@@ -178,7 +183,7 @@ class Program {
 				+ '\t}\n';
 		}
 		emitted.set(text, shard.className);
-		return text;
+		return StringTools.replace(text, token, Std.string(u.shards.handleOf(fn.entry)));
 	}
 
 	// ---- the dispatch table -------------------------------------------------------------------
@@ -267,18 +272,28 @@ class Program {
 		emitIntArray(buf, addrs, a -> Std.string(block.get(a)));
 		buf.add('\t];\n\n');
 
+		buf.add('\tstatic final N:Int = ${addrs.length};\n\n');
+		buf.add(flatTables());
+
 		buf.add("	/** The row for an address, or -1 if this program has no code there. */
 	public static function lookup(addr:Int):Int {
+		if (!flatReady) buildFlat();
+		final slot = (addr >>> 2) & 1023;
+		final cached = shim.MemA.get32(CACHE_ROW, slot << 2);
+		if (cached != 0 && shim.MemA.get32(CACHE_TAG, slot << 2) == addr) return cached - 2;
 		var lo = 0;
-		var hi = ADDRS.length - 1;
+		var hi = N - 1;
+		var row = -1;
 		while (lo <= hi) {
 			final mid = (lo + hi) >> 1;
-			final at = ADDRS[mid];
-			if (at == addr) return mid;
-			if (at < addr) lo = mid + 1;
-			else hi = mid - 1;
+			final at = shim.MemA.get32(ADDRS_F, mid << 2);
+			if (at == addr) { row = mid; break; }
+			else if (at < addr) { lo = mid + 1; }
+			else { hi = mid - 1; }
 		}
-		return -1;
+		shim.MemA.set32(CACHE_TAG, slot << 2, addr);
+		shim.MemA.set32(CACHE_ROW, slot << 2, row + 2);
+		return row;
 	}
 
 	/** Routes a handle to the shard that owns it, entering at block `entry`. */
@@ -319,18 +334,72 @@ class Program {
 		}
 		final row = lookup(addr);
 		if (row < 0) return false;
-		dispatch(HANDLES[row], BLOCKS[row], ctx);
+		dispatch(shim.MemA.get32(HANDLES_F, row << 2), shim.MemA.get32(BLOCKS_F, row << 2), ctx);
 		return true;
 	}
 
 	/** Whether an address is a function entry rather than a block inside one. Diagnostics only. */
 	public static function isEntry(addr:Int):Bool {
 		final row = lookup(addr);
-		return row >= 0 && BLOCKS[row] == 0;
+		return row >= 0 && shim.MemA.get32(BLOCKS_F, row << 2) == 0;
 	}
 }
 ");
 		return buf.toString();
+	}
+
+	/**
+		The tables the hot path actually reads, and the reason they are not the arrays above.
+
+		reflaxe.CPP represents `Array<Int>` as `std::shared_ptr<std::deque<int>>`. Every element
+		access is therefore a call into `_Deque_iterator::operator[]` through a node map, and
+		`length` is iterator subtraction with two shifts — so an eleven-probe binary search costs
+		about four hundred instructions and a fistful of dependent loads. PC sampling on a
+		Dreamcast, 305,000 samples, put **19% of the entire frame** inside this one lookup: the
+		single largest item in the profile, above the game's own hottest function.
+
+		The same numbers in a flat buffer are one `mov.l` per probe. On top of that, `lookup` is
+		a **pure function of an address over build-time-constant tables** — the executable's code
+		cannot move — so a direct-mapped cache of the answers can never go stale and needs no
+		invalidation of any kind. A hit is a compare and a load.
+
+		The literal arrays stay because they are how the data arrives; they are walked once, at
+		startup, and never touched again.
+	**/
+	static function flatTables():String {
+		return "	static var ADDRS_F:shim.RawBuf;
+	static var HANDLES_F:shim.RawBuf;
+	static var BLOCKS_F:shim.RawBuf;
+	static var CACHE_TAG:shim.RawBuf;
+	static var CACHE_ROW:shim.RawBuf;
+	static var flatReady:Bool = false;
+
+	/** Initialize before guest execution; subsequent calls allocate nothing. */
+	public static function init():Void {
+		if (!flatReady) buildFlat();
+	}
+
+	static function buildFlat():Void {
+		ADDRS_F = shim.RawMem.alloc(N << 2);
+		HANDLES_F = shim.RawMem.alloc(N << 2);
+		BLOCKS_F = shim.RawMem.alloc(N << 2);
+		var i = 0;
+		while (i < N) {
+			shim.MemA.set32(ADDRS_F, i << 2, ADDRS[i]);
+			shim.MemA.set32(HANDLES_F, i << 2, HANDLES[i]);
+			shim.MemA.set32(BLOCKS_F, i << 2, BLOCKS[i]);
+			i++;
+		}
+		// Zero is an empty cache row; one encodes a miss and two encodes table row zero.
+		// Every Int address, including -1, therefore has an unambiguous answer.
+		CACHE_TAG = shim.RawMem.alloc(1024 << 2);
+		CACHE_ROW = shim.RawMem.alloc(1024 << 2);
+		i = 0;
+		while (i < 1024) { shim.MemA.set32(CACHE_ROW, i << 2, 0); i++; }
+		flatReady = true;
+	}
+
+";
 	}
 
 	// ---- the overlays --------------------------------------------------------------------------
@@ -412,16 +481,79 @@ class Program {
 	**/
 	public static function lookup(overlay:Int, addr:Int):Int {
 		if (overlay < 0 || overlay >= COUNT) return -1;
-		var lo = ROW_START[overlay];
-		var hi = ROW_END[overlay] - 1;
+		if (!flatReady) buildFlat();
+		// Two tags, because the answer depends on both arguments and a collision between two
+		// overlays asking about the same address would otherwise return the wrong row.
+		final slot = ((addr >>> 2) + overlay * 40503) & 1023;
+		if (shim.MemA.get32(CACHE_ADDR, slot << 2) == addr
+			&& shim.MemA.get32(CACHE_OVL, slot << 2) == overlay)
+			return shim.MemA.get32(CACHE_ROW, slot << 2);
+		var lo = shim.MemA.get32(ROW_START_F, overlay << 2);
+		var hi = shim.MemA.get32(ROW_END_F, overlay << 2) - 1;
+		var row = -1;
 		while (lo <= hi) {
 			final mid = (lo + hi) >> 1;
-			final at = ADDRS[mid];
-			if (at == addr) return mid;
-			if (at < addr) lo = mid + 1;
-			else hi = mid - 1;
+			final at = shim.MemA.get32(ADDRS_F, mid << 2);
+			if (at == addr) { row = mid; break; }
+			else if (at < addr) { lo = mid + 1; }
+			else { hi = mid - 1; }
 		}
-		return -1;
+		shim.MemA.set32(CACHE_ADDR, slot << 2, addr);
+		shim.MemA.set32(CACHE_OVL, slot << 2, overlay);
+		shim.MemA.set32(CACHE_ROW, slot << 2, row);
+		return row;
+	}
+
+	/**
+		The same flat tables FnTable keeps, and for the same measured reason — but this is the
+		copy that gameplay actually runs through. A game's code lives in the overlays it streams
+		from the disc, so `FnTable.call` reaches a resident overlay first and never touches the
+		executable's table at all. Sampling a Dreamcast found 14% of the frame inside
+		`std::_Deque_iterator::operator[]` **after** FnTable was flattened: template
+		instantiations have vague linkage, so every caller in the program shares one copy of that
+		function, and the callers left were these.
+	**/
+	static var ADDRS_F:shim.RawBuf;
+	static var HANDLES_F:shim.RawBuf;
+	static var BLOCKS_F:shim.RawBuf;
+	static var ROW_START_F:shim.RawBuf;
+	static var ROW_END_F:shim.RawBuf;
+	static var CACHE_ADDR:shim.RawBuf;
+	static var CACHE_OVL:shim.RawBuf;
+	static var CACHE_ROW:shim.RawBuf;
+	static var flatReady:Bool = false;
+
+	/** Initialize before guest execution; subsequent calls allocate nothing. */
+	public static function init():Void {
+		if (!flatReady) buildFlat();
+	}
+
+	static function buildFlat():Void {
+		final n = ADDRS.length;
+		ADDRS_F = shim.RawMem.alloc(n << 2);
+		HANDLES_F = shim.RawMem.alloc(n << 2);
+		BLOCKS_F = shim.RawMem.alloc(n << 2);
+		var i = 0;
+		while (i < n) {
+			shim.MemA.set32(ADDRS_F, i << 2, ADDRS[i]);
+			shim.MemA.set32(HANDLES_F, i << 2, HANDLES[i]);
+			shim.MemA.set32(BLOCKS_F, i << 2, BLOCKS[i]);
+			i++;
+		}
+		ROW_START_F = shim.RawMem.alloc(COUNT << 2);
+		ROW_END_F = shim.RawMem.alloc(COUNT << 2);
+		i = 0;
+		while (i < COUNT) {
+			shim.MemA.set32(ROW_START_F, i << 2, ROW_START[i]);
+			shim.MemA.set32(ROW_END_F, i << 2, ROW_END[i]);
+			i++;
+		}
+		CACHE_ADDR = shim.RawMem.alloc(1024 << 2);
+		CACHE_OVL = shim.RawMem.alloc(1024 << 2);
+		CACHE_ROW = shim.RawMem.alloc(1024 << 2);
+		i = 0;
+		while (i < 1024) { shim.MemA.set32(CACHE_OVL, i << 2, -1); i++; }
+		flatReady = true;
 	}
 
 	/** Whether an address falls inside an overlay's window, resident or not. */
@@ -429,8 +561,8 @@ class Program {
 		return overlay >= 0 && overlay < COUNT && addr >= LO[overlay] && addr < HI[overlay];
 	}
 
-	public static function handleAt(row:Int):Int return HANDLES[row];
-	public static function blockAt(row:Int):Int return BLOCKS[row];
+	public static function handleAt(row:Int):Int return shim.MemA.get32(HANDLES_F, row << 2);
+	public static function blockAt(row:Int):Int return shim.MemA.get32(BLOCKS_F, row << 2);
 
 	/**
 		Tells the runtime which overlays exist. Called once, at boot, after `Runtime.boot`.

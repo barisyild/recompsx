@@ -90,4 +90,41 @@ enum abstract Op(Int) to Int {
 			case _: true;
 		}
 	}
+
+	/**
+		What the instruction costs in CPU cycles.
+
+		One per instruction is the R3000A's issue rate and was this project's whole model, which
+		makes the emulated machine execute about two and a half times as much work per frame as the
+		real one — and a game notices. Games do not measure time only with interrupts; they also
+		spin, counting *iterations*, and libetc's `VSync` is one of them: it waits for the vblank
+		counter to change and gives up after `1<<15` turns of a fourteen-instruction loop. At one
+		cycle each that budget is 459k cycles against a frame's 565k, so the wait always lost the
+		race and Crash Bash printed `VSync: timeout` roughly once a frame while running visibly
+		fast. Nothing was wrong with the interrupt; the CPU was.
+
+		**Loads are what the model was missing.** The PlayStation has no data cache, so every load
+		reaches memory and halts the CPU until the data arrives; psx-spx's measured figures, per
+		`lw` and including the one-cycle issue, are 1 for the scratchpad, 5 for on-die I/O, 7 for
+		main RAM and 27..33 for the BIOS ROM. Main RAM is what almost every load in a game touches
+		— Crash Bash's whole executable forms a `0x1F80xxxx` base sixteen times — so 7 is the
+		figure here and the region is not distinguished. Stores cost 1: they go to the write queue
+		and the CPU carries on.
+
+		Deliberately still unmodelled, and roughly self-cancelling: the *load shadow*, where a slow
+		load overlaps the independent instructions after it (psx-spx measures an on-die load
+		falling from 5 to about 3 with four instructions to hide behind), which makes us slow for
+		well-scheduled code; and instruction-cache misses, which make us fast. Also unmodelled:
+		`div` at a fixed 36 cycles and `mult` at 6/9/13 by operand magnitude, both of which stall
+		only at the `mflo`/`mfhi` that reads them and neither of which a compiler emits often — GCC
+		divides by multiplying, as the anti-piracy routine in this very game does.
+	**/
+	public var cost(get, never):Int;
+
+	function get_cost():Int {
+		return switch (cast this : Op) {
+			case LB | LH | LWL | LW | LBU | LHU | LWR | LWC2: 7;
+			case _: 1;
+		}
+	}
 }

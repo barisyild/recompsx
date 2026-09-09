@@ -37,6 +37,11 @@ class GteOps {
 		rtpsSaturation();
 		divisionEdges();
 		sfLmMatrix();
+		mvmvaSweep();
+		mvmvaFarColorBug();
+		arithmeticOps();
+		colorInterpolation();
+		lightingFamily();
 
 		Conf.report("GteOps");
 	}
@@ -425,6 +430,170 @@ class GteOps {
 				else {}
 				Gte.execute(ctx, imm);
 				feedAll();
+			}
+		}
+	}
+
+	// ---- MVMVA, over every operand combination -------------------------------------------------------------------
+
+	/**
+		All sixty-four ways of naming MVMVA's operands, each with the whole register file fed in.
+
+		MVMVA is not one operation but a family: three bits of matrix, two of vector, two of
+		translation, and the instruction word decides. A mistake in the *selection* — the light
+		matrix read where the colour matrix was asked for, the background colour used as the
+		translation — produces perfectly plausible numbers for the wrong question, which is exactly
+		the failure a digest catches and an eyeball does not. Sweeping the field pins all of it.
+	**/
+	static function mvmvaSweep():Void {
+		loadDistinctMatrices();
+		setVector(0, 100, -200, 300);
+		setVector(1, -400, 500, -600);
+		setVector(2, 700, -800, 900);
+		Gte.setData(ctx, 9, 1111);      // IR1
+		Gte.setData(ctx, 10, -2222);    // IR2
+		Gte.setData(ctx, 11, 3333);     // IR3
+		Gte.setData(ctx, 6, 0x40302010); // RGBC, whose red byte feeds the garbage matrix
+		Gte.setData(ctx, 8, 0x555);      // IR0, likewise
+
+		for (mx in 0...4) {
+			for (v in 0...4) {
+				for (cv in 0...4) {
+					Gte.execute(ctx, 0x12 | 0x80000 | (mx << 17) | (v << 15) | (cv << 13));
+					feedAll();
+				}
+			}
+		}
+	}
+
+	/**
+		The far-colour translation, which the hardware does not add correctly.
+
+		psx-spx: the result keeps only the last two products of each row, while FLAG is set as
+		though the whole sum had been computed. Both halves are asserted, because an implementation
+		that "fixes" the bug passes every other test in this file.
+	**/
+	static function mvmvaFarColorBug():Void {
+		loadDistinctMatrices();
+		setVector(0, 0x1000, 0x1000, 0x1000);
+		// FC large enough that the omitted first term would be unmissable if it were added.
+		Gte.setCtrl(ctx, 21, 0x7000);
+		Gte.setCtrl(ctx, 22, 0x7000);
+		Gte.setCtrl(ctx, 23, 0x7000);
+
+		Gte.execute(ctx, 0x12 | 0x80000 | (0 << 17) | (0 << 15) | (2 << 13));
+		final fcMac1 = Gte.getData(ctx, 25);
+		// The same rows with no translation at all: identical but for the first product.
+		Gte.execute(ctx, 0x12 | 0x80000 | (0 << 17) | (0 << 15) | (3 << 13));
+		final noneMac1 = Gte.getData(ctx, 25);
+		// RT11 * VX0, the term the far-colour path throws away, at sf=12.
+		final firstTerm = (0x0100 * 0x1000) >> 12;
+		Conf.expect("the far-colour path loses the first product of the row",
+			noneMac1 - fcMac1, firstTerm);
+		feedAll();
+	}
+
+	static function loadDistinctMatrices():Void {
+		// Rotation, light and colour matrices with no value in common, so a mis-selected one shows.
+		Gte.setCtrl(ctx, 0, packXY(0x0100, 0x0200));
+		Gte.setCtrl(ctx, 1, packXY(0x0300, 0x0400));
+		Gte.setCtrl(ctx, 2, packXY(0x0500, 0x0600));
+		Gte.setCtrl(ctx, 3, packXY(0x0700, 0x0800));
+		Gte.setCtrl(ctx, 4, 0x0900);
+		Gte.setCtrl(ctx, 5, 11);  Gte.setCtrl(ctx, 6, 22);  Gte.setCtrl(ctx, 7, 33);   // TR
+		Gte.setCtrl(ctx, 8, packXY(0x1100, 0x1200));
+		Gte.setCtrl(ctx, 9, packXY(0x1300, 0x1400));
+		Gte.setCtrl(ctx, 10, packXY(0x1500, 0x1600));
+		Gte.setCtrl(ctx, 11, packXY(0x1700, 0x1800));
+		Gte.setCtrl(ctx, 12, 0x1900);
+		Gte.setCtrl(ctx, 13, 44); Gte.setCtrl(ctx, 14, 55); Gte.setCtrl(ctx, 15, 66);  // BK
+		Gte.setCtrl(ctx, 16, packXY(0x2100, 0x2200));
+		Gte.setCtrl(ctx, 17, packXY(0x2300, 0x2400));
+		Gte.setCtrl(ctx, 18, packXY(0x2500, 0x2600));
+		Gte.setCtrl(ctx, 19, packXY(0x2700, 0x2800));
+		Gte.setCtrl(ctx, 20, 0x2900);
+		Gte.setCtrl(ctx, 21, 77); Gte.setCtrl(ctx, 22, 88); Gte.setCtrl(ctx, 23, 99);  // FC
+	}
+
+	/** SQR, OP, GPF and GPL — small, and each wrong in a different way if the shift is wrong. */
+	static function arithmeticOps():Void {
+		loadDistinctMatrices();
+		Gte.setData(ctx, 8, 0x800);       // IR0, the interpolation weight
+		Gte.setData(ctx, 9, 0x1000);
+		Gte.setData(ctx, 10, -0x0800);
+		Gte.setData(ctx, 11, 0x0400);
+		for (sf in 0...2) {
+			final s = sf == 1 ? 0x80000 : 0;
+			Gte.setData(ctx, 9, 0x1000); Gte.setData(ctx, 10, -0x0800); Gte.setData(ctx, 11, 0x0400);
+			Gte.execute(ctx, 0x28 | s); feedAll();      // SQR
+			Gte.setData(ctx, 9, 0x1000); Gte.setData(ctx, 10, -0x0800); Gte.setData(ctx, 11, 0x0400);
+			Gte.execute(ctx, 0x0C | s); feedAll();      // OP
+			Gte.setData(ctx, 9, 0x1000); Gte.setData(ctx, 10, -0x0800); Gte.setData(ctx, 11, 0x0400);
+			Gte.execute(ctx, 0x3D | s); feedAll();      // GPF
+			Gte.setData(ctx, 9, 0x1000); Gte.setData(ctx, 10, -0x0800); Gte.setData(ctx, 11, 0x0400);
+			Gte.execute(ctx, 0x3E | s); feedAll();      // GPL
+		}
+		// The square of a vector cannot be negative however `lm` is set.
+		Gte.setData(ctx, 9, -0x1000);
+		Gte.execute(ctx, 0x28 | 0x80000);
+		final sq = Gte.getData(ctx, 25);
+		Conf.expect("a squared component is positive", sq >= 0 ? 1 : 0, 1);
+	}
+
+	/**
+		The fog family, whose whole point is the intermediate that is *not* saturated by `lm`.
+
+		psx-spx puts it in a footnote: `(FC - MAC)` lands in IR saturated as if `lm` were zero, and
+		only the final write obeys the real `lm`. Clamp the intermediate and every negative
+		difference becomes zero, so fog brightens where it should darken and no test of the final
+		value alone would notice.
+	**/
+	static function colorInterpolation():Void {
+		loadDistinctMatrices();
+		Gte.setCtrl(ctx, 21, 0x0040); Gte.setCtrl(ctx, 22, 0x0080); Gte.setCtrl(ctx, 23, 0x00C0);
+		for (sf in 0...2) {
+			for (lm in 0...2) {
+				final imm = (sf == 1 ? 0x80000 : 0) | (lm == 1 ? 0x400 : 0);
+				Gte.setData(ctx, 6, 0x01203040);   // RGBC
+				Gte.setData(ctx, 8, 0x0800);       // IR0
+				Gte.setData(ctx, 9, 0x0200); Gte.setData(ctx, 10, -0x0300); Gte.setData(ctx, 11, 0x0400);
+				Gte.execute(ctx, 0x10 | imm); feedAll();   // DPCS
+				Gte.setData(ctx, 9, 0x0200); Gte.setData(ctx, 10, -0x0300); Gte.setData(ctx, 11, 0x0400);
+				Gte.execute(ctx, 0x11 | imm); feedAll();   // INTPL
+				Gte.setData(ctx, 9, 0x0200); Gte.setData(ctx, 10, -0x0300); Gte.setData(ctx, 11, 0x0400);
+				Gte.execute(ctx, 0x29 | imm); feedAll();   // DCPL
+				Gte.execute(ctx, 0x2A | imm); feedAll();   // DPCT, which consumes the colour FIFO
+			}
+		}
+	}
+
+	/**
+		The six normal-colour commands and the two colour ones, over both `sf` and both `lm`.
+
+		These are how a model gets lit, and they are built out of two fixed MVMVA steps plus a
+		material multiply and an optional depth cue — so a mistake in the *composition* produces
+		numbers that are individually plausible and a scene that is wrong, most often black. The
+		vectors here give the light and colour matrices distinct values from the rotation matrix,
+		so a command reaching for the wrong one shows immediately.
+	**/
+	static function lightingFamily():Void {
+		loadDistinctMatrices();
+		setVector(0, 0x0400, -0x0300, 0x0200);
+		setVector(1, -0x0100, 0x0500, 0x0300);
+		setVector(2, 0x0600, 0x0100, -0x0400);
+		Gte.setCtrl(ctx, 21, 0x0180); Gte.setCtrl(ctx, 22, 0x01C0); Gte.setCtrl(ctx, 23, 0x0200);
+		final ops = [0x1E, 0x20, 0x13, 0x16, 0x1B, 0x3F, 0x1C, 0x14];
+		for (o in 0...ops.length) {
+			for (sf in 0...2) {
+				for (lm in 0...2) {
+					Gte.setData(ctx, 6, 0x02607080);   // RGBC: a material that is not grey
+					Gte.setData(ctx, 8, 0x0400);       // IR0
+					Gte.setData(ctx, 9, 0x0300);
+					Gte.setData(ctx, 10, -0x0200);
+					Gte.setData(ctx, 11, 0x0500);
+					Gte.execute(ctx, ops[o] | (sf == 1 ? 0x80000 : 0) | (lm == 1 ? 0x400 : 0));
+					feedAll();
+				}
 			}
 		}
 	}

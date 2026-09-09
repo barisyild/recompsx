@@ -451,6 +451,23 @@ class Gte {
 		else if (op == 0x06) nclip();
 		else if (op == 0x2D) avsz3();
 		else if (op == 0x2E) avsz4();
+		else if (op == 0x12) mvmva(sf, lm, imm25);
+		else if (op == 0x28) sqr(sf);
+		else if (op == 0x0C) crossProduct(sf, lm);
+		else if (op == 0x3D) gpf(sf, lm);
+		else if (op == 0x3E) gpl(sf, lm);
+		else if (op == 0x10) dpcs(sf, lm);
+		else if (op == 0x2A) dpct(sf, lm);
+		else if (op == 0x11) intpl(sf, lm);
+		else if (op == 0x29) dcpl(sf, lm);
+		else if (op == 0x1E) ncs(sf, lm, 0);
+		else if (op == 0x20) ncTriple(sf, lm, 0);
+		else if (op == 0x13) ncds(sf, lm, 0);
+		else if (op == 0x16) ncTriple(sf, lm, 1);
+		else if (op == 0x1B) nccs(sf, lm, 0);
+		else if (op == 0x3F) ncTriple(sf, lm, 2);
+		else if (op == 0x1C) cc(sf, lm);
+		else if (op == 0x14) cdp(sf, lm);
 		else unimplementedOp(op);
 	}
 
@@ -577,6 +594,397 @@ class Gte {
 		I64.addProduct16(zsf4, sz3 & 0xFFFF);
 		mac0 = mac0From32();
 		otz = saturateSz3(I64.shr12());
+	}
+
+	// ---- MVMVA and the arithmetic family ---------------------------------------------------------------
+
+	// The operands MVMVA picks out of its instruction word, copied here rather than branched on
+	// three times per lane. Nine matrix elements, three vector components, three translation ones.
+	static var mm11 = 0; static var mm12 = 0; static var mm13 = 0;
+	static var mm21 = 0; static var mm22 = 0; static var mm23 = 0;
+	static var mm31 = 0; static var mm32 = 0; static var mm33 = 0;
+	static var mvX = 0; static var mvY = 0; static var mvZ = 0;
+	static var mtX = 0; static var mtY = 0; static var mtZ = 0;
+
+	/**
+		Multiply a vector by a matrix and add a translation — the general form of every other
+		transform the GTE does, with all three operands chosen by the instruction word.
+
+		This is the one a 3D game cannot do without. `RTPS` covers the camera transform, but every
+		*other* transform a game invents — a bone, a normal into world space, a light direction, a
+		custom projection — is written as `MVMVA` with a matrix the game loaded itself. Leaving it
+		out is why a build can draw its 2D interface perfectly and never put a single polygon of the
+		world on screen: the sprites go through the GPU untransformed, and the world does not.
+
+		Two hardware faults are part of the definition and both are reproduced. Selecting the far
+		colour as the translation (`cv=2`) does not add it correctly — the first product of each row
+		is lost, while FLAG is set as though the whole sum had happened — and selecting matrix 3
+		reads a "matrix" assembled out of unrelated registers. Neither is useful, both are what the
+		silicon does, and a game that stumbles into either has been calibrated against the result.
+	**/
+	static function mvmva(sf:Int, lm:Bool, imm25:Int):Void {
+		selectMatrix((imm25 >> 17) & 3);
+		selectVector((imm25 >> 15) & 3);
+		final cv = (imm25 >> 13) & 3;
+		selectTranslation(cv);
+		if (cv == 2) mvmvaFarColor(sf, lm);
+		else mvmvaNormal(sf, lm);
+	}
+
+	static function mvmvaNormal(sf:Int, lm:Bool):Void {
+		I64.setShl12(mtX);
+		I64.addProduct16(mm11, mvX); step44(F_MAC1_POS, F_MAC1_NEG);
+		I64.addProduct16(mm12, mvY); step44(F_MAC1_POS, F_MAC1_NEG);
+		I64.addProduct16(mm13, mvZ); step44(F_MAC1_POS, F_MAC1_NEG);
+		mac1 = shiftBySf(sf);
+
+		I64.setShl12(mtY);
+		I64.addProduct16(mm21, mvX); step44(F_MAC2_POS, F_MAC2_NEG);
+		I64.addProduct16(mm22, mvY); step44(F_MAC2_POS, F_MAC2_NEG);
+		I64.addProduct16(mm23, mvZ); step44(F_MAC2_POS, F_MAC2_NEG);
+		mac2 = shiftBySf(sf);
+
+		I64.setShl12(mtZ);
+		I64.addProduct16(mm31, mvX); step44(F_MAC3_POS, F_MAC3_NEG);
+		I64.addProduct16(mm32, mvY); step44(F_MAC3_POS, F_MAC3_NEG);
+		I64.addProduct16(mm33, mvZ); step44(F_MAC3_POS, F_MAC3_NEG);
+		mac3 = shiftBySf(sf);
+
+		copyMacToIr(lm);
+	}
+
+	/**
+		`cv=2`, where the hardware loses the first product of every row.
+
+		psx-spx: "the return values are reduced to the last two portions of the formula ...
+		nevertheless, some bits in the FLAG register seem to be adjusted as if the full operation
+		would have been executed". So each lane is computed twice — once with the translation and
+		the first product, purely so its overflows reach FLAG, and once without either, for the
+		value that is kept.
+	**/
+	static function mvmvaFarColor(sf:Int, lm:Bool):Void {
+		mac1 = farColorLane(sf, mtX, mm11, mm12, mm13, F_MAC1_POS, F_MAC1_NEG);
+		mac2 = farColorLane(sf, mtY, mm21, mm22, mm23, F_MAC2_POS, F_MAC2_NEG);
+		mac3 = farColorLane(sf, mtZ, mm31, mm32, mm33, F_MAC3_POS, F_MAC3_NEG);
+		copyMacToIr(lm);
+	}
+
+	static function farColorLane(sf:Int, t:Int, m1:Int, m2:Int, m3:Int, pos:Int, neg:Int):Int {
+		// For the flags only.
+		I64.setShl12(t);
+		I64.addProduct16(m1, mvX); step44(pos, neg);
+		// For the value.
+		I64.setZero();
+		I64.addProduct16(m2, mvY); step44(pos, neg);
+		I64.addProduct16(m3, mvZ); step44(pos, neg);
+		return shiftBySf(sf);
+	}
+
+	static function selectMatrix(mx:Int):Void {
+		if (mx == 0) {
+			mm11 = rt11; mm12 = rt12; mm13 = rt13;
+			mm21 = rt21; mm22 = rt22; mm23 = rt23;
+			mm31 = rt31; mm32 = rt32; mm33 = rt33;
+		} else if (mx == 1) {
+			mm11 = l11; mm12 = l12; mm13 = l13;
+			mm21 = l21; mm22 = l22; mm23 = l23;
+			mm31 = l31; mm32 = l32; mm33 = l33;
+		} else if (mx == 2) {
+			mm11 = lr1; mm12 = lr2; mm13 = lr3;
+			mm21 = lg1; mm22 = lg2; mm23 = lg3;
+			mm31 = lb1; mm32 = lb2; mm33 = lb3;
+		} else {
+			// Not a matrix at all: three registers that happen to sit where one would be read
+			// from, per psx-spx's "-R*10h, +R*10h, IR0, RT13 x3, RT22 x3". R is RGBC's red byte.
+			final r = (rgbc & 0xFF) << 4;
+			mm11 = -r; mm12 = r; mm13 = ir0;
+			mm21 = rt13; mm22 = rt13; mm23 = rt13;
+			mm31 = rt22; mm32 = rt22; mm33 = rt22;
+		}
+	}
+
+	static function selectVector(v:Int):Void {
+		if (v == 3) {
+			mvX = ir1; mvY = ir2; mvZ = ir3;
+		} else {
+			mvX = vecX(v); mvY = vecY(v); mvZ = vecZ(v);
+		}
+	}
+
+	static function selectTranslation(cv:Int):Void {
+		if (cv == 0) {
+			mtX = trX; mtY = trY; mtZ = trZ;
+		} else if (cv == 1) {
+			mtX = rbk; mtY = gbk; mtZ = bbk;
+		} else if (cv == 2) {
+			mtX = rfc; mtY = gfc; mtZ = bfc;
+		} else {
+			mtX = 0; mtY = 0; mtZ = 0;
+		}
+	}
+
+	/** `[MAC] = [IR1²,IR2²,IR3²] SHR (sf*12)`. Always positive, so `lm` cannot bite. */
+	static function sqr(sf:Int):Void {
+		I64.setZero(); I64.addProduct16(ir1, ir1); mac1 = shiftBySf(sf);
+		I64.setZero(); I64.addProduct16(ir2, ir2); mac2 = shiftBySf(sf);
+		I64.setZero(); I64.addProduct16(ir3, ir3); mac3 = shiftBySf(sf);
+		copyMacToIr(false);
+	}
+
+	/**
+		The cross product of IR with the RT matrix's diagonal, which a game uses as a vector.
+
+		Sony's documentation calls it the outer product, which psx-spx puts down to a translation of
+		外積; the arithmetic is the ordinary cross product either way.
+	**/
+	static function crossProduct(sf:Int, lm:Bool):Void {
+		final d1 = rt11, d2 = rt22, d3 = rt33;
+		final a = ir1, b = ir2, c = ir3;
+		I64.setZero();
+		I64.addProduct16(c, d2); I64.addProduct16(-b, d3);
+		step44(F_MAC1_POS, F_MAC1_NEG); mac1 = shiftBySf(sf);
+		I64.setZero();
+		I64.addProduct16(a, d3); I64.addProduct16(-c, d1);
+		step44(F_MAC2_POS, F_MAC2_NEG); mac2 = shiftBySf(sf);
+		I64.setZero();
+		I64.addProduct16(b, d1); I64.addProduct16(-a, d2);
+		step44(F_MAC3_POS, F_MAC3_NEG); mac3 = shiftBySf(sf);
+		copyMacToIr(lm);
+	}
+
+	/** `[MAC] = ([IR] * IR0) SAR (sf*12)`, then a colour. */
+	static function gpf(sf:Int, lm:Bool):Void {
+		interpolateBy(0, 0, 0, sf);
+		finishColor(sf, lm);
+	}
+
+	/** The same with the current MAC as a base, shifted up first so the SAR undoes it. */
+	static function gpl(sf:Int, lm:Bool):Void {
+		interpolateBy(shlBySf(mac1, sf), shlBySf(mac2, sf), shlBySf(mac3, sf), sf);
+		finishColor(sf, lm);
+	}
+
+	static function interpolateBy(b1:Int, b2:Int, b3:Int, sf:Int):Void {
+		I64.set(b1); I64.addProduct16(ir1, ir0);
+		step44(F_MAC1_POS, F_MAC1_NEG); mac1 = shiftBySf(sf);
+		I64.set(b2); I64.addProduct16(ir2, ir0);
+		step44(F_MAC2_POS, F_MAC2_NEG); mac2 = shiftBySf(sf);
+		I64.set(b3); I64.addProduct16(ir3, ir0);
+		step44(F_MAC3_POS, F_MAC3_NEG); mac3 = shiftBySf(sf);
+	}
+
+	static inline function shlBySf(v:Int, sf:Int):Int {
+		return sf == 0 ? v : (v << 12) | 0;
+	}
+
+	// ---- depth cueing, and the interpolations built out of it ------------------------------------------
+
+	/**
+		Fog: the vertex colour pulled towards the far colour by IR0.
+
+		`DPCS` starts from the RGBC register, `DPCT` from the bottom of the colour FIFO three times
+		over, `INTPL` from IR itself, and `DCPL` from the colour modulated by IR — after which all
+		four run the same interpolation and push the same kind of colour. Which starting value is
+		used is the whole difference between them.
+	**/
+	static function dpcs(sf:Int, lm:Bool):Void {
+		startFromColor(rgbc);
+		farColorInterpolate(sf, lm);
+	}
+
+	static function dpct(sf:Int, lm:Bool):Void {
+		// Three times, each reading the *bottom* of the FIFO — which the push then moves along, so
+		// the three entries are consumed in order and all three end up replaced.
+		dpctOnce(sf, lm);
+		dpctOnce(sf, lm);
+		dpctOnce(sf, lm);
+	}
+
+	static function dpctOnce(sf:Int, lm:Bool):Void {
+		startFromColor(rgb0);
+		farColorInterpolate(sf, lm);
+	}
+
+	static function intpl(sf:Int, lm:Bool):Void {
+		I64.setShl12(ir1); mac1 = I64.low32();
+		I64.setShl12(ir2); mac2 = I64.low32();
+		I64.setShl12(ir3); mac3 = I64.low32();
+		farColorInterpolate(sf, lm);
+	}
+
+	static function dcpl(sf:Int, lm:Bool):Void {
+		mac1 = (shim.IntMath.mul(rgbc & 0xFF, ir1) << 4) | 0;
+		mac2 = (shim.IntMath.mul((rgbc >> 8) & 0xFF, ir2) << 4) | 0;
+		mac3 = (shim.IntMath.mul((rgbc >> 16) & 0xFF, ir3) << 4) | 0;
+		farColorInterpolate(sf, lm);
+	}
+
+	// ---- the lighting family ---------------------------------------------------------------------
+
+	/**
+		Normal colour, and the six commands built on it.
+
+		This is how a PlayStation lights a model, and there is no other way: a vertex normal goes
+		through the light matrix to find how much each of three lights strikes it, that result goes
+		through the colour matrix onto the background colour to become a light colour, and the
+		light colour is then combined with the material — the polygon's own RGB — and optionally
+		pulled towards the far colour by depth. Six commands, differing only in which of the last
+		two steps they perform, and all of them ending in the colour FIFO the game reads back.
+
+		Both matrix steps are MVMVA with its fields fixed, which psx-spx says outright, so they are
+		the same code: the light matrix against a vertex, then the colour matrix against IR with
+		the background colour as the translation.
+
+		Absent, a lit model computes no colour at all and is drawn in whatever was left in the
+		accumulators — black, most often, which on a dark scene is indistinguishable from a model
+		that was never drawn.
+	**/
+	static function ncs(sf:Int, lm:Bool, v:Int):Void {
+		lightNormal(sf, lm, v);
+		lightColour(sf, lm);
+		finishColor(sf, lm);
+	}
+
+	/** Normal colour, then the material, then depth-cued towards the far colour. */
+	static function ncds(sf:Int, lm:Bool, v:Int):Void {
+		lightNormal(sf, lm, v);
+		lightColour(sf, lm);
+		materialTimesIr();
+		farColorInterpolate(sf, lm);
+	}
+
+	/** Normal colour, then the material, and no depth cue. */
+	static function nccs(sf:Int, lm:Bool, v:Int):Void {
+		lightNormal(sf, lm, v);
+		lightColour(sf, lm);
+		materialTimesIr();
+		shiftMacBySf(sf);
+		finishColor(sf, lm);
+	}
+
+	/** The same three, over all three vertex normals. `kind` picks which. */
+	static function ncTriple(sf:Int, lm:Bool, kind:Int):Void {
+		for (v in 0...3) {
+			if (kind == 0) ncs(sf, lm, v);
+			else if (kind == 1) ncds(sf, lm, v);
+			else nccs(sf, lm, v);
+		}
+	}
+
+	/** IR is already the normal's light: colour matrix, material, no depth cue. */
+	static function cc(sf:Int, lm:Bool):Void {
+		lightColour(sf, lm);
+		materialTimesIr();
+		shiftMacBySf(sf);
+		finishColor(sf, lm);
+	}
+
+	/** The same, depth-cued. */
+	static function cdp(sf:Int, lm:Bool):Void {
+		lightColour(sf, lm);
+		materialTimesIr();
+		farColorInterpolate(sf, lm);
+	}
+
+	/** `(LLM * V) SAR (sf*12)` — MVMVA against the light matrix with no translation. */
+	static function lightNormal(sf:Int, lm:Bool, v:Int):Void {
+		selectMatrix(1);
+		selectVector(v);
+		selectTranslation(3);
+		mvmvaNormal(sf, lm);
+	}
+
+	/** `(BK*1000h + LCM * IR) SAR (sf*12)` — the colour matrix onto the background colour. */
+	static function lightColour(sf:Int, lm:Bool):Void {
+		selectMatrix(2);
+		selectVector(3);
+		selectTranslation(1);
+		mvmvaNormal(sf, lm);
+	}
+
+	/**
+		`[MAC] = [R*IR1, G*IR2, B*IR3] SHL 4` — the light met by the material it falls on.
+
+		No shift by `sf` here: the commands that depth-cue apply it after the far colour has been
+		mixed in, and the ones that do not apply it themselves. Both products fit in 32 bits — a
+		byte times a signed 16-bit accumulator, shifted four — so the accumulator is loaded whole.
+	**/
+	static function materialTimesIr():Void {
+		I64.set((shim.IntMath.mul(rgbc & 0xFF, ir1) << 4) | 0);
+		step44(F_MAC1_POS, F_MAC1_NEG);
+		mac1 = I64.low32();
+		I64.set((shim.IntMath.mul((rgbc >> 8) & 0xFF, ir2) << 4) | 0);
+		step44(F_MAC2_POS, F_MAC2_NEG);
+		mac2 = I64.low32();
+		I64.set((shim.IntMath.mul((rgbc >> 16) & 0xFF, ir3) << 4) | 0);
+		step44(F_MAC3_POS, F_MAC3_NEG);
+		mac3 = I64.low32();
+	}
+
+	static function shiftMacBySf(sf:Int):Void {
+		I64.set(mac1); mac1 = shiftBySf(sf);
+		I64.set(mac2); mac2 = shiftBySf(sf);
+		I64.set(mac3); mac3 = shiftBySf(sf);
+	}
+
+	/** `[MAC] = [R,G,B] SHL 16`, the starting point DPCS and DPCT share. */
+	static function startFromColor(source:Int):Void {
+		mac1 = ((source & 0xFF) << 16) | 0;
+		mac2 = (((source >> 8) & 0xFF) << 16) | 0;
+		mac3 = (((source >> 16) & 0xFF) << 16) | 0;
+	}
+
+	/**
+		`MAC = MAC + (FC - MAC) * IR0`, which psx-spx spells out in two steps.
+
+		The intermediate `(FC - MAC) SAR (sf*12)` lands in IR saturated *as if `lm` were zero*,
+		whatever `lm` actually is; only the final write back to IR obeys it. Getting that wrong
+		clamps every negative difference to zero and fog stops darkening anything.
+	**/
+	static function farColorInterpolate(sf:Int, lm:Bool):Void {
+		final base1 = mac1, base2 = mac2, base3 = mac3;
+
+		I64.setShl12(rfc); I64.addSmall(-base1);
+		step44(F_MAC1_POS, F_MAC1_NEG);
+		ir1 = saturateIr(shiftBySf(sf), false, F_IR1);
+		I64.setShl12(gfc); I64.addSmall(-base2);
+		step44(F_MAC2_POS, F_MAC2_NEG);
+		ir2 = saturateIr(shiftBySf(sf), false, F_IR2);
+		I64.setShl12(bfc); I64.addSmall(-base3);
+		step44(F_MAC3_POS, F_MAC3_NEG);
+		ir3 = saturateIr(shiftBySf(sf), false, F_IR3);
+
+		interpolateBy(base1, base2, base3, sf);
+		finishColor(sf, lm);
+	}
+
+	/** Every colour operation ends the same way: a FIFO entry, and IR holding what made it. */
+	static function finishColor(sf:Int, lm:Bool):Void {
+		pushColor(saturateColor(mac1 >> 4, F_COLOR_R),
+			saturateColor(mac2 >> 4, F_COLOR_G),
+			saturateColor(mac3 >> 4, F_COLOR_B));
+		copyMacToIr(lm);
+	}
+
+	static function copyMacToIr(lm:Bool):Void {
+		ir1 = saturateIr(mac1, lm, F_IR1);
+		ir2 = saturateIr(mac2, lm, F_IR2);
+		ir3 = saturateIr(mac3, lm, F_IR3);
+	}
+
+	static function saturateColor(v:Int, bit:Int):Int {
+		if (v < 0) { flag |= (1 << bit); return 0; }
+		else {}
+		if (v > 0xFF) { flag |= (1 << bit); return 0xFF; }
+		else {}
+		return v;
+	}
+
+	/** The colour FIFO, three deep, keeping RGBC's code byte with each entry as the hardware does. */
+	static function pushColor(r:Int, g:Int, b:Int):Void {
+		rgb0 = rgb1;
+		rgb1 = rgb2;
+		rgb2 = r | (g << 8) | (b << 16) | (rgbc & 0xFF000000);
 	}
 
 	// ---- the pieces the operations are made of --------------------------------------------------------

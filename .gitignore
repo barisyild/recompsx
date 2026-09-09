@@ -1,5 +1,7 @@
 # Generated artifacts — never committed
 out/
+/web/game.js
+/web/build.json
 
 # Pinned toolchain + project-local haxelib repo
 .toolchain/

@@ -524,9 +524,46 @@ class Spu {
 		else {}
 	}
 
+	/**
+		How many frames the host may be holding before the emulator stops adding to the pile.
+
+		A hundred milliseconds. Below about fifty a browser starts running dry between callbacks;
+		much above this and the delay is audible as sound arriving after the picture it belongs to.
+	**/
+	static inline var LATENCY_CAP = 4410;
+
+	/**
+		Hands the batch over, unless sound is already running late.
+
+		The emulator makes samples at the rate the emulated machine makes them and the host plays
+		them at the rate its clock ticks, and those two are never exactly equal. Whichever way the
+		difference goes it accumulates: too slow and the host runs dry, too fast and the surplus
+		sits in the host's queue, which *is* the delay — sound arriving later and later behind the
+		frame it belongs to, growing for as long as the game runs.
+
+		Nothing anywhere used to notice. `bp_audio_buffered` has been in the backend ABI from the
+		start, described there as being for pacing, and the SDL backend has always answered it
+		honestly — but no caller existed, so the queue was free to grow without limit. This is that
+		caller: over the cap, a batch is dropped rather than added. Three milliseconds of silence
+		is a far smaller artefact than a second of lag, and because the surplus is a fraction of a
+		percent, a drop is rare once the queue has settled at the cap.
+
+		**It costs the host one function.** A page that does not implement `audioBuffered` is
+		reported as holding nothing, which is correct for a host that plays what it is given
+		immediately and leaves everything as it was for one that does not — the pacing simply does
+		not engage, because nothing told it there was anything to pace.
+
+		Determinism is untouched, deliberately: the decision is made *after* `emit` has counted
+		every sample, so `samplesOut` and `nonSilent` — which the digest hashes — are what the
+		emulated machine produced, whatever the host did with them.
+	**/
 	static function flush():Void {
 		if (outCount == 0) return;
 		else {}
+		if (Backend.audioBuffered() > LATENCY_CAP) {
+			outCount = 0;
+			return;
+		} else {}
 		Backend.audioPush(out, outCount);
 		outCount = 0;
 	}

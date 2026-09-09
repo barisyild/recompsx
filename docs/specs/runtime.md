@@ -430,7 +430,7 @@ pending INT at a time; successors queue until ack.
 | 0x12 | SetSession | session 1 only; else INT5(0x10) |
 | 0x13/0x14 | GetTN/GetTD | INT3 BCD from CUE TOC |
 | 0x15/0x16 | SeekL/SeekP | INT3, INT2 after SEEK(d) |
-| 0x19 | Test 0x20 | INT3(0x94,0x09,0x19,0xC0) canned version; other subs log-once + INT5 |
+| 0x19 | Test 0x04/0x05/0x20 | 04: reset/start SCEx observation, INT3(stat); 05: stop observation, INT3(total,success), no status prefix; 20: INT3(0x94,0x09,0x19,0xC0); other subs log-once + INT5 |
 | 0x1A | GetID | INT3(stat) then INT2(0x02,0x00,0x20,0x00,'S','C','E','A') licensed (region char from config); audio disc INT5(0x0A,0x90); no disc INT5(0x08,0x40) |
 | 0x1C | Reset | INT3; full reset after constant |
 | 0x1E | ReadTOC | INT3, INT2 after ~1 s constant |
@@ -438,6 +438,16 @@ pending INT at a time; successors queue until ack.
 Status byte: 0 error, 1 motor, 2 seek-err, 3 id-err, 4 shell-open (latched), 5 read, 6 seek,
 7 play (5/6/7 exclusive). States: Idle/SeekPending/Reading/Playing/Paused/Stopped — transitions
 only via scheduled CD_EVENTs.
+
+SCEx implementation: track lead-in separately from data LBA zero. Reset/ReadTOC position the
+head there; Seek/Read/Play leave it; Setloc only sets a destination. Test 04 restarts the motor
+and clears counters. The current coarse model takes one observation after one guest second,
+yielding 1/1 only for a mounted licensed image in the lead-in. Test 05 stops observation and
+retains its result for repeated reads. Exact wobble/servo timing and unlicensed/audio media
+classification remain outside this model. Source:
+[psx-spx Test commands](https://psx-spx.consoledev.net/cdromdrive/#19h04h-int3stat-read-scex-string-and-force-motor-on).
+`CdScex` verifies the register responses, early reads, reset, head movement, missing medium and
+cycle wrapping on JS and reflaxe.CPP using no game assets.
 
 **Data path**: per sector event: fetch raw 2352 at LBA++; XA-ADPCM realtime Form2 audio + mode.6
 (+filter) → XA decoder (no INT1, no buffer); else stage into double-buffered sector slots +

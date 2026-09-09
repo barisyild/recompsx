@@ -203,6 +203,10 @@ and keep the one that identifies the most functions consistently.
 
 (Complete instruction→Haxe emission tables and the worked example: **Appendix A** below.)
 
+- **Machine IR**: `FunctionIR` decodes each discovered block for the code-generation passes.
+  Instructions retain GPR read/write masks, observable effects and cycle charges; terminators
+  and their slots stay distinct and every block retains its stable resume ID. `Effect` and
+  `RegisterMask` are Int-backed Haxe abstractions used by the build-time tool (ADR-0008).
 - **CpuState**: 31 named Int fields (`at..ra` by ABI name — `$zero` has NO field: reads emit
   literal 0, writes dropped, loads to r0 still perform the read for I/O side effects),
   `hi, lo, pc` (virtual: written only before `Runtime.call`/`Kernel.*`/traps), `cycles`,
@@ -221,13 +225,26 @@ and keep the one that identifies the most functions consistently.
   The Haxe analyzer can now propagate constants/copies and eliminate dead local writes.
 - **Body template**: linear chains, optionally containing single-block loops, emit sequences
   with entry guards for resumption. Conditional self-loops emit native `while` even inside a
-  larger CFG. Other edges retain `while(true) switch(bb)` and dense address-ordered indices.
-  Each block is emitted once; calls, loops and arbitrary block resumes share the same body.
-- **Cycles & pump**: flat 1 cycle/instruction, `ctx.cycles = (ctx.cycles + N) | 0` immediately
+  larger CFG. `RegionPlan` also reduces sequences and convergent branch arms inside mixed CFGs.
+  A region's original block IDs share a dispatcher case; local resume guards skip its prefix
+  or enter an arm, while ordinary internal transfers fall through. A fully reduced returning
+  function needs no dispatcher. Irreducible edges and checked computed targets retain their
+  fallback; no block body is duplicated. `--no-regions` disables only these reductions, while
+  `--no-opt` also disables scalar registers and simple-loop/linear structuring.
+- **Cycles & pump**: loads (`lb/lbu/lh/lhu/lw/lwl/lwr/lwc2`) cost 7 cycles; other
+  instructions cost 1, restoring the committed bus-cost model in `Op.cost`. This remains a
+  coarse model: address-specific wait states and instruction-cache timing are not simulated.
+  `ctx.cycles = (ctx.cycles + N) | 0` is emitted immediately
   before every control transfer. Instructions removed from host code still count. Function
   entry and every target of an address-backward CFG edge carry a wrap-safe pump check, including
   recovered switch edges. Register publish/reload is on the due-event path, outside the common
   loop path. Halt/unwind tokens return immediately after the pump (ADR-0007).
+- **Optional cooperative execution** (`-D recompsx_cooperative`, ADR-0010): check suspension
+  before each existing safe-point pump. Publish registers and capture the compiled body handle,
+  stable block entry and pending-entry-pump flag. After calls, retain the continuation after
+  the call/slot, with no instruction replay. The generated launcher binds `FnTable.dispatch`
+  for handle-based resumption, preserving active code identity across overlay changes. The
+  non-cooperative path retains ordinary synchronous execution.
 - **Sharding**: functions sorted by (universe, entry VA), greedily packed ≤150 funcs and ≤10k
   lines per file; stable split points; overlay boundaries force separate shard sets under
   `out/<game>/hx/ovl_<id>/`. Names: class `Fns_<seq>_<startVA>`, function `f_<VA8hex>` always
@@ -565,3 +582,9 @@ public static function f_80010000(ctx:CpuState):Void {
 Rules demonstrated: condition temp before the delay slot; jal link → slot → call ordering;
 delay-slot instruction inlined into the `jr ra` return path; cycle increments immediately before
 every control transfer, each covering exactly the instructions since the previous increment.
+
+Generated executable and overlay dispatch tables are flattened into aligned integer buffers
+at launcher initialization. Direct-mapped lookup caches include misses and overlay identity;
+`Dispatch` checks collisions, address -1, interior entries and resident-window shadowing on both
+targets. Optional `-D recompsx_insns` counts original instructions and blocks independently of
+cycle costs. Counters are excluded from guest-state digests.

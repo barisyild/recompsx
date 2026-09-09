@@ -22,6 +22,9 @@ real destination: PS2 and its relatives (PSP, Dreamcast, GameCube/Wii, Switch) p
 targets. Adding one means implementing a single C header and one shim directory — see
 `docs/specs/backend.md` §0 for the target matrix, per-target memory budgets and byte-order rules.
 
+The restored Dreamcast backend is described in `docs/specs/backend.md` §2.1. Browser execution
+uses optional main-thread continuations (ADR-0010); neither host owns guest timing.
+
 ## Two-artifact split
 
 The load-bearing structural decision: the tool and the runtime live under different rules.

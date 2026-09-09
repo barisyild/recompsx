@@ -25,6 +25,23 @@ import cxx.num.UInt32;
 @:include("backend_c_api.h") @:topLevel
 extern function bp_present(vram:Ptr<UInt16>, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void;
 
+@:include("backend_c_api.h") @:topLevel extern function bp_gpu_vram(vram:Ptr<UInt16>):Void;
+
+@:include("backend_c_api.h") @:topLevel
+extern function bp_gpu_state(texBaseX:Int, texBaseY:Int, texDepth:Int, clutX:Int, clutY:Int,
+	semiMode:Int, flags:Int, texWindow:Int, drawX:Int, drawY:Int):Void;
+
+@:include("backend_c_api.h") @:topLevel
+extern function bp_gpu_tri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
+	x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
+	x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void;
+
+@:include("backend_c_api.h") @:topLevel
+extern function bp_gpu_rect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int, semiMode:Int):Void;
+
+@:include("backend_c_api.h") @:topLevel
+extern function bp_gpu_dirty(x:Int, y:Int, w:Int, h:Int):Void;
+
 @:include("backend_c_api.h") @:topLevel
 extern function bp_audio_push(frames:Ptr<Int16>, frameCount:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_audio_buffered():Int;

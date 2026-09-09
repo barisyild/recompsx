@@ -25,6 +25,11 @@ import shim.RawMem;
 	hardware page reads 0, swallows writes, and reports itself once — which makes the log a list
 	of the subsystems still to build, in the order the game asks for them.
 **/
+/* The arena declarations must reach every translation unit that inlines a memory
+ * access, and reflaxe does not carry an extern's include along an inlining chain —
+ * but every generated shard includes this header, so it is the right place to say it
+ * once. Ignored by targets that have no C++ headers. */
+@:headerCode("#include \"recompsx_arena.h\"")
 class Memory {
 	public static inline var RAM_SIZE = 0x200000;      // 2 MB
 	public static inline var RAM_MASK = 0x1FFFFF;
@@ -35,8 +40,13 @@ class Memory {
 	static inline var IO_BASE = 0x1F801000;
 	static inline var IO_SIZE = 0x3000;
 
-	public static var ram:RawBuf;
-	public static var scratch:RawBuf;
+	/** Emulated RAM and scratchpad, as `shim.Arena` accessors rather than fields. A field would
+	    be a pointer, and a pointer costs two dependent loads per access on the C++ targets and
+	    cannot be held in a register across stores — the measurement and the rest of the reasoning
+	    are in `src/shims/cxx/native/recompsx_arena.h`. On JavaScript these inline to the same
+	    typed arrays they always were. */
+	public static inline function ram():RawBuf return shim.Arena.ram();
+	public static inline function scratch():RawBuf return shim.Arena.scratch();
 
 	/** Reads and writes outside anything mapped, counted so a report can mention them. */
 	public static var unmappedAccesses:Int = 0;
@@ -44,8 +54,9 @@ class Memory {
 	public static function init():Void {
 		// Zero-filled, deliberately: emulated state must never start from host memory, or the
 		// first run differs from the second and every determinism guarantee is void.
-		ram = RawMem.alloc(RAM_SIZE);
-		scratch = RawMem.alloc(SCRATCH_SIZE);
+		machine = null;
+		for (i in 0...RAM_SIZE) RawMem.set8(ram(), i, 0);
+		for (i in 0...SCRATCH_SIZE) RawMem.set8(scratch(), i, 0);
 		resetMemControl();
 		RomFont.init();
 	}
@@ -60,44 +71,66 @@ class Memory {
 
 	public static inline function read8u(a:Int):Int {
 		final p = phys(a);
-		return isRam(p) ? RawMem.get8(ram, p & RAM_MASK) : slowRead8(p);
+		return isRam(p) ? RawMem.get8(ram(), p & RAM_MASK) : slowRead8(p);
 	}
 
 	public static inline function read8s(a:Int):Int {
 		return (read8u(a) << 24) >> 24;
 	}
 
+	// The 16/32-bit fast paths go through MemA — the aligned accessors — not RawMem. Everything
+	// arriving here is aligned by architecture: MIPS traps a misaligned lw/lh on real hardware,
+	// and the kernel HLE's own structures are word-aligned by construction. Byte-offset walkers
+	// (Iso9660 records) never come through Memory and keep RawMem's tolerant byte composition.
 	public static inline function read16u(a:Int):Int {
 		final p = phys(a);
-		return isRam(p) ? RawMem.get16(ram, p & RAM_MASK) : slowRead16(p);
+		if (isRam(p)) return shim.MemA.get16(ram(), p & RAM_MASK);
+		else if (isScratch(p)) return shim.MemA.get16(scratch(), p - SCRATCH_BASE);
+		else return slowRead16(p);
 	}
 
 	public static inline function read16s(a:Int):Int {
 		return (read16u(a) << 16) >> 16;
 	}
 
+	/**
+		The scratchpad is on the fast path too, and it had to be measured to earn the branch.
+
+		It is a kilobyte of memory inside the CPU and games keep their hottest structures there —
+		so every one of those accesses was paying a call into `slowRead32` and then a
+		byte-composed read on top. Per-frame sampling on a Dreamcast put 3.6 ms in `slowRead32`
+		and 1.6 in `slowWrite32` out of a 50 ms frame. The test costs one compare on the RAM path
+		(it is the else arm) and removes a call from every scratchpad access.
+
+		Alignment holds for the same reason it holds for RAM: MIPS traps a misaligned `lw`, so
+		anything reaching a 32-bit accessor is word-aligned by architecture.
+	**/
 	public static inline function read32(a:Int):Int {
 		final p = phys(a);
-		return isRam(p) ? RawMem.get32(ram, p & RAM_MASK) : slowRead32(p);
+		if (isRam(p)) return shim.MemA.get32(ram(), p & RAM_MASK);
+		else if (isScratch(p)) return shim.MemA.get32(scratch(), p - SCRATCH_BASE);
+		else return slowRead32(p);
 	}
 
 	// ---- writes --------------------------------------------------------------------------------
 
 	public static inline function write8(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) RawMem.set8(ram, p & RAM_MASK, v);
+		if (isRam(p)) RawMem.set8(ram(), p & RAM_MASK, v);
 		else slowWrite8(p, v);
 	}
 
 	public static inline function write16(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) RawMem.set16(ram, p & RAM_MASK, v);
+		if (isRam(p)) shim.MemA.set16(ram(), p & RAM_MASK, v);
+		else if (isScratch(p)) shim.MemA.set16(scratch(), p - SCRATCH_BASE, v);
 		else slowWrite16(p, v);
 	}
 
 	public static inline function write32(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) RawMem.set32(ram, p & RAM_MASK, v);
+		if (isRam(p)) shim.MemA.set32(ram(), p & RAM_MASK, v);
+		else if (isScratch(p)) shim.MemA.set32(scratch(), p - SCRATCH_BASE, v);
 		else slowWrite32(p, v);
 	}
 
@@ -227,7 +260,7 @@ class Memory {
 		if (p == 0x1F801070) return core.Irq.readStat();
 		else if (p == 0x1F801074) return core.Irq.readMask();
 		else if (p == 0x1F801810) return gpu.Gpu.readData();
-		else if (p == 0x1F801814) return gpu.Gpu.readStatus(cycleHint);
+		else if (p == 0x1F801814) return gpu.Gpu.readStatus(cycleHint());
 		else if (isMemControl(p)) return memControl[(p - MEMCTRL_BASE) >> 2];
 		else if (p == RAM_SIZE_REG) return ramSizeReg;
 		else return ioUnknownRead(p);
@@ -281,16 +314,29 @@ class Memory {
 	}
 
 	/**
-		The current cycle count, for registers whose value depends on the clock.
+		The machine, for registers whose value depends on the clock.
 
-		GPUSTAT's beam-parity bit is the reason: it has to be computed from the line the beam is on,
-		and a memory read has no `ctx` to ask. The pump keeps this in step, which is enough because
-		nothing between two pump points can observe the beam moving anyway.
+		GPUSTAT's beam-parity bit is the reason: it has to be computed from the line the beam is
+		on, and a memory read has no `ctx` parameter to ask. This used to be two ints —
+		`cycleHint`/`raHint` — that every pump site copied out of `ctx`, which put two stores on
+		the hottest path in the program for the benefit of the rarest: profiled on the game's own
+		scheduler loop, the copies were pure overhead at 2,570 sites and the values were consulted
+		only when an access actually reached a device. Holding the one `CpuState` instead costs
+		those sites nothing and is *fresher*: `machine.cycles` at the moment of the access, not at
+		the entry of the block — the same value today, because generated code accumulates cycles
+		at block end, but no longer a copy that can lag.
+
+		One static, set once at boot. There is exactly one live machine; HLE thread switches copy
+		registers into it rather than replacing it, which is what makes a single binding correct.
 	**/
-	public static var cycleHint:Int = 0;
+	// Stand-alone device fixtures may run without a CPU; boot binds the live machine.
+	public static var machine:Null<core.CpuState> = null;
 
-	/** The interrupted function's return address, for diagnostics that need to name a caller. */
-	public static var raHint:Int = 0;
+	/** The current cycle count, read straight off the machine. */
+	public static inline function cycleHint():Int return machine == null ? 0 : machine.cycles;
+
+	/** The running function's return address, for diagnostics that need to name a caller. */
+	public static inline function raHint():Int return machine == null ? 0 : machine.ra;
 
 	static function ioWrite32(p:Int, v:Int):Void {
 		if (p == 0x1F801070) core.Irq.writeStat(v);
@@ -335,10 +381,10 @@ class Memory {
 	}
 
 	static function slowRead8(p:Int):Int {
-		if (isScratch(p)) return RawMem.get8(scratch, p - SCRATCH_BASE);
+		if (isScratch(p)) return RawMem.get8(scratch(), p - SCRATCH_BASE);
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
 		// a 32-bit word would read three neighbours that mean something else entirely.
-		else if (isCdrom(p)) return cd.Cdrom.readPolled(p, raHint);
+		else if (isCdrom(p)) return cd.Cdrom.readPolled(p, raHint());
 		else if (isSio(p)) return sio.Sio0.read8(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
 		else if (isRom(p)) return romRead8(p);
@@ -346,10 +392,10 @@ class Memory {
 	}
 
 	static function cdWordWrite(p:Int, v:Int):Void {
-		cd.Cdrom.write8(p, v & 0xFF, cycleHint);
-		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint);
-		cd.Cdrom.write8(p + 2, (v >>> 16) & 0xFF, cycleHint);
-		cd.Cdrom.write8(p + 3, (v >>> 24) & 0xFF, cycleHint);
+		cd.Cdrom.write8(p, v & 0xFF, cycleHint());
+		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint());
+		cd.Cdrom.write8(p + 2, (v >>> 16) & 0xFF, cycleHint());
+		cd.Cdrom.write8(p + 3, (v >>> 24) & 0xFF, cycleHint());
 	}
 
 	/**
@@ -368,8 +414,8 @@ class Memory {
 		silently goes somewhere else.
 	**/
 	static function cdHalfWrite(p:Int, v:Int):Void {
-		cd.Cdrom.write8(p, v & 0xFF, cycleHint);
-		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint);
+		cd.Cdrom.write8(p, v & 0xFF, cycleHint());
+		cd.Cdrom.write8(p + 1, (v >>> 8) & 0xFF, cycleHint());
 	}
 
 	/** A word read of the CD page: four byte registers, little-endian, each with its own effect. */
@@ -398,10 +444,10 @@ class Memory {
 	}
 
 	static function slowRead16(p:Int):Int {
-		if (isScratch(p)) return RawMem.get16(scratch, p - SCRATCH_BASE);
+		if (isScratch(p)) return RawMem.get16(scratch(), p - SCRATCH_BASE);
 		else if (isCdrom(p)) return cd.Cdrom.read8(p) | (cd.Cdrom.read8(p + 1) << 8);
 		else if (isSio(p)) return sio.Sio0.read16(p);
-		else if (isTimer(p)) return timers.Timers.read(p, cycleHint) & 0xFFFF;
+		else if (isTimer(p)) return timers.Timers.read(p, cycleHint()) & 0xFFFF;
 		else if (spu.Spu.contains(p)) return spu.Spu.read16(p);
 		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
 		else if (isRom(p)) return romRead8(p) | (romRead8(p + 1) << 8);
@@ -409,9 +455,9 @@ class Memory {
 	}
 
 	static function slowRead32(p:Int):Int {
-		if (isScratch(p)) return RawMem.get32(scratch, p - SCRATCH_BASE);
+		if (isScratch(p)) return RawMem.get32(scratch(), p - SCRATCH_BASE);
 		else if (isSio(p)) return sio.Sio0.read32(p);
-		else if (isTimer(p)) return timers.Timers.read(p, cycleHint);
+		else if (isTimer(p)) return timers.Timers.read(p, cycleHint());
 		// The CD's four registers were reachable by byte and halfword but not by word, so a
 		// 32-bit read of the status register fell through to the unknown-I/O path and answered
 		// zero — a drive that reports nothing, to a driver that reads it that way.
@@ -444,8 +490,8 @@ class Memory {
 	}
 
 	static function slowWrite8(p:Int, v:Int):Void {
-		if (isScratch(p)) RawMem.set8(scratch, p - SCRATCH_BASE, v);
-		else if (isCdrom(p)) cd.Cdrom.write8(p, v, cycleHint);
+		if (isScratch(p)) RawMem.set8(scratch(), p - SCRATCH_BASE, v);
+		else if (isCdrom(p)) cd.Cdrom.write8(p, v, cycleHint());
 		else if (isSio(p)) sio.Sio0.write8(p, v);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFF, 0xFF);
 		else unmappedAccesses++;
@@ -465,9 +511,9 @@ class Memory {
 	}
 
 	static function slowWrite16(p:Int, v:Int):Void {
-		if (isScratch(p)) RawMem.set16(scratch, p - SCRATCH_BASE, v);
+		if (isScratch(p)) RawMem.set16(scratch(), p - SCRATCH_BASE, v);
 		else if (isSio(p)) sio.Sio0.write16(p, v);
-		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
+		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint());
 		else if (isCdrom(p)) cdHalfWrite(p, v & 0xFFFF);
 		else if (spu.Spu.contains(p)) spu.Spu.write16(p, v & 0xFFFF);
 		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
@@ -475,8 +521,8 @@ class Memory {
 	}
 
 	static function slowWrite32(p:Int, v:Int):Void {
-		if (isScratch(p)) RawMem.set32(scratch, p - SCRATCH_BASE, v);
-		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint);
+		if (isScratch(p)) RawMem.set32(scratch(), p - SCRATCH_BASE, v);
+		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint());
 		else if (isCdrom(p)) cdWordWrite(p, v);
 		else if (dma.Dma.contains(p)) dma.Dma.write(p, v);
 		else if (spu.Spu.contains(p)) spuWordWrite(p, v);
@@ -494,7 +540,7 @@ class Memory {
 		var s = phys(src) & RAM_MASK;
 		var n = bytes;
 		while (n > 0) {
-			RawMem.set8(ram, d, RawMem.get8(ram, s));
+			RawMem.set8(ram(), d, RawMem.get8(ram(), s));
 			d++;
 			s++;
 			n--;
@@ -506,7 +552,7 @@ class Memory {
 		var d = phys(addr) & RAM_MASK;
 		var i = 0;
 		while (i < bytes) {
-			RawMem.set8(ram, d + i, RawMem.get8(src, srcOffset + i));
+			RawMem.set8(ram(), d + i, RawMem.get8(src, srcOffset + i));
 			i++;
 		}
 	}

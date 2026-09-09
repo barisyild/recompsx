@@ -30,7 +30,8 @@ class Codegen {
 		else return CodegenReference.dispatch(addr, ctx);
 	}
 
-	static function reset(ctx:CpuState):Void {
+	public static function reset(ctx:CpuState):Void {
+		Memory.machine = ctx;
 		ctx.at = 0; ctx.v0 = 0; ctx.v1 = 0;
 		ctx.a0 = 0; ctx.a1 = 0; ctx.a2 = 0; ctx.a3 = 0;
 		ctx.t0 = 0; ctx.t1 = 0; ctx.t2 = 0; ctx.t3 = 0;
@@ -43,7 +44,7 @@ class Codegen {
 		ctx.nextEvent = 0x40000000; ctx.unwindToken = 0; ctx.sr = 0; ctx.cause = 0;
 	}
 
-	static function compare(a:CpuState, b:CpuState):Void {
+	public static function compare(a:CpuState, b:CpuState):Void {
 		Conf.expect("at", b.at, a.at); Conf.expect("v0", b.v0, a.v0); Conf.expect("v1", b.v1, a.v1);
 		Conf.expect("a0", b.a0, a.a0); Conf.expect("a1", b.a1, a.a1);
 		Conf.expect("a2", b.a2, a.a2); Conf.expect("a3", b.a3, a.a3);
@@ -111,6 +112,10 @@ class Codegen {
 		Runtime.bindDispatch(dispatch);
 		Kernel.vramDump = false;
 		Kernel.reportOps = false;
+		reset(b);
+		b.a0 = 0x80040000;
+		CodegenOptimized.loadSlot(b);
+		Conf.expect("delay-slot load retains bus cycles", b.cycles, 8);
 		for (kind in 0...22) {
 			for (sample in 0...16) {
 				run(a, kind, sample, false);
@@ -138,6 +143,7 @@ class Codegen {
 						Conf.expect("multiply low", b.v1, IntMath.mul(b.a0, b.a1));
 					case 7:
 						Conf.expect("word load", b.t0, b.a1);
+						Conf.expect("five RAM loads plus store and return slot", b.cycles, 38);
 						Conf.expect("signed byte", b.v0, (b.a1 << 24) >> 24);
 						Conf.expect("signed half", b.t1, (b.a1 << 16) >> 16);
 					case 8: Conf.expect("zero load still pops FIFO", b.v0, 0x09);

@@ -197,6 +197,36 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     SDL_RenderPresent(g_renderer);
 }
 
+/* ---- hardware drawing -------------------------------------------------------------------------
+ * SDL2 gets the finished picture, not the primitives: this backend answers 0 to BP_CAP_GPU_DRAW,
+ * so the runtime never takes the fork and these are never called. They exist because the ABI is
+ * the contract and a backend answers all of it — and because the day a desktop GPU path is
+ * wanted, the seam is already here. */
+
+void bp_gpu_vram(const uint16_t* vram) { (void)vram; }
+
+void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
+                  int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
+                  int draw_x, int draw_y) {
+    (void)tex_base_x; (void)tex_base_y; (void)tex_depth;
+    (void)clut_x; (void)clut_y; (void)semi_mode; (void)flags; (void)tex_window;
+    (void)draw_x; (void)draw_y;
+}
+
+void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
+                int x1, int y1, int c1, int u1, int v1,
+                int x2, int y2, int c2, int u2, int v2) {
+    (void)x0; (void)y0; (void)c0; (void)u0; (void)v0;
+    (void)x1; (void)y1; (void)c1; (void)u1; (void)v1;
+    (void)x2; (void)y2; (void)c2; (void)u2; (void)v2;
+}
+
+void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
+    (void)x; (void)y; (void)w; (void)h; (void)bgr; (void)semi; (void)semi_mode;
+}
+
+void bp_gpu_dirty(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+
 /* ---- audio -------------------------------------------------------------------------------- */
 
 void bp_audio_push(const int16_t* frames, int frame_count) {

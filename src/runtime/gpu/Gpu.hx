@@ -3,6 +3,7 @@ package gpu;
 import core.Irq;
 import core.Runtime;
 import core.TimeBase;
+import shim.Backend;
 
 /**
 	The GPU's register file: the two ports at 1F801810h and 1F801814h, and the state behind them.
@@ -96,6 +97,38 @@ class Gpu {
 	/** GP1(05h) writes — how often the game moves the displayed window. */
 	public static var flips(default, null) = 0;
 
+	/** A polygon's vertices, decoded once per packet. Allocated at boot, never per primitive. */
+	static var vx:Array<Int>;
+	static var vy:Array<Int>;
+	static var vc:Array<Int>;
+	static var vu:Array<Int>;
+	static var vv:Array<Int>;
+
+	/**
+		The texture the primitive being rasterised reads from, decoded once per packet.
+
+		Carried in statics rather than through the call, because a textured triangle needs fifteen
+		numbers and the portable subset has no structs to pass them in. Set immediately before
+		`triangle`, read only inside it.
+	**/
+	static var texEnabled = false;
+	static var texRaw = false;
+	static var texDepth = 0;        // 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct
+	static var texBaseX = 0;        // in halfwords
+	static var texBaseY = 0;
+	static var clutX = 0;
+	static var clutY = 0;
+
+	/**
+		Whether the primitive blends with what is already there, and how.
+
+		The mode is GPU state — GP0(E1h) bits 5-6 — which a textured polygon may override for
+		itself through its own texpage word. Whether blending happens at all is the command's own
+		bit 1, and for a textured pixel the texel gets the final say through its bit 15.
+	**/
+	static var semiMode = 0;
+	static var semiTransparent = false;
+
 	/** The command word and its parameters, gathered until the packet is whole. */
 	static var packet:Array<Int>;
 	static var packetLen = 0;
@@ -104,8 +137,31 @@ class Gpu {
 	public static var primitives(default, null) = 0;
 	public static var pixels(default, null) = 0;
 
+	/**
+		Whether primitives are handed to the backend instead of being rasterised here.
+
+		**False on every path that hashes anything, and that is the point.** A backend with a
+		rasteriser of its own can draw a PlayStation scene far faster than a 200 MHz console can
+		draw it in software, but the pixels it produces are its own — near enough to look right,
+		not near enough to be the same bytes. So this is a fork in *presentation* and never in
+		state: everything the emulated machine can observe (GP0 parsing, GPUSTAT, interrupts,
+		cycle costs, uploads, VRAM-to-VRAM copies) happens identically either way, and only the
+		rasterised pixels go elsewhere.
+
+		Nothing turns it on by itself. A host has to ask, with `--video-hw`, *and* its backend has
+		to answer `BP_CAP_GPU_DRAW`; the JavaScript shim answers no by construction, so the
+		reference target cannot take this path even by accident. Headless digest runs therefore
+		never see it. See docs/decisions/ADR-0011.
+	**/
+	public static var hw = false;
+
 	public static function init():Void {
 		packet = [for (_ in 0...32) 0];
+		vx = [for (_ in 0...4) 0];
+		vy = [for (_ in 0...4) 0];
+		vc = [for (_ in 0...4) 0];
+		vu = [for (_ in 0...4) 0];
+		vv = [for (_ in 0...4) 0];
 		opCount = [for (_ in 0...256) 0];
 		Vram.init();
 		reset();
@@ -130,6 +186,8 @@ class Gpu {
 		drawAreaBottomRight = 0;
 		drawOffset = 0;
 		textureWindow = 0;
+		semiMode = 0;
+		semiTransparent = false;
 		displayStart = 0;
 		// The retail defaults: a 320x240 window in the middle of the visible area.
 		displayRangeH = 0xC60260;
@@ -214,6 +272,10 @@ class Gpu {
 		xferI = 0;
 		// Two pixels to a word, rounded up: an odd-width rectangle pads its last word.
 		xferLeft = (xferW * xferH + 1) >> 1;
+		// Told once, here, rather than per texel: the rectangle is known the moment the transfer
+		// is armed, and a backend caching decoded textures needs the region, not the pixels.
+		if (hw) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		else {}
 	}
 
 	static function push(v:Int):Void {
@@ -272,6 +334,10 @@ class Gpu {
 			}
 		}
 		copies++;
+		// The copy lands in emulated VRAM in both modes — it is state, not presentation — but a
+		// backend holding a decoded copy of that region now holds a stale one.
+		if (hw) Backend.gpuDirty(dx0, dy0, w, h);
+		else {}
 	}
 
 	/** One copied pixel, honouring the mask bits exactly as a drawn one does. */
@@ -309,27 +375,71 @@ class Gpu {
 		final gouraud = (op & 0x10) != 0;
 		final textured = (op & 0x04) != 0;
 		final quad = (op & 0x08) != 0;
-		final colour = colourOf(packet[0]);
 
 		// Vertex words sit at a fixed stride once the command word is past; with gouraud the
-		// first vertex's colour was the command word itself.
+		// first vertex's colour was the command word itself and each later vertex is preceded by
+		// its own. The three arrays are allocated once at boot — these used to be array literals,
+		// which is an allocation per polygon, and this game submits three million of them.
 		var i = 1;
-		final xs = [0, 0, 0, 0];
-		final ys = [0, 0, 0, 0];
 		final n = quad ? 4 : 3;
 		for (v in 0...n) {
-			if (gouraud && v > 0) i++;
-			xs[v] = sx(packet[i]);
-			ys[v] = sy(packet[i]);
+			if (gouraud && v > 0) {
+				vc[v] = packet[i] & 0xFFFFFF;
+				i++;
+			} else {
+				vc[v] = packet[0] & 0xFFFFFF;
+			}
+			vx[v] = sx(packet[i]);
+			vy[v] = sy(packet[i]);
 			i++;
-			if (textured) i++;
+			if (textured) {
+				vu[v] = packet[i] & 0xFF;
+				vv[v] = (packet[i] >>> 8) & 0xFF;
+				// The palette rides on the first vertex's word and the texture page on the
+				// second; the rest carry nothing in their high half.
+				if (v == 0) setClut(packet[i] >>> 16);
+				else if (v == 1) setTexPage(packet[i] >>> 16);
+				else {}
+				i++;
+			} else {}
 		}
-		triangle(xs[0], ys[0], xs[1], ys[1], xs[2], ys[2], colour);
-		if (quad) triangle(xs[1], ys[1], xs[2], ys[2], xs[3], ys[3], colour);
+		texEnabled = textured;
+		texRaw = (op & 0x01) != 0;
+		semiTransparent = (op & 0x02) != 0;
+		triangle(0, 1, 2);
+		if (quad) triangle(1, 2, 3);
 		else {}
 	}
 
+	/** GP0's palette attribute: X in sixteens, Y in lines. */
+	static function setClut(attr:Int):Void {
+		clutX = (attr & 0x3F) << 4;
+		clutY = (attr >>> 6) & 0x1FF;
+	}
+
+	/** The texture page a primitive names for itself, in the same layout GP0(E1h) uses. */
+	static function setTexPage(attr:Int):Void {
+		texBaseX = (attr & 0x0F) << 6;
+		texBaseY = ((attr >>> 4) & 1) << 8;
+		semiMode = (attr >>> 5) & 3;
+		texDepth = (attr >>> 7) & 3;
+	}
+
+	/**
+		GP0(E1h) — the page, the blend mode and the depth, for everything that does not say
+		otherwise.
+
+		An untextured primitive has no texpage word of its own, so this is where its blend mode
+		comes from; a textured polygon carries its own and overrides all three.
+	**/
+	static function setDrawMode(v:Int):Void {
+		texPage = v & 0x3FFF;
+		setTexPage(v & 0x1FF);
+	}
+
 	static function drawRect(op:Int):Void {
+		semiTransparent = (op & 0x02) != 0;
+		texEnabled = false;
 		final colour = colourOf(packet[0]);
 		final textured = (op & 0x04) != 0;
 		var i = 1;
@@ -349,6 +459,8 @@ class Gpu {
 	}
 
 	static function drawFill():Void {
+		semiTransparent = false;
+		texEnabled = false;
 		final colour = colourOf(packet[0]);
 		final x = packet[1] & 0x3F0;
 		final y = (packet[1] >>> 16) & 0x1FF;
@@ -366,7 +478,45 @@ class Gpu {
 		what a first render needs. Degenerate and oversized triangles are dropped exactly as the
 		hardware drops them: anything wider than 1023 or taller than 511 is not drawn at all.
 	**/
-	static function triangle(x0:Int, y0:Int, x1:Int, y1:Int, x2:Int, y2:Int, colour:Int):Void {
+	static function triangle(ia:Int, ib0:Int, ic0:Int):Void {
+		// The hardware fork. Taken before the winding is normalised, because that is a rasteriser's
+		// business and a backend with culling disabled does not care which way round the vertices
+		// arrive. Both rejects below are kept so the primitive counter means the same thing in
+		// either mode — a heartbeat that counted differently would make the two incomparable.
+		if (hw) {
+			final hx0 = vx[ia], hy0 = vy[ia];
+			final hx1 = vx[ib0], hy1 = vy[ib0];
+			final hx2 = vx[ic0], hy2 = vy[ic0];
+			final loX = hx0 < hx1 ? (hx0 < hx2 ? hx0 : hx2) : (hx1 < hx2 ? hx1 : hx2);
+			final hiX = hx0 > hx1 ? (hx0 > hx2 ? hx0 : hx2) : (hx1 > hx2 ? hx1 : hx2);
+			final loY = hy0 < hy1 ? (hy0 < hy2 ? hy0 : hy2) : (hy1 < hy2 ? hy1 : hy2);
+			final hiY = hy0 > hy1 ? (hy0 > hy2 ? hy0 : hy2) : (hy1 > hy2 ? hy1 : hy2);
+			if (hiX - loX > 1023 || hiY - loY > 511) return;
+			else {}
+			if (edge(hx0, hy0, hx1, hy1, hx2, hy2) == 0) return;
+			else {}
+			primitives++;
+			Backend.gpuState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
+				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
+				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
+			Backend.gpuTri(hx0, hy0, vc[ia], vu[ia], vv[ia],
+				hx1, hy1, vc[ib0], vu[ib0], vv[ib0],
+				hx2, hy2, vc[ic0], vu[ic0], vv[ic0]);
+			return;
+		} else {}
+
+		// One winding, decided here, so that everything downstream has a single case to handle.
+		// A clockwise triangle is the same triangle with two vertices exchanged, and exchanging
+		// them carries the colour and the texture coordinate along, so nothing else notices.
+		var ib = ib0, ic = ic0;
+		if (edge(vx[ia], vy[ia], vx[ib], vy[ib], vx[ic], vy[ic]) < 0) {
+			ib = ic0;
+			ic = ib0;
+		} else {}
+		final a = ia, b = ib, c = ic;
+		final x0 = vx[a], y0 = vy[a], c0 = vc[a];
+		final x1 = vx[b], y1 = vy[b], c1 = vc[b];
+		final x2 = vx[c], y2 = vy[c], c2 = vc[c];
 		var minX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
 		var maxX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
 		var minY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
@@ -374,37 +524,308 @@ class Gpu {
 		if (maxX - minX > 1023 || maxY - minY > 511) return;
 		else {}
 
-		final clip = clipBox();
-		if (minX < clipX0(clip)) minX = clipX0(clip);
+		// Read once into locals rather than through the four ignored-argument accessors that used
+		// to stand here. Those made JavaScript and reflaxe.CPP disagree about the *lower* two
+		// clamps — same vertices, same area, same clip values, different bounding box — which is
+		// 0.3% of every pixel this rasteriser writes. See PROGRESS.md, upstream defect 10.
+		final clipLeft = drawAreaTopLeft & 0x3FF;
+		final clipTop = (drawAreaTopLeft >>> 10) & 0x1FF;
+		final clipRight = drawAreaBottomRight & 0x3FF;
+		final clipBottom = (drawAreaBottomRight >>> 10) & 0x1FF;
+		if (minX < clipLeft) minX = clipLeft;
 		else {}
-		if (minY < clipY0(clip)) minY = clipY0(clip);
+		if (minY < clipTop) minY = clipTop;
 		else {}
-		if (maxX > clipX1(clip)) maxX = clipX1(clip);
+		if (maxX > clipRight) maxX = clipRight;
 		else {}
-		if (maxY > clipY1(clip)) maxY = clipY1(clip);
+		if (maxY > clipBottom) maxY = clipBottom;
 		else {}
 
 		final area = edge(x0, y0, x1, y1, x2, y2);
 		if (area == 0) return;
 		else {}
 		primitives++;
+
+		// The edge function is linear in x and y, so stepping it costs an add where evaluating it
+		// costs two multiplies. Six multiplies a pixel over a bounding box is what a scene of three
+		// million triangles spends most of its time on, and none of them are necessary: one
+		// evaluation per edge at the top-left corner, then `stepX` along a row and `stepY` down.
+		//
+		// Identical integers, not an approximation — the same values the three calls produced,
+		// arrived at by addition. The digest is the proof and it does not move.
+		final stepX0 = y1 - y2, stepY0 = x2 - x1;
+		final stepX1 = y2 - y0, stepY1 = x0 - x2;
+		final stepX2 = y0 - y1, stepY2 = x1 - x0;
+		// The fill rule. A pixel lying exactly on a shared edge is claimed by one of the two
+		// triangles that meet there, never both and never neither: the edge belongs to whichever
+		// of them has it as a top or a left edge, and the two traverse it in opposite directions,
+		// so exactly one qualifies. Without this, every seam is drawn twice — invisible on an
+		// opaque surface, because the second write puts back what the first did, and a bright line
+		// along every polygon diagonal the moment the surface blends with what is behind it.
+		var row0 = edge(x1, y1, x2, y2, minX, minY) + (topLeft(x1, y1, x2, y2) ? 0 : -1);
+		var row1 = edge(x2, y2, x0, y0, minX, minY) + (topLeft(x2, y2, x0, y0) ? 0 : -1);
+		var row2 = edge(x0, y0, x1, y1, minX, minY) + (topLeft(x0, y0, x1, y1) ? 0 : -1);
+
+		if (texEnabled) {
+			texturedSpans(a, b, c, x0, y0, c0, x1, y1, c1, x2, y2, c2,
+				minX, maxX, minY, maxY, area, row0, row1, row2,
+				stepX0, stepX1, stepX2, stepY0, stepY1, stepY2);
+		} else if (c0 == c1 && c1 == c2) {
+			flatSpans(minX, maxX, minY, maxY, area, row0, row1, row2,
+				stepX0, stepX1, stepX2, stepY0, stepY1, stepY2, colourOf(c0));
+		} else {
+			shadedSpans(x0, y0, c0, x1, y1, c1, x2, y2, c2, minX, maxX, minY, maxY, area,
+				row0, row1, row2, stepX0, stepX1, stepX2, stepY0, stepY1, stepY2);
+		}
+	}
+
+	/** One colour over the whole triangle: no interpolation to do, so none is paid for. */
+	static function flatSpans(minX:Int, maxX:Int, minY:Int, maxY:Int, area:Int,
+			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
+			stepY0:Int, stepY1:Int, stepY2:Int, colour:Int):Void {
+		var r0 = row0, r1 = row1, r2 = row2;
 		var y = minY;
 		while (y <= maxY) {
+			var w0 = r0, w1 = r1, w2 = r2;
 			var x = minX;
 			while (x <= maxX) {
-				final w0 = edge(x1, y1, x2, y2, x, y);
-				final w1 = edge(x2, y2, x0, y0, x, y);
-				final w2 = edge(x0, y0, x1, y1, x, y);
-				if (inside(w0, w1, w2, area)) plot(x, y, colour);
+				if (inside(w0, w1, w2, area)) plotMaybeSemi(x, y, colour);
 				else {}
+				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
 				x++;
 			}
+			r0 = (r0 + stepY0) | 0; r1 = (r1 + stepY1) | 0; r2 = (r2 + stepY2) | 0;
 			y++;
 		}
 	}
 
+	/**
+		Gouraud shading: each channel a plane through the three vertex colours.
+
+		Colour varies linearly across a triangle, so each channel is stepped exactly as the edge
+		functions are — one division per channel per triangle to find the two gradients, then an
+		add per pixel. Ten fractional bits, which is enough that the rounding error accumulated
+		across a full-width span stays under one level of the 255, and few enough that every
+		intermediate stays inside 32 bits: the bounding-box reject above caps coordinate
+		differences at 1023 by 511, so a gradient numerator cannot exceed about half a million.
+
+		Gradients are clamped to one full colour range per pixel. Anything steeper is a sliver
+		whose colour saturates within a pixel anyway, and the clamp is what keeps a degenerate
+		triangle from producing an intermediate that wraps. `IntMath.mul` throughout so that if one
+		ever does wrap, it wraps the same way on both targets.
+
+		Without this the whole scene is faceted: every polygon Crash Bash draws but one in a
+		thousand asks for shading, and painting all three vertices in the first one's colour turns
+		a smooth surface into flat plates.
+	**/
+	static function shadedSpans(x0:Int, y0:Int, c0:Int, x1:Int, y1:Int, c1:Int,
+			x2:Int, y2:Int, c2:Int, minX:Int, maxX:Int, minY:Int, maxY:Int, area:Int,
+			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
+			stepY0:Int, stepY1:Int, stepY2:Int):Void {
+		final ax = x1 - x0, ay = y1 - y0;
+		final bx = x2 - x0, by = y2 - y0;
+
+		final r0 = c0 & 0xFF, g0 = (c0 >>> 8) & 0xFF, b0 = (c0 >>> 16) & 0xFF;
+		final dr1 = (c1 & 0xFF) - r0, dg1 = ((c1 >>> 8) & 0xFF) - g0, db1 = ((c1 >>> 16) & 0xFF) - b0;
+		final dr2 = (c2 & 0xFF) - r0, dg2 = ((c2 >>> 8) & 0xFF) - g0, db2 = ((c2 >>> 16) & 0xFF) - b0;
+
+		final drdx = gradient(shim.IntMath.mul(dr1, by) - shim.IntMath.mul(dr2, ay), area);
+		final drdy = gradient(shim.IntMath.mul(dr2, ax) - shim.IntMath.mul(dr1, bx), area);
+		final dgdx = gradient(shim.IntMath.mul(dg1, by) - shim.IntMath.mul(dg2, ay), area);
+		final dgdy = gradient(shim.IntMath.mul(dg2, ax) - shim.IntMath.mul(dg1, bx), area);
+		final dbdx = gradient(shim.IntMath.mul(db1, by) - shim.IntMath.mul(db2, ay), area);
+		final dbdy = gradient(shim.IntMath.mul(db2, ax) - shim.IntMath.mul(db1, bx), area);
+
+		final ox = minX - x0, oy = minY - y0;
+		var rRow = start(r0, drdx, ox, drdy, oy);
+		var gRow = start(g0, dgdx, ox, dgdy, oy);
+		var bRow = start(b0, dbdx, ox, dbdy, oy);
+
+		var e0 = row0, e1 = row1, e2 = row2;
+		var y = minY;
+		while (y <= maxY) {
+			var w0 = e0, w1 = e1, w2 = e2;
+			var r = rRow, g = gRow, b = bRow;
+			var x = minX;
+			while (x <= maxX) {
+				if (inside(w0, w1, w2, area)) {
+					plotMaybeSemi(x, y, pack555(r >> CFRAC, g >> CFRAC, b >> CFRAC));
+				} else {}
+				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
+				r = (r + drdx) | 0; g = (g + dgdx) | 0; b = (b + dbdx) | 0;
+				x++;
+			}
+			e0 = (e0 + stepY0) | 0; e1 = (e1 + stepY1) | 0; e2 = (e2 + stepY2) | 0;
+			rRow = (rRow + drdy) | 0; gRow = (gRow + dgdy) | 0; bRow = (bRow + dbdy) | 0;
+			y++;
+		}
+	}
+
+	/**
+		A textured triangle: the same interpolation, with U and V carried alongside the colour.
+
+		Texture coordinates are linear in screen space on this hardware — there is no perspective
+		correction, which is why PlayStation textures swim on large polygons — so they step exactly
+		as the colour channels do, and the same gradient clamp keeps a sliver from wrapping an
+		intermediate. Eight-bit coordinates, so a numerator has the same bound the colours do.
+
+		Two rules decide a texel's fate. `0x0000` is fully transparent and the pixel is skipped
+		entirely, which is how every cut-out shape on the PlayStation is drawn. Otherwise the texel
+		is modulated by the interpolated vertex colour, `texel * colour / 128`, so 0x80 is
+		unchanged, below it darkens and above it brightens — unless the command's raw-texture bit
+		is set, in which case the texel is written as it was fetched.
+	**/
+	static function texturedSpans(ia:Int, ib:Int, ic:Int,
+			x0:Int, y0:Int, c0:Int, x1:Int, y1:Int, c1:Int, x2:Int, y2:Int, c2:Int,
+			minX:Int, maxX:Int, minY:Int, maxY:Int, area:Int,
+			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
+			stepY0:Int, stepY1:Int, stepY2:Int):Void {
+		final ax = x1 - x0, ay = y1 - y0;
+		final bx = x2 - x0, by = y2 - y0;
+
+		final r0 = c0 & 0xFF, g0 = (c0 >>> 8) & 0xFF, b0 = (c0 >>> 16) & 0xFF;
+		final dr1 = (c1 & 0xFF) - r0, dg1 = ((c1 >>> 8) & 0xFF) - g0, db1 = ((c1 >>> 16) & 0xFF) - b0;
+		final dr2 = (c2 & 0xFF) - r0, dg2 = ((c2 >>> 8) & 0xFF) - g0, db2 = ((c2 >>> 16) & 0xFF) - b0;
+		final u0 = vu[ia], v0 = vv[ia];
+		final du1 = vu[ib] - u0, dv1 = vv[ib] - v0;
+		final du2 = vu[ic] - u0, dv2 = vv[ic] - v0;
+
+		final drdx = gradient(shim.IntMath.mul(dr1, by) - shim.IntMath.mul(dr2, ay), area);
+		final drdy = gradient(shim.IntMath.mul(dr2, ax) - shim.IntMath.mul(dr1, bx), area);
+		final dgdx = gradient(shim.IntMath.mul(dg1, by) - shim.IntMath.mul(dg2, ay), area);
+		final dgdy = gradient(shim.IntMath.mul(dg2, ax) - shim.IntMath.mul(dg1, bx), area);
+		final dbdx = gradient(shim.IntMath.mul(db1, by) - shim.IntMath.mul(db2, ay), area);
+		final dbdy = gradient(shim.IntMath.mul(db2, ax) - shim.IntMath.mul(db1, bx), area);
+		final dudx = gradient(shim.IntMath.mul(du1, by) - shim.IntMath.mul(du2, ay), area);
+		final dudy = gradient(shim.IntMath.mul(du2, ax) - shim.IntMath.mul(du1, bx), area);
+		final dvdx = gradient(shim.IntMath.mul(dv1, by) - shim.IntMath.mul(dv2, ay), area);
+		final dvdy = gradient(shim.IntMath.mul(dv2, ax) - shim.IntMath.mul(dv1, bx), area);
+
+		final ox = minX - x0, oy = minY - y0;
+		var rRow = start(r0, drdx, ox, drdy, oy);
+		var gRow = start(g0, dgdx, ox, dgdy, oy);
+		var bRow = start(b0, dbdx, ox, dbdy, oy);
+		var uRow = start(u0, dudx, ox, dudy, oy);
+		var vRow = start(v0, dvdx, ox, dvdy, oy);
+
+		var e0 = row0, e1 = row1, e2 = row2;
+		var y = minY;
+		while (y <= maxY) {
+			var w0 = e0, w1 = e1, w2 = e2;
+			var r = rRow, g = gRow, b = bRow, u = uRow, v = vRow;
+			var x = minX;
+			while (x <= maxX) {
+				if (inside(w0, w1, w2, area)) {
+					shadeTexel(x, y, u >> CFRAC, v >> CFRAC, r >> CFRAC, g >> CFRAC, b >> CFRAC);
+				} else {}
+				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
+				r = (r + drdx) | 0; g = (g + dgdx) | 0; b = (b + dbdx) | 0;
+				u = (u + dudx) | 0; v = (v + dvdx) | 0;
+				x++;
+			}
+			e0 = (e0 + stepY0) | 0; e1 = (e1 + stepY1) | 0; e2 = (e2 + stepY2) | 0;
+			rRow = (rRow + drdy) | 0; gRow = (gRow + dgdy) | 0; bRow = (bRow + dbdy) | 0;
+			uRow = (uRow + dudy) | 0; vRow = (vRow + dvdy) | 0;
+			y++;
+		}
+	}
+
+	/** One textured pixel: fetch, drop it if the texel is transparent, modulate, write. */
+	static function shadeTexel(x:Int, y:Int, u:Int, v:Int, r:Int, g:Int, b:Int):Void {
+		final t = texel(u, v);
+		if (t == 0) return;
+		else {}
+		// Bit 15 of a texel means "blend me" — but only for a command that asked to blend at all;
+		// for an opaque command the same bit means nothing and the texel is drawn as it is.
+		final blend = semiTransparent && (t & 0x8000) != 0;
+		final c = texRaw ? t & 0x7FFF : modulate(t, r, g, b);
+		if (blend) plotSemi(x, y, c);
+		else plot(x, y, c);
+	}
+
+	/**
+		`texel * colour / 128`, per channel, back into a 15-bit word.
+
+		The texel's five bits are widened to eight before the multiply and narrowed after, so the
+		rounding happens once rather than twice.
+	**/
+	static inline function modulate(t:Int, r:Int, g:Int, b:Int):Int {
+		final tr = (t & 0x1F) << 3, tg = ((t >>> 5) & 0x1F) << 3, tb = ((t >>> 10) & 0x1F) << 3;
+		return pack555(shim.IntMath.mul(tr, r) >> 7, shim.IntMath.mul(tg, g) >> 7,
+			shim.IntMath.mul(tb, b) >> 7);
+	}
+
+	/**
+		One texel out of the current page, through the texture window and any palette.
+
+		Three storage formats share the page: four-bit and eight-bit indices into a CLUT elsewhere
+		in VRAM, and fifteen-bit colour stored directly. Indexed formats pack several pixels into
+		one halfword — four nibbles or two bytes, lowest bits leftmost — so the coordinate selects
+		both the halfword and the field within it.
+
+		The window is applied first, because it is what makes a small tile repeat across a page:
+		psx-spx gives it as `(coord AND NOT(mask*8)) OR ((offset AND mask)*8)`, and the repeat is
+		the masking-off of the high bits rather than anything stored in VRAM.
+	**/
+	static function texel(u:Int, v:Int):Int {
+		final mx = textureWindow & 0x1F;
+		final my = (textureWindow >>> 5) & 0x1F;
+		final tu = ((u & ~(mx << 3)) | ((textureWindow >>> 10) & 0x1F & mx) << 3) & 0xFF;
+		final tv = ((v & ~(my << 3)) | ((textureWindow >>> 15) & 0x1F & my) << 3) & 0xFF;
+		if (texDepth == 2) return Vram.get((texBaseX + tu) & 1023, (texBaseY + tv) & 511);
+		else {}
+		if (texDepth == 1) {
+			final w = Vram.get((texBaseX + (tu >> 1)) & 1023, (texBaseY + tv) & 511);
+			return palette((w >>> ((tu & 1) << 3)) & 0xFF);
+		} else {}
+		final w = Vram.get((texBaseX + (tu >> 2)) & 1023, (texBaseY + tv) & 511);
+		return palette((w >>> ((tu & 3) << 2)) & 0x0F);
+	}
+
+	static inline function palette(index:Int):Int {
+		return Vram.get((clutX + index) & 1023, clutY & 511);
+	}
+
+	/** Ten fractional bits: fine enough to hide banding, coarse enough to stay inside an Int. */
+	static inline var CFRAC = 10;
+	static inline var CGRAD_MAX = 255 << CFRAC;
+
+	static inline function gradient(numerator:Int, area:Int):Int {
+		final g = shim.IntMath.div(shim.IntMath.mul(numerator, 1 << CFRAC), area);
+		return g > CGRAD_MAX ? CGRAD_MAX : (g < -CGRAD_MAX ? -CGRAD_MAX : g);
+	}
+
+	static inline function start(base:Int, dx:Int, ox:Int, dy:Int, oy:Int):Int {
+		return ((base << CFRAC) + shim.IntMath.mul(dx, ox) + shim.IntMath.mul(dy, oy)) | 0;
+	}
+
+	/** Three 8-bit channels, clamped, into the 15-bit word VRAM holds. */
+	static inline function pack555(r:Int, g:Int, b:Int):Int {
+		final rc = r < 0 ? 0 : (r > 255 ? 255 : r);
+		final gc = g < 0 ? 0 : (g > 255 ? 255 : g);
+		final bc = b < 0 ? 0 : (b > 255 ? 255 : b);
+		return (rc >> 3) | ((gc >> 3) << 5) | ((bc >> 3) << 10);
+	}
+
+	/**
+		Inside the triangle, biases included. Winding is normalised before we get here, so the
+		three tests all point the same way and `area` is only along to keep the call shape.
+	**/
 	static inline function inside(w0:Int, w1:Int, w2:Int, area:Int):Bool {
-		return area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0) : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+		return w0 >= 0 && w1 >= 0 && w2 >= 0;
+	}
+
+	/**
+		Whether a directed edge is a top or a left edge of the triangle on its inside.
+
+		With screen coordinates running down the page and the winding normalised so that the
+		interior lies where all three edge functions are non-negative: a horizontal edge travelling
+		right has the interior below it, which makes it the top; any edge travelling upwards has
+		the interior to its right, which makes it a left edge.
+	**/
+	static inline function topLeft(ax:Int, ay:Int, bx:Int, by:Int):Bool {
+		final dy = by - ay;
+		return dy < 0 || (dy == 0 && bx > ax);
 	}
 
 	static inline function edge(ax:Int, ay:Int, bx:Int, by:Int, cx:Int, cy:Int):Int {
@@ -412,15 +833,68 @@ class Gpu {
 	}
 
 	static function fillRect(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
+		// No `primitives++` here in either mode: both callers count for themselves.
+		if (hw) {
+			Backend.gpuState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
+				drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
+			Backend.gpuRect(x, y, w, h, colour, semiTransparent ? 1 : 0, semiMode);
+			return;
+		} else {}
 		var j = 0;
 		while (j < h) {
 			var i = 0;
 			while (i < w) {
-				plot(x + i, y + j, colour);
+				plotMaybeSemi(x + i, y + j, colour);
 				i++;
 			}
 			j++;
 		}
+	}
+
+	/** Whichever of the two the current primitive asked for. One predictable branch a pixel. */
+	static inline function plotMaybeSemi(x:Int, y:Int, colour:Int):Void {
+		if (semiTransparent) plotSemi(x, y, colour);
+		else plot(x, y, colour);
+	}
+
+	/**
+		A pixel blended into what is already in the framebuffer.
+
+		The four modes are the whole of PlayStation transparency, and each is one line of
+		arithmetic on five-bit channels (psx-spx, "Semi Transparency"): half and half, additive,
+		subtractive, and a quarter added. Additive is the common one — every spark, flame, glow and
+		lens flare on the machine is a dark texture added to the background, which is why a build
+		without blending draws them as **black squares over the picture** rather than as light.
+
+		The mask check is read once and used for both the test and the blend source: the pixel
+		underneath is both what decides whether we may write and what we are blending with.
+	**/
+	static function plotSemi(x:Int, y:Int, colour:Int):Void {
+		if (x >= 0 && x < 1024 && y >= 0 && y < 512) {
+			final back = Vram.get(x, y);
+			if (!(maskCheck && (back & 0x8000) != 0)) {
+				final c = blendWith(back, colour);
+				Vram.set(x, y, maskSet ? c | 0x8000 : c);
+				pixels++;
+			} else {}
+		} else {}
+	}
+
+	static function blendWith(back:Int, front:Int):Int {
+		final br = back & 0x1F, bg = (back >>> 5) & 0x1F, bb = (back >>> 10) & 0x1F;
+		final fr = front & 0x1F, fg = (front >>> 5) & 0x1F, fb = (front >>> 10) & 0x1F;
+		if (semiMode == 0) return sat555((br + fr) >> 1, (bg + fg) >> 1, (bb + fb) >> 1);
+		else if (semiMode == 1) return sat555(br + fr, bg + fg, bb + fb);
+		else if (semiMode == 2) return sat555(br - fr, bg - fg, bb - fb);
+		else return sat555(br + (fr >> 2), bg + (fg >> 2), bb + (fb >> 2));
+	}
+
+	/** Three five-bit channels, clamped to 0..31, packed. */
+	static inline function sat555(r:Int, g:Int, b:Int):Int {
+		final rc = r < 0 ? 0 : (r > 31 ? 31 : r);
+		final gc = g < 0 ? 0 : (g > 31 ? 31 : g);
+		final bc = b < 0 ? 0 : (b > 31 ? 31 : b);
+		return rc | (gc << 5) | (bc << 10);
 	}
 
 	/**
@@ -443,12 +917,6 @@ class Gpu {
 		} else {}
 	}
 
-	// The draw area, packed as it arrives: X in bits 0..9, Y in 10..18.
-	static inline function clipBox():Int return 0;
-	static inline function clipX0(_:Int):Int return drawAreaTopLeft & 0x3FF;
-	static inline function clipY0(_:Int):Int return (drawAreaTopLeft >>> 10) & 0x1FF;
-	static inline function clipX1(_:Int):Int return drawAreaBottomRight & 0x3FF;
-	static inline function clipY1(_:Int):Int return (drawAreaBottomRight >>> 10) & 0x1FF;
 
 	/**
 		A GP0 command word.
@@ -466,7 +934,7 @@ class Gpu {
 		final op = v >>> 24;
 		if (opCount != null) opCount[op]++;
 		else {}
-		if (op == 0xE1) texPage = v & 0x3FFF;
+		if (op == 0xE1) setDrawMode(v);
 		else if (op == 0xE2) textureWindow = v & 0xFFFFF;
 		else if (op == 0xE3) drawAreaTopLeft = v & 0xFFFFF;
 		else if (op == 0xE4) drawAreaBottomRight = v & 0xFFFFF;

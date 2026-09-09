@@ -34,7 +34,8 @@ enum {
     BP_CAP_MAX_PADS         = 0,
     BP_CAP_HAS_AUDIO        = 1,
     BP_CAP_HAS_STORAGE      = 2,
-    BP_CAP_PREFERRED_SCALE  = 3
+    BP_CAP_PREFERRED_SCALE  = 3,
+    BP_CAP_GPU_DRAW         = 4    /* nonzero: this backend can rasterise primitives itself */
 };
 int  bp_caps(int cap_id);
 
@@ -57,6 +58,52 @@ enum {
     BP_PRESENT_PAL       = 1 << 2
 };
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
+
+/* ---- hardware drawing (optional; only when bp_caps(BP_CAP_GPU_DRAW) is nonzero) -------------
+ * A backend that owns a rasteriser can be handed the PlayStation's primitives instead of the
+ * finished picture. The runtime keeps parsing GP0, keeps its GPUSTAT, its interrupts, its cycle
+ * costs and its VRAM uploads exactly as before — the ONLY difference is that rasterised pixels
+ * are drawn by the backend rather than written into emulated VRAM. It is a fork in presentation,
+ * never in state, and the runtime only takes it when a host explicitly asks for it.
+ *
+ * Consequences a backend must accept: emulated VRAM no longer contains what was drawn, so
+ * anything reading rendered pixels back (feedback effects, a VRAM dump) sees what was there
+ * before. Frames that draw no primitives fall back to bp_present, so movies still work.
+ *
+ * Coordinates arrive with the drawing offset already applied. Colours are 24-bit BGR, exactly as
+ * the GP0 command word carries them. Texture and blend state is latched by bp_gpu_state and
+ * applies to every primitive until the next call. */
+
+/* Hands over the emulated 1024x512 VRAM, borrowed until shutdown, so the backend can read
+ * textures and palettes out of it. Called once, before the first primitive. */
+void bp_gpu_vram(const uint16_t* vram);
+
+enum {
+    BP_GPU_TEXTURED = 1 << 0,   /* sample a texture rather than using vertex colour alone */
+    BP_GPU_SEMI     = 1 << 1,   /* blend with the framebuffer, per semi_mode */
+    BP_GPU_RAW      = 1 << 2    /* use the texel as-is; do not modulate it by the vertex colour */
+};
+/* tex_window is GP0(E2h) raw: mask x/y in bits 0-9, offset x/y in bits 10-19. It makes a small
+ * tile repeat across a page, so it changes which texel a given U,V names — a backend caching a
+ * decoded page must fold it in (and key on it) or repeating textures come out wrong. */
+/* draw_x/draw_y are the drawing area's top-left corner in VRAM. Primitive coordinates are
+ * absolute VRAM positions, and a double-buffered game draws into the buffer it is NOT currently
+ * displaying — so this, not the display origin, is what screen coordinates are relative to. */
+void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
+                  int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
+                  int draw_x, int draw_y);
+
+/* One triangle. Quads arrive as two. */
+void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
+                int x1, int y1, int c1, int u1, int v1,
+                int x2, int y2, int c2, int u2, int v2);
+
+/* An axis-aligned rectangle in one flat colour: sprites and GP0(02h) fills both land here. */
+void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
+
+/* Emulated VRAM changed under this rectangle — an upload or a VRAM-to-VRAM copy. Anything the
+ * backend cached from that region (decoded textures, palettes) is now stale. */
+void bp_gpu_dirty(int x, int y, int w, int h);
 
 /* ---- audio -------------------------------------------------------------------------------
  * 44100 Hz stereo signed 16-bit, interleaved. frame_count is stereo frames, not samples.

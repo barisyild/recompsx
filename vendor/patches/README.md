@@ -11,7 +11,8 @@ is backed up with the rest of the repository and can be reapplied to any checkou
 directory to one submodule. Check whether a patch is already present before applying it;
 several earlier fixes are included in the existing pins. Plain diffs (0004/0005) use `git apply`.
 
-The scalar-register emitter requires 0005; `scripts/setup.sh` applies it idempotently. To apply
+Generated block dispatchers require 0004 and the scalar-register emitter requires 0005;
+`scripts/setup.sh` applies both idempotently. To apply
 it manually from the repository root, on a checkout missing it:
 
     git -C vendor/reflaxe apply --check ../patches/0005-reflaxe-reassigned-local-declarations.patch
@@ -43,3 +44,8 @@ apply a working-tree patch.
   moving anything. `TestCodegen.constantStores`, `loadThenRedefine` and `storeThenRedefine`
   are synthetic MIPS reproductions;
   `scripts/conformance.sh Codegen` must build and pass on both targets (ADR-0007).
+
+- **reflaxe-cpp-array-is-vector.patch — contiguous Haxe Arrays.** Restored from commit
+  `6819782` on `dreamcast-hardware-rendering`, alongside its native memory and dispatch paths.
+  `scripts/setup.sh` applies this patch idempotently to `vendor/reflaxe.CPP`; it also preserves
+  the existing 0005 patch in `vendor/reflaxe`. See ADR-0009 for the original measurements.

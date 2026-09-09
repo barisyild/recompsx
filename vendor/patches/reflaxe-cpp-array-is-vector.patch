@@ -1,0 +1,97 @@
+diff --git a/src/cxxcompiler/subcompilers/Expressions.hx b/src/cxxcompiler/subcompilers/Expressions.hx
+index fd9a9e4..50fc346 100644
+--- a/src/cxxcompiler/subcompilers/Expressions.hx
++++ b/src/cxxcompiler/subcompilers/Expressions.hx
+@@ -252,7 +252,7 @@ class Expressions extends SubCompiler {
+ 				IComp.includeMMType(SharedPtr, compilingInHeader);
+ 				final arrayType = Main.getExprType(expr).unwrapArrayType();
+ 				final t = TComp.compileType(arrayType, expr.pos);
+-				final d = "std::deque<" + t + ">";
++				final d = "std::vector<" + t + ">";
+ 				result = Compiler.SharedPtrMakeCpp + "<" + d + ">(" + d + ({
+ 					if(el.length > 0) {
+ 						final cppList: Array<String> = el.map(e -> compileExpressionForType(e, arrayType).trustMe());
+diff --git a/src/cxxcompiler/subcompilers/Includes.hx b/src/cxxcompiler/subcompilers/Includes.hx
+index 39f2e4d..830f401 100644
+--- a/src/cxxcompiler/subcompilers/Includes.hx
++++ b/src/cxxcompiler/subcompilers/Includes.hx
+@@ -48,7 +48,7 @@ class Includes extends SubCompiler {
+ 	// ----------------------------
+ 	// C++ STD Includes
+ 	public static var StringInclude = "string";
+-	public static var ArrayInclude = "deque";
++	public static var ArrayInclude = "vector";
+ 	public static var AnyInclude = "any";
+ 
+ 	// ----------------------------
+diff --git a/std/cxx/DynamicToString.hx b/std/cxx/DynamicToString.hx
+index 2cb1cfd..0e20af6 100644
+--- a/std/cxx/DynamicToString.hx
++++ b/std/cxx/DynamicToString.hx
+@@ -9,10 +9,10 @@ template<typename T>
+ struct has_to_string <T, decltype(std::declval<T>().toString())> : std::true_type { };
+ 
+ template<typename>
+-struct is_deque : std::false_type {};
++struct is_hxarray : std::false_type {};
+ 
+ template<typename T>
+-struct is_deque<std::deque<T>> : std::true_type {};
++struct is_hxarray<std::vector<T>> : std::true_type {};
+ 
+ struct DynamicToString: public std::string {
+     template<typename T>
+@@ -43,7 +43,7 @@ struct DynamicToString: public std::string {
+ 			if constexpr(std::is_trivially_copy_assignable_v<std::remove_reference_t<decltype(*std::declval<T>())>>) {
+ 				return ToString(*s);
+ 			}
+-		} else if constexpr(is_deque<T>::value) {
++		} else if constexpr(is_hxarray<T>::value) {
+ 			std::string result = \"[\";
+ 			auto len = s.size();
+ 			for(decltype(len) i = 0; i < len; i++) {
+@@ -63,7 +63,7 @@ struct DynamicToString: public std::string {
+ @:cxxStd
+ @:haxeStd
+ @:headerInclude("type_traits", true)
+-@:headerInclude("deque", true)
++@:headerInclude("vector", true)
+ @:headerInclude("memory", true)
+ @:headerInclude("string", true)
+ @:headerInclude("sstream", true)
+diff --git a/std/cxx/_std/Array.hx b/std/cxx/_std/Array.hx
+index 1a16282..4619fe3 100644
+--- a/std/cxx/_std/Array.hx
++++ b/std/cxx/_std/Array.hx
+@@ -126,8 +126,8 @@ class HxArray {
+ @:cxxStd
+ @:haxeStd
+ @:coreApi
+-@:nativeName("std::deque", "Array")
+-@:include("deque", true)
++@:nativeName("std::vector", "Array")
++@:include("vector", true)
+ @:valueEquality
+ @:filename("HxArray")
+ @:dynamicCompatible
+@@ -151,8 +151,9 @@ extern class Array<T> {
+ 	@:noDiscard(true)
+ 	var length(default, null): Int;
+ 
+-	@:nativeName("push_front")
+-	public function unshift(x: T): Void;
++	@:runtime public inline function unshift(x: T): Void {
++		untyped __cpp__("{0}.insert({0}.begin(), {1})", this, x);
++	}
+ 
+ 	@:nativeName("insert")
+ 	@:dontGenerateDynamic
+@@ -180,7 +181,7 @@ extern class Array<T> {
+ 
+ 	@:runtime public inline function shift(): Null<T>  {
+ 		final result = untyped this.front();
+-		untyped this.pop_front();
++		untyped __cpp__("{0}.erase({0}.begin())", this);
+ 		return result;
+ 	}
+ 

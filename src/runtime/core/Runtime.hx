@@ -32,6 +32,9 @@ class Runtime {
 		causes. One integer settles it.
 	**/
 	public static var dispatches = 0;
+	/** Optional instruction/block profiling; excluded from the emulated-state digest. */
+	public static var insns = 0;
+	public static var blocks = 0;
 
 	/** The slot value a shard's dispatcher was handed, observed at entry, before its switch. */
 	public static var lastSlot = -999;
@@ -57,9 +60,15 @@ class Runtime {
 		measure from. A launcher should call this and nothing else.
 	**/
 	public static function boot(ctx:CpuState):Void {
+		insns = 0;
+		blocks = 0;
+		#if recompsx_cooperative
+		Cooperative.init();
+		#end
 		// Region first: every video constant derives from it, and they are computed once.
 		TimeBase.setRegion(false);
 		mem.Memory.init();
+		mem.Memory.machine = ctx;
 		Irq.init();
 		gpu.Gpu.init();
 		gpu.Scanout.init();
@@ -94,12 +103,24 @@ class Runtime {
 	**/
 	public static function callAndResume(ctx:CpuState, addr:Int):Void {
 		call(ctx, addr);
+		#if recompsx_cooperative
+		settle(ctx);
+	}
+
+	/** Handles a guest nonlocal jump after either address or pinned-handle dispatch. */
+	public static function settle(ctx:CpuState):Void {
+		#end
 		var guard = 0;
 		while (ctx.unwindToken != 0) {
 			// A halt is the one token nobody resumes from: a headless run has reached the frame it
 			// was told to stop at, and the emulated stack has just been left behind on purpose.
 			if (ctx.unwindToken == kernel.Kernel.UNWIND_HALT) return;
 			else {}
+			#if recompsx_cooperative
+			if (ctx.unwindToken == Cooperative.TOKEN) return;
+			else {}
+			Cooperative.discard();
+			#end
 			ctx.unwindToken = 0;
 			guard++;
 			// A longjmp loop that never settles would otherwise hang with no explanation.
@@ -195,8 +216,14 @@ class Runtime {
 		vblank.
 	**/
 	public static function pump(ctx:CpuState):Void {
-		// Registers whose value follows the clock read it from here; see Memory.cycleHint.
-		mem.Memory.cycleHint = ctx.cycles;
+		#if recompsx_cooperative
+		Cooperative.blocked++;
+		pumpAtomic(ctx);
+		Cooperative.blocked--;
+	}
+
+	static function pumpAtomic(ctx:CpuState):Void {
+		#end
 		Scheduler.runDue(ctx);
 		if (ctx.unwindToken != 0) return;
 		else {}

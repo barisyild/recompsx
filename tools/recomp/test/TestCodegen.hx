@@ -113,6 +113,16 @@ class TestCodegen {
 			imm(13, 16, 16, 0x5678), JR, 0]);
 		add("linkedIndirect", [alu(9, 31, 8, 0), imm(9, 8, 0, 0), imm(9, 3, 2, 1), JR, 0,
 			imm(9, 2, 4, 4), JR, 0], [20]);
+		// Three native frames, then repeated yields inside the leaf's loop. Slots execute once.
+		add("nestedCalls", [imm(9, 16, 0, 11), jal(next + 32), imm(9, 3, 3, 1),
+			imm(9, 2, 2, 100), JR, imm(9, 16, 16, 2), 0, 0,
+			imm(9, 4, 0, 3), jal(next + 64), imm(9, 3, 3, 2),
+			imm(9, 2, 2, 10), JR, imm(9, 16, 16, 3), 0, 0,
+			alu(0x21, 2, 2, 4), imm(9, 4, 4, -1), imm(7, 0, 4, -3),
+			imm(9, 3, 3, 1), JR, imm(9, 16, 16, 4)]);
+		add("nestedUnwind", [jal(next + 20), imm(9, 3, 3, 1), imm(9, 2, 0, 999), JR, 0,
+			jal(0x8000f000), imm(9, 16, 0, 77), imm(9, 2, 0, 888), JR, 0]);
+		add("loadSlot", [JR, imm(0x23, 2, 4, 0)]);
 		if (check) {
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
@@ -137,5 +147,6 @@ class TestCodegen {
 			if (check) Assert.equals(source(opt, false), text, "deterministic emission");
 			File.saveContent('$dir/$cls.hx', text);
 		}
+		TestRegions.generate(check);
 	}
 }

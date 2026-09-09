@@ -14,10 +14,8 @@ package shim;
 	of two paths, so the Node path is exactly what it was and the browser path never has to
 	pretend to be a filesystem.
 
-	The main loop is still the game's own — `main()` does not return, which a browser tab cannot
-	survive. So the page runs this in a **worker**, where blocking is allowed, and frames arrive
-	on the main thread through the host's `present`. Consoles will eventually want an inverted
-	`stepFrame()` shape for the same reason; a worker is what makes the browser not need it yet.
+	The browser build enables portable cooperative continuations. BrowserLoop schedules slices
+	on the main thread; the page receives raw VRAM through `present`. No worker is involved.
 **/
 class Backend {
 	public static inline var LOG_DEBUG = 0;
@@ -54,6 +52,28 @@ class Backend {
 	public static function shutdown():Void {}
 
 	public static function caps(capId:Int):Int return capId == 0 ? 4 : 0;
+
+	/**
+		The hardware-drawing seam, which on this target is five ways of doing nothing.
+
+		They exist because the facade is a compile-time contract — the runtime calls
+		`Backend.gpuTri` without knowing which shim is on the classpath — and unreachable because
+		`caps(4)` above is zero, so `gpu.Gpu.hw` never becomes true here.
+	**/
+	public static function gpuVram(vram:RawBuf):Void {}
+
+	public static function gpuState(texBaseX:Int, texBaseY:Int, texDepth:Int,
+			clutX:Int, clutY:Int, semiMode:Int, flags:Int, texWindow:Int,
+			drawX:Int, drawY:Int):Void {}
+
+	public static function gpuTri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
+			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
+			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {}
+
+	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
+			semiMode:Int):Void {}
+
+	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {}
 
 	public static function argCount():Int {
 		if (args.length == 0) args = readArgs();

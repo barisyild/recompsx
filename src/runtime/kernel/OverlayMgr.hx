@@ -356,6 +356,24 @@ class OverlayMgr {
 		// hunting for a second overlay when the first one is sitting right there.
 		final r = residentAt(addr);
 		if (r >= 0) {
+			// Resident, but has the disc been read over *this* part of its window since? Overlays
+			// nest, and only a write across the fingerprint unseats one — so an overlay can be
+			// correctly resident while the address in question belongs to something loaded on top
+			// of it later. The two cases want opposite fixes, and saying "add an entryHint" for
+			// the second sends a person to add a hint the tool will refuse, because the bytes the
+			// *executable* holds there are data. Crash Bash does exactly this: a block lands over
+			// the stage overlay and past its end, and the call goes into the part past the end.
+			// ...by a load that is not this overlay's *own*. An overlay arrives by being read from
+			// the disc, so a covering load whose span is exactly this window is how it got here,
+			// and says nothing about anything else being on top. Only a foreign span does.
+			final l = loadCovering(addr);
+			if (l >= 0 && !(loadFrom[l] == lo[r] && loadTo[l] == hi[r] + 1)) {
+				Runtime.reportOnce(addr, "no code at " + hex(addr) + " (ra=" + hex(ra) + "): "
+					+ "overlay " + r + " is resident, but the disc has since been read over this "
+					+ "part of its window, so what is there belongs to something else."
+					+ provenance(addr));
+				return true;
+			} else {}
 			// The overlay is present and identified; it just has no code at this address. That is
 			// an entry the analysis was never given — overlays are all reached through pointers,
 			// so the sweep misses some — and the fix is a hint on *this* overlay.

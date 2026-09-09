@@ -199,6 +199,36 @@ else
 fi
 
 
+
+# ---- every backend implements the whole ABI ---------------------------------------------------
+#
+# backend_c_api.h IS the platform boundary, and a port that quietly omits one of its functions
+# does not fail to build — it fails to link, on a cross-toolchain, at the end of a twenty-minute
+# compile, with an error naming a symbol and not a file. Cheaper to notice here.
+#
+# Definitions are recognised by starting at column 0, which is how every backend in this tree is
+# written; calls are indented. A forward declaration would satisfy the check, which is acceptable:
+# the linker catches that case immediately and this one it does not.
+if [ -f src/backend/api/backend_c_api.h ]; then
+  abi_names="$(grep -oE 'bp_[a-z_]+\(' src/backend/api/backend_c_api.h | tr -d '(' | sort -u)"
+  abi_gaps=""
+  for impl in src/backend/*/*.c; do
+    [ -f "$impl" ] || continue
+    gap=""
+    for n in $abi_names; do
+      grep -qE "^[A-Za-z_][A-Za-z0-9_ *]*${n}\(" "$impl" || gap="$gap $n"
+    done
+    if [ -n "$gap" ]; then abi_gaps="$abi_gaps
+  $impl does not define:$gap"; fi
+  done
+  if [ -n "$abi_gaps" ]; then
+    fail "a backend is missing part of backend_c_api.h:$abi_gaps"
+  else
+    ok "every backend implements all $(echo "$abi_names" | wc -l | tr -d ' ') ABI functions"
+  fi
+fi
+
+
 if [ $FAIL -eq 0 ]; then
   printf '\033[32mcheck.sh: clean\033[0m\n'
 else

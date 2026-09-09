@@ -1,19 +1,27 @@
 import core.CpuState;
 import core.Runtime;
 
-/**
-	Entry point for the scale spike: link a whole recompiled program and report what it weighs.
-
-	It does not run the game — the runtime has no GPU, no kernel and no disc yet. What it proves
-	is the thing M1.5 exists to answer: that ~90,000 lines of machine-written Haxe compile, in
-	what time, to what size. Those numbers decide whether the shard layout needs changing before
-	the emitter is built out further, and whether a console with 32 MB of RAM is still in reach.
-**/
+/** Shared launcher for generated games: synchronous or cooperatively sliced from the same Haxe. */
 class GenMain {
+	#if recompsx_cooperative
+	static var running:CpuState;
+	static function step():Bool {
+		final more = core.Cooperative.step(running, GameInfo.ENTRY_POINT, core.TimeBase.cyclesPerFrame() >> 2);
+		if (!more) report(running);
+		else {}
+		return more;
+	}
+	#end
+
 	public static function main():Void {
 		final ctx = new CpuState();
 		Runtime.bindDispatch(FnTable.call);
 		Runtime.boot(ctx);
+		FnTable.init();
+		Overlays.init();
+		#if recompsx_cooperative
+		core.Cooperative.bind(FnTable.dispatch);
+		#end
 		kernel.Kernel.haltAt = headlessFrames();
 		// Which windows this game loads code into. After boot, because it fills in state the
 		// runtime clears on the way up.
@@ -34,6 +42,20 @@ class GenMain {
 		if (shim.Backend.argCount() >= 2) mountDisc(shim.Backend.arg(1));
 		else {}
 
+		// Hardware drawing, if this host asked for it and its backend can actually do it. Both
+		// halves are required: the flag alone is a wish, and the capability alone is a facility
+		// nobody asked to use. Headless digests always use the deterministic software renderer.
+		if (kernel.Kernel.haltAt == 0 && videoHw()) {
+			if (shim.Backend.caps(4) != 0) {
+				gpu.Gpu.hw = true;
+				shim.Backend.gpuVram(gpu.Vram.data);
+				shim.Backend.log(shim.Backend.LOG_INFO, "video: primitives go to the backend");
+			} else {
+				shim.Backend.log(shim.Backend.LOG_WARN,
+					"--video-hw asked for, but this backend has no rasteriser — drawing in software");
+			}
+		} else {}
+
 		ctx.pc = GameInfo.ENTRY_POINT;
 		ctx.gp = GameInfo.INITIAL_GP;
 		ctx.sp = GameInfo.INITIAL_SP;
@@ -42,16 +64,28 @@ class GenMain {
 			"recompiled program linked: " + GameInfo.FUNCTIONS + " functions in "
 			+ GameInfo.SHARDS + " shards, entry " + hex(GameInfo.ENTRY_POINT));
 
-		// Dispatch to the entry point purely to prove the table resolves. The runtime is not
-		// complete enough to let it get far, and the unimplemented-call report is the output.
-		// The game's main loop never returns, so the frame that proves rendering works has to be
-		// taken from inside it. kernel.Kernel's heartbeat asks for this once the game has drawn.
+		// Frame capture is requested inside the game loop, which need never return normally.
 		kernel.Kernel.vramDump = true;
 		kernel.Kernel.reportOps = true;
+		#if recompsx_cooperative
+		running = ctx;
+		core.Cooperative.every = optionInt('--yield-every');
+		#if js
+		shim.BrowserLoop.drive(step);
+		#else
+		while (step()) {}
+		#end
+		#else
 		Runtime.callAndResume(ctx, GameInfo.ENTRY_POINT);
-		if (false) {
-			shim.Backend.log(shim.Backend.LOG_ERROR, "entry point is not in the table");
-		}
+		report(ctx);
+		#end
+	}
+
+	static function report(ctx:CpuState):Void {
+		#if recompsx_insns
+		shim.Backend.log(shim.Backend.LOG_INFO, "insns " + Runtime.insns + " | blocks "
+			+ Runtime.blocks + " | dispatches " + Runtime.dispatches);
+		#end
 		// What the machine actually did, not just what it could not do. Every one of these is
 		// deterministic, so two runs — or two targets — that disagree here have diverged.
 		shim.Backend.log(shim.Backend.LOG_INFO,
@@ -121,15 +155,31 @@ class GenMain {
 		interface that eventually runs the wrong thing.
 	**/
 	static function headlessFrames():Int {
+		return optionInt('--headless-hash');
+	}
+
+	static function optionInt(name:String):Int {
 		final argc = shim.Backend.argCount();
 		var i = 0;
 		while (i + 1 < argc) {
-			if (shim.Backend.arg(i) == "--headless-hash") return parseInt(shim.Backend.arg(i + 1));
+			if (shim.Backend.arg(i) == name) return parseInt(shim.Backend.arg(i + 1));
 			else {}
 			i++;
 		}
 		return 0;
 	}
+
+	static function videoHw():Bool {
+		final argc = shim.Backend.argCount();
+		var i = 0;
+		while (i < argc) {
+			if (shim.Backend.arg(i) == "--video-hw") return true;
+			else {}
+			i++;
+		}
+		return false;
+	}
+
 
 	/** Small non-negative integer parser; `Std.parseInt` pulls in machinery a runtime need not carry. */
 	static function parseInt(s:String):Int {

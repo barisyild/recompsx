@@ -2,6 +2,209 @@
 
 ## Status snapshot
 
+**2026-09-09: committed console features reconciled into main; browser menu restored.**
+The previous claim that working features existed only in an untracked JS artifact was wrong.
+They are committed in `25d9a5d` and `6819782` on `dreamcast-hardware-rendering`, which diverged
+from main at `d731004`. Main's `2c80e68` added scalar codegen on the older runtime. Main now
+combines those committed device, rendering, memory, backend and discovery changes with the
+newer scalar registers, machine IR/regions and continuations.
+No generated sources or game assets are imported into Git; existing vendor edits are retained
+and carried as reproducible patches. Setup applies both 0004 (continue) and 0005 (locals),
+plus the contiguous-array patch, without changing the submodule pins.
+
+Restored: complete committed GTE operations/textured rasterizer, CD acknowledgement and held
+sector cleanup, load instruction cycle charges, flat dispatch caches, native aligned memory,
+raw-pointer CpuState and I64 operations, optional instruction profiling and Dreamcast backend.
+The newer timed SCEx model and main-thread cooperative driver remain. Launcher initialization
+prepares the tables before execution; a cache sentinel and a shard function-name collision found
+by the new synthetic Dispatch fixture are corrected. `CdCommands` checks abandoned sectors and
+queued interrupt acknowledgement. `analyzer-optimize` and JS ES6 stay enabled on every build.
+
+The source-built browser bundle `bcafe8128288` reaches the **Select Game Type** menu with a
+rendered 3D character and advances beyond frame 7366. No game-script error appeared in the
+browser error log (one unrelated browser-extension error was present). It uses no Web Worker.
+Optimized cooperative JS, forced-yield JS and synchronous `--no-opt` JS agree at frame 3000:
+
+    [info] frames 3000 | events fired 28871 | irqs delivered 6420 | handler calls 9302
+    [info] distinct unimplemented things reached: 0
+    [info] frames=3000 digest=0e180c28
+
+Acceptance output, 2026-09-09:
+
+    ./scripts/check.sh
+      every backend implements all 31 ABI functions
+      check.sh: clean
+    ./scripts/test.sh
+      all 341 checks passed
+      conformance: 18 test(s) x 2 targets
+      CdCommands 840417e3   values=40
+      CdScex     36383746   values=70
+      Codegen    9a417b15   values=13924
+      CtxPass    8a6e7e04   values=20
+      Dispatch   88b340ec   values=595
+      GteOps     1cf89aa2   values=5299
+      Raster     b66077e7   values=524
+      Regions    d6b90d6e   values=38333
+      Yielding   203c40c1   values=7780
+      conformance: all targets agree
+      test.sh: both targets agree — 329de455
+
+Codegen/region/yield fixture digests changed with the restored load costs and live clock
+binding; all modes/targets agree, with explicit 7-cycle load/delay-slot assertions. Optional
+instruction profiling also preserves the JS Codegen digest. The current source fingerprint
+matches the served bundle; all four bounded JS logs (candidate, forced yields, reference and
+served artifact) have the same emulated counters. The full reflaxe.CPP game, built against the
+null backend with cooperative continuations, also matches at frame 3000 with and without
+`--yield-every 31`:
+
+    ./out/_reconcile-native/build/recompsx web/boot.exe web/disc.bin --headless-hash 3000
+    ./out/_reconcile-native/build/recompsx web/boot.exe web/disc.bin --headless-hash 3000 --yield-every 31
+      [info] distinct unimplemented things reached: 0
+      [info] frames=3000 digest=0e180c28
+
+This is a bounded bring-up/menu result, not an assertion that every game/level is supported.
+Evidence and source provenance are under ignored `out/_reconcile/` and `out/_web/build.json`.
+
+**2026-09-09: source-built main-thread browser execution and SCEx response fix verified.**
+`scripts/build-web.sh crashbash` now regenerates the same optimized code and compiles optional
+cooperative continuations (ADR-0010). The page at `127.0.0.1:8000` loads manifest-keyed build
+`e08491afe0f7` (17,195,116 bytes). No Web Worker is used. Pause held frame 3152 unchanged across
+checks; resume advanced beyond frame 5802; the browser reported no JavaScript errors. Source,
+build flags, media links and local-server instructions are documented in `docs/WEB.md`.
+
+Continuations retain compiled body handles and stable block entries, including pending callers,
+so delay slots are not replayed and overlay replacement cannot change a suspended function's
+identity. HLE/pump callbacks remain atomic. The feature is optional; synchronous builds allocate
+no continuation buffers. `Yielding` compares register/memory/timing state under varied slice
+budgets, nested calls, unwind, callbacks and dispatcher replacement on both targets.
+
+Historical intermediate diagnosis, corrected above: rebuilding exposed a runtime fix missing
+from the then-current main branch (already committed on the console branch): `Test 05h`
+in the Haxe CD controller returned `(status,1,1)` regardless of head position. The observed
+boot check is SCEx/modchip detection: SeekP → Play → Test 04 → delay → Test 05, with no GetlocP
+in the 1500-frame command trace. The controller now returns two persistent counters, models
+lead-in separately from data LBA zero, and resets/samples them using guest time. Exact wobble
+timing remains a coarse one-observation model. This is a generic drive correction, not a game
+patch or a LibCrypt/subchannel implementation. Evidence is in `games/crashbash/notes.md`.
+
+The corrected source passes this check and reads 1970 sectors by frame 3000 instead of 731.
+It then reaches 15 missing function/overlay/GTE paths, VSync timeouts and a black screen;
+full-game compatibility is **not** established. Optimized synchronous JS, cooperative JS,
+forced-checkpoint JS and the `--no-opt` reference agree on `b542d57e`. The old local bundle
+reports `8af4d44b` and zero gaps;
+it contains additional runtime/discovery changes from the console branch, not then merged into
+main. It is retained only
+as an ignored diagnostic artifact. The earlier `6bd5e3fd` represents the pre-SCEx-fix state.
+
+Acceptance output, 2026-09-09:
+
+    ./scripts/check.sh
+      check.sh: clean
+    ./scripts/test.sh
+      all 341 checks passed
+      conformance: 14 test(s) x 2 targets
+      CdScex     36383746   values=70
+      Codegen    818e2901   values=13907
+      Regions    c1baa399   values=38333
+      Yielding   3cbb7802   values=7780
+      conformance: all targets agree
+      test.sh: both targets agree — 329de455
+    node out/_web/game.js web/boot.exe web/disc.bin --headless-hash 3000
+    node out/_web/game.js web/boot.exe web/disc.bin --headless-hash 3000 --yield-every 31
+    node out/_browser/game-sync.js web/boot.exe web/disc.bin --headless-hash 3000
+    node out/_browser/game-reference.js web/boot.exe web/disc.bin --headless-hash 3000
+      [info] distinct unimplemented things reached: 15
+      [info] frames=3000 digest=b542d57e
+
+Logs are ignored under `out/_browser/`. The new game digest above is verified on JS; the new
+CD and continuation behavior is verified by cross-target conformance, not a full C++ game run.
+
+**2026-09-09: generic machine IR and regional control-flow structuring verified (ADR-0008).**
+Code generation now shares decoded instructions, explicit register/effect masks, delay slots,
+cycle charges and stable resume IDs. Int-backed Haxe `RegisterMask` / `Effect` abstractions live
+only in the build-time tool. Unique-predecessor sequences and convergent branches become native
+flow inside larger CFGs; irreducible edges and checked computed transfers retain a dispatcher.
+Every original block remains independently resumable and has one emitted body. There are no
+game-specific addresses, library patterns or calling-convention assumptions in these passes.
+Register synchronization is still function-wide; general native multi-block loops and liveness
+remain follow-ups. `--no-regions` isolates the prior scalar/simple-loop pass; `--no-opt` keeps
+the context-field reference.
+
+Synthetic coverage includes 18 CFGs and every valid block entry, plus delay-slot changes,
+callback register changes, halt, unwind, cycle wrapping and modified jump-table targets. The
+full gate passes 341 tool checks and 12 conformance groups on JS and reflaxe.CPP. Crash Bash's
+optimized JS/C++ and scalar-only JS builds retain `6bd5e3fd` over 3000 frames. Spyro 3 demo generates
+633 functions / 47 switch tables and compiles to JS; this is not a full-game execution check.
+Function/overlay dispatch metadata is byte-identical to the pre-change output in both modes.
+
+Acceptance output, 2026-09-09:
+
+    ./scripts/check.sh
+      check.sh: clean
+    ./scripts/test.sh
+      all 341 checks passed
+      conformance: 12 test(s) x 2 targets
+      Codegen    818e2901   values=13907
+      Regions    c1baa399   values=38333
+      conformance: all targets agree
+      test.sh: both targets agree — 329de455
+    node out/_gen/game.js web/boot.exe web/disc.bin --headless-hash 3000
+    node out/_regions/scalar/game.js web/boot.exe web/disc.bin --headless-hash 3000
+    ./out/_gen/build/recompsx web/boot.exe web/disc.bin --headless-hash 3000
+      [info] distinct unimplemented things reached: 0
+      [info] frames=3000 digest=6bd5e3fd
+
+Crash Bash's 1358 functions retain 522 block/region dispatchers instead of 916; their dispatcher
+case groups fall 17,515 → 7,615. The pass applies 5,549 sequence and 3,251 choice reductions in
+891 functions. Spyro's 633 functions contain 286 dispatchers after 4,623 sequence and 3,307 choice
+reductions. These are structural counts, not performance measurements.
+
+JS timing on macOS 26.5.2 / ARM64 / Node v22.13.0, 3000 frames, one warm-up plus five alternating
+samples with no builds running: medians 4.4335 → 4.2686 s (1.039x, about 3.7% less elapsed time).
+Samples overlap; this is a modest observation on the boot workload, not demonstrated gameplay
+acceleration. Generated Haxe grows 8,436,743 → 9,287,714 bytes (+10.1%); JS grows 15,228,737 →
+16,354,240 bytes (+7.4%). Resume guards and nesting have a real size cost. Raw evidence is in
+ignored `out/_regions/{game-benchmark,structure}.json`. At measurement time the served browser
+bundle was still the older artifact described below; these are not browser measurements.
+
+`./scripts/bench-regions.sh` builds and times 25M synthetic MIPS branch/loop iterations with
+identical scalar registers and safe points, enabling only the regional pass. Both targets and
+modes report `[info] result=25000000 slots=5000001 cycles=250000025`. Five-sample medians after
+warm-up, alternating modes with no other builds running:
+
+| Target | Scalar-only | Regions | Speedup |
+|---|---:|---:|---:|
+| JS | 0.9203 s | 0.4615 s | 1.99x |
+| C++ | 0.0944 s | 0.0596 s | 1.58x |
+
+Raw samples: ignored `out/_regions_bench/results.json`. This isolated loop gain must not be
+extrapolated to the full game. Release/null game executable size is unchanged at 5,545,416 bytes.
+The native 3000-frame comparison gives medians 11.0765 → 10.1931 s (1.087x); samples vary widely
+and overlap, so this does not establish a repeatable game speedup. Absolute timings also differ
+substantially from the earlier session; compare paired variants within this run, not across
+sessions. All twelve warm-up/measured runs retain `6bd5e3fd`. Raw samples and binary hashes are
+in ignored `out/_regions/native-benchmark.json`.
+
+**2026-09-09: optimization audit confirms remaining hot paths and a stale browser artifact.**
+Before the regional pass, a fresh JS build with the shipped analyzer/ES6/DCE flags was
+byte-identical to `out/_gen/game.js`.
+A bounded Node v22.13.0 CPU profile over 3000 frames still reports `digest=6bd5e3fd`:
+49.0% of self samples are in `f_8002de2c` and `f_8002d4f4`, 9.4% in `Memory.slowRead8`,
+and 5.9% in GC. This is one diagnostic profile including startup, media loading, logging and
+PCM export, not a timing benchmark, browser FPS result or representative gameplay check.
+The two generated functions retain 15- and 190-block dispatchers. Register synchronization uses
+function-wide read/write sets, without per-boundary liveness. Independently, `Cdrom.read1803`
+constructs its diagnostic string before `tnote` checks whether tracing has ended; the profile
+does not isolate how much time that allocation costs. Raw evidence is ignored under
+`out/_codegen_audit/`. The earlier five-run JS comparison below remains the timing evidence:
+the scalar/self-loop optimization did not measurably speed up this 3000-frame boot workload.
+At audit time `web/index.html` served a different, older `web/game.js`, without scalar GPR
+lowering and with yield/rewind support missing from the sources. That provenance issue is now
+resolved by the source-built cooperative path above.
+This audit motivated the machine IR and regional pass above. Haxe already folds local constants
+and some fixed RAM accesses; further passes should target facts across blocks and observable
+machine-state boundaries, including register synchronization per boundary.
+
 **2026-09-08: scalar-register and structured code generation is verified (ADR-0007).**
 GPRs become Haxe locals, with publication/reload at calls and due pumps. Linear chains and
 conditional self-loops use native control flow while retaining every block's resume index and
@@ -107,8 +310,17 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
-Codegen follow-up: profile multi-block hot loops before extending CFG structuring; reduce
-boundary synchronization only with proven liveness and callback/resume tests (ADR-0007).
+Codegen follow-up: the machine IR and sequence/choice regions are implemented (ADR-0008).
+Measure general native multi-block loops and per-boundary dirty/liveness analysis separately,
+including resume-routing size costs. Call-effect summaries must include due pumps and callbacks,
+not just a callee's syntactic register accesses. Later candidates are cross-block constant/range
+propagation and size-budgeted inlining of proven small callees. Compare each pass with the
+appropriate baseline and `--no-opt` on JS and reflaxe.CPP, with callback/interior-entry tests.
+
+The browser runs reconciled main sources with cooperative code (ADR-0010); the committed
+console branch features now restore the menu. Extend bounded gameplay/overlay coverage before
+claiming broader compatibility, and separately measure an early trace guard for CD-register
+diagnostics. Web Workers remain excluded by the user's constraint.
 
 1. **M2 kernel HLE — done.** Crash Bash makes **no unimplemented kernel call**: every A0, B0, C0
    and syscall it reaches is handled, and both targets produce identical output across 238 lines.
@@ -719,13 +931,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
-- **Why Crash Bash reaches an anti-piracy screen at all is untraced**, and it is the one thing
-  standing between the boot sequence and the game. It is a fidelity question about our machine,
-  not about the disc: the same run answers `GetID` as a licensed disc, handles the drive's
-  `Test 04h`/`05h` sub-commands, and now reports a console region. One wrong answer has already
-  been found and fixed this way — the console had no region at all, so the game drew the Japanese
-  message — and the method that found it (measure what the game reads before it decides, one
-  register at a time) is what to run again.
+- **Resolved: missing console-branch integration caused the browser regression.** Commits
+  `25d9a5d` / `6819782` were present all along. Their GTE/CD/rendering/timing and per-game
+  metadata are now reconciled into main; the browser reaches the menu and JS variants report
+  zero missing paths. Full gameplay coverage and a new Dreamcast hardware run remain open;
+  see the current acceptance output and `games/crashbash/notes.md`.
 - **The kernel has no font**, and will need one the moment a game draws text through the ROM.
   `B0(51h) Krom2RawAdd` and `B0(53h) Krom2Offset` hand out addresses of glyphs in the BIOS font
   ROM. Measured from a real ROM's structure (a format, not its data): 16×16 glyphs, 32 bytes
@@ -734,10 +944,40 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   glyphs of our own or a freely-licensed bitmap font — and if the text needed is Japanese, only
   the second is realistic. Crash Bash stopped asking once it knew what console it was on, so this
   is no longer blocking anything.
-- Otherwise none blocking. Known unknowns are tracked as `[M0-VERIFY]` items above and as the open
+- Other known unknowns are tracked as `[M0-VERIFY]` items above and as the open
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-09 [codex] Prepared the verified runtime/codegen/browser reconciliation for main commit
+  and push; made setup apply the existing continue patch as well as locals/array patches.
+  Validation: previous full gate 341 checks, 18 groups x2, game 0e180c28 on JS/C++; check.sh clean.
+  Next: extend gameplay coverage and measure the remaining generic codegen optimizations.
+
+2026-09-09 [codex] Reconciled committed 25d9a5d/6819782 features into main's working tree,
+  preserving scalar/IR/regions and main-thread continuations; corrected the source-loss diagnosis.
+  Browser bcafe8128288 reaches Select Game Type; 3000-frame JS/reference/stress and C++/stress
+  all report 0e180c28, zero gaps; gate 341 checks, 18 groups x2, demo 329de455; check.sh clean.
+  Next: extend gameplay/overlay coverage and measure further generic codegen work.
+
+2026-09-09 [codex] Restored source-built main-thread browser execution with pinned continuations
+  (ADR-0010), pause/resume and hash-keyed bundles; traced/fixed SCEx Test 04/05 drive responses.
+  Gate: 341 checks, 14 groups x2; Yielding 3cbb7802, CdScex 36383746, demo 329de455.
+  Browser e08491afe0f7 active; JS reference/sync/yield/stress b542d57e pass SCEx, reach 15 later gaps.
+  Next: reconcile indirect-entry and GTE source drift behind the later black screen.
+
+2026-09-09 [codex] Added generic machine IR, Int-backed effect/register abstractions and resumable
+  sequence/choice regions (ADR-0008), plus --no-regions and synthetic cross-target fixtures.
+  Gate: 341 tool checks, 12 groups x2; game JS/C++ 6bd5e3fd; Spyro also generates/JS-compiles.
+  Synthetic loop JS 1.99x / C++ 1.58x; game timings noisy, JS size +7.4%, native size unchanged.
+  Next: general native multi-block loops and boundary liveness; restore source-built browser yields.
+
+2026-09-09 [codex] Scoped codegen proposals from current emitter/CFG contracts: small IR,
+  regional structuring and boundary-aware register data flow; next implement and measure separately.
+
+2026-09-09 [codex] Audited generated Haxe/JS and profiled a fresh 3000-frame build: 6bd5e3fd.
+  Two generated functions account for 49.0% of CPU self samples; found eager CD trace strings.
+  Browser serves a different artifact; next measure trace guards and restore source-built yields.
 
 2026-09-08 [codex] Added scalar GPR lowering and structured chains/self-loops (ADR-0007),
   corrected call/unwind semantics, and exported reproducible reflaxe declaration patch 0005.

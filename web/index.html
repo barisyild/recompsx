@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>recompsx</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0d12; color: #e8ecf3; }
+    main { width: min(94vw, 980px); display: grid; gap: 14px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    h1 { margin: 0; font: 700 clamp(18px, 3vw, 28px)/1.2 system-ui, sans-serif; }
+    button { border: 0; border-radius: 8px; padding: 10px 18px; font: inherit; cursor: pointer; background: #f4b942; color: #17130a; }
+    button:disabled { cursor: wait; opacity: .65; }
+    .screen { aspect-ratio: 4 / 3; background: #000; border: 1px solid #292f3a; border-radius: 10px; overflow: hidden; box-shadow: 0 24px 80px #0009; }
+    canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; object-fit: contain; }
+    #status { min-height: 1.4em; color: #aab3c2; }
+    #log { height: 130px; overflow: auto; margin: 0; padding: 10px; background: #11151d; border-radius: 8px; color: #8691a3; font-size: 11px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>recompsx JS</h1>
+      <button id="start">Oyunu başlat</button>
+    </header>
+    <div class="screen"><canvas id="screen" width="640" height="480"></canvas></div>
+    <div id="status">Başlatmak için düğmeye bas.</div>
+    <small id="build"></small>
+    <pre id="log"></pre>
+  </main>
+  <script>
+    const start = document.querySelector('#start');
+    const status = document.querySelector('#status');
+    const log = document.querySelector('#log');
+    const canvas = document.querySelector('#screen');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const frame = document.createElement('canvas');
+    const frameCtx = frame.getContext('2d', { alpha: false });
+    const audioQueue = [];
+    let queuedFrames = 0;
+    let audioContext;
+    let image;
+    let buildInfo;
+    fetch('build.json', { cache: 'no-store' }).then(r => {
+      if (!r.ok) throw new Error('Önce scripts/build-web.sh ile derle.');
+      return r.json();
+    }).then(info => {
+      buildInfo = info;
+      document.querySelector('#build').textContent = `Derleme ${info.version}`;
+      document.querySelector('h1').textContent = `${info.title} · recompsx JS`;
+      document.title = `recompsx — ${info.title}`;
+    }).catch(error => { status.textContent = error.message; });
+
+    function writeLog(line) {
+      log.textContent += line + '\n';
+      if (log.textContent.length > 24000) log.textContent = log.textContent.slice(-18000);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function fetchBytes(path, label) {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(`${label} yüklenemedi: HTTP ${response.status}`);
+      const total = Number(response.headers.get('content-length')) || 0;
+      if (!response.body || !total) return new Uint8Array(await response.arrayBuffer());
+      const out = new Uint8Array(total);
+      const reader = response.body.getReader();
+      let offset = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        out.set(value, offset);
+        offset += value.length;
+        status.textContent = `${label} yükleniyor: %${Math.floor(offset * 100 / total)}`;
+      }
+      return out;
+    }
+
+    function startAudio() {
+      audioContext = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      const node = audioContext.createScriptProcessor(2048, 0, 2);
+      node.onaudioprocess = event => {
+        const left = event.outputBuffer.getChannelData(0);
+        const right = event.outputBuffer.getChannelData(1);
+        left.fill(0); right.fill(0);
+        let at = 0;
+        while (at < left.length && audioQueue.length) {
+          const item = audioQueue[0];
+          const available = item.frames - item.at;
+          const take = Math.min(left.length - at, available);
+          for (let i = 0; i < take; i++) {
+            left[at + i] = item.samples[(item.at + i) * 2] / 32768;
+            right[at + i] = item.samples[(item.at + i) * 2 + 1] / 32768;
+          }
+          item.at += take; at += take; queuedFrames -= take;
+          if (item.at === item.frames) audioQueue.shift();
+        }
+      };
+      node.connect(audioContext.destination);
+    }
+
+    start.addEventListener('click', async () => {
+      if (globalThis.recompsxHost) {
+        const host = globalThis.recompsxHost;
+        host.paused = !host.paused;
+        start.textContent = host.paused ? 'Devam et' : 'Duraklat';
+        if (host.paused) { audioQueue.length = 0; queuedFrames = 0; }
+        status.textContent = host.paused ? 'Duraklatıldı' : 'Devam ediyor…';
+        return;
+      }
+      start.disabled = true;
+      try {
+        if (!buildInfo) {
+          const response = await fetch('build.json', { cache: 'no-store' });
+          if (!response.ok) throw new Error('Tarayıcı derlemesi bulunamadı.');
+          buildInfo = await response.json();
+        }
+        startAudio();
+        const boot = await fetchBytes('boot.exe', 'PS-EXE');
+        const disc = await fetchBytes('disc.bin', 'Disk görüntüsü');
+        status.textContent = 'Oyun başlatılıyor…';
+
+        globalThis.recompsxHost = {
+          args: ['boot.exe', 'disc.bin'],
+          files: { 'boot.exe': boot, 'disc.bin': disc },
+          paused: false,
+          present(vram, sx, sy, width, height, flags) {
+            if (width <= 0 || height <= 0) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              return;
+            }
+            if (!image || image.width !== width || image.height !== height) {
+              frame.width = width; frame.height = height;
+              image = frameCtx.createImageData(width, height);
+            }
+            const rgba = image.data;
+            const rgb24 = (flags & 1) !== 0;
+            let out = 0;
+            for (let y = 0; y < height; y++) {
+              const row = ((sy + y) & 511) * 2048;
+              for (let x = 0; x < width; x++) {
+                const at = (sx * 2 + x * (rgb24 ? 3 : 2)) & 2047;
+                if (rgb24) {
+                  rgba[out++] = vram[row + at];
+                  rgba[out++] = vram[row + ((at + 1) & 2047)];
+                  rgba[out++] = vram[row + ((at + 2) & 2047)];
+                } else {
+                  const v = vram[row + at] | (vram[row + ((at + 1) & 2047)] << 8);
+                  const r = v & 31, g = (v >> 5) & 31, b = (v >> 10) & 31;
+                  rgba[out++] = (r << 3) | (r >> 2);
+                  rgba[out++] = (g << 3) | (g >> 2);
+                  rgba[out++] = (b << 3) | (b >> 2);
+                }
+                rgba[out++] = 255;
+              }
+            }
+            frameCtx.putImageData(image, 0, 0);
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+          },
+          audioPush(bytes) {
+            const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+            const copy = new Int16Array(samples);
+            const frames = copy.length >> 1;
+            audioQueue.push({ samples: copy, frames, at: 0 });
+            queuedFrames += frames;
+            while (queuedFrames > 11025 && audioQueue.length > 1) {
+              const dropped = audioQueue.shift();
+              queuedFrames -= dropped.frames - dropped.at;
+            }
+          },
+          audioBuffered() { return queuedFrames; },
+          state(value) {
+            start.disabled = value !== 'running';
+            start.textContent = value === 'running' ? 'Duraklat' : 'Oyunu başlat';
+            if (value === 'error') status.textContent = 'Oyun bir hatayla durdu; ayrıntılar aşağıda.';
+            else if (value === 'stopped') status.textContent = 'Oyun durdu.';
+          },
+          progress(frames, yields) {
+            status.textContent = `${frames} kare · çalışıyor`;
+            status.dataset.frames = frames;
+            status.dataset.yields = yields;
+          },
+          log(level, line) { writeLog(line); },
+          storageWrite(name, bytes) { writeLog(`[dosya] ${name}: ${bytes.length} bayt`); }
+        };
+        const script = document.createElement('script');
+        script.src = `game.js?v=${encodeURIComponent(buildInfo.version)}`;
+        script.onerror = () => {
+          status.textContent = 'Hata: game.js yüklenemedi';
+          start.disabled = false;
+        };
+        document.body.appendChild(script);
+      } catch (error) {
+        status.textContent = `Hata: ${error.message}`;
+        writeLog(error.stack || String(error));
+        start.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
