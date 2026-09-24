@@ -214,15 +214,37 @@ and keep the one that identifies the most functions consistently.
 - **Sanctioned runtime API surface** (generated code touches nothing else):
   `Memory.read8s/8u/16s/16u/32`, `Memory.write8/16/32`, `Memory.lwl/lwr` (return merged value) /
   `Memory.swl/swr` (RMW); `Runtime.call/pump/mfc0/mtc0/rfe`; `Kernel.syscall/brk`;
-  `Ops.mult/multu/div/divu` (hi:lo writers — single tested impl of MIPS edge cases:
+  `Ops.mult/multu/div/divu` and their fused result helpers (hi:lo writers — single tested impl of MIPS edge cases:
   `div rs,0 → hi=rs, lo=(rs>=0?-1:1)`; `div 0x80000000,-1 → hi=0, lo=0x80000000` (C++ UB —
   special-cased); `divu rs,0 → hi=rs, lo=0xFFFFFFFF`);
   `Gte.execute/getData/setData/getCtrl/setCtrl`.
 - **Register lowering**: `RegisterPlan` identifies used/written GPRs. Used registers become
   Haxe locals, written registers are published before calls, returns and due pumps; all used
-  locals are reloaded after a returning call/pump. An unwind returns before any stale local can
-  overwrite restored state. Memory, HI/LO and coprocessor helpers retain their existing ABI.
-  The Haxe analyzer can now propagate constants/copies and eliminate dead local writes.
+  locals are reloaded after a returning call/pump. A backwards CFG liveness pass narrows those
+  reloads to values needed by the continuation, while function exits keep every written
+  architectural register observable for callbacks and cooperative suspension. An unwind returns
+  before any stale local can overwrite restored state. Memory, HI/LO and coprocessor helpers
+  retain their existing ABI. `RegisterMask` and `Effect` are allocation-free `Int` abstractions
+  in the build-time tool; the generated runtime remains scalar fields and plain `Int`s.
+  CFG liveness also removes dead pure GPR writes outside the reverse slice that reaches a pump,
+  call, trap or external transfer (ADR-0017). The Haxe analyzer can then propagate remaining
+  constants/copies without being forced to preserve overwritten locals; publication paths retain
+  their full architectural visibility.
+- **Pattern fusion**: `PatternMatcher` runs on adjacent instructions in a basic-block body before
+  emission. It currently folds `lui → ori/addiu` into one constant assignment and routes
+  `mult/multu/div/divu → mflo/mfhi` through fused `Ops` result helpers. HI:LO side effects remain
+  intact, a discarded `mflo/mfhi` still emits the underlying multiply/divide, and the original
+  instruction count/cycles remain charged by the block. Delay slots, control transfers, traps,
+  memory operations and scheduler boundaries are deliberately not crossed. This is a codegen
+  transformation, not a game signature or a runtime interpreter pattern table.
+- **Stack memory forwarding**: `StackMemoryForwarding` recognizes only aligned word `sw`/`lw`
+  pairs whose base is `$sp` or `$fp` and whose signed immediate is identical. A later store can
+  remove an earlier superseded store in the same basic block; a load can read the still-valid
+  store's source local directly when that source register has not changed. Any other memory
+  operation, stack/frame-pointer write, trap, control effect or unknown effect clears the facts.
+  `$sp`/`$fp` are not treated as proof that arbitrary memory is RAM, and calls, delay slots,
+  branches and scheduler boundaries are never crossed. The generated code therefore retains raw
+  memory at every uncertain boundary while reducing ordinary compiler spill traffic (ADR-0016).
 - **Body template**: linear chains, optionally containing single-block loops, emit sequences
   with entry guards for resumption. Conditional self-loops emit native `while` even inside a
   larger CFG. `RegionPlan` also reduces sequences and convergent branch arms inside mixed CFGs.

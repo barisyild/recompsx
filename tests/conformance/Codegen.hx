@@ -105,6 +105,26 @@ class Codegen {
 		else CodegenReference.dispatch(addr, ctx);
 	}
 
+	static function runFused(ctx:CpuState, sample:Int, opt:Bool):Void {
+		reset(ctx);
+		ctx.a0 = sample - 8;
+		ctx.a1 = IntMath.mul(sample, 0x12345679) | 0;
+		if (opt) CodegenOptimized.fusedPatterns(ctx);
+		else CodegenReference.fusedPatterns(ctx);
+	}
+
+	static function runStack(ctx:CpuState, opt:Bool):Void {
+		reset(ctx);
+		if (opt) CodegenOptimized.stackForward(ctx);
+		else CodegenReference.stackForward(ctx);
+	}
+
+	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
+		reset(ctx);
+		if (opt) CodegenOptimized.deadWrites(ctx);
+		else CodegenReference.deadWrites(ctx);
+	}
+
 	public static function main():Void {
 		final a = new CpuState();
 		final b = new CpuState();
@@ -186,6 +206,22 @@ class Codegen {
 				}
 			}
 		}
+		for (sample in 0...16) {
+			runFused(a, sample, false);
+			runFused(b, sample, true);
+			compare(a, b);
+			Conf.expect("fused constant formation", b.t6, 0x12345678);
+		}
+		runStack(a, false);
+		runStack(b, true);
+		compare(a, b);
+		Conf.expect("stack forwarded load", b.t2, 22);
+		Conf.expect("stack load after sp change", b.t3, 22);
+		Conf.expect("stack reload after sp restore", b.t4, 22);
+		runDeadWrites(a, false);
+		runDeadWrites(b, true);
+		compare(a, b);
+		Conf.expect("dead-write result", b.v0, 5);
 		// Every interior block remains a valid entry with its incoming context untouched.
 		for (entry in 0...3) {
 			reset(a); reset(b); a.a0 = 5; b.a0 = 5; a.v0 = 100; b.v0 = 100;

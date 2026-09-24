@@ -22,6 +22,51 @@ import shim.IntMath;
 	  XOR trick, not `<`.
 **/
 class Ops {
+	/**
+		Fused forms used by the recompiler for an adjacent multiply/divide and MFLO/MFHI.
+		Each helper still writes both architectural halves before returning the consumed one.
+		That makes the optimization valid even when a later instruction reads the other half.
+	**/
+	public static function multLo(ctx:CpuState, a:Int, b:Int):Int {
+		mult(ctx, a, b);
+		return ctx.lo;
+	}
+
+	public static function multHi(ctx:CpuState, a:Int, b:Int):Int {
+		mult(ctx, a, b);
+		return ctx.hi;
+	}
+
+	public static function multuLo(ctx:CpuState, a:Int, b:Int):Int {
+		multu(ctx, a, b);
+		return ctx.lo;
+	}
+
+	public static function multuHi(ctx:CpuState, a:Int, b:Int):Int {
+		multu(ctx, a, b);
+		return ctx.hi;
+	}
+
+	public static function divLo(ctx:CpuState, a:Int, b:Int):Int {
+		div(ctx, a, b);
+		return ctx.lo;
+	}
+
+	public static function divHi(ctx:CpuState, a:Int, b:Int):Int {
+		div(ctx, a, b);
+		return ctx.hi;
+	}
+
+	public static function divuLo(ctx:CpuState, a:Int, b:Int):Int {
+		divu(ctx, a, b);
+		return ctx.lo;
+	}
+
+	public static function divuHi(ctx:CpuState, a:Int, b:Int):Int {
+		divu(ctx, a, b);
+		return ctx.hi;
+	}
+
 	public static function mult(ctx:CpuState, a:Int, b:Int):Void {
 		final neg = (a < 0) != (b < 0);
 		var ua = a;

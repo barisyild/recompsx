@@ -123,10 +123,43 @@ class TestCodegen {
 		add("nestedUnwind", [jal(next + 20), imm(9, 3, 3, 1), imm(9, 2, 0, 999), JR, 0,
 			jal(0x8000f000), imm(9, 16, 0, 77), imm(9, 2, 0, 888), JR, 0]);
 		add("loadSlot", [JR, imm(0x23, 2, 4, 0)]);
+		final fused = add("fusedPatterns", [
+			alu(0x18, 0, 4, 5), alu(0x12, 0, 0, 0), alu(0x10, 23, 0, 0),
+			alu(0x18, 0, 4, 5), alu(0x12, 2, 0, 0),
+			alu(0x18, 0, 4, 5), alu(0x10, 3, 0, 0),
+			alu(0x19, 0, 4, 5), alu(0x12, 8, 0, 0),
+			alu(0x19, 0, 4, 5), alu(0x10, 9, 0, 0),
+			alu(0x1a, 0, 4, 5), alu(0x12, 10, 0, 0),
+			alu(0x1a, 0, 4, 5), alu(0x10, 11, 0, 0),
+			alu(0x1b, 0, 4, 5), alu(0x12, 12, 0, 0),
+			alu(0x1b, 0, 4, 5), alu(0x10, 13, 0, 0),
+			imm(15, 14, 0, 0x1234), imm(13, 14, 14, 0x5678), JR, 0]);
+		final stack = add("stackForward", [
+			imm(9, 8, 0, 11), imm(9, 9, 0, 22),
+			imm(0x2b, 8, 29, 0), imm(0x2b, 9, 29, 0),
+			imm(0x23, 10, 29, 0), imm(9, 29, 29, 4),
+			imm(0x23, 11, 29, -4), imm(9, 29, 29, -4),
+			imm(0x23, 12, 29, 0), JR, 0]);
+		final dead = add("deadWrites", [
+			imm(9, 8, 0, 1), imm(9, 8, 0, 2), imm(9, 2, 8, 3)]);
 		if (check) {
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
 			Assert.isTrue(loop.indexOf('ctx.cycles = (ctx.cycles +') >= 0, "cycles wrap on both targets");
+			Assert.equals(fused.indexOf('Ops.multLo(ctx') >= 0, opt, "fused signed multiply low");
+			Assert.equals(fused.indexOf('Ops.multHi(ctx') >= 0, opt, "fused signed multiply high");
+			Assert.equals(fused.indexOf('Ops.multuLo(ctx') >= 0, opt, "fused unsigned multiply low");
+			Assert.equals(fused.indexOf('Ops.multuHi(ctx') >= 0, opt, "fused unsigned multiply high");
+			Assert.equals(fused.indexOf('Ops.divLo(ctx') >= 0, opt, "fused signed divide low");
+			Assert.equals(fused.indexOf('Ops.divHi(ctx') >= 0, opt, "fused signed divide high");
+			Assert.equals(fused.indexOf('Ops.divuLo(ctx') >= 0, opt, "fused unsigned divide low");
+			Assert.equals(fused.indexOf('Ops.divuHi(ctx') >= 0, opt, "fused unsigned divide high");
+			Assert.equals(fused.indexOf('t6 = 0x12345678;') >= 0, opt, "fused constant formation");
+			Assert.equals(stack.indexOf('t2 = t1;') >= 0, opt, "stack load forwarding");
+			Assert.equals(stack.indexOf('Memory.write32(ctx.sp, ctx.t0);') >= 0, !opt,
+				"superseded stack store shape");
+			Assert.equals(dead.indexOf('t0 = 1;') >= 0, !opt, "dead pure write elimination");
+			Assert.isTrue(dead.indexOf('t0 = 2;') >= 0, "live pure write retained");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'
 			+ 'import kernel.Kernel;\nimport gte.Gte;\nclass $cls {\n' + bodies.toString()
