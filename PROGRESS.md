@@ -2,6 +2,25 @@
 
 ## Status snapshot
 
+**2026-09-25: the rasteriser walks spans, not bounding boxes; JS 9000 frames 34.6 s → 25.2 s.**
+`Gpu.rowSpan` solves each row's covered columns from the three edge functions in closed form,
+so the span loops visit only pixels inside the triangle and pay no per-pixel inside test.
+Textured spans decide the window masks, page and palette origins, depth and mode flags once per
+triangle and fetch texels from the linear framebuffer index inline; they were three out-of-line
+calls a pixel. Pixels are counted per span; opaque flat rows and fills go through the new
+`RawMem.fill16Index` (`TypedArray.fill` on JS, a loop on C++). Bit-identical: the Raster
+fixture's pre-existing sections still digest `b66077e7` on the new code and the game digests are
+unchanged. The fixture gained blended and textured sections (every depth, the window, all four
+blend modes, raw and modulated, the mask bits); its digest is now `a749a71a`, recorded on JS.
+Profile after, per class: GTE 34 %, GPU 22.5 % (was 44 %), generated 19 %, SPU 11 %, Memory 7 %.
+
+    conformance Raster (old sections only)   b66077e7   values=524
+    conformance Raster (with new sections)   a749a71a   values=525
+    node out/_gen/game.js ... --headless-hash 3000   digest=0e180c28
+    node out/_gen/game.js ... --headless-hash 9000   digest=ab13c60f   25.35 s / 25.04 s
+    the previous build, same runs                     digest=ab13c60f   34.48 s / 34.77 s
+    check.sh: clean; test.sh: 367 tool checks, 18 JS conformance groups, demo 329de455
+
 **2026-09-25: first per-subsystem profiles of the reconciled tree, both targets, one digest.**
 `node --cpu-prof` over 9000 frames (the 3D **Select Game Type** menu), bucketed by runtime
 class: GPU rasterizer 44 %, GTE 24 % plus I64 shim 2 %, generated game code 14 %, SPU 8 %,
@@ -1030,6 +1049,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] Rasteriser: closed-form row spans, per-triangle texel constants with inline
+linear fetches, span-level pixel counts, typed-array row fills. The old Raster sections reproduce
+b66077e7; game digests unchanged; JS 9000 frames 34.6 s → 25.2 s. The fixture gains blended and
+textured coverage (a749a71a). Next: the GTE's JS I64 as an exact double (ADR-0018).
 
 2026-09-25 [claude] Profiled the reconciled tree on both targets at 9000 frames (JS 34.7 s,
 C++ 9.3 s, digest ab13c60f): rasterizer 44 %, GTE 26 %, generated code 14 %, SPU 8 %, Memory 5 %

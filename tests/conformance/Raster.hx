@@ -46,6 +46,8 @@ class Raster {
 		sharedEdges();
 		extremeCoordinates();
 		quads();
+		blendedTriangles();
+		texturedTriangles();
 
 		Conf.expect("something was drawn", gpu.Gpu.primitives > 0 ? 1 : 0, 1);
 		Conf.feed(gpu.Gpu.primitives);
@@ -179,6 +181,92 @@ class Raster {
 			vertex(x + 10 + next(100), y + 10 + next(80));
 		}
 	}
+
+	/**
+		Untextured triangles that blend with what is under them, in each of the four modes, with
+		the mask bits on and off. An untextured primitive takes its blend mode from GP0(E1h), so
+		that is set here as a game would set it.
+	**/
+	static function blendedTriangles():Void {
+		for (i in 0...64) {
+			gp0(0xE1000000 | ((i & 3) << 5));
+			gp0(0xE6000000 | ((i >> 2) & 3));
+			final gouraud = (i & 4) != 0;
+			gp0(((gouraud ? 0x32 : 0x22) << 24) | rgb());
+			vertex(next(700) - 40, next(500) - 40);
+			if (gouraud) gp0(rgb()); else {}
+			vertex(next(700) - 40, next(500) - 40);
+			if (gouraud) gp0(rgb()); else {}
+			vertex(next(700) - 40, next(500) - 40);
+		}
+		gp0(0xE6000000);
+	}
+
+	/**
+		Textured triangles in every storage format, through a texture window, with a palette,
+		semi-transparency in each mode, raw and modulated, and the mask bits — the whole of the
+		texel path, which until 2026-09-25 had no fixture and was guarded by the game digest alone.
+
+		The texture and the palette are uploaded through GP0(A0h) from the same generator, so the
+		fixture owns its inputs; nothing is read from a game. A third of the texels carry bit 15,
+		which is what semi-transparency keys on, and one in twelve is zero, which is transparent
+		in every format.
+	**/
+	static function texturedTriangles():Void {
+		final before = gpu.Gpu.pixels;
+		upload(512, 0, 64, 64);      // the page: 64 halfwords wide, so every depth reads inside it
+		upload(0, 480, 256, 1);      // the palette: 256 entries, enough for the 8-bit format
+		final clut = 480 << 6;       // x/16 = 0, y = 480
+		for (i in 0...150) {
+			final depth = i % 3;
+			final mode = (i >> 2) & 3;
+			final page = 8 | (mode << 5) | (depth << 7);   // x base 512/64 = 8, y base 0
+			if ((i & 7) == 6) gp0(0xE2000000 | (3 | (2 << 5) | (5 << 10) | (1 << 15)));
+			else if ((i & 7) == 7) gp0(0xE2000000);
+			else {}
+			if ((i & 15) == 9) gp0(0xE6000001);
+			else if ((i & 15) == 10) gp0(0xE6000002);
+			else if ((i & 15) == 11) gp0(0xE6000003);
+			else if ((i & 15) == 12) gp0(0xE6000000);
+			else {}
+			final gouraud = (i & 1) != 0;
+			final semi = (i & 2) != 0;
+			final raw = (i % 5) == 0;
+			final op = 0x24 | (gouraud ? 0x10 : 0) | (semi ? 0x02 : 0) | (raw ? 0x01 : 0);
+			gp0((op << 24) | rgb());
+			vertex(next(700) - 40, next(500) - 40);
+			gp0((clut << 16) | uv());
+			if (gouraud) gp0(rgb()); else {}
+			vertex(next(700) - 40, next(500) - 40);
+			gp0((page << 16) | uv());
+			if (gouraud) gp0(rgb()); else {}
+			vertex(next(700) - 40, next(500) - 40);
+			gp0(uv());
+		}
+		gp0(0xE2000000);
+		gp0(0xE6000000);
+		Conf.expect("textured triangles drew something", gpu.Gpu.pixels > before ? 1 : 0, 1);
+	}
+
+	/** A CPU-to-VRAM rectangle of generated halfwords, two to a word, low halfword first. */
+	static function upload(x:Int, y:Int, w:Int, h:Int):Void {
+		gp0(0xA0000000);
+		gp0(x | (y << 16));
+		gp0(w | (h << 16));
+		final words = (w * h + 1) >> 1;
+		for (i in 0...words) {
+			final lo = texelWord();
+			final hi = texelWord();
+			gp0(lo | (hi << 16));
+		}
+	}
+
+	static function texelWord():Int {
+		final r = next(12);
+		return r == 0 ? 0 : (r < 5 ? next(0x8000) | 0x8000 : next(0x8000));
+	}
+
+	static function uv():Int return next(256) | (next(256) << 8);
 
 	// ---- helpers -----------------------------------------------------------------------------------
 
