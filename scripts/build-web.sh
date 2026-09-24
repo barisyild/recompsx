@@ -10,24 +10,31 @@ if [[ "$CONFIG" != *.json ]]; then CONFIG="games/$CONFIG/game.json"; fi
 mkdir -p out/_web/gen web
 ./scripts/recompsx.sh gen "$CONFIG" --out out/_web/gen
 haxe build/game-web.hxml
+# Keep the direct Haxe output for diagnostics and compile the served bundle separately. SIMPLE
+# preserves the generated static class ABI; ADVANCED is unsafe because the page host is a JS ABI.
+mv out/_web/game.js out/_web/game.raw.js
+./scripts/closure-web.sh out/_web/game.raw.js out/_web/game.js
 python3 - "$CONFIG" <<'PY'
 import hashlib, json, os, shutil, subprocess, sys
 from pathlib import Path
 root = Path.cwd()
 bundle = root / 'out/_web/game.js'
+raw_bundle = root / 'out/_web/game.raw.js'
 digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
 config = json.loads(Path(sys.argv[1]).read_text())
 source = hashlib.sha256()
 inputs = [p for directory in ('tools/recomp/src', 'src/runtime', 'src/shims/js', 'shared')
           for p in (root / directory).rglob('*.hx')]
 inputs += [root / p for p in ('build/common.hxml', 'build/game-web.hxml',
-                              'tests/spike/GenMain.hx', sys.argv[1])]
+                              'tests/spike/GenMain.hx', 'package.json', 'package-lock.json',
+                              'scripts/closure-web.sh', sys.argv[1])]
 for p in sorted(set(inputs)):
     source.update(p.relative_to(root).as_posix().encode() + b'\0' + p.read_bytes())
 git = lambda *args: subprocess.check_output(['git', *args], text=True).strip()
 
 manifest = {'version': digest[:12], 'sha256': digest, 'title': config.get('title', 'recompsx'),
             'cooperative': True, 'regions': True, 'bytes': bundle.stat().st_size,
+            'rawBytes': raw_bundle.stat().st_size, 'closure': True,
             'branch': git('branch', '--show-current'), 'revision': git('rev-parse', 'HEAD'),
             'sourceSha256': source.hexdigest(),
             'dirty': bool(git('status', '--porcelain', '--untracked-files=normal'))}

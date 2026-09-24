@@ -45,3 +45,4 @@ vram.bin
 *.pcm
 *.wav
 *.png
+node_modules/

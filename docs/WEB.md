@@ -9,6 +9,13 @@ same pinned toolchain as the other targets; `scripts/build-web.sh` sources `scri
 python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 ```
 
+The web build keeps the Haxe ES6 output as `out/_web/game.raw.js`, then runs the served bundle
+through the pinned `google-closure-compiler` npm package at `SIMPLE_OPTIMIZATIONS` with
+`ECMASCRIPT_2015` output. This keeps ES6 classes and the page host ABI intact; `ADVANCED` is not
+safe for the generated runtime because the page and runtime communicate through dynamic JS names.
+Run `npm install` once after checkout. The build uses `npx --no-install`, so a missing local
+compiler is an explicit build error rather than an accidental version change.
+
 Open <http://127.0.0.1:8000/> and press **Oyunu başlat**. The same button pauses/resumes. The
 page displays the bundle's content hash. Reload after rebuilding; it fetches an uncached
 manifest and loads `game.js?v=<hash>`. The manifest records the source branch, commit, dirty
@@ -40,13 +47,16 @@ node out/_web/game.js web/boot.exe web/disc.bin --headless-hash 3000 --yield-eve
 ```
 
 Node uses the same continuation code without browser pacing. `--yield-every` is a diagnostic
-stress option, not required by the page. The source defines and continuation contract are in
+stress option, not required by the page. These commands use the JavaScript-only gate by default;
+set `RECOMPSX_JS_ONLY=0` when the deferred reflaxe.CPP comparison is needed. The source defines
+and continuation contract are in
 [ADR-0010](decisions/ADR-0010-cooperative-main-thread.md).
 
 Current compatibility and measured digests are in [PROGRESS.md](../PROGRESS.md). The missing
 features were committed on `dreamcast-hardware-rendering` (`25d9a5d`, `6819782`), and have now
 been reconciled into the `main` working tree while retaining scalar registers, IR/regions and
 main-thread continuations. At 3000 frames the optimized cooperative, forced-yield and `--no-opt`
-JS runs and full reflaxe.CPP game runs (normal/forced yields) agree on `0e180c28` with zero
-missing paths. The browser reaches Select Game Type with rendered 3D characters. This is a bounded bring-up check, not proof
+JS runs agree on `0e180c28` with zero missing paths. The browser reaches Select Game Type with
+rendered 3D characters. The reflaxe.CPP check remains available through `RECOMPSX_JS_ONLY=0` and
+is deferred while JS is the active iteration target. This is a bounded bring-up check, not proof
 that every level or every PS1 game is supported.

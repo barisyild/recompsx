@@ -588,11 +588,12 @@ class Gpu {
 		while (y <= maxY) {
 			var w0 = r0, w1 = r1, w2 = r2;
 			var x = minX;
+			var pixel = Vram.rowStart(y) + minX;
 			while (x <= maxX) {
-				if (inside(w0, w1, w2, area)) plotMaybeSemi(x, y, colour);
+				if (inside(w0, w1, w2, area)) plotMaybeSemiLinear(pixel, colour);
 				else {}
 				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
-				x++;
+				x++; pixel++;
 			}
 			r0 = (r0 + stepY0) | 0; r1 = (r1 + stepY1) | 0; r2 = (r2 + stepY2) | 0;
 			y++;
@@ -647,13 +648,14 @@ class Gpu {
 			var w0 = e0, w1 = e1, w2 = e2;
 			var r = rRow, g = gRow, b = bRow;
 			var x = minX;
+			var pixel = Vram.rowStart(y) + minX;
 			while (x <= maxX) {
 				if (inside(w0, w1, w2, area)) {
-					plotMaybeSemi(x, y, pack555(r >> CFRAC, g >> CFRAC, b >> CFRAC));
+					plotMaybeSemiLinear(pixel, pack555(r >> CFRAC, g >> CFRAC, b >> CFRAC));
 				} else {}
 				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
 				r = (r + drdx) | 0; g = (g + dgdx) | 0; b = (b + dbdx) | 0;
-				x++;
+				x++; pixel++;
 			}
 			e0 = (e0 + stepY0) | 0; e1 = (e1 + stepY1) | 0; e2 = (e2 + stepY2) | 0;
 			rRow = (rRow + drdy) | 0; gRow = (gRow + dgdy) | 0; bRow = (bRow + dbdy) | 0;
@@ -714,14 +716,15 @@ class Gpu {
 			var w0 = e0, w1 = e1, w2 = e2;
 			var r = rRow, g = gRow, b = bRow, u = uRow, v = vRow;
 			var x = minX;
+			var pixel = Vram.rowStart(y) + minX;
 			while (x <= maxX) {
 				if (inside(w0, w1, w2, area)) {
-					shadeTexel(x, y, u >> CFRAC, v >> CFRAC, r >> CFRAC, g >> CFRAC, b >> CFRAC);
+					shadeTexelLinear(pixel, u >> CFRAC, v >> CFRAC, r >> CFRAC, g >> CFRAC, b >> CFRAC);
 				} else {}
 				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
 				r = (r + drdx) | 0; g = (g + dgdx) | 0; b = (b + dbdx) | 0;
 				u = (u + dudx) | 0; v = (v + dvdx) | 0;
-				x++;
+				x++; pixel++;
 			}
 			e0 = (e0 + stepY0) | 0; e1 = (e1 + stepY1) | 0; e2 = (e2 + stepY2) | 0;
 			rRow = (rRow + drdy) | 0; gRow = (gRow + dgdy) | 0; bRow = (bRow + dbdy) | 0;
@@ -741,6 +744,18 @@ class Gpu {
 		final c = texRaw ? t & 0x7FFF : modulate(t, r, g, b);
 		if (blend) plotSemi(x, y, c);
 		else plot(x, y, c);
+	}
+
+	/** Textured span variant with a precomputed, in-bounds VRAM index. */
+	static inline function shadeTexelLinear(index:Int, u:Int, v:Int, r:Int, g:Int, b:Int):Void {
+		final t = texel(u, v);
+		if (t == 0) {}
+		else {
+			final blend = semiTransparent && (t & 0x8000) != 0;
+			final c = texRaw ? t & 0x7FFF : modulate(t, r, g, b);
+			if (blend) plotSemiLinear(index, c);
+			else plotLinear(index, c);
+		}
 	}
 
 	/**
@@ -840,15 +855,62 @@ class Gpu {
 			Backend.gpuRect(x, y, w, h, colour, semiTransparent ? 1 : 0, semiMode);
 			return;
 		} else {}
-		var j = 0;
-		while (j < h) {
-			var i = 0;
-			while (i < w) {
-				plotMaybeSemi(x + i, y + j, colour);
-				i++;
+		// Drawing clips at the viewport edge; it does not wrap like a VRAM transfer. Clip once
+		// here so the inner loop can use a linear VRAM index without repeating coordinate checks.
+		final left = x < 0 ? 0 : x;
+		final top = y < 0 ? 0 : y;
+		final right0 = x + w;
+		final bottom0 = y + h;
+		final right = right0 > 1024 ? 1024 : right0;
+		final bottom = bottom0 > 512 ? 512 : bottom0;
+		if (left >= right || top >= bottom) return;
+		else {}
+		final count = right - left;
+		if (!semiTransparent && !maskCheck) {
+			final value = maskSet ? colour | 0x8000 : colour;
+			var row = Vram.rowStart(top) + left;
+			var j = top;
+			while (j < bottom) {
+				Vram.fillLinear(row, count, value);
+				row += Vram.WIDTH;
+				j++;
 			}
-			j++;
+			pixels += count * (bottom - top);
+		} else {
+			var row = Vram.rowStart(top) + left;
+			var j = top;
+			while (j < bottom) {
+				var i = 0;
+				while (i < count) {
+					plotMaybeSemiLinear(row + i, colour);
+					i++;
+				}
+				row += Vram.WIDTH;
+				j++;
+			}
 		}
+	}
+
+	/** The caller has clipped the pixel, so no coordinate masks or bounds checks are needed. */
+	static inline function plotMaybeSemiLinear(index:Int, colour:Int):Void {
+		if (semiTransparent) plotSemiLinear(index, colour);
+		else plotLinear(index, colour);
+	}
+
+	static function plotSemiLinear(index:Int, colour:Int):Void {
+		final back = Vram.getLinear(index);
+		if (!(maskCheck && (back & 0x8000) != 0)) {
+			final c = blendWith(back, colour);
+			Vram.setLinear(index, maskSet ? c | 0x8000 : c);
+			pixels++;
+		} else {}
+	}
+
+	static inline function plotLinear(index:Int, colour:Int):Void {
+		if (!(maskCheck && (Vram.getLinear(index) & 0x8000) != 0)) {
+			Vram.setLinear(index, maskSet ? colour | 0x8000 : colour);
+			pixels++;
+		} else {}
 	}
 
 	/** Whichever of the two the current primitive asked for. One predictable branch a pixel. */

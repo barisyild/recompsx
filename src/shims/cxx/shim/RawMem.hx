@@ -46,6 +46,10 @@ class RawMem {
 	public static inline function get16(m:RawBuf, a:Int):Int
 		return get8(m, a) | (get8(m, a + 1) << 8);
 
+	/** Aligned halfword access when the caller already has a halfword index. */
+	public static inline function get16Index(m:RawBuf, index:Int):Int
+		return get16(m, index << 1);
+
 	public static inline function get32(m:RawBuf, a:Int):Int
 		return get8(m, a) | (get8(m, a + 1) << 8) | (get8(m, a + 2) << 16) | (get8(m, a + 3) << 24);
 
@@ -53,6 +57,9 @@ class RawMem {
 		set8(m, a, v);
 		set8(m, a + 1, v >>> 8);
 	}
+
+	public static inline function set16Index(m:RawBuf, index:Int, v:Int):Void
+		set16(m, index << 1, v);
 
 	public static inline function set32(m:RawBuf, a:Int, v:Int):Void {
 		set8(m, a, v);
