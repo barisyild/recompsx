@@ -9,6 +9,7 @@ import recomp.codegen.RegionPlan.Region;
 import recomp.mips.Disasm;
 import recomp.mips.Instr;
 import recomp.mips.Op;
+import recomp.codegen.PatternMatcher.FusedKind;
 
 /**
 	Turns analysed MIPS into Haxe.
@@ -292,6 +293,11 @@ class Emitter {
 		if (registers != null) registers.reload(buf, ind);
 	}
 
+	function reloadContinuation(buf:StringBuf, ind:String, entry:Int):Void {
+		if (registers != null && entry >= 0 && entry < ir.blocks.length)
+			registers.reloadContinuation(buf, ind, ir.blocks[entry].addr);
+	}
+
 	function emitReturn(buf:StringBuf, ind:String):Void {
 		publish(buf, ind);
 		buf.add(ind + 'return;\n');
@@ -312,7 +318,7 @@ class Emitter {
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
 		// A nonlocal jump has already restored CpuState: never publish stale locals over it.
 		buf.add(ind + '\t' + UNWIND_LINE + '\n');
-		reload(buf, ind + '\t');
+		if (registers != null) registers.reloadBlock(buf, ind + '\t', ir.blocks[entry].addr);
 		buf.add(ind + '} else {}\n');
 	}
 
@@ -372,7 +378,31 @@ class Emitter {
 	function emitBlock(buf:StringBuf, fn:Func, blockAddr:Int, indexOf:Map<Int, Int>,
 			ind:String):Void {
 		final block = ir.byAddress.get(blockAddr);
-		for (instruction in block.body) emitSimple(buf, ind, instruction.decoded);
+		final stackPlan = optimize ? StackMemoryForwarding.plan(block.body) : null;
+		var i = 0;
+		while (i < block.body.length) {
+			if (stackPlan != null) {
+				switch (stackPlan[i]) {
+					case ForwardLoad(source):
+						final line = assign(block.body[i].decoded.rt, reg(source), false);
+						if (line != "") buf.add(ind + line + '\n');
+						i++;
+						continue;
+					case DropStore:
+						i++;
+						continue;
+					case null:
+				}
+			}
+			final fused = optimize ? PatternMatcher.match(block.body, i) : null;
+			if (fused == null) {
+				emitSimple(buf, ind, block.body[i].decoded, false, block.addr, i);
+				i++;
+			} else {
+				emitFused(buf, ind, block.body[i].decoded, block.body[i + 1].decoded, fused.kind);
+				i += fused.length;
+			}
+		}
 		if (block.transfer != null) {
 			emitTransfer(buf, fn, block.transfer.decoded,
 				block.delaySlot == null ? null : block.delaySlot.decoded,
@@ -383,6 +413,46 @@ class Emitter {
 			else emitReturn(buf, ind);
 		}
 	}
+
+	/** Emit a selected pair as one Haxe expression or one runtime helper call. */
+	function emitFused(buf:StringBuf, ind:String, first:Instr, second:Instr,
+			kind:FusedKind):Void {
+		final text = switch (kind) {
+			case ConstantOr:
+				assign(first.rt, hex((first.immU << 16) | second.immU), false);
+			case ConstantAdd:
+				assign(first.rt, hex(((first.immU << 16) + second.immS) | 0), false);
+			case MultLo:
+				fusedResult(second.rd, 'Ops.multLo(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.mult(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case MultHi:
+				fusedResult(second.rd, 'Ops.multHi(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.mult(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case MultuLo:
+				fusedResult(second.rd, 'Ops.multuLo(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.multu(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case MultuHi:
+				fusedResult(second.rd, 'Ops.multuHi(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.multu(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case DivLo:
+				fusedResult(second.rd, 'Ops.divLo(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.div(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case DivHi:
+				fusedResult(second.rd, 'Ops.divHi(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.div(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case DivuLo:
+				fusedResult(second.rd, 'Ops.divuLo(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.divu(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case DivuHi:
+				fusedResult(second.rd, 'Ops.divuHi(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
+					'Ops.divu(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+		};
+		if (text != "") buf.add(ind + text + '\n');
+	}
+
+	/** A discarded MFLO/MFHI still leaves the multiply/divide result in HI:LO. */
+	function fusedResult(dest:Int, result:String, sideEffect:String):String
+		return dest == 0 ? '$sideEffect;' : assign(dest, result, false);
 
 	/** Charge every original instruction, including eliminated instructions and delay slots. */
 	static function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
@@ -473,7 +543,7 @@ class Emitter {
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}Runtime.call(ctx, $t);\n');
 				emitCallUnwind(buf, ind, continuation);
-				reload(buf, ind);
+				reloadContinuation(buf, ind, continuation);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case J:
@@ -550,7 +620,7 @@ class Emitter {
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
 		}
 		emitCallUnwind(buf, ind, resumes ? continuation : -1);
-		if (resumes) reload(buf, ind);
+		if (resumes) reloadContinuation(buf, ind, continuation);
 	}
 
 	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int):Void {
@@ -577,19 +647,22 @@ class Emitter {
 
 	// ---- instructions without a delay slot -------------------------------------------------------
 
-	function emitSimple(buf:StringBuf, ind:String, i:Instr, slot:Bool = false):Void {
+	function emitSimple(buf:StringBuf, ind:String, i:Instr, slot:Bool = false,
+			afterBlock:Null<Int> = null, afterIndex:Int = -1):Void {
 		final barrier = i.op == Op.SYSCALL || i.op == Op.BREAK;
 		if (barrier) publish(buf, ind);
-		final line = simple(i);
+		final line = simple(i, afterBlock, afterIndex);
 		if (line != "") buf.add(ind + line + (slot ? '   // delay slot' : '') + '\n');
 		if (barrier) {
 			buf.add(ind + UNWIND_LINE + '\n');
-			reload(buf, ind);
+			if (registers != null && afterBlock != null)
+				registers.reloadAfter(buf, ind, afterBlock, afterIndex);
+			else reload(buf, ind);
 		}
 	}
 
 	/** The Haxe statement for one non-branching instruction, or "" for a nop. */
-	function simple(i:Instr):String {
+	function simple(i:Instr, afterBlock:Null<Int> = null, afterIndex:Int = -1):String {
 		if (i.isNop) return "";
 
 		final rd = i.rd, rt = i.rt, rs = i.rs;
@@ -599,51 +672,58 @@ class Emitter {
 			// Folded where a source is $zero or the immediate is 0. These are not micro-
 			// optimisations — the compiler would fold them anyway — but the generated code is
 			// read by people during bring-up, and `ctx.v0 = 4` says what `(0 + 4) | 0` hides.
-			case ADDI | ADDIU:
+			case ADDI:
 				if (rs == 0) assign(rt, Std.string(i.immS), false)
 				else if (i.immS == 0) assign(rt, reg(rs), false)
 				else assign(rt, '${reg(rs)} + ${i.immS}', true);
+			case ADDIU:
+				if (rs == 0) pureAssign(rt, Std.string(i.immS), false, afterBlock, afterIndex)
+				else if (i.immS == 0) pureAssign(rt, reg(rs), false, afterBlock, afterIndex)
+				else pureAssign(rt, '${reg(rs)} + ${i.immS}', true, afterBlock, afterIndex);
 			case ADD | ADDU:
-				if (rs == 0) assign(rd, reg(rt), false)
-				else if (rt == 0) assign(rd, reg(rs), false)
-				else assign(rd, '${reg(rs)} + ${reg(rt)}', true);
+				if (rs == 0) pureAssign(rd, reg(rt), false, afterBlock, afterIndex)
+				else if (rt == 0) pureAssign(rd, reg(rs), false, afterBlock, afterIndex)
+				else if (i.op == Op.ADD) assign(rd, '${reg(rs)} + ${reg(rt)}', true)
+				else pureAssign(rd, '${reg(rs)} + ${reg(rt)}', true, afterBlock, afterIndex);
 			case SUB | SUBU:
-				if (rt == 0) assign(rd, reg(rs), false)
-				else assign(rd, '${reg(rs)} - ${reg(rt)}', true);
+				if (rt == 0 && i.op == Op.SUB) assign(rd, reg(rs), false)
+				else if (rt == 0) pureAssign(rd, reg(rs), false, afterBlock, afterIndex)
+				else if (i.op == Op.SUB) assign(rd, '${reg(rs)} - ${reg(rt)}', true)
+				else pureAssign(rd, '${reg(rs)} - ${reg(rt)}', true, afterBlock, afterIndex);
 
-			case AND:  assign(rd, '${reg(rs)} & ${reg(rt)}', false);
+			case AND:  pureAssign(rd, '${reg(rs)} & ${reg(rt)}', false, afterBlock, afterIndex);
 			case OR:
 				// `or rd, rs, $zero` is the canonical register move.
-				if (rt == 0) assign(rd, reg(rs), false)
-				else if (rs == 0) assign(rd, reg(rt), false)
-				else assign(rd, '${reg(rs)} | ${reg(rt)}', false);
-			case XOR:  assign(rd, '${reg(rs)} ^ ${reg(rt)}', false);
-			case NOR:  assign(rd, '~(${reg(rs)} | ${reg(rt)})', false);
+				if (rt == 0) pureAssign(rd, reg(rs), false, afterBlock, afterIndex)
+				else if (rs == 0) pureAssign(rd, reg(rt), false, afterBlock, afterIndex)
+				else pureAssign(rd, '${reg(rs)} | ${reg(rt)}', false, afterBlock, afterIndex);
+			case XOR:  pureAssign(rd, '${reg(rs)} ^ ${reg(rt)}', false, afterBlock, afterIndex);
+			case NOR:  pureAssign(rd, '~(${reg(rs)} | ${reg(rt)})', false, afterBlock, afterIndex);
 
-			case ANDI: assign(rt, '${reg(rs)} & ${hex16(i.immU)}', false);
-			case ORI:  assign(rt, '${reg(rs)} | ${hex16(i.immU)}', false);
-			case XORI: assign(rt, '${reg(rs)} ^ ${hex16(i.immU)}', false);
-			case LUI:  assign(rt, hex(i.immU << 16), false);
+			case ANDI: pureAssign(rt, '${reg(rs)} & ${hex16(i.immU)}', false, afterBlock, afterIndex);
+			case ORI:  pureAssign(rt, '${reg(rs)} | ${hex16(i.immU)}', false, afterBlock, afterIndex);
+			case XORI: pureAssign(rt, '${reg(rs)} ^ ${hex16(i.immU)}', false, afterBlock, afterIndex);
+			case LUI:  pureAssign(rt, hex(i.immU << 16), false, afterBlock, afterIndex);
 
-			case SLT:   assign(rd, '${reg(rs)} < ${reg(rt)} ? 1 : 0', false);
-			case SLTI:  assign(rt, '${reg(rs)} < ${i.immS} ? 1 : 0', false);
+			case SLT:   pureAssign(rd, '${reg(rs)} < ${reg(rt)} ? 1 : 0', false, afterBlock, afterIndex);
+			case SLTI:  pureAssign(rt, '${reg(rs)} < ${i.immS} ? 1 : 0', false, afterBlock, afterIndex);
 			// Unsigned comparison on a signed type: flip both sign bits and compare.
-			case SLTU:  assign(rd, '(${reg(rs)} ^ 0x80000000) < (${reg(rt)} ^ 0x80000000) ? 1 : 0', false);
-			case SLTIU: assign(rt, '(${reg(rs)} ^ 0x80000000) < ${hex(i.immS ^ 0x80000000)} ? 1 : 0', false);
+			case SLTU:  pureAssign(rd, '(${reg(rs)} ^ 0x80000000) < (${reg(rt)} ^ 0x80000000) ? 1 : 0', false, afterBlock, afterIndex);
+			case SLTIU: pureAssign(rt, '(${reg(rs)} ^ 0x80000000) < ${hex(i.immS ^ 0x80000000)} ? 1 : 0', false, afterBlock, afterIndex);
 
-			case SLL:  assign(rd, '${reg(rt)} << ${i.shamt}', false);
-			case SRL:  assign(rd, '${reg(rt)} >>> ${i.shamt}', false);
-			case SRA:  assign(rd, '${reg(rt)} >> ${i.shamt}', false);
-			case SLLV: assign(rd, '${reg(rt)} << (${reg(rs)} & 31)', false);
-			case SRLV: assign(rd, '${reg(rt)} >>> (${reg(rs)} & 31)', false);
-			case SRAV: assign(rd, '${reg(rt)} >> (${reg(rs)} & 31)', false);
+			case SLL:  pureAssign(rd, '${reg(rt)} << ${i.shamt}', false, afterBlock, afterIndex);
+			case SRL:  pureAssign(rd, '${reg(rt)} >>> ${i.shamt}', false, afterBlock, afterIndex);
+			case SRA:  pureAssign(rd, '${reg(rt)} >> ${i.shamt}', false, afterBlock, afterIndex);
+			case SLLV: pureAssign(rd, '${reg(rt)} << (${reg(rs)} & 31)', false, afterBlock, afterIndex);
+			case SRLV: pureAssign(rd, '${reg(rt)} >>> (${reg(rs)} & 31)', false, afterBlock, afterIndex);
+			case SRAV: pureAssign(rd, '${reg(rt)} >> (${reg(rs)} & 31)', false, afterBlock, afterIndex);
 
 			case MULT:  'Ops.mult(ctx, ${reg(rs)}, ${reg(rt)});';
 			case MULTU: 'Ops.multu(ctx, ${reg(rs)}, ${reg(rt)});';
 			case DIV:   'Ops.div(ctx, ${reg(rs)}, ${reg(rt)});';
 			case DIVU:  'Ops.divu(ctx, ${reg(rs)}, ${reg(rt)});';
-			case MFHI:  assign(rd, 'ctx.hi', false);
-			case MFLO:  assign(rd, 'ctx.lo', false);
+			case MFHI:  pureAssign(rd, 'ctx.hi', false, afterBlock, afterIndex);
+			case MFLO:  pureAssign(rd, 'ctx.lo', false, afterBlock, afterIndex);
 			case MTHI:  'ctx.hi = ${reg(rs)};';
 			case MTLO:  'ctx.lo = ${reg(rs)};';
 
@@ -693,6 +773,13 @@ class Emitter {
 		if (dest == 0) return "";
 		if (!wraps && expr == reg(dest)) return "";
 		return '${reg(dest)} = ' + (wraps ? '($expr) | 0;' : '$expr;');
+	}
+
+	/** Drop a pure GPR write when CFG liveness proves no later guest observation. */
+	function pureAssign(dest:Int, expr:String, wraps:Bool, block:Null<Int>, index:Int):String {
+		if (dest != 0 && registers != null && block != null && registers.canDropPureWrite(block)
+			&& !registers.liveAfter(block, index, dest)) return "";
+		return assign(dest, expr, wraps);
 	}
 
 	/** A load whose result is discarded still has to happen: the address may be a register. */
