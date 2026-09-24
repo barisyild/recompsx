@@ -2,6 +2,14 @@
 
 ## Status snapshot
 
+**2026-09-25: two GTE experiments measured and rejected (ADR-0018).** A JavaScript `I64` on
+an exact double passed `GteOps` (`1cf89aa2`) and the game digests but did not move the clock:
+interleaved 9000-frame runs, minimum of three, pair 26.84 s, double 27.20 s, double with the
+wrap only on overflow 29.22 s. `Gte.execute` as a `switch` was isolated at +10 % (27.4 s
+against 25.0 s) and is rejected too. The GTE code is unchanged; the pair shim's high-word-only
+check and three-operation wrap are cheaper than a latency-bound double chain on a boxed static.
+The remaining GTE lever is a value-passing accumulator that lives in a register on both targets.
+
 **2026-09-25: the rasteriser walks spans, not bounding boxes; JS 9000 frames 34.6 s → 25.2 s.**
 `Gpu.rowSpan` solves each row's covered columns from the three edge functions in closed form,
 so the span loops visit only pixels inside the triangle and pay no per-pixel inside test.
@@ -1049,6 +1057,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] GTE: the JS I64-as-double shim (ADR-0018) and a `switch` dispatcher were
+built, verified digest-identical, timed interleaved and rejected: 27.2 s and 29.2 s against the
+26.8 s pair, and the switch alone +10 %. No GTE change ships. Next: codegen structuring
+(natural loops, if-chains) or a value-passing GTE accumulator, both to be measured the same way.
 
 2026-09-25 [claude] Rasteriser: closed-form row spans, per-triangle texel constants with inline
 linear fetches, span-level pixel counts, typed-array row fills. The old Raster sections reproduce
