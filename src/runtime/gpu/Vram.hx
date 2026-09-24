@@ -23,11 +23,31 @@ class Vram {
 		data = RawMem.alloc(BYTES);
 	}
 
-	public static inline function get(x:Int, y:Int):Int
+	public static function get(x:Int, y:Int):Int
 		return RawMem.get16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2);
 
-	public static inline function set(x:Int, y:Int, v:Int):Void
+	public static function set(x:Int, y:Int, v:Int):Void
 		RawMem.set16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2, v);
+
+	/**
+		Linear access for clipped raster spans. The caller has already established that the index
+		is inside the 1024x512 framebuffer, so this avoids repeating two coordinate masks and a
+		multiply for every pixel. Uploads and VRAM copies keep using get/set because those paths
+		wrap at the hardware's torus boundary.
+	**/
+	public static inline function getLinear(index:Int):Int return RawMem.get16Index(data, index);
+
+	public static inline function setLinear(index:Int, v:Int):Void RawMem.set16Index(data, index, v);
+
+	public static inline function rowStart(y:Int):Int return y * WIDTH;
+
+	public static inline function fillLinear(start:Int, count:Int, v:Int):Void {
+		var i = 0;
+		while (i < count) {
+			setLinear(start + i, v);
+			i++;
+		}
+	}
 
 	/** Packs 5-bit components into BGR555. */
 	public static inline function rgb(r:Int, g:Int, b:Int):Int

@@ -1,0 +1,7 @@
+{
+  "name": "recompsx-web-build",
+  "private": true,
+  "devDependencies": {
+    "google-closure-compiler": "20260915.0.0"
+  }
+}

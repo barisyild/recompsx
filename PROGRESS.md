@@ -2,6 +2,80 @@
 
 ## Status snapshot
 
+**2026-09-25: first per-subsystem profiles of the reconciled tree, both targets, one digest.**
+`node --cpu-prof` over 9000 frames (the 3D **Select Game Type** menu), bucketed by runtime
+class: GPU rasterizer 44 %, GTE 24 % plus I64 shim 2 %, generated game code 14 %, SPU 8 %,
+Memory 5 %. Wall time 34.7 s for 9000 frames, about four times real time. The native C++ build
+of the same tree runs the same 9000 frames in 9.3 s; both targets report `digest=ab13c60f`.
+In the native `sample` profile `Memory::read32`/`write32` are the fourth and sixth hottest
+symbols and `Vram::get` is in the top thirteen: the non-inline accessors of ADR-0013 are a JS
+bundle-size decision that became an out-of-line call per guest load/store on C++ (1656 calls in
+one shard, zero direct RAM accesses, against the direct `*(int*)(recompsx_ram + off)` of the
+pre-0013 build). It was not measured on C++ before this and must become per-target before the
+console path resumes. `node --trace-deopt` over 3000 frames: 513 deopts, mostly `wrong map` and
+`not a Smi`, because KSEG0 addresses lie outside V8's 31-bit Smi range and every `CpuState`
+field that ever holds one is double-represented; `cycles` crosses 2^30 after about 32 s and
+transitions too. ADR-0014, 0016 and 0017 changed the Crash Bash output by six lines in total and
+carry no speed measurement. The ranked levers are in "Next up".
+
+**2026-09-21: JavaScript-only iteration is now the default (ADR-0015).**
+`scripts/conformance.sh` and `scripts/test.sh` skip reflaxe.CPP unless invoked with
+`RECOMPSX_JS_ONLY=0`; the C++ build files and shims remain intact for the later return. The JS
+gate still runs all tool tests, 18 conformance groups and the deterministic demo digest.
+
+**2026-09-21: conservative stack word forwarding added to generic codegen (ADR-0016).**
+`StackMemoryForwarding` removes superseded aligned word stores and forwards exact `$sp`/`$fp`
+`sw` → `lw` reloads within one basic block, guarded by register versions and memory-effect
+barriers. Raw memory remains at uncertain boundaries; the first fixture covers store elimination,
+forwarding and stack-pointer invalidation. The rebuilt Crash Bash source is 553,670 lines /
+15,232,114 bytes; raw JS is 10,525,412 bytes and Closure output is 4,929,742 bytes
+(`fdca8703c2a9`). The 3000-frame game digest remains `0e180c28`.
+
+**2026-09-22: CFG liveness now removes dead pure register writes (ADR-0017).**
+The emitter drops non-trapping arithmetic, logical, shift, comparison, `lui` and `mfhi/mflo`
+writes only outside reverse CFG paths that reach a pump, call, trap or external transfer. Interior
+entries, transfer/delay-slot reads, publication paths and raw memory effects remain conservative;
+instruction counts and cycle charges are unchanged. The Crash Bash protected slice is byte-stable;
+the synthetic leaf fixture verifies the actual write elimination. The rebuilt bundle remains
+`fdca8703c2a9`, with `frames=3000 digest=0e180c28`.
+
+**2026-09-21: closed instruction patterns fused before Haxe emission (ADR-0014).**
+`PatternMatcher` now folds `lui → ori/addiu` constant formation and routes adjacent
+`mult/multu/div/divu → mflo/mfhi` pairs through tested `core.Ops` result helpers. A discarded
+`mflo/mfhi` still preserves the HI:LO write. The pass stays inside basic-block bodies and never
+crosses delay slots, control transfers, traps, memory effects or scheduler boundaries. The
+generated Crash Bash source fell to 553,676 lines / 15,232,397 bytes; raw browser JS is
+10,525,845 bytes and Closure ES6 output is 4,929,926 bytes (`dab5faf1a01e`). Raw and Closure
+game runs agree at `frames=3000 digest=0e180c28` (raw 6.71 s, Closure 6.56 s). The full
+two-target conformance gate passes all 18 groups, including Codegen `a71569d0` and Yielding
+`203c40c1`; `check.sh` is clean.
+
+**2026-09-21: clipped raster spans and ES6 Closure browser bundle added (ADR-0013).**
+Raster triangle spans now carry a precomputed linear VRAM index, rectangle drawing clips once and
+uses row fills, and only wrapping upload/VRAM-copy paths keep coordinate masking in the pixel loop.
+Large `Memory` and wrapped `Vram` accessors are no longer Haxe-inline, preventing their full
+address trees from expanding into every generated guest function. Crash Bash raw JS is 10,564,124
+bytes and the ES6-preserving Closure bundle is 4,930,496 bytes (`b97768f188a6`). Raw and Closure
+Node runs agree at `frames=3000 digest=0e180c28`; raw measured 6.91 s and Closure 7.14 s. The
+Raster fixture agrees on both targets (`b66077e7`), and the JS-only gate remains green. Full C++
+game validation remains deferred while JS is the active iteration target.
+
+**2026-09-21: boundary-aware register liveness added to static Haxe generation (ADR-0012).**
+`RegisterPlan` now runs backwards CFG liveness and narrows reloads after calls, due pumps and
+syscalls while keeping publication conservative and seeding function exits with the full written
+architectural state. The pass is generic over discovered MIPS CFGs and keeps interior entries and
+cooperative callbacks correct. `RegisterMask` remains an allocation-free `Int` abstraction in the
+build-time tool; generated code still uses scalar `CpuState` fields and plain `Int`s.
+
+Crash Bash generation is byte-stable in discovery and now emits 555,652 lines / 15,282,659 bytes,
+down from 583,506 lines / 15,803,189 bytes before the pass. Publication lines remain 97,203 while
+reload lines fall 84,959 → 57,105. The JS game still reports `frames=3000 digest=0e180c28`, and
+`RECOMPSX_JS_ONLY=1 ./scripts/test.sh` passes all 341 tool checks, 18 JavaScript conformance
+groups and the demo digest `329de455`. C++ spikes/build remain available through the default gate
+and are intentionally deferred during the fast JS iteration loop. The served browser bundle was
+rebuilt as `35a52a761a52` from this source tree and its served artifact also reports
+`frames=3000 digest=0e180c28`.
+
 **2026-09-09: committed console features reconciled into main; browser menu restored.**
 The previous claim that working features existed only in an untracked JS artifact was wrong.
 They are committed in `25d9a5d` and `6819782` on `dreamcast-hardware-rendering`, which diverged
@@ -310,12 +384,20 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
-Codegen follow-up: the machine IR and sequence/choice regions are implemented (ADR-0008).
-Measure general native multi-block loops and per-boundary dirty/liveness analysis separately,
-including resume-routing size costs. Call-effect summaries must include due pumps and callbacks,
-not just a callee's syntactic register accesses. Later candidates are cross-block constant/range
-propagation and size-budgeted inlining of proven small callees. Compare each pass with the
-appropriate baseline and `--no-opt` on JS and reflaxe.CPP, with callback/interior-entry tests.
+Measured order, 2026-09-25 (`node --cpu-prof`, 9000 frames, per-class buckets in the snapshot):
+1) rasterizer span specialisation per texture depth and semi-transparency with the texel
+constants hoisted out of the pixel loop, or the WebGL presentation fork behind the ADR-0008
+gates; 2) a double-backed JS `shim.I64` for the GTE's 44-bit accumulator (exact below 2^53;
+needs an ADR amending golden rule 1 for that one shim, with the GteOps digest as the guard),
+plus emitting the specific GTE op instead of the `Gte.execute` decode; 3) natural multi-block
+loops and if/else-if chains in RegionPlan, so the 632 remaining `while(true) switch(bb)` bodies
+become structured code; 4) a one-line inline RAM fast path and a direct typed-array index in
+the JS MemA; 5) closed-form fast-forward of wait loops such as f_80032264; 6) interprocedural
+register summaries at static calls. Cross-block constant/copy propagation and range propagation
+are demoted: ADR-0014/0016/0017 show instruction-level passes do not move this program. Any
+boundary pass must continue to account for due pumps, callbacks, cooperative suspension and
+interior entries. Before the console path resumes, make ADR-0013's accessor inlining
+per-target; it is an out-of-line call per guest access on C++ today.
 
 The browser runs reconciled main sources with cooperative code (ADR-0010); the committed
 console branch features now restore the menu. Extend bounded gameplay/overlay coverage before
@@ -949,6 +1031,37 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Profiled the reconciled tree on both targets at 9000 frames (JS 34.7 s,
+C++ 9.3 s, digest ab13c60f): rasterizer 44 %, GTE 26 %, generated code 14 %, SPU 8 %, Memory 5 %
+on JS; ADR-0013's accessors are out-of-line calls on C++. Committed the JS-iteration work
+(ADR-0012..0017, Closure bundle, JS-only gate). Next: rasterizer span specialisation, a
+double-backed JS I64 for the GTE, then natural-loop/if-chain structuring in RegionPlan.
+
+2026-09-22 [codex] Added CFG-liveness dead pure-write elimination (ADR-0017), with fixtures for
+overwritten register assignments and interior-entry safety. Protected reverse paths retain
+publication semantics; 367 tool checks, 18 JS conformance groups, `check.sh`, and Crash Bash
+`frames=3000 digest=0e180c28` all pass. Bundle remains `fdca8703c2a9`.
+
+2026-09-21 [codex] Added conservative same-block stack word forwarding (ADR-0016): superseded
+`sw` stores are dropped and exact `$sp`/`$fp` `lw` reloads forward through stable GPR locals;
+memory/control barriers and stack-pointer writes clear facts. Acceptance: 363 tool checks, 18 JS
+conformance groups including Codegen `79549398`, demo digest `329de455`, `check.sh` clean, and
+Crash Bash `frames=3000 digest=0e180c28` from the rebuilt `fdca8703c2a9` bundle.
+
+2026-09-21 [codex] Made JS-only conformance/test gates the default while retaining reflaxe.CPP as
+  an opt-in via RECOMPSX_JS_ONLY=0 (ADR-0015). Updated build/web guidance and recorded the
+  deferred-target workflow; no C++ files or shims were removed.
+
+2026-09-21 [codex] Added generic IR pattern fusion for constant formation and MIPS multiply/divide
+  result pairs, preserving HI:LO and zero destinations. Crash Bash generation fell to 553,676 lines;
+  raw/Closure browser bundles are 10.53/4.93 MB and both report 0e180c28. Full two-target
+  conformance passes all 18 groups (Codegen a71569d0, Yielding 203c40c1); check.sh is clean.
+
+2026-09-21 [codex] Added clipped linear VRAM raster paths and removed large Memory/Vram Haxe
+  inlines; raw JS fell to 10.56 MB and Closure ES6 output to 4.93 MB. Raw/Closure game runs
+  agree on 0e180c28, Raster agrees across JS/C++, and the JS-only gate passes. Next: keep generic
+  codegen propagation work on the JS-first loop and validate Closure output in the browser.
+
 2026-09-09 [codex] Prepared the verified runtime/codegen/browser reconciliation for main commit
   and push; made setup apply the existing continue patch as well as locals/array patches.
   Validation: previous full gate 341 checks, 18 groups x2, game 0e180c28 on JS/C++; check.sh clean.
@@ -959,6 +1072,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   Browser bcafe8128288 reaches Select Game Type; 3000-frame JS/reference/stress and C++/stress
   all report 0e180c28, zero gaps; gate 341 checks, 18 groups x2, demo 329de455; check.sh clean.
   Next: extend gameplay/overlay coverage and measure further generic codegen work.
+
+2026-09-21 [codex] Added ADR-0012 boundary-aware GPR liveness and JS-only gate. Crash Bash output
+  fell 583506→555652 lines and reloads 84959→57105; JS game digest stayed 0e180c28; all 341 tool
+  checks and 18 JS conformance groups passed. Next: cross-block constant/copy propagation.
 
 2026-09-09 [codex] Restored source-built main-thread browser execution with pinned continuations
   (ADR-0010), pause/resume and hash-keyed bundles; traced/fixed SCEx Test 04/05 drive responses.

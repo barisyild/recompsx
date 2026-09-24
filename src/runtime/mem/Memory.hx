@@ -69,12 +69,12 @@ class Memory {
 
 	// ---- reads ---------------------------------------------------------------------------------
 
-	public static inline function read8u(a:Int):Int {
+	public static function read8u(a:Int):Int {
 		final p = phys(a);
 		return isRam(p) ? RawMem.get8(ram(), p & RAM_MASK) : slowRead8(p);
 	}
 
-	public static inline function read8s(a:Int):Int {
+	public static function read8s(a:Int):Int {
 		return (read8u(a) << 24) >> 24;
 	}
 
@@ -82,14 +82,14 @@ class Memory {
 	// arriving here is aligned by architecture: MIPS traps a misaligned lw/lh on real hardware,
 	// and the kernel HLE's own structures are word-aligned by construction. Byte-offset walkers
 	// (Iso9660 records) never come through Memory and keep RawMem's tolerant byte composition.
-	public static inline function read16u(a:Int):Int {
+	public static function read16u(a:Int):Int {
 		final p = phys(a);
 		if (isRam(p)) return shim.MemA.get16(ram(), p & RAM_MASK);
 		else if (isScratch(p)) return shim.MemA.get16(scratch(), p - SCRATCH_BASE);
 		else return slowRead16(p);
 	}
 
-	public static inline function read16s(a:Int):Int {
+	public static function read16s(a:Int):Int {
 		return (read16u(a) << 16) >> 16;
 	}
 
@@ -105,7 +105,7 @@ class Memory {
 		Alignment holds for the same reason it holds for RAM: MIPS traps a misaligned `lw`, so
 		anything reaching a 32-bit accessor is word-aligned by architecture.
 	**/
-	public static inline function read32(a:Int):Int {
+	public static function read32(a:Int):Int {
 		final p = phys(a);
 		if (isRam(p)) return shim.MemA.get32(ram(), p & RAM_MASK);
 		else if (isScratch(p)) return shim.MemA.get32(scratch(), p - SCRATCH_BASE);
@@ -114,20 +114,20 @@ class Memory {
 
 	// ---- writes --------------------------------------------------------------------------------
 
-	public static inline function write8(a:Int, v:Int):Void {
+	public static function write8(a:Int, v:Int):Void {
 		final p = phys(a);
 		if (isRam(p)) RawMem.set8(ram(), p & RAM_MASK, v);
 		else slowWrite8(p, v);
 	}
 
-	public static inline function write16(a:Int, v:Int):Void {
+	public static function write16(a:Int, v:Int):Void {
 		final p = phys(a);
 		if (isRam(p)) shim.MemA.set16(ram(), p & RAM_MASK, v);
 		else if (isScratch(p)) shim.MemA.set16(scratch(), p - SCRATCH_BASE, v);
 		else slowWrite16(p, v);
 	}
 
-	public static inline function write32(a:Int, v:Int):Void {
+	public static function write32(a:Int, v:Int):Void {
 		final p = phys(a);
 		if (isRam(p)) shim.MemA.set32(ram(), p & RAM_MASK, v);
 		else if (isScratch(p)) shim.MemA.set32(scratch(), p - SCRATCH_BASE, v);

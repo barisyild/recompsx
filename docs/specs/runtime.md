@@ -39,8 +39,8 @@ control. Bus timing is not modelled (fixed cost per instruction; pacing is cosme
 3), but a game's startup writes these unconditionally and reads them back, so a register that
 answers zero is a machine that does not exist.
 
-Fast path (codegen inlines): `(p & 0xFF800000) == 0` ⇔ RAM window → one AND + one branch for
-~99% of accesses; `slow32` branch order: scratchpad → I/O (`p - 0x1F801000` in [0, 0x3000)) →
+Fast path in `Memory.read32`/`write32`: `(p & 0xFF800000) == 0` ⇔ RAM window → one AND + one
+branch for ~99% of accesses; `slow32` branch order: scratchpad → I/O (`p - 0x1F801000` in [0, 0x3000)) →
 KSEG2 → BIOS window → Exp1 → bus error (log-once, return 0 — never host garbage; strict mode
 aborts).
 
@@ -51,9 +51,10 @@ readBytesToRam/fillRam`. 16/32-bit accesses assumed aligned (debug builds assert
 
 **All of these are `static` methods on `Memory`, and the buffers are `static` fields** — the
 emitted call is `Memory.read32(a)` — there is no `mem` parameter, and generated functions take
-only `ctx`. This is forced by an upstream limitation, not preference: inlined *instance* methods
-collide in reflaxe.CPP (see `docs/specs/backend.md` §4 and PROGRESS.md [M0-VERIFY] #12), and the
-memory accessors must inline or the whole performance model collapses. There is exactly one
+only `ctx`. The public address accessors deliberately remain ordinary static methods: inlining
+their complete RAM/scratchpad/I/O decision tree into every generated load made very large JS
+function bodies and made downstream ES6 compilation pathological. Haxe and the C++ optimizer
+can still inline the small RawMem/MemA accessors inside this boundary. There is exactly one
 machine being emulated, so a singleton is the honest model anyway.
 
 **RawMem endianness seam**: LE contract at every get16/get32; per-target impls per backend spec
