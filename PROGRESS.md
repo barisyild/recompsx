@@ -2,6 +2,19 @@
 
 ## Status snapshot
 
+**2026-09-25: the generated code is structured; 9 dispatchers remain of 632 (ADR-0019).**
+`RegionPlan` reduces natural loops (dominators, any number of exits) and forward runs (a
+single-entry slice in topological order); the emitter uses the entry-routing local `resume` as
+the Relooper's label: every block resets it, every sequence part is guarded by it, a jump past
+the next part records its target, a loop exit records it and `break`s, and a loop ends with
+`if (resume >= 0 && resume != header) break`. Jump tables record their targets too and are never
+placed where a `break` inside a `switch` would be needed. All three hottest functions are
+structured. Bit-identical: `Codegen 632ff691`, `Regions d6b90d6e`, `Yielding 203c40c1`; game
+`0e180c28` / `ab13c60f` / `31c46089` at 3000 / 9000 / 18000. JS timing neutral within noise
+(9000 frames 27.08 → 28.19 s wall, 33.35 → 31.55 s user, minimum of three interleaved); the
+vblank wait loop's self time fell 44 %. The C++ effect is the point of the shape and is
+unmeasured until that path resumes.
+
 **2026-09-25: two GTE experiments measured and rejected (ADR-0018).** A JavaScript `I64` on
 an exact double passed `GteOps` (`1cf89aa2`) and the game digests but did not move the clock:
 interleaved 9000-frame runs, minimum of three, pair 26.84 s, double 27.20 s, double with the
@@ -416,9 +429,9 @@ Measured order, 2026-09-25 (`node --cpu-prof`, 9000 frames, per-class buckets in
 constants hoisted out of the pixel loop, or the WebGL presentation fork behind the ADR-0008
 gates; 2) a double-backed JS `shim.I64` for the GTE's 44-bit accumulator (exact below 2^53;
 needs an ADR amending golden rule 1 for that one shim, with the GteOps digest as the guard),
-plus emitting the specific GTE op instead of the `Gte.execute` decode; 3) natural multi-block
-loops and if/else-if chains in RegionPlan, so the 632 remaining `while(true) switch(bb)` bodies
-become structured code; 4) a one-line inline RAM fast path and a direct typed-array index in
+plus emitting the specific GTE op instead of the `Gte.execute` decode; 3) done — ADR-0019
+structures all but 9 functions, neutral on JS within noise, unmeasured on C++; 4) a one-line
+inline RAM fast path and a direct typed-array index in
 the JS MemA; 5) closed-form fast-forward of wait loops such as f_80032264; 6) interprocedural
 register summaries at static calls. Cross-block constant/copy propagation and range propagation
 are demoted: ADR-0014/0016/0017 show instruction-level passes do not move this program. Any
@@ -1057,6 +1070,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] Codegen structuring (ADR-0019): natural loops with recorded exits and
+topological forward runs on `resume` as label; dispatchers 632 → 9, hottest functions
+structured, every digest unchanged, 375 tool checks. JS neutral within noise; C++ unmeasured.
+Next: interprocedural register summaries at static calls, the inline RAM fast path, the wait-loop
+fast-forward, and a value-passing GTE accumulator — each measured interleaved before it is kept.
 
 2026-09-25 [claude] GTE: the JS I64-as-double shim (ADR-0018) and a `switch` dispatcher were
 built, verified digest-identical, timed interleaved and rejected: 27.2 s and 29.2 s against the

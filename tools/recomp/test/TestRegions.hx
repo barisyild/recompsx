@@ -156,6 +156,8 @@ class TestRegions {
 					Assert.equals(ids.length, ir.blocks.length, 'region owns every block once');
 					for (id in 0...ids.length) Assert.equals(ids[id], id, 'stable region resume ID');
 					if (kind == 0 || kind == 1) Assert.isTrue(body.indexOf('switch (bb)') < 0, 'diamond has native branches');
+					if (kind == 2) Assert.isTrue(body.indexOf('switch (bb)') < 0, 'diamond loop is a native loop');
+					if (kind == 2) Assert.isTrue(body.indexOf('while (true) {') >= 0, 'diamond loop has a while');
 					if (kind == 4) Assert.isTrue(body.indexOf('switch (bb)') >= 0, 'irreducible loop retains fallback');
 				}
 			}
