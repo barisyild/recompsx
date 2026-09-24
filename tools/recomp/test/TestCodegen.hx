@@ -103,7 +103,7 @@ class TestCodegen {
 		add("loopInSwitch", [alu(0x21, 2, 0, 0), alu(0x21, 2, 2, 4),
 			imm(9, 4, 4, -1), imm(7, 0, 4, -3), imm(9, 3, 3, 1),
 			imm(5, 0, 5, 3), 0, JR, imm(9, 2, 2, 100), JR, imm(9, 2, 2, 200)]);
-		add("multiBlockLoop", [alu(0x21, 2, 0, 0), imm(4, 0, 4, 5), 0,
+		final multi = add("multiBlockLoop", [alu(0x21, 2, 0, 0), imm(4, 0, 4, 5), 0,
 			alu(0x21, 2, 2, 4), imm(9, 4, 4, -1),
 			0x08000000 | (((next + 4) & 0x0fffffff) >>> 2), 0, JR, 0]);
 		// Initializer and nested-block reads must prevent a declaration from being moved past
@@ -159,6 +159,9 @@ class TestCodegen {
 			Assert.equals(stack.indexOf('Memory.write32(ctx.sp, ctx.t0);') >= 0, !opt,
 				"superseded stack store shape");
 			Assert.equals(dead.indexOf('t0 = 1;') >= 0, !opt, "dead pure write elimination");
+			Assert.equals(multi.indexOf('while (true) {') >= 0, opt, "multi-block loop is a native loop");
+			Assert.equals(multi.indexOf('switch (bb)') < 0, opt, "multi-block loop needs no dispatcher");
+			Assert.equals(multi.indexOf('; break;') >= 0, opt, "loop exit records its target and breaks");
 			Assert.isTrue(dead.indexOf('t0 = 2;') >= 0, "live pure write retained");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'

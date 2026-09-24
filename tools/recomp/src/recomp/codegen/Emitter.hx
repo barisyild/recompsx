@@ -16,9 +16,16 @@ import recomp.codegen.PatternMatcher.FusedKind;
 
 	Registers become scalar Haxe locals, giving the Haxe analyzer ordinary values to propagate
 	and eliminate. CpuState is synchronised at calls, returns and scheduler safe points. Linear
-	CFGs become sequences, single-block loops become native loops, and single-entry regions
-	inside other CFGs become sequences and choices. Remaining control flow uses a region/block
-	dispatcher. Every guest block stays addressable without duplicating its body (ADR-0007/0008).
+	CFGs become sequences, natural loops with one exit become native `while` loops, and
+	single-entry regions inside other CFGs become sequences and choices. Remaining control flow
+	uses a region/block dispatcher. Every guest block stays addressable without duplicating its
+	body (ADR-0007/0008).
+
+	Inside a native loop a transfer may only fall through, `continue`, `break` or return: Haxe
+	has no labelled jumps, so nothing inside one may reach the dispatcher. A jump past the next
+	part of a sequence, and a `break` out of a loop, record their target in `resume`, the same
+	local that routes an interior entry; every sequence part is guarded by it and every block
+	resets it, which is what lets forward jumps and multi-exit loops stay structured.
 
 	Every arithmetic result that can overflow is written `| 0`, which JS needs and C++ folds
 	away (ADR-0004). Eliminated instructions still contribute to the guest cycle count.
@@ -48,6 +55,17 @@ class Emitter {
 	var linearNext:Null<Int>;
 	// A structured choice consumes its header's branch after latching it before the slot.
 	var capturedBranch:Null<Int>;
+	// The innermost native loop being emitted: a transfer to its header is a `continue`, one
+	// to anything outside its members a recorded `break`. Null outside a Loop region.
+	var loopHead:Null<Int>;
+	var loopMembers:Null<Map<Int, Bool>>;
+	// The enclosing sequences, innermost last: which part is being emitted, so a transfer to a
+	// later part of any of them can be a recorded forward jump. `loopFrame` is how many of them
+	// lie outside the innermost native loop and are therefore reached only by a `break`.
+	final frames:Array<SequenceFrame> = [];
+	var loopFrame:Int = 0;
+	// Region emission declares `resume`; block emission then resets it at every block start.
+	var inRegions:Bool = false;
 
 	/**
 		The class a call to this address should go to, or null to dispatch it by address.
@@ -89,6 +107,11 @@ class Emitter {
 		nativeLoop = null;
 		linearNext = null;
 		capturedBranch = null;
+		loopHead = null;
+		loopMembers = null;
+		loopFrame = 0;
+		inRegions = false;
+		while (frames.length > 0) frames.pop();
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.
@@ -125,7 +148,7 @@ class Emitter {
 		final linear = optimize && linearChain(fn, blockAddrs);
 		if (optimize && structureRegions && !flat && !linear) {
 			final regions = new RegionPlan(ir);
-			if (regions.sequences > 0 || regions.choices > 0) {
+			if (regions.sequences > 0 || regions.choices > 0 || regions.loops > 0) {
 				emitRegions(buf, fn, regions, indexOf);
 				buf.add('\t}\n');
 				return buf.toString();
@@ -170,8 +193,9 @@ class Emitter {
 	}
 
 	function emitRegions(buf:StringBuf, fn:Func, plan:RegionPlan, indexOf:Map<Int, Int>):Void {
+		inRegions = true;
 		final dispatch = plan.roots.length != 1 || plan.roots[0].successors.length != 0;
-		buf.add('\t\t// Regions: ${plan.roots.length}; ${plan.sequences} sequence / ${plan.choices} choice reductions.\n');
+		buf.add('\t\t// Regions: ${plan.roots.length}; ${plan.sequences} sequence / ${plan.choices} choice / ${plan.loops} loop reductions.\n');
 		if (dispatch) {
 			buf.add('\t\tvar bb = entry;\n\t\twhile (true) switch (bb) {\n');
 		} else {
@@ -182,14 +206,20 @@ class Emitter {
 			if (dispatch) buf.add('\t\t\tcase ${root.members.join(" | ")}:\n');
 			buf.add(ind + 'var resume = ${dispatch ? "bb" : "entry"};\n');
 			emitRegion(buf, fn, root, indexOf, ind, null);
+			// The end of a root is reached only with a recorded target in another root: the
+			// guards inside skipped everything after a jump out of a loop or past the tail.
+			if (dispatch) buf.add(ind + 'bb = resume; continue;\n');
 		}
 		if (dispatch) buf.add('\t\t\tdefault: return;\n\t\t}\n');
 	}
 
 	/**
-		`resume` is local entry routing, not a guest block dispatcher. -1 means ordinary flow.
-		Only a region's skipped prefix/choice examines it; internal transfers fall through.
-		Each block, its cycles and its safe point are emitted once, including resumed arms.
+		`resume` is local entry routing, not a guest block dispatcher. -1 means ordinary flow;
+		otherwise it names the block the guards are steering towards: the interior entry on the
+		way in, or the target of a forward jump or a loop exit recorded on the way. Every part of
+		a sequence is guarded by it and every block resets it on arrival, so the steering costs a
+		compare a part and nothing once a block has run — the host compiler folds the compares
+		that follow a reset. Each block, its cycles and its safe point are emitted once.
 	**/
 	function emitRegion(buf:StringBuf, fn:Func, region:Region, indexOf:Map<Int, Int>,
 			ind:String, follow:Null<Int>):Void {
@@ -210,13 +240,16 @@ class Emitter {
 					emitBlock(buf, fn, block.addr, indexOf, ind);
 				}
 			case Sequence(parts):
+				final frame = new SequenceFrame([for (part in parts) part.entry]);
+				frames.push(frame);
 				for (i in 0...parts.length) {
+					frame.index = i;
 					final last = i + 1 == parts.length;
-					if (!last) buf.add(ind + 'if (resume < 0 || ${containsEntry(parts[i])}) {\n');
-					emitRegion(buf, fn, parts[i], indexOf, last ? ind : ind + '\t',
-						last ? follow : parts[i + 1].entry);
-					if (!last) buf.add(ind + '\tresume = -1;\n' + ind + '} else {}\n');
+					buf.add(ind + 'if (resume < 0 || ${containsEntry(parts[i])}) {\n');
+					emitRegion(buf, fn, parts[i], indexOf, ind + '\t', last ? follow : parts[i + 1].entry);
+					buf.add(ind + '} else {}\n');
 				}
+				frames.pop();
 			case Choice(head, taken, notTaken, join):
 				final branch = head.selector;
 				final name = 'take_${branch.resumeId}';
@@ -226,7 +259,7 @@ class Emitter {
 				capturedBranch = branch.addr;
 				emitRegion(buf, fn, head, indexOf, ind + '\t', null);
 				capturedBranch = previous;
-				buf.add(ind + '\tresume = -1;\n' + ind + '} else {}\n');
+				buf.add(ind + '} else {}\n');
 				buf.add(ind + 'if (resume < 0 ? $name : ${containsEntry(taken)}) {\n');
 				if (taken != null) emitRegion(buf, fn, taken, indexOf, ind + '\t', join);
 				buf.add(ind + '} else {\n');
@@ -234,6 +267,22 @@ class Emitter {
 				buf.add(ind + '}\n');
 				linearNext = follow;
 				if (join != null) emitGoto(buf, ind, join, indexOf, head.entry);
+			case Loop(body, exits):
+				final outerHead = loopHead, outerMembers = loopMembers, outerFrame = loopFrame;
+				loopHead = body.entry;
+				loopMembers = [for (id in body.members) id => true];
+				loopFrame = frames.length;
+				final headId = ir.byAddress.get(body.entry).resumeId;
+				buf.add(ind + 'while (true) {\n');
+				emitRegion(buf, fn, body, indexOf, ind + '\t', null);
+				// Reached with a recorded target only: one outside the loop leaves it, and the
+				// guards after the loop steer to it; the loop's own header is the next pass.
+				buf.add(ind + '\tif (resume >= 0 && resume != $headId) break; else {}\n');
+				buf.add(ind + '}\n');
+				loopHead = outerHead;
+				loopMembers = outerMembers;
+				loopFrame = outerFrame;
+				linearNext = follow;
 		}
 	}
 
@@ -378,6 +427,8 @@ class Emitter {
 	function emitBlock(buf:StringBuf, fn:Func, blockAddr:Int, indexOf:Map<Int, Int>,
 			ind:String):Void {
 		final block = ir.byAddress.get(blockAddr);
+		// Arriving here ends whatever `resume` was steering towards.
+		if (inRegions) buf.add(ind + 'resume = -1;\n');
 		final stackPlan = optimize ? StackMemoryForwarding.plan(block.body) : null;
 		var i = 0;
 		while (i < block.body.length) {
@@ -497,7 +548,12 @@ class Emitter {
 					for (target in table.targets) {
 						if (indexOf.exists(target) && !emitted.exists(target)) {
 							emitted.set(target, true);
-							buf.add('$ind\tcase ${hex(target)}: bb = ${indexOf.get(target)}; continue;\n');
+							// Inside a region the arm records a forward target or continues the
+							// loop; a `break` here would leave the switch, not the loop, on C++,
+							// and RegionPlan never places a table where one would be needed.
+							final kind = jumpKind(target, indexOf);
+							if (kind == JUMP_BREAK) throw 'table target ${hex(target)} outside its loop at ${hex(instr.addr)}';
+							buf.add('$ind\tcase ${hex(target)}: ' + (kind == JUMP_FALL ? '{}' : jumpText(kind, target, indexOf)) + '\n');
 						}
 					}
 					buf.add('$ind\tdefault:\n');
@@ -585,20 +641,23 @@ class Emitter {
 					emitFallThrough(buf, fn, ind, indexOf, retAddr);
 				} else if (nativeLoop != null && taken == nativeLoop) {
 					buf.add('${ind}if (!$cond) break;\n');
-				} else if (linearNext != null && taken == linearNext && notTaken == linearNext) {
-					// Both outcomes are the following block; the slot and cycles already ran.
-				} else if (takenIdx >= 0 && notTakenIdx >= 0) {
-					buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
-				} else if (takenIdx >= 0) {
-					buf.add('${ind}if ($cond) { bb = $takenIdx; continue; } else {\n');
-					emitReturn(buf, ind + '\t');
-					buf.add('${ind}}\n');
-				} else if (notTakenIdx >= 0) {
-					buf.add('${ind}if ($cond) {\n');
-					emitReturn(buf, ind + '\t');
-					buf.add('${ind}} else { bb = $notTakenIdx; continue; }\n');
 				} else {
-					emitReturn(buf, ind);
+					final takenKind = jumpKind(taken, indexOf);
+					final notTakenKind = jumpKind(notTaken, indexOf);
+					if (takenKind == JUMP_FALL && notTakenKind == JUMP_FALL) {
+						// Both outcomes are the following block; the slot and cycles already ran.
+					} else if (takenKind == JUMP_DISPATCH && notTakenKind == JUMP_DISPATCH) {
+						buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
+					} else if (takenKind == JUMP_RETURN && notTakenKind == JUMP_RETURN) {
+						emitReturn(buf, ind);
+					} else if (takenKind == JUMP_FALL) {
+						buf.add('${ind}if (!$cond) ' + arm(notTakenKind, notTaken, indexOf, ind) + ' else {}\n');
+					} else if (notTakenKind == JUMP_FALL) {
+						buf.add('${ind}if ($cond) ' + arm(takenKind, taken, indexOf, ind) + ' else {}\n');
+					} else {
+						buf.add('${ind}if ($cond) ' + arm(takenKind, taken, indexOf, ind)
+							+ ' else ' + arm(notTakenKind, notTaken, indexOf, ind) + '\n');
+					}
 				}
 
 			case _:
@@ -633,16 +692,73 @@ class Emitter {
 
 	function emitFallThrough(buf:StringBuf, fn:Func, ind:String, indexOf:Map<Int, Int>,
 			addr:Int):Void {
-		if (linearNext != null && addr == linearNext) return;
-		if (indexOf.exists(addr)) buf.add('${ind}bb = ${indexOf.get(addr)}; continue;\n');
-		else emitReturn(buf, ind);
+		emitJump(buf, ind, addr, indexOf);
 	}
 
 	function emitGoto(buf:StringBuf, ind:String, target:Int, indexOf:Map<Int, Int>,
 			fallback:Int):Void {
-		if (linearNext != null && target == linearNext) return;
-		if (indexOf.exists(target)) buf.add('${ind}bb = ${indexOf.get(target)}; continue;\n');
-		else emitReturn(buf, ind);
+		emitJump(buf, ind, target, indexOf);
+	}
+
+	// ---- transfers -------------------------------------------------------------------------------
+
+	static inline final JUMP_FALL = 0;       // control falls into the target: nothing to emit
+	static inline final JUMP_CONTINUE = 1;   // the enclosing native loop's header
+	static inline final JUMP_BREAK = 2;      // out of the enclosing native loop, target recorded
+	static inline final JUMP_FORWARD = 3;    // a later part of an enclosing sequence, recorded
+	static inline final JUMP_DISPATCH = 4;   // another case of the block dispatcher
+	static inline final JUMP_RETURN = 5;     // outside the function: publish and return
+
+	/**
+		How control reaches `target` from here. The order is the nesting: the block that follows
+		in a sequence needs no statement; the innermost native loop owns its header and, by a
+		recorded `break`, everything outside its members; a later part of an enclosing sequence
+		is reached by recording it and letting the guards skip; anything else still in the
+		function goes through the dispatcher — which no native loop may contain — and anything
+		outside it leaves.
+	**/
+	function jumpKind(target:Int, indexOf:Map<Int, Int>):Int {
+		if (linearNext != null && target == linearNext) return JUMP_FALL;
+		if (loopHead != null && target == loopHead) return JUMP_CONTINUE;
+		if (loopHead != null && !loopMembers.exists(idOf(target))) return JUMP_BREAK;
+		var frame = frames.length - 1;
+		while (frame >= loopFrame) {
+			final at = frames[frame].entries.indexOf(target);
+			if (at > frames[frame].index) return JUMP_FORWARD;
+			if (at >= 0) throw 'backward transfer to ${hex(target)} inside a sequence at ${hex(functionAddr)}';
+			frame--;
+		}
+		if (loopHead != null) throw 'unstructured transfer to ${hex(target)} inside a native loop at ${hex(functionAddr)}';
+		return indexOf.exists(target) ? JUMP_DISPATCH : JUMP_RETURN;
+	}
+
+	inline function idOf(target:Int):Int return ir.byAddress.get(target).resumeId;
+
+	/** The one-line statement for a jump that is not a fall-through or a return. */
+	function jumpText(kind:Int, target:Int, indexOf:Map<Int, Int>):String {
+		return switch (kind) {
+			case JUMP_CONTINUE: 'resume = -1; continue;';
+			case JUMP_BREAK: 'resume = ${idOf(target)}; break;';
+			case JUMP_FORWARD: 'resume = ${idOf(target)};';
+			case _: 'bb = ${indexOf.get(target)}; continue;';
+		};
+	}
+
+	function emitJump(buf:StringBuf, ind:String, target:Int, indexOf:Map<Int, Int>):Void {
+		final kind = jumpKind(target, indexOf);
+		if (kind == JUMP_FALL) return;
+		if (kind == JUMP_RETURN) emitReturn(buf, ind);
+		else buf.add(ind + jumpText(kind, target, indexOf) + '\n');
+	}
+
+	/** One arm of a branch as a braced block: a one-liner inline, a return on its own lines. */
+	function arm(kind:Int, target:Int, indexOf:Map<Int, Int>, ind:String):String {
+		if (kind != JUMP_RETURN) return '{ ' + jumpText(kind, target, indexOf) + ' }';
+		final lines = new StringBuf();
+		lines.add('{\n');
+		emitReturn(lines, ind + '\t');
+		lines.add(ind + '}');
+		return lines.toString();
 	}
 
 	// ---- instructions without a delay slot -------------------------------------------------------
@@ -833,4 +949,11 @@ class Emitter {
 
 	static function vectorName(a:Int):String
 		return a == 0xA0 ? "A0" : (a == 0xB0 ? "B0" : "C0");
+}
+
+/** One enclosing sequence during emission: its part entries, and which part is being emitted. */
+private class SequenceFrame {
+	public final entries:Array<Int>;
+	public var index:Int = 0;
+	public function new(entries:Array<Int>) this.entries = entries;
 }
