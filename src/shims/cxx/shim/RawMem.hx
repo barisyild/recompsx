@@ -61,6 +61,16 @@ class RawMem {
 	public static inline function set16Index(m:RawBuf, index:Int, v:Int):Void
 		set16(m, index << 1, v);
 
+	/** `count` halfwords from a halfword index, all one value. A plain loop the C++ compiler
+	    vectorises; the JS twin uses the typed array's `fill`. Same bytes either way. */
+	public static inline function fill16Index(m:RawBuf, index:Int, count:Int, v:Int):Void {
+		var i = 0;
+		while (i < count) {
+			set16(m, (index + i) << 1, v);
+			i++;
+		}
+	}
+
 	public static inline function set32(m:RawBuf, a:Int, v:Int):Void {
 		set8(m, a, v);
 		set8(m, a + 1, v >>> 8);

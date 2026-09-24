@@ -41,13 +41,9 @@ class Vram {
 
 	public static inline function rowStart(y:Int):Int return y * WIDTH;
 
-	public static inline function fillLinear(start:Int, count:Int, v:Int):Void {
-		var i = 0;
-		while (i < count) {
-			setLinear(start + i, v);
-			i++;
-		}
-	}
+	/** `count` halfwords from a linear index, one value: a row of a fill or of an opaque span. */
+	public static inline function fillLinear(start:Int, count:Int, v:Int):Void
+		RawMem.fill16Index(data, start, count, v);
 
 	/** Packs 5-bit components into BGR555. */
 	public static inline function rgb(r:Int, g:Int, b:Int):Int

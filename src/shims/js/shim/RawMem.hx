@@ -70,6 +70,23 @@ class RawMem {
 		}
 	}
 
+	/**
+		`count` halfwords from a halfword index, all one value. The typed array's own `fill`
+		stores exactly what `set16Index` would, element by element, and is a single native call
+		where the loop was a store per pixel of every opaque span and clear the rasteriser draws.
+	**/
+	public static inline function fill16Index(m:RawBuf, index:Int, count:Int, v:Int):Void {
+		if (LE) {
+			js.Syntax.code("{0}.fill({1}, {2}, {3})", m.u16, v, index, index + count);
+		} else {
+			var i = 0;
+			while (i < count) {
+				set16(m, (index + i) << 1, v);
+				i++;
+			}
+		}
+	}
+
 	public static inline function set32(m:RawBuf, a:Int, v:Int):Void {
 		if (LE && (a & 3) == 0) {
 			m.i32[a >> 2] = v;
