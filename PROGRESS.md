@@ -1231,6 +1231,15 @@ What remains in `rtps` is the arithmetic itself — nine multiply-adds with thei
 the table divide, the saturations, two FIFOs — and V8 loads a static field at a constant
 offset, so the static traffic is not the lever it looks like. GTE closed here: −4.4 % mean and
 −3.8 % min over the two steps.
+The user's in-game profile (6×, locked) puts MVMVA first among the GTE's commands — the
+engine's overlay code (`f_800c353c → … → f_800330cc`) calls it per vertex — with RTPS second
+and the sounding mixer between them. `mvmva` chose its matrix, vector and translation by
+copying them into nine plus six static scratch fields and reading them back lane by lane;
+they are locals now, passed to `mvmvaNormal`/`mvmvaFarColor`, and the two lighting commands
+that also fed the lanes pass their constant selections directly, so the scratch and the three
+selectors are gone. GteOps 1cf89aa2 and Acc64 unchanged, four digests unchanged. A scratchpad
+microbenchmark (`Gte.cmdMvmva`, 3 M calls): 30.4–31.5 → 25.2–26.6 ns per call; `rtps`
+untouched at ~45 ns. Game, three rounds `--no-audio`: mean 16.66 → 16.08 s.
 Next: GP0 → WebGL uniforms per batch; a mobile GC profile; the remaining 160 scavenges.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local

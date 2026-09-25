@@ -621,14 +621,6 @@ class Gte {
 
 	// ---- MVMVA and the arithmetic family ---------------------------------------------------------------
 
-	// The operands MVMVA picks out of its instruction word, copied here rather than branched on
-	// three times per lane. Nine matrix elements, three vector components, three translation ones.
-	static var mm11 = 0; static var mm12 = 0; static var mm13 = 0;
-	static var mm21 = 0; static var mm22 = 0; static var mm23 = 0;
-	static var mm31 = 0; static var mm32 = 0; static var mm33 = 0;
-	static var mvX = 0; static var mvY = 0; static var mvZ = 0;
-	static var mtX = 0; static var mtY = 0; static var mtZ = 0;
-
 	/**
 		Multiply a vector by a matrix and add a translation — the general form of every other
 		transform the GTE does, with all three operands chosen by the instruction word.
@@ -646,31 +638,69 @@ class Gte {
 		silicon does, and a game that stumbles into either has been calibrated against the result.
 	**/
 	static function mvmva(sf:Int, lm:Bool, imm25:Int):Void {
-		selectMatrix((imm25 >> 17) & 3);
-		selectVector((imm25 >> 15) & 3);
+		final mx = (imm25 >> 17) & 3;
+		final vs = (imm25 >> 15) & 3;
 		final cv = (imm25 >> 13) & 3;
-		selectTranslation(cv);
-		if (cv == 2) mvmvaFarColor(sf, lm);
-		else mvmvaNormal(sf, lm);
+		// The matrix, the vector and the translation the instruction word names, chosen into
+		// locals. They used to be copied through static scratch and read back lane by lane,
+		// which cost about as much as the multiplies they fed.
+		var m11 = 0, m12 = 0, m13 = 0, m21 = 0, m22 = 0, m23 = 0, m31 = 0, m32 = 0, m33 = 0;
+		if (mx == 0) {
+			m11 = rt11; m12 = rt12; m13 = rt13;
+			m21 = rt21; m22 = rt22; m23 = rt23;
+			m31 = rt31; m32 = rt32; m33 = rt33;
+		} else if (mx == 1) {
+			m11 = l11; m12 = l12; m13 = l13;
+			m21 = l21; m22 = l22; m23 = l23;
+			m31 = l31; m32 = l32; m33 = l33;
+		} else if (mx == 2) {
+			m11 = lr1; m12 = lr2; m13 = lr3;
+			m21 = lg1; m22 = lg2; m23 = lg3;
+			m31 = lb1; m32 = lb2; m33 = lb3;
+		} else {
+			// Not a matrix at all: three registers that happen to sit where one would be read
+			// from, per psx-spx's "-R*10h, +R*10h, IR0, RT13 x3, RT22 x3". R is RGBC's red byte.
+			final r = (rgbc & 0xFF) << 4;
+			m11 = -r; m12 = r; m13 = ir0;
+			m21 = rt13; m22 = rt13; m23 = rt13;
+			m31 = rt22; m32 = rt22; m33 = rt22;
+		}
+		var vx = 0, vy = 0, vz = 0;
+		if (vs == 3) {
+			vx = ir1; vy = ir2; vz = ir3;
+		} else {
+			vx = vecX(vs); vy = vecY(vs); vz = vecZ(vs);
+		}
+		var tx = 0, ty = 0, tz = 0;
+		if (cv == 0) {
+			tx = trX; ty = trY; tz = trZ;
+		} else if (cv == 1) {
+			tx = rbk; ty = gbk; tz = bbk;
+		} else if (cv == 2) {
+			tx = rfc; ty = gfc; tz = bfc;
+		} else {}
+		if (cv == 2) mvmvaFarColor(sf, lm, m11, m12, m13, m21, m22, m23, m31, m32, m33, vx, vy, vz, tx, ty, tz);
+		else mvmvaNormal(sf, lm, m11, m12, m13, m21, m22, m23, m31, m32, m33, vx, vy, vz, tx, ty, tz);
 	}
 
-	static function mvmvaNormal(sf:Int, lm:Bool):Void {
-		var m = Acc.shl12(mtX);
-		m = step44(Acc.mac(m, mm11, mvX), F_MAC1_POS, F_MAC1_NEG);
-		m = step44(Acc.mac(m, mm12, mvY), F_MAC1_POS, F_MAC1_NEG);
-		m = step44(Acc.mac(m, mm13, mvZ), F_MAC1_POS, F_MAC1_NEG);
+	static function mvmvaNormal(sf:Int, lm:Bool, m11:Int, m12:Int, m13:Int, m21:Int, m22:Int,
+			m23:Int, m31:Int, m32:Int, m33:Int, vx:Int, vy:Int, vz:Int, tx:Int, ty:Int, tz:Int):Void {
+		var m = Acc.shl12(tx);
+		m = step44(Acc.mac(m, m11, vx), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, m12, vy), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, m13, vz), F_MAC1_POS, F_MAC1_NEG);
 		mac1 = shiftBySf(m, sf);
 
-		m = Acc.shl12(mtY);
-		m = step44(Acc.mac(m, mm21, mvX), F_MAC2_POS, F_MAC2_NEG);
-		m = step44(Acc.mac(m, mm22, mvY), F_MAC2_POS, F_MAC2_NEG);
-		m = step44(Acc.mac(m, mm23, mvZ), F_MAC2_POS, F_MAC2_NEG);
+		m = Acc.shl12(ty);
+		m = step44(Acc.mac(m, m21, vx), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, m22, vy), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, m23, vz), F_MAC2_POS, F_MAC2_NEG);
 		mac2 = shiftBySf(m, sf);
 
-		m = Acc.shl12(mtZ);
-		m = step44(Acc.mac(m, mm31, mvX), F_MAC3_POS, F_MAC3_NEG);
-		m = step44(Acc.mac(m, mm32, mvY), F_MAC3_POS, F_MAC3_NEG);
-		m = step44(Acc.mac(m, mm33, mvZ), F_MAC3_POS, F_MAC3_NEG);
+		m = Acc.shl12(tz);
+		m = step44(Acc.mac(m, m31, vx), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, m32, vy), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, m33, vz), F_MAC3_POS, F_MAC3_NEG);
 		mac3 = shiftBySf(m, sf);
 
 		copyMacToIr(lm);
@@ -685,63 +715,22 @@ class Gte {
 		the first product, purely so its overflows reach FLAG, and once without either, for the
 		value that is kept.
 	**/
-	static function mvmvaFarColor(sf:Int, lm:Bool):Void {
-		mac1 = farColorLane(sf, mtX, mm11, mm12, mm13, F_MAC1_POS, F_MAC1_NEG);
-		mac2 = farColorLane(sf, mtY, mm21, mm22, mm23, F_MAC2_POS, F_MAC2_NEG);
-		mac3 = farColorLane(sf, mtZ, mm31, mm32, mm33, F_MAC3_POS, F_MAC3_NEG);
+	static function mvmvaFarColor(sf:Int, lm:Bool, m11:Int, m12:Int, m13:Int, m21:Int, m22:Int,
+			m23:Int, m31:Int, m32:Int, m33:Int, vx:Int, vy:Int, vz:Int, tx:Int, ty:Int, tz:Int):Void {
+		mac1 = farColorLane(sf, tx, m11, m12, m13, vx, vy, vz, F_MAC1_POS, F_MAC1_NEG);
+		mac2 = farColorLane(sf, ty, m21, m22, m23, vx, vy, vz, F_MAC2_POS, F_MAC2_NEG);
+		mac3 = farColorLane(sf, tz, m31, m32, m33, vx, vy, vz, F_MAC3_POS, F_MAC3_NEG);
 		copyMacToIr(lm);
 	}
 
-	static function farColorLane(sf:Int, t:Int, m1:Int, m2:Int, m3:Int, pos:Int, neg:Int):Int {
+	static function farColorLane(sf:Int, t:Int, m1:Int, m2:Int, m3:Int, vx:Int, vy:Int, vz:Int,
+			pos:Int, neg:Int):Int {
 		// For the flags only.
-		step44(Acc.mac(Acc.shl12(t), m1, mvX), pos, neg);
+		step44(Acc.mac(Acc.shl12(t), m1, vx), pos, neg);
 		// For the value.
-		var m = step44(Acc.mac(Acc.zero(), m2, mvY), pos, neg);
-		m = step44(Acc.mac(m, m3, mvZ), pos, neg);
+		var m = step44(Acc.mac(Acc.zero(), m2, vy), pos, neg);
+		m = step44(Acc.mac(m, m3, vz), pos, neg);
 		return shiftBySf(m, sf);
-	}
-
-	static function selectMatrix(mx:Int):Void {
-		if (mx == 0) {
-			mm11 = rt11; mm12 = rt12; mm13 = rt13;
-			mm21 = rt21; mm22 = rt22; mm23 = rt23;
-			mm31 = rt31; mm32 = rt32; mm33 = rt33;
-		} else if (mx == 1) {
-			mm11 = l11; mm12 = l12; mm13 = l13;
-			mm21 = l21; mm22 = l22; mm23 = l23;
-			mm31 = l31; mm32 = l32; mm33 = l33;
-		} else if (mx == 2) {
-			mm11 = lr1; mm12 = lr2; mm13 = lr3;
-			mm21 = lg1; mm22 = lg2; mm23 = lg3;
-			mm31 = lb1; mm32 = lb2; mm33 = lb3;
-		} else {
-			// Not a matrix at all: three registers that happen to sit where one would be read
-			// from, per psx-spx's "-R*10h, +R*10h, IR0, RT13 x3, RT22 x3". R is RGBC's red byte.
-			final r = (rgbc & 0xFF) << 4;
-			mm11 = -r; mm12 = r; mm13 = ir0;
-			mm21 = rt13; mm22 = rt13; mm23 = rt13;
-			mm31 = rt22; mm32 = rt22; mm33 = rt22;
-		}
-	}
-
-	static function selectVector(v:Int):Void {
-		if (v == 3) {
-			mvX = ir1; mvY = ir2; mvZ = ir3;
-		} else {
-			mvX = vecX(v); mvY = vecY(v); mvZ = vecZ(v);
-		}
-	}
-
-	static function selectTranslation(cv:Int):Void {
-		if (cv == 0) {
-			mtX = trX; mtY = trY; mtZ = trZ;
-		} else if (cv == 1) {
-			mtX = rbk; mtY = gbk; mtZ = bbk;
-		} else if (cv == 2) {
-			mtX = rfc; mtY = gfc; mtZ = bfc;
-		} else {
-			mtX = 0; mtY = 0; mtZ = 0;
-		}
 	}
 
 	/** `[MAC] = [IR1²,IR2²,IR3²] SHR (sf*12)`. Always positive, so `lm` cannot bite. */
@@ -900,18 +889,15 @@ class Gte {
 
 	/** `(LLM * V) SAR (sf*12)` — MVMVA against the light matrix with no translation. */
 	static function lightNormal(sf:Int, lm:Bool, v:Int):Void {
-		selectMatrix(1);
-		selectVector(v);
-		selectTranslation(3);
-		mvmvaNormal(sf, lm);
+		final vx = v == 3 ? ir1 : vecX(v);
+		final vy = v == 3 ? ir2 : vecY(v);
+		final vz = v == 3 ? ir3 : vecZ(v);
+		mvmvaNormal(sf, lm, l11, l12, l13, l21, l22, l23, l31, l32, l33, vx, vy, vz, 0, 0, 0);
 	}
 
 	/** `(BK*1000h + LCM * IR) SAR (sf*12)` — the colour matrix onto the background colour. */
 	static function lightColour(sf:Int, lm:Bool):Void {
-		selectMatrix(2);
-		selectVector(3);
-		selectTranslation(1);
-		mvmvaNormal(sf, lm);
+		mvmvaNormal(sf, lm, lr1, lr2, lr3, lg1, lg2, lg3, lb1, lb2, lb3, ir1, ir2, ir3, rbk, gbk, bbk);
 	}
 
 	/**
