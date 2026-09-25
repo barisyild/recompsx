@@ -6,7 +6,7 @@
 The multi-second freezes (the last note looping) were disc waits: one Flycast 30-vblank window on
 a loading screen spent 2492 of 3007 ms in `disc`. A seek read a whole 128 KB window synchronously
 and each prefetch stepped back 4 KB. Now a seek reads 16 KB and the next windows follow it back to
-back, doubling to 128 KB. Simulated: worst stall -35..40 %, total -30..65 %. Awaiting Flycast.
+back, doubling to 128 KB. Simulated: worst stall -35..40 %, total -30..65 %. Flycast: the user sees a clear improvement.
 reflaxe.CPP `--max` is the Dreamcast baseline (the user's measurement); Hatchet is set aside.
 
 **2026-09-26: the game runs bit-identically through Hatchet (Haxe -> C++98), a reflaxe.CPP candidate.**
@@ -1135,7 +1135,8 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 2026-09-26 [claude] DC disc read-ahead (backend_kos.c): seek reads 16 KB, then contiguous windows
 doubling to 128 KB; reads across the seam copy from both. Cause: loading-screen overlay disc 2492 of
 3007 ms. Host harness: 471 MB random + the game's 12,100 reads byte-exact. Rebuilt
-out/dc/crashbash-reflaxe-max.cdi. Next: the user's Flycast check of `disc` on the same screen.
+out/dc/crashbash-reflaxe-max.cdi; the user reports a clear improvement on Flycast. Next if freezes
+remain: a seek-time prefetch hint (CdlSetloc/ReadN) so the drive starts before the game asks.
 
 2026-09-26 [claude] `build-dc.sh --max`: Release -O3 + LTO, -fno-exceptions -fno-rtti (neither output uses
 them), own build-dc-max dir. DC images: reflaxe-max 8.02 MB, hatchet-max 7.00 MB loaded; CDIs
