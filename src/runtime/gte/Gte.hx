@@ -3,6 +3,7 @@ package gte;
 import core.CpuState;
 import core.Runtime;
 import shim.I64;
+import shim.Acc;
 
 /**
 	The Geometry Transformation Engine — coprocessor 2, and the reason PlayStation games have
@@ -523,27 +524,27 @@ class Gte {
 	static function rtps(sf:Int, lm:Bool, v:Int, last:Bool):Void {
 		final vx = vecX(v), vy = vecY(v), vz = vecZ(v);
 
-		I64.setShl12(trX);
-		I64.addProduct16(rt11, vx); step44(F_MAC1_POS, F_MAC1_NEG);
-		I64.addProduct16(rt12, vy); step44(F_MAC1_POS, F_MAC1_NEG);
-		I64.addProduct16(rt13, vz); step44(F_MAC1_POS, F_MAC1_NEG);
-		mac1 = shiftBySf(sf);
+		var m = Acc.shl12(trX);
+		m = step44(Acc.mac(m, rt11, vx), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, rt12, vy), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, rt13, vz), F_MAC1_POS, F_MAC1_NEG);
+		mac1 = shiftBySf(m, sf);
 
-		I64.setShl12(trY);
-		I64.addProduct16(rt21, vx); step44(F_MAC2_POS, F_MAC2_NEG);
-		I64.addProduct16(rt22, vy); step44(F_MAC2_POS, F_MAC2_NEG);
-		I64.addProduct16(rt23, vz); step44(F_MAC2_POS, F_MAC2_NEG);
-		mac2 = shiftBySf(sf);
+		m = Acc.shl12(trY);
+		m = step44(Acc.mac(m, rt21, vx), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, rt22, vy), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, rt23, vz), F_MAC2_POS, F_MAC2_NEG);
+		mac2 = shiftBySf(m, sf);
 
-		I64.setShl12(trZ);
-		I64.addProduct16(rt31, vx); step44(F_MAC3_POS, F_MAC3_NEG);
-		I64.addProduct16(rt32, vy); step44(F_MAC3_POS, F_MAC3_NEG);
-		I64.addProduct16(rt33, vz); step44(F_MAC3_POS, F_MAC3_NEG);
+		m = Acc.shl12(trZ);
+		m = step44(Acc.mac(m, rt31, vx), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, rt32, vy), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, rt33, vz), F_MAC3_POS, F_MAC3_NEG);
 		// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation flag
 		// is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games rely on
 		// it. psx-spx records the same quirk.
-		final mac3Shifted = I64.shr12();
-		mac3 = shiftBySf(sf);
+		final mac3Shifted = Acc.shr12(m);
+		mac3 = shiftBySf(m, sf);
 
 		ir1 = saturateIr(mac1, lm, F_IR1);
 		ir2 = saturateIr(mac2, lm, F_IR2);
@@ -553,15 +554,13 @@ class Gte {
 
 		final n = unrDivide();
 
-		I64.set(ofx);
-		I64.addProductWide(ir1, n);
-		mac0 = mac0From32();
-		final sx = saturateSxy(I64.shr16(), F_SX2);
+		m = Acc.mac(Acc.of(ofx), ir1, n);
+		mac0 = mac0From32(m);
+		final sx = saturateSxy(Acc.shr16(m), F_SX2);
 
-		I64.set(ofy);
-		I64.addProductWide(ir2, n);
-		mac0 = mac0From32();
-		final sy = saturateSxy(I64.shr16(), F_SY2);
+		m = Acc.mac(Acc.of(ofy), ir2, n);
+		mac0 = mac0From32(m);
+		final sy = saturateSxy(Acc.shr16(m), F_SY2);
 
 		pushSxy(pack(sx, sy));
 
@@ -578,9 +577,7 @@ class Gte {
 
 	/** `IR0 = DQB + DQA * n`, the fog factor a game multiplies its colours by. */
 	static function depthCueing(n:Int):Void {
-		I64.set(dqb);
-		I64.addProductWide(dqa, n);
-		mac0 = mac0From32();
+		mac0 = mac0From32(Acc.mac(Acc.of(dqb), dqa, n));
 		ir0 = saturateIr0(mac0);
 	}
 
@@ -595,36 +592,33 @@ class Gte {
 		final x0 = sxyX(sxy0), y0 = sxyY(sxy0);
 		final x1 = sxyX(sxy1), y1 = sxyY(sxy1);
 		final x2 = sxyX(sxy2), y2 = sxyY(sxy2);
-		I64.setZero();
-		I64.addProduct16(x0, y1);
-		I64.addProduct16(x1, y2);
-		I64.addProduct16(x2, y0);
-		I64.addProduct16(-x0, y2);
-		I64.addProduct16(-x1, y0);
-		I64.addProduct16(-x2, y1);
-		mac0 = mac0From32();
+		var m = Acc.mac(Acc.zero(), x0, y1);
+		m = Acc.mac(m, x1, y2);
+		m = Acc.mac(m, x2, y0);
+		m = Acc.mac(m, -x0, y2);
+		m = Acc.mac(m, -x1, y0);
+		m = Acc.mac(m, -x2, y1);
+		mac0 = mac0From32(m);
 	}
 
 	/** The average depth of three vertices, scaled — what a game sorts its ordering table by. */
 	static function avsz3():Void {
-		I64.setZero();
 		// Four separate products, never ZSF times a sum: 32767 x 65535 only just fits in an Int,
 		// and a sum of three depths times ZSF would not.
-		I64.addProduct16(zsf3, sz1 & 0xFFFF);
-		I64.addProduct16(zsf3, sz2 & 0xFFFF);
-		I64.addProduct16(zsf3, sz3 & 0xFFFF);
-		mac0 = mac0From32();
-		otz = saturateSz3(I64.shr12());
+		var m = Acc.mac(Acc.zero(), zsf3, sz1 & 0xFFFF);
+		m = Acc.mac(m, zsf3, sz2 & 0xFFFF);
+		m = Acc.mac(m, zsf3, sz3 & 0xFFFF);
+		mac0 = mac0From32(m);
+		otz = saturateSz3(Acc.shr12(m));
 	}
 
 	static function avsz4():Void {
-		I64.setZero();
-		I64.addProduct16(zsf4, sz0 & 0xFFFF);
-		I64.addProduct16(zsf4, sz1 & 0xFFFF);
-		I64.addProduct16(zsf4, sz2 & 0xFFFF);
-		I64.addProduct16(zsf4, sz3 & 0xFFFF);
-		mac0 = mac0From32();
-		otz = saturateSz3(I64.shr12());
+		var m = Acc.mac(Acc.zero(), zsf4, sz0 & 0xFFFF);
+		m = Acc.mac(m, zsf4, sz1 & 0xFFFF);
+		m = Acc.mac(m, zsf4, sz2 & 0xFFFF);
+		m = Acc.mac(m, zsf4, sz3 & 0xFFFF);
+		mac0 = mac0From32(m);
+		otz = saturateSz3(Acc.shr12(m));
 	}
 
 	// ---- MVMVA and the arithmetic family ---------------------------------------------------------------
@@ -663,23 +657,23 @@ class Gte {
 	}
 
 	static function mvmvaNormal(sf:Int, lm:Bool):Void {
-		I64.setShl12(mtX);
-		I64.addProduct16(mm11, mvX); step44(F_MAC1_POS, F_MAC1_NEG);
-		I64.addProduct16(mm12, mvY); step44(F_MAC1_POS, F_MAC1_NEG);
-		I64.addProduct16(mm13, mvZ); step44(F_MAC1_POS, F_MAC1_NEG);
-		mac1 = shiftBySf(sf);
+		var m = Acc.shl12(mtX);
+		m = step44(Acc.mac(m, mm11, mvX), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, mm12, mvY), F_MAC1_POS, F_MAC1_NEG);
+		m = step44(Acc.mac(m, mm13, mvZ), F_MAC1_POS, F_MAC1_NEG);
+		mac1 = shiftBySf(m, sf);
 
-		I64.setShl12(mtY);
-		I64.addProduct16(mm21, mvX); step44(F_MAC2_POS, F_MAC2_NEG);
-		I64.addProduct16(mm22, mvY); step44(F_MAC2_POS, F_MAC2_NEG);
-		I64.addProduct16(mm23, mvZ); step44(F_MAC2_POS, F_MAC2_NEG);
-		mac2 = shiftBySf(sf);
+		m = Acc.shl12(mtY);
+		m = step44(Acc.mac(m, mm21, mvX), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, mm22, mvY), F_MAC2_POS, F_MAC2_NEG);
+		m = step44(Acc.mac(m, mm23, mvZ), F_MAC2_POS, F_MAC2_NEG);
+		mac2 = shiftBySf(m, sf);
 
-		I64.setShl12(mtZ);
-		I64.addProduct16(mm31, mvX); step44(F_MAC3_POS, F_MAC3_NEG);
-		I64.addProduct16(mm32, mvY); step44(F_MAC3_POS, F_MAC3_NEG);
-		I64.addProduct16(mm33, mvZ); step44(F_MAC3_POS, F_MAC3_NEG);
-		mac3 = shiftBySf(sf);
+		m = Acc.shl12(mtZ);
+		m = step44(Acc.mac(m, mm31, mvX), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, mm32, mvY), F_MAC3_POS, F_MAC3_NEG);
+		m = step44(Acc.mac(m, mm33, mvZ), F_MAC3_POS, F_MAC3_NEG);
+		mac3 = shiftBySf(m, sf);
 
 		copyMacToIr(lm);
 	}
@@ -702,13 +696,11 @@ class Gte {
 
 	static function farColorLane(sf:Int, t:Int, m1:Int, m2:Int, m3:Int, pos:Int, neg:Int):Int {
 		// For the flags only.
-		I64.setShl12(t);
-		I64.addProduct16(m1, mvX); step44(pos, neg);
+		step44(Acc.mac(Acc.shl12(t), m1, mvX), pos, neg);
 		// For the value.
-		I64.setZero();
-		I64.addProduct16(m2, mvY); step44(pos, neg);
-		I64.addProduct16(m3, mvZ); step44(pos, neg);
-		return shiftBySf(sf);
+		var m = step44(Acc.mac(Acc.zero(), m2, mvY), pos, neg);
+		m = step44(Acc.mac(m, m3, mvZ), pos, neg);
+		return shiftBySf(m, sf);
 	}
 
 	static function selectMatrix(mx:Int):Void {
@@ -756,9 +748,9 @@ class Gte {
 
 	/** `[MAC] = [IR1²,IR2²,IR3²] SHR (sf*12)`. Always positive, so `lm` cannot bite. */
 	static function sqr(sf:Int):Void {
-		I64.setZero(); I64.addProduct16(ir1, ir1); mac1 = shiftBySf(sf);
-		I64.setZero(); I64.addProduct16(ir2, ir2); mac2 = shiftBySf(sf);
-		I64.setZero(); I64.addProduct16(ir3, ir3); mac3 = shiftBySf(sf);
+		mac1 = shiftBySf(Acc.mac(Acc.zero(), ir1, ir1), sf);
+		mac2 = shiftBySf(Acc.mac(Acc.zero(), ir2, ir2), sf);
+		mac3 = shiftBySf(Acc.mac(Acc.zero(), ir3, ir3), sf);
 		copyMacToIr(false);
 	}
 
@@ -771,15 +763,9 @@ class Gte {
 	static function crossProduct(sf:Int, lm:Bool):Void {
 		final d1 = rt11, d2 = rt22, d3 = rt33;
 		final a = ir1, b = ir2, c = ir3;
-		I64.setZero();
-		I64.addProduct16(c, d2); I64.addProduct16(-b, d3);
-		step44(F_MAC1_POS, F_MAC1_NEG); mac1 = shiftBySf(sf);
-		I64.setZero();
-		I64.addProduct16(a, d3); I64.addProduct16(-c, d1);
-		step44(F_MAC2_POS, F_MAC2_NEG); mac2 = shiftBySf(sf);
-		I64.setZero();
-		I64.addProduct16(b, d1); I64.addProduct16(-a, d2);
-		step44(F_MAC3_POS, F_MAC3_NEG); mac3 = shiftBySf(sf);
+		mac1 = shiftBySf(step44(Acc.mac(Acc.mac(Acc.zero(), c, d2), -b, d3), F_MAC1_POS, F_MAC1_NEG), sf);
+		mac2 = shiftBySf(step44(Acc.mac(Acc.mac(Acc.zero(), a, d3), -c, d1), F_MAC2_POS, F_MAC2_NEG), sf);
+		mac3 = shiftBySf(step44(Acc.mac(Acc.mac(Acc.zero(), b, d1), -a, d2), F_MAC3_POS, F_MAC3_NEG), sf);
 		copyMacToIr(lm);
 	}
 
@@ -796,12 +782,9 @@ class Gte {
 	}
 
 	static function interpolateBy(b1:Int, b2:Int, b3:Int, sf:Int):Void {
-		I64.set(b1); I64.addProduct16(ir1, ir0);
-		step44(F_MAC1_POS, F_MAC1_NEG); mac1 = shiftBySf(sf);
-		I64.set(b2); I64.addProduct16(ir2, ir0);
-		step44(F_MAC2_POS, F_MAC2_NEG); mac2 = shiftBySf(sf);
-		I64.set(b3); I64.addProduct16(ir3, ir0);
-		step44(F_MAC3_POS, F_MAC3_NEG); mac3 = shiftBySf(sf);
+		mac1 = shiftBySf(step44(Acc.mac(Acc.of(b1), ir1, ir0), F_MAC1_POS, F_MAC1_NEG), sf);
+		mac2 = shiftBySf(step44(Acc.mac(Acc.of(b2), ir2, ir0), F_MAC2_POS, F_MAC2_NEG), sf);
+		mac3 = shiftBySf(step44(Acc.mac(Acc.of(b3), ir3, ir0), F_MAC3_POS, F_MAC3_NEG), sf);
 	}
 
 	static inline function shlBySf(v:Int, sf:Int):Int {
@@ -837,9 +820,9 @@ class Gte {
 	}
 
 	static function intpl(sf:Int, lm:Bool):Void {
-		I64.setShl12(ir1); mac1 = I64.low32();
-		I64.setShl12(ir2); mac2 = I64.low32();
-		I64.setShl12(ir3); mac3 = I64.low32();
+		mac1 = Acc.low32(Acc.shl12(ir1));
+		mac2 = Acc.low32(Acc.shl12(ir2));
+		mac3 = Acc.low32(Acc.shl12(ir3));
 		farColorInterpolate(sf, lm);
 	}
 
@@ -941,21 +924,15 @@ class Gte {
 		byte times a signed 16-bit accumulator, shifted four — so the accumulator is loaded whole.
 	**/
 	static function materialTimesIr():Void {
-		I64.set((shim.IntMath.mul(rgbc & 0xFF, ir1) << 4) | 0);
-		step44(F_MAC1_POS, F_MAC1_NEG);
-		mac1 = I64.low32();
-		I64.set((shim.IntMath.mul((rgbc >> 8) & 0xFF, ir2) << 4) | 0);
-		step44(F_MAC2_POS, F_MAC2_NEG);
-		mac2 = I64.low32();
-		I64.set((shim.IntMath.mul((rgbc >> 16) & 0xFF, ir3) << 4) | 0);
-		step44(F_MAC3_POS, F_MAC3_NEG);
-		mac3 = I64.low32();
+		mac1 = Acc.low32(step44(Acc.of((shim.IntMath.mul(rgbc & 0xFF, ir1) << 4) | 0), F_MAC1_POS, F_MAC1_NEG));
+		mac2 = Acc.low32(step44(Acc.of((shim.IntMath.mul((rgbc >> 8) & 0xFF, ir2) << 4) | 0), F_MAC2_POS, F_MAC2_NEG));
+		mac3 = Acc.low32(step44(Acc.of((shim.IntMath.mul((rgbc >> 16) & 0xFF, ir3) << 4) | 0), F_MAC3_POS, F_MAC3_NEG));
 	}
 
 	static function shiftMacBySf(sf:Int):Void {
-		I64.set(mac1); mac1 = shiftBySf(sf);
-		I64.set(mac2); mac2 = shiftBySf(sf);
-		I64.set(mac3); mac3 = shiftBySf(sf);
+		mac1 = shiftBySf(Acc.of(mac1), sf);
+		mac2 = shiftBySf(Acc.of(mac2), sf);
+		mac3 = shiftBySf(Acc.of(mac3), sf);
 	}
 
 	/** `[MAC] = [R,G,B] SHL 16`, the starting point DPCS and DPCT share. */
@@ -975,15 +952,9 @@ class Gte {
 	static function farColorInterpolate(sf:Int, lm:Bool):Void {
 		final base1 = mac1, base2 = mac2, base3 = mac3;
 
-		I64.setShl12(rfc); I64.addSmall(-base1);
-		step44(F_MAC1_POS, F_MAC1_NEG);
-		ir1 = saturateIr(shiftBySf(sf), false, F_IR1);
-		I64.setShl12(gfc); I64.addSmall(-base2);
-		step44(F_MAC2_POS, F_MAC2_NEG);
-		ir2 = saturateIr(shiftBySf(sf), false, F_IR2);
-		I64.setShl12(bfc); I64.addSmall(-base3);
-		step44(F_MAC3_POS, F_MAC3_NEG);
-		ir3 = saturateIr(shiftBySf(sf), false, F_IR3);
+		ir1 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(rfc), -base1), F_MAC1_POS, F_MAC1_NEG), sf), false, F_IR1);
+		ir2 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(gfc), -base2), F_MAC2_POS, F_MAC2_NEG), sf), false, F_IR2);
+		ir3 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(bfc), -base3), F_MAC3_POS, F_MAC3_NEG), sf), false, F_IR3);
 
 		interpolateBy(base1, base2, base3, sf);
 		finishColor(sf, lm);
@@ -1020,26 +991,30 @@ class Gte {
 
 	// ---- the pieces the operations are made of --------------------------------------------------------
 
-	/** One accumulation step: check the 44-bit range, flag it, then wrap as the hardware does. */
-	static inline function step44(posBit:Int, negBit:Int):Void {
-		final over = I64.check44();
+	/**
+		One accumulation step: check the 44-bit range, flag it, then wrap as the hardware does.
+		The accumulator is a value (`shim.Acc`) passed in and handed back, so a chain of steps
+		stays in a local — a register, on both targets — rather than in a static field.
+	**/
+	static inline function step44(m:Acc, posBit:Int, negBit:Int):Acc {
+		final over = Acc.check44(m);
 		if (over > 0) flag |= (1 << posBit);
 		else if (over < 0) flag |= (1 << negBit);
 		else {}
-		I64.wrap44();
+		return Acc.wrap44(m);
 	}
 
-	static inline function shiftBySf(sf:Int):Int {
-		return sf == 0 ? I64.low32() : I64.shr12();
+	static inline function shiftBySf(m:Acc, sf:Int):Int {
+		return sf == 0 ? Acc.low32(m) : Acc.shr12(m);
 	}
 
 	/** MAC0 is 32 bits, so its flags are a range check rather than a truncation. */
-	static inline function mac0From32():Int {
-		final over = I64.check32();
+	static inline function mac0From32(m:Acc):Int {
+		final over = Acc.check32(m);
 		if (over > 0) flag |= (1 << F_MAC0_POS);
 		else if (over < 0) flag |= (1 << F_MAC0_NEG);
 		else {}
-		return I64.low32();
+		return Acc.low32(m);
 	}
 
 	static function saturateIr(v:Int, lm:Bool, bit:Int):Int {

@@ -1092,6 +1092,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
+double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
+`m = step44(Acc.mac(m, …), …)` with no static field in the loop. Digests unchanged (GteOps
+1cf89aa2, Acc64 0deeafe0, game 0e180c28 / ab13c60f). Five interleaved rounds, four to one:
+mean 19.55 → 19.24 s, min 18.95 → 17.96 s; GTE share 29.7 → 27.1 %. C++ twin unverified.
+
 2026-09-25 [claude] JS `MemA` reads and writes the typed-array element directly (the `LE` and
 alignment tests are gone from every aligned access; `RawMem` refuses to start on a big-endian
 host instead). Digests unchanged (Mem 27f9aa59, Codegen 632ff691, game ab13c60f); five
