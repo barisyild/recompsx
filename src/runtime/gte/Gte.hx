@@ -538,22 +538,13 @@ class Gte {
 	static function rtps(sf:Int, lm:Bool, v:Int, last:Bool):Void {
 		final vx = vecX(v), vy = vecY(v), vz = vecZ(v);
 
-		var m = Acc.shl12(trX);
-		m = step44(Acc.mac(m, rt11, vx), F_MAC1_POS, F_MAC1_NEG);
-		m = step44(Acc.mac(m, rt12, vy), F_MAC1_POS, F_MAC1_NEG);
-		m = step44(Acc.mac(m, rt13, vz), F_MAC1_POS, F_MAC1_NEG);
+		var m = row44(trX, rt11, rt12, rt13, vx, vy, vz, F_MAC1_POS, F_MAC1_NEG);
 		mac1 = shiftBySf(m, sf);
 
-		m = Acc.shl12(trY);
-		m = step44(Acc.mac(m, rt21, vx), F_MAC2_POS, F_MAC2_NEG);
-		m = step44(Acc.mac(m, rt22, vy), F_MAC2_POS, F_MAC2_NEG);
-		m = step44(Acc.mac(m, rt23, vz), F_MAC2_POS, F_MAC2_NEG);
+		m = row44(trY, rt21, rt22, rt23, vx, vy, vz, F_MAC2_POS, F_MAC2_NEG);
 		mac2 = shiftBySf(m, sf);
 
-		m = Acc.shl12(trZ);
-		m = step44(Acc.mac(m, rt31, vx), F_MAC3_POS, F_MAC3_NEG);
-		m = step44(Acc.mac(m, rt32, vy), F_MAC3_POS, F_MAC3_NEG);
-		m = step44(Acc.mac(m, rt33, vz), F_MAC3_POS, F_MAC3_NEG);
+		m = row44(trZ, rt31, rt32, rt33, vx, vy, vz, F_MAC3_POS, F_MAC3_NEG);
 		// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation flag
 		// is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games rely on
 		// it. psx-spx records the same quirk.
@@ -1001,6 +992,31 @@ class Gte {
 		// the wrap is a pair of 64-bit shifts, and this runs nine times a vertex.
 		final over = Acc.check44(m);
 		return over == 0 ? m : overflow44(m, over, posBit, negBit);
+	}
+
+	/**
+		`(tr << 12) + r1*x + r2*y + r3*z`, each partial sum checked against 44 bits.
+
+		The matrix and the vector are sixteen-bit signed, so each product is within 2^30; with
+		|tr| < 2^30 the translation is within 2^42, and no partial sum can reach 2^43. Then no
+		step can flag or wrap, and the checks are skipped — on a 32-bit CPU they are 64-bit
+		compares, three to a row and nine to a vertex. A translation outside that range, which
+		games do not use, takes every step exactly as before.
+	**/
+	static inline function row44(tr:Int, r1:Int, r2:Int, r3:Int, x:Int, y:Int, z:Int,
+			posBit:Int, negBit:Int):Acc {
+		return (tr > -0x40000000 && tr < 0x40000000)
+			? Acc.mac(Acc.mac(Acc.mac(Acc.shl12(tr), r1, x), r2, y), r3, z)
+			: row44Checked(tr, r1, r2, r3, x, y, z, posBit, negBit);
+	}
+
+	static function row44Checked(tr:Int, r1:Int, r2:Int, r3:Int, x:Int, y:Int, z:Int,
+			posBit:Int, negBit:Int):Acc {
+		var m = Acc.shl12(tr);
+		m = step44(Acc.mac(m, r1, x), posBit, negBit);
+		m = step44(Acc.mac(m, r2, y), posBit, negBit);
+		m = step44(Acc.mac(m, r3, z), posBit, negBit);
+		return m;
 	}
 
 	static function overflow44(m:Acc, over:Int, posBit:Int, negBit:Int):Acc {

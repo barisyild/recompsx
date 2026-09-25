@@ -4,6 +4,8 @@ import core.Irq;
 import core.Runtime;
 import core.TimeBase;
 import shim.Backend;
+import shim.MemA;
+import shim.RawBuf;
 
 /**
 	The GPU's register file: the two ports at 1F801810h and 1F801814h, and the state behind them.
@@ -212,6 +214,49 @@ class Gpu {
 			if (pending == 0) draw();
 			else {}
 		}
+	}
+
+	/**
+		An ordering-table node's words, straight from RAM: how the GPU channel feeds GP0.
+
+		Word by word through `writeGp0` is exact, but it runs the command state machine on every
+		word, and a packet's parameters each went through `consumeParameter` and `push` only to be
+		copied into `packet`. A game builds its table one packet to a node, so when a polygon or
+		rectangle starts at a command boundary and ends inside this node, it is copied in one pass
+		and drawn, leaving every counter and field as the word path would have. Everything else —
+		state commands, transfers, a packet split across nodes — takes the word path.
+	**/
+	public static function writeGp0Words(ram:RawBuf, addr:Int, count:Int):Void {
+		var i = 0;
+		while (i < count) {
+			final v = MemA.get32(ram, (addr + (i << 2)) & 0x1FFFFC);
+			final n = (xferLeft == 0 && pending == 0) ? wholeParameters(v >>> 24) : -1;
+			if (n > 0 && i + n < count) {
+				wholePacket(ram, addr + (i << 2), v >>> 24, n);
+				i += n + 1;
+			} else {
+				writeGp0(v);
+				i++;
+			}
+		}
+	}
+
+	/** Parameter words of a packet `writeGp0Words` takes whole — polygons, rectangles — or -1. */
+	static inline function wholeParameters(op:Int):Int {
+		return (op >= 0x20 && op <= 0x3F) ? polygonWords(op)
+			: ((op >= 0x60 && op <= 0x7F) ? rectangleWords(op) : -1);
+	}
+
+	/** What `writeGp0` does over a command word and its `n` parameters, in one pass. */
+	static function wholePacket(ram:RawBuf, at:Int, op:Int, n:Int):Void {
+		wordsReceived += n + 1;
+		commandsReceived++;
+		if (opCount != null) opCount[op]++;
+		else {}
+		for (k in 0...n + 1) packet[k] = MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC);
+		packetLen = n + 1;
+		if (op >= 0x60) drawRect(op);
+		else drawPolygon(op);
 	}
 
 	static function consumeParameter(v:Int):Void {

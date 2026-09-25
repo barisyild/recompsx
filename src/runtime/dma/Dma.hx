@@ -186,10 +186,8 @@ class Dma {
 			// addresses RAM, wrapping at 2 MB exactly as `Memory.read32`'s decode does for these
 			// addresses, and GP0 is all 0x1F801810 is. Going through `write32` cost each word a
 			// read, a write, a region search and three calls — half of all the time spent in this
-			// channel, measured on the hardware-drawing path.
-			for (i in 0...count) {
-				inline Gpu.writeGp0(MemA.get32(ram, (addr + 4 + (i << 2)) & 0x1FFFFC));
-			}
+			// channel, measured on the hardware-drawing path. The GPU takes the node whole.
+			Gpu.writeGp0Words(ram, addr + 4, count);
 			wordsToGpu += count;
 			addr = header & 0x1FFFFC;
 			// Bit 23 of the link marks the end. A table that neither ends nor repeats would

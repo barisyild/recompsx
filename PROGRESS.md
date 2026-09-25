@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Flycast after the scene-build change: build 195 -> 93, 35.6 fps (841 ms; emu 324 gte 230
+gpu 182). GP0 takes a DMA node's whole polygon/rectangle packet in one pass (9000-frame logs identical,
+counters included; desktop channel time -25 %); RTPS skips its 44-bit checks when |TR| < 2^30 (exact:
+16-bit factors). Crash Bash runs RTPS only (~850/vblank, ~2500 GTE ops). Digests unchanged both targets.
+
 2026-09-26 [claude] Flycast after the GPU DMA change: gpu 274 -> ~186, fps 29.4-31.9 in busier scenes;
 emu ~323 gte ~220 build ~195 of ~940 ms. DC scene build: pal_bank_at memoised per build (exact: VRAM
 still, in-flight banks never rewritten, refusals and nearest matches stand; the steal bumps the
