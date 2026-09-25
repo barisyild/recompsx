@@ -22,7 +22,13 @@ class RawMem {
 	static function detectLE():Bool {
 		final probe = new RawBuf(4);
 		probe.i32[0] = 0x11223344;
-		return probe.u8[0] == 0x44;
+		final le = probe.u8[0] == 0x44;
+		// The aligned accessors (MemA) read typed-array elements directly, which is only the
+		// byte-composed value on a little-endian host. No JavaScript engine runs big-endian
+		// today; if one ever does, stopping here is better than a digest that quietly differs.
+		if (!le) js.Syntax.code("throw new Error('recompsx: big-endian host; the aligned accessors assume little-endian')");
+		else {}
+		return le;
 	}
 
 	public static function alloc(size:Int):RawBuf {
