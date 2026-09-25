@@ -26,8 +26,10 @@ presentation fork. Texels are decoded in the fragment shader straight out of a 1
 VRAM; a 1024x512 framebuffer texture stands in for the rendered VRAM, refreshed from uploads by
 dirty rectangles and blitted to the canvas at each vblank. There is no depth buffer and no depth
 test, as on the PlayStation: primitives draw in submission order. Triangles are scissored to
-the drawing area (`bp_gpu_clip`), rectangles are not, matching the software path. Headless Node
-runs have no host and never take this path, so the digest is unaffected. Untick the box for the
+the drawing area (`bp_gpu_clip`), rectangles are not, matching the software path. The mask bits
+(`bp_gpu_mask`) are the stencil buffer: uploads carry bit 15 into it, "set" marks what a
+primitive draws, "check" skips what is marked. Headless Node runs have no host and never take
+this path, so the digest is unaffected. Untick the box for the
 software rasteriser and the 2D canvas. Reload after rebuilding; it fetches an uncached
 manifest and loads `game.js?v=<hash>`. The manifest records the source branch, commit, dirty
 status and a digest of generator/runtime/config inputs, in addition to the bundle digest.

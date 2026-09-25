@@ -37,6 +37,13 @@ path, so digests are untouched.
 
 Measured in the page with `requestAnimationFrame`/`setTimeout` callbacks timed: main-thread CPU
 per emulated frame 3.85 ms with the software rasteriser, 2.43 ms with WebGL (−37 %) over the
-same stretch of the attract mode. The mask bits are still not modelled on the hardware path
-(the ABI does not carry them). The C backends gained a stub `bp_gpu_clip`, unverified while the
-C++ path is paused (ADR-0015); the Dreamcast one records the corners for its user clip later.
+same stretch of the attract mode. The mask bits are modelled through a second ABI addition,
+`bp_gpu_mask` (GP0(E6h)): the framebuffer texture carries a stencil, a dirty rectangle's copy
+writes it from bit 15, a primitive drawn with "set" increments it under every pixel it writes,
+and one drawn with "check" passes only where it is zero. Uploads and copies keep applying the
+bits in emulated VRAM before the backend hears of them. Verified in the page with the renderer
+driven directly (a "check" rectangle leaves a "set" rectangle and an uploaded bit-15 region
+untouched); Crash Bash's attract loop never sets or checks the bit, so the game itself does
+not exercise it. The C backends gained stubs for both additions, unverified while the C++ path
+is paused (ADR-0015); the Dreamcast one records the values for its user clip later, and has no
+stencil to give the mask.

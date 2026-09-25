@@ -112,6 +112,13 @@ void bp_gpu_dirty(int x, int y, int w, int h);
  * Rectangles follow the software path and clip to VRAM alone. */
 void bp_gpu_clip(int x0, int y0, int x1, int y1);
 
+/* GP0(E6h). set_bit forces bit 15 on every pixel a primitive writes; check_bit makes a primitive
+ * skip pixels whose bit 15 is already set. Uploads and VRAM-to-VRAM copies apply both in emulated
+ * VRAM before bp_gpu_dirty reports them, so a backend applies them to primitives only. Crash
+ * Bash's warning screen is the visible case: the text is drawn with set_bit, then a circle over
+ * it with check_bit, and without the check the circle paints across the letters. */
+void bp_gpu_mask(int set_bit, int check_bit);
+
 /* ---- audio -------------------------------------------------------------------------------
  * 44100 Hz stereo signed 16-bit, interleaved. frame_count is stereo frames, not samples.
  * bp_audio_buffered reports what the host still holds, for pacing only. */

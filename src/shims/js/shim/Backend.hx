@@ -105,6 +105,10 @@ class Backend {
 		js.Syntax.code("{0}.gpu.clip({1}, {2}, {3}, {4})", host(), x0, y0, x1, y1);
 	}
 
+	public static function gpuMask(setBit:Int, checkBit:Int):Void {
+		js.Syntax.code("{0}.gpu.mask({1}, {2})", host(), setBit, checkBit);
+	}
+
 	public static function argCount():Int {
 		if (args.length == 0) args = readArgs();
 		else {}

@@ -59,6 +59,7 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
 }
 void bp_gpu_dirty(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
 void bp_gpu_clip(int x0, int y0, int x1, int y1) { (void)x0; (void)y0; (void)x1; (void)y1; }
+void bp_gpu_mask(int set_bit, int check_bit) { (void)set_bit; (void)check_bit; }
 
 void bp_audio_push(const int16_t* frames, int frame_count) { (void)frames; (void)frame_count; }
 int  bp_audio_buffered(void) { return 0; }

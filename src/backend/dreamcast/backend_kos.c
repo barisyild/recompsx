@@ -1658,6 +1658,12 @@ void bp_gpu_clip(int x0, int y0, int x1, int y1) {
     g_clip_x0 = x0; g_clip_y0 = y0; g_clip_x1 = x1; g_clip_y1 = y1;
 }
 
+/* Recorded, not yet applied. The PVR has no stencil; the browser backend models these with one. */
+static int g_mask_set, g_mask_check;
+void bp_gpu_mask(int set_bit, int check_bit) {
+    g_mask_set = set_bit; g_mask_check = check_bit;
+}
+
 void bp_gpu_dirty(int x, int y, int w, int h) {
     if(!(g_bg_x + g_bg_w <= x || x + w <= g_bg_x
       || g_bg_y + g_bg_h <= y || y + h <= g_bg_y)) g_bg_stale = 1;

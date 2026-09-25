@@ -29,9 +29,12 @@
 
   Triangles are scissored to the drawing area (bp_gpu_clip): a double-buffered game's geometry
   reaches past the buffer it draws into, and the software rasteriser clips it there. Rectangles
-  are not, as in the software path. Not modelled, as on the Dreamcast backend: the mask bits, which
-  the ABI does not carry. Anything a game reads back from VRAM after drawing sees what was there
-  before the draw, by the ABI's own terms.
+  are not, as in the software path.
+
+  The mask bit (bp_gpu_mask) is the stencil: a dirty rectangle's copy writes 1 where VRAM's bit 15
+  is set and 0 elsewhere, a primitive drawn with "set" increments the stencil of every pixel it
+  writes, and one drawn with "check" passes only where the stencil is zero. Anything a game reads
+  back from VRAM after drawing sees what was there before the draw, by the ABI's own terms.
 */
 function createHardwareGpu(canvas) {
   const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false,
@@ -141,10 +144,12 @@ function createHardwareGpu(canvas) {
     precision highp int;
     precision highp usampler2D;
     uniform usampler2D uVram;
+    uniform int uMaskedOnly;     // 1: keep only halfwords with bit 15 set (the stencil pass)
     in vec2 vTexel;
     out vec4 oColor;
     void main() {
       uint t = texelFetch(uVram, ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511), 0).r;
+      if (uMaskedOnly != 0 && (t & 0x8000u) == 0u) discard;
       oColor = vec4(vec3(float(t & 31u), float((t >> 5) & 31u), float((t >> 10) & 31u)) / 31.0, 1.0);
     }`;
   // The framebuffer texture to the screen.
@@ -186,7 +191,7 @@ function createHardwareGpu(canvas) {
     depth: U(primProgram, 'uDepth'), clut: U(primProgram, 'uClut'), window: U(primProgram, 'uWindow'),
     flags: U(primProgram, 'uFlags'), pass: U(primProgram, 'uPass') };
   const quad = (p) => ({ dst: U(p, 'uDst'), src: U(p, 'uSrc'), tex: U(p, 'uVram') || U(p, 'uFrame'),
-    srcX: U(p, 'uSrcX') });
+    srcX: U(p, 'uSrcX'), maskedOnly: U(p, 'uMaskedOnly') });
   const copyU = quad(copyProgram), blitU = quad(blitProgram), present24U = quad(present24Program);
 
   const vramTex = gl.createTexture();
@@ -207,8 +212,13 @@ function createHardwareGpu(canvas) {
   const fbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbTex, 0);
+  const stencilRb = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, stencilRb);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, W, H);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, stencilRb);
   gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.clearStencil(0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
   const primVao = gl.createVertexArray();
@@ -235,8 +245,15 @@ function createHardwareGpu(canvas) {
   // ---- state and batches ----------------------------------------------------------------------
   const cur = { tx: 0, ty: 0, depth: 0, cx: 0, cy: 0, semiMode: 0, flags: 0, window: 0, dx: 0, dy: 0 };
   const clipRect = { x0: 0, y0: 0, x1: 1023, y1: 511 };
+  const maskBits = { set: 0, check: 0 };
   const batches = [];
   let open = null;          // the batch primitives are being appended to, or null
+
+  function mask(setBit, checkBit) {
+    if (maskBits.set === setBit && maskBits.check === checkBit) return;
+    maskBits.set = setBit; maskBits.check = checkBit;
+    open = null;
+  }
 
   function clip(x0, y0, x1, y1) {
     if (clipRect.x0 === x0 && clipRect.y0 === y0 && clipRect.x1 === x1 && clipRect.y1 === y1) return;
@@ -262,6 +279,7 @@ function createHardwareGpu(canvas) {
       const mx = cur.window & 31, my = (cur.window >> 5) & 31;
       open = { start: vertexCount, count: 0, tx: cur.tx, ty: cur.ty, depth: cur.depth,
         cx: cur.cx, cy: cur.cy, semiMode: cur.semiMode, flags: cur.flags, clipped,
+        maskSet: maskBits.set, maskCheck: maskBits.check,
         sx: clipRect.x0, sy: clipRect.y0, sw: clipRect.x1 - clipRect.x0 + 1, sh: clipRect.y1 - clipRect.y0 + 1,
         uAnd: (~(mx << 3)) & 255, uOr: (((cur.window >> 10) & 31) & mx) << 3,
         vAnd: (~(my << 3)) & 255, vOr: (((cur.window >> 15) & 31) & my) << 3 };
@@ -321,6 +339,7 @@ function createHardwareGpu(canvas) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, vramTex);
     gl.uniform1i(prim.vram, 0);
+    gl.enable(gl.STENCIL_TEST);
     for (const b of batches) {
       if (b.clipped && b.sw > 0 && b.sh > 0) {
         gl.enable(gl.SCISSOR_TEST);
@@ -328,6 +347,10 @@ function createHardwareGpu(canvas) {
       } else {
         gl.disable(gl.SCISSOR_TEST);
       }
+      // "check": draw only where no mask bit is set. "set": leave a mask bit on what is drawn,
+      // by incrementing, so the check's reference of zero needs no second value.
+      if (b.maskCheck) gl.stencilFunc(gl.EQUAL, 0, 0xFF); else gl.stencilFunc(gl.ALWAYS, 0, 0xFF);
+      gl.stencilOp(gl.KEEP, gl.KEEP, b.maskSet ? gl.INCR : gl.KEEP);
       gl.uniform2i(prim.texBase, b.tx, b.ty);
       gl.uniform1i(prim.depth, b.depth);
       gl.uniform2i(prim.clut, b.cx, b.cy);
@@ -348,6 +371,7 @@ function createHardwareGpu(canvas) {
     }
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
     batches.length = 0;
     open = null;
     vertexCount = 0;
@@ -382,7 +406,20 @@ function createHardwareGpu(canvas) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, W, H);
     gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    // The colour, with the stencil cleared under the rectangle; then the stencil set again
+    // wherever the halfword's bit 15 is on. The mask bits an upload carried are now the
+    // stencil's, exactly as the software path left them in VRAM.
+    gl.enable(gl.STENCIL_TEST);
+    gl.useProgram(copyProgram);
+    gl.uniform1i(copyU.maskedOnly, 0);
+    gl.stencilFunc(gl.ALWAYS, 0, 0xFF);
+    gl.stencilOp(gl.REPLACE, gl.REPLACE, gl.REPLACE);
     quadDraw(copyProgram, copyU, vramTex, x, y, w, h, W, H, x, y, w, h, false);
+    gl.uniform1i(copyU.maskedOnly, 1);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xFF);
+    quadDraw(copyProgram, copyU, vramTex, x, y, w, h, W, H, x, y, w, h, false);
+    gl.disable(gl.STENCIL_TEST);
   }
 
   /** Emulated VRAM changed under this rectangle, which may wrap at either edge. */
@@ -430,5 +467,5 @@ function createHardwareGpu(canvas) {
     primitives = 0;
   }
 
-  return { vram, state, tri, rect, dirty, clip, present, get primitives() { return primitives; } };
+  return { vram, state, tri, rect, dirty, clip, mask, present, get primitives() { return primitives; } };
 }
