@@ -51,29 +51,59 @@ class Backend {
 
 	public static function shutdown():Void {}
 
-	public static function caps(capId:Int):Int return capId == 0 ? 4 : 0;
+	/**
+		Capability 4 is hardware drawing, and it is the page's to offer: a host that carries a
+		`gpu` object (the WebGL2 renderer in `web/gpu-webgl.js`) can be handed the primitives.
+		Under Node there is no host and the answer is zero, so `gpu.Gpu.hw` never becomes true in
+		a headless run and the digest stays with the software rasteriser — the same rule every
+		backend follows (ADR-0008).
+	**/
+	public static function caps(capId:Int):Int {
+		if (capId == 0) return 4;
+		else if (capId == 4) return hasGpu() ? 1 : 0;
+		else return 0;
+	}
+
+	static inline function hasGpu():Bool {
+		return js.Syntax.code("({0} != null && {0}.gpu != null)", host());
+	}
 
 	/**
-		The hardware-drawing seam, which on this target is five ways of doing nothing.
-
-		They exist because the facade is a compile-time contract — the runtime calls
-		`Backend.gpuTri` without knowing which shim is on the classpath — and unreachable because
-		`caps(4)` above is zero, so `gpu.Gpu.hw` never becomes true here.
+		The hardware-drawing seam. Each call forwards to the host's renderer, which decodes
+		textures out of the same VRAM halfwords the runtime writes. The runtime only calls these
+		once `caps(4)` said yes, so the renderer is present whenever they run.
 	**/
-	public static function gpuVram(vram:RawBuf):Void {}
+	public static function gpuVram(vram:RawBuf):Void {
+		js.Syntax.code("{0}.gpu.vram({1}.u16)", host(), vram);
+	}
 
 	public static function gpuState(texBaseX:Int, texBaseY:Int, texDepth:Int,
 			clutX:Int, clutY:Int, semiMode:Int, flags:Int, texWindow:Int,
-			drawX:Int, drawY:Int):Void {}
+			drawX:Int, drawY:Int):Void {
+		js.Syntax.code("{0}.gpu.state({1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10})",
+			host(), texBaseX, texBaseY, texDepth, clutX, clutY, semiMode, flags, texWindow, drawX, drawY);
+	}
 
 	public static function gpuTri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
 			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
-			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {}
+			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {
+		js.Syntax.code("{0}.gpu.tri({1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15})",
+			host(), x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
+	}
 
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
-			semiMode:Int):Void {}
+			semiMode:Int):Void {
+		js.Syntax.code("{0}.gpu.rect({1}, {2}, {3}, {4}, {5}, {6}, {7})",
+			host(), x, y, w, h, bgr, semi, semiMode);
+	}
 
-	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {}
+	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {
+		js.Syntax.code("{0}.gpu.dirty({1}, {2}, {3}, {4})", host(), x, y, w, h);
+	}
+
+	public static function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void {
+		js.Syntax.code("{0}.gpu.clip({1}, {2}, {3}, {4})", host(), x0, y0, x1, y1);
+	}
 
 	public static function argCount():Int {
 		if (args.length == 0) args = readArgs();

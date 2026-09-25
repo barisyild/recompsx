@@ -15,6 +15,9 @@
     button:disabled { cursor: wait; opacity: .65; }
     .screen { aspect-ratio: 4 / 3; background: #000; border: 1px solid #292f3a; border-radius: 10px; overflow: hidden; box-shadow: 0 24px 80px #0009; }
     canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; object-fit: contain; }
+    canvas[hidden] { display: none; }
+    #screen-gl { object-fit: fill; }
+    label { font-size: 13px; color: #aab3c2; display: flex; align-items: center; gap: 6px; }
     #status { min-height: 1.4em; color: #aab3c2; }
     #log { height: 130px; overflow: auto; margin: 0; padding: 10px; background: #11151d; border-radius: 8px; color: #8691a3; font-size: 11px; white-space: pre-wrap; }
   </style>
@@ -23,18 +26,28 @@
   <main>
     <header>
       <h1>recompsx JS</h1>
+      <label><input type="checkbox" id="hw" checked> WebGL çizim</label>
       <button id="start">Oyunu başlat</button>
     </header>
-    <div class="screen"><canvas id="screen" width="640" height="480"></canvas></div>
+    <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
     <div id="status">Başlatmak için düğmeye bas.</div>
     <small id="build"></small>
     <pre id="log"></pre>
   </main>
+  <script src="gpu-webgl.js"></script>
   <script>
     const start = document.querySelector('#start');
     const status = document.querySelector('#status');
     const log = document.querySelector('#log');
     const canvas = document.querySelector('#screen');
+    const glCanvas = document.querySelector('#screen-gl');
+    const hwBox = document.querySelector('#hw');
+    // The WebGL2 renderer draws the PlayStation's primitives itself (gpu-webgl.js). Offered only
+    // where WebGL2 exists; the software rasteriser and the 2D canvas remain the fallback.
+    let renderer = null;
+    if (!(typeof createHardwareGpu === 'function') || !glCanvas.getContext('webgl2')) {
+      hwBox.checked = false; hwBox.disabled = true; hwBox.parentElement.title = 'WebGL2 yok';
+    }
     const ctx = canvas.getContext('2d', { alpha: false });
     const frame = document.createElement('canvas');
     const frameCtx = frame.getContext('2d', { alpha: false });
@@ -121,11 +134,20 @@
         const disc = await fetchBytes('disc.bin', 'Disk görüntüsü');
         status.textContent = 'Oyun başlatılıyor…';
 
+        hwBox.disabled = true;
+        if (hwBox.checked) {
+          try { renderer = createHardwareGpu(glCanvas); }
+          catch (error) { writeLog(`[webgl] ${error.message}; yazılım çizimine dönüldü`); renderer = null; }
+        }
+        if (renderer) { canvas.hidden = true; glCanvas.hidden = false; }
+
         globalThis.recompsxHost = {
-          args: ['boot.exe', 'disc.bin'],
+          args: renderer ? ['boot.exe', 'disc.bin', '--video-hw'] : ['boot.exe', 'disc.bin'],
           files: { 'boot.exe': boot, 'disc.bin': disc },
           paused: false,
+          gpu: renderer,
           present(vram, sx, sy, width, height, flags) {
+            if (renderer) { renderer.present(vram, sx, sy, width, height, flags); return; }
             if (width <= 0 || height <= 0) {
               ctx.clearRect(0, 0, canvas.width, canvas.height);
               return;

@@ -230,6 +230,12 @@ class Gpu {
 		xferLeft--;
 		putTexel(v & 0xFFFF);
 		putTexel((v >>> 16) & 0xFFFF);
+		// Only now has VRAM changed under the rectangle: the backend contract speaks in the
+		// past tense, and a backend that copies the region on hearing of it (the browser's)
+		// must hear of it after the words are in. Telling it at the header, as this used to,
+		// handed it the palette that was there before the upload.
+		if (xferLeft == 0 && hw) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		else {}
 	}
 
 	/**
@@ -272,10 +278,8 @@ class Gpu {
 		xferI = 0;
 		// Two pixels to a word, rounded up: an odd-width rectangle pads its last word.
 		xferLeft = (xferW * xferH + 1) >> 1;
-		// Told once, here, rather than per texel: the rectangle is known the moment the transfer
-		// is armed, and a backend caching decoded textures needs the region, not the pixels.
-		if (hw) Backend.gpuDirty(xferX, xferY, xferW, xferH);
-		else {}
+		// The backend is told when the last word lands (transferWord), not here: the rectangle
+		// is known now, but its contents are not yet what the backend would read.
 	}
 
 	static function push(v:Int):Void {
@@ -1035,13 +1039,26 @@ class Gpu {
 		else {}
 		if (op == 0xE1) setDrawMode(v);
 		else if (op == 0xE2) textureWindow = v & 0xFFFFF;
-		else if (op == 0xE3) drawAreaTopLeft = v & 0xFFFFF;
-		else if (op == 0xE4) drawAreaBottomRight = v & 0xFFFFF;
+		else if (op == 0xE3) setDrawArea(v, drawAreaBottomRight);
+		else if (op == 0xE4) setDrawArea(drawAreaTopLeft, v);
 		else if (op == 0xE5) drawOffset = v & 0x3FFFFF;
 		else if (op == 0xE6) setMaskBits(v);
 		else if (op == 0x1F) raiseIrq();
 		else if (op == 0x00 || op == 0x01 || (op >= 0x03 && op <= 0x1E)) {}   // NOPs
 		else pending = parameterCount(op);
+	}
+
+	/**
+		GP0(E3h)/(E4h). A hardware backend is told the corners so it can clip triangles where
+		the software rasteriser does; without that, a double-buffered game's geometry reaches
+		past its drawing buffer into the buffer on screen.
+	**/
+	static function setDrawArea(topLeft:Int, bottomRight:Int):Void {
+		drawAreaTopLeft = topLeft & 0xFFFFF;
+		drawAreaBottomRight = bottomRight & 0xFFFFF;
+		if (hw) Backend.gpuClip(drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF,
+			drawAreaBottomRight & 0x3FF, (drawAreaBottomRight >>> 10) & 0x1FF);
+		else {}
 	}
 
 	static function setMaskBits(v:Int):Void {

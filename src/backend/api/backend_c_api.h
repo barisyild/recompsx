@@ -105,6 +105,13 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
  * backend cached from that region (decoded textures, palettes) is now stale. */
 void bp_gpu_dirty(int x, int y, int w, int h);
 
+/* The drawing area, both corners inclusive, as GP0(E3h)/(E4h) set it. Triangles are drawn only
+ * inside it. A double-buffered game draws into the buffer it is not displaying, and its
+ * geometry reaches past that buffer's edge into the one on screen: the software rasteriser
+ * clips there, and a backend that does not shows the next frame's spill on this one.
+ * Rectangles follow the software path and clip to VRAM alone. */
+void bp_gpu_clip(int x0, int y0, int x1, int y1);
+
 /* ---- audio -------------------------------------------------------------------------------
  * 44100 Hz stereo signed 16-bit, interleaved. frame_count is stereo frames, not samples.
  * bp_audio_buffered reports what the host still holds, for pacing only. */

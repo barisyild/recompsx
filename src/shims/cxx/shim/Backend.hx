@@ -64,6 +64,9 @@ class Backend {
 	public static inline function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void
 		BackendNative.bp_gpu_dirty(x, y, w, h);
 
+	public static inline function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void
+		BackendNative.bp_gpu_clip(x0, y0, x1, y1);
+
 	public static inline function audioPush(frames:RawBuf, frameCount:Int):Void
 		BackendNative.bp_audio_push(RawMem.s16Ptr(frames), frameCount);
 
