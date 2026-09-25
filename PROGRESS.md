@@ -1092,6 +1092,15 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Call-site `inline` for the I/O reads inside `slowRead32` (Timers, SIO, DMA,
+CD, SPU, ROM) and `inline` on the Timers read chain (`value/fold/ticksIn/dotsIn/videoClocksIn/
+unsignedDiv/unsignedMod` and the small helpers, early returns turned into if/else so Haxe can
+inline them). Digests unchanged (Mem 27f9aa59, VideoTime eb49ad68, game 0e180c28 / ab13c60f);
+bundle +5 KB of 9.8 MB. Wall time within noise over five interleaved rounds (min 15.38 vs
+15.68 s); the timer chain's self time in the profile fell 527 → 440 ms. Kept because it costs
+nothing — unlike the class-wide accessor inlining (B: +34 % bundle, H: +9 %), which stays rejected.
+Next: fewer divisions per timer read (one floor instead of two in `dotsIn(videoClocksIn())`).
+
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
 `m = step44(Acc.mac(m, …), …)` with no static field in the loop. Digests unchanged (GteOps
