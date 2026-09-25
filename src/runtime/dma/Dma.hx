@@ -80,7 +80,7 @@ class Dma {
 		condition that can never become true — and the whole of DMA looks like it never completes
 		while every channel has in fact already run.
 	**/
-	static function readDicr():Int {
+	static inline function readDicr():Int {
 		final force = (dicr & 0x00008000) != 0;
 		final master = (dicr & 0x00800000) != 0;
 		final flags = (dicr >>> 24) & 0x7F;
@@ -89,12 +89,11 @@ class Dma {
 		return raised ? (dicr | 0x80000000) : (dicr & 0x7FFFFFFF);
 	}
 
-	static function channelRead(p:Int):Int {
+	static inline function channelRead(p:Int):Int {
 		final ch = (p - BASE) >> 4;
-		if (ch < 0 || ch > 6) return 0;
-		else {}
 		final reg = p & 0xF;
-		if (reg == MADR) return madr[ch];
+		if (ch < 0 || ch > 6) return 0;
+		else if (reg == MADR) return madr[ch];
 		else if (reg == BCR) return bcr[ch];
 		else if (reg == CHCR) return chcr[ch];
 		else return 0;
@@ -107,17 +106,16 @@ class Dma {
 	}
 
 	/** DICR's flag bits are write-1-to-clear; the enables are ordinary. */
-	static function writeDicr(v:Int):Void {
+	static inline function writeDicr(v:Int):Void {
 		final acked = (v >>> 24) & 0x7F;
 		dicr = (v & 0x00FFFFFF) | (((dicr >>> 24) & ~acked & 0x7F) << 24);
 	}
 
-	static function channelWrite(p:Int, v:Int):Void {
+	static inline function channelWrite(p:Int, v:Int):Void {
 		final ch = (p - BASE) >> 4;
-		if (ch < 0 || ch > 6) return;
-		else {}
 		final reg = p & 0xF;
-		if (reg == MADR) madr[ch] = v & 0xFFFFFF;
+		if (ch < 0 || ch > 6) {}
+		else if (reg == MADR) madr[ch] = v & 0xFFFFFF;
 		else if (reg == BCR) bcr[ch] = v;
 		else if (reg == CHCR) startIfArmed(ch, v);
 		else {}
