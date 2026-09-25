@@ -246,7 +246,11 @@ function createHardwareGpu(canvas) {
   const cur = { tx: 0, ty: 0, depth: 0, cx: 0, cy: 0, semiMode: 0, flags: 0, window: 0, dx: 0, dy: 0 };
   const clipRect = { x0: 0, y0: 0, x1: 1023, y1: 511 };
   const maskBits = { set: 0, check: 0 };
+  // Batch records are pooled: a frame reuses the same objects in the same order, so a
+  // steady frame allocates nothing. Hundreds of fresh records a frame were a steady minor-GC
+  // load, which a phone notices.
   const batches = [];
+  let batchCount = 0;
   let open = null;          // the batch primitives are being appended to, or null
 
   function mask(setBit, checkBit) {
@@ -277,13 +281,21 @@ function createHardwareGpu(canvas) {
     const twoPass = (cur.flags & (TEXTURED | SEMI)) === (TEXTURED | SEMI);
     if (open === null || twoPass || open.clipped !== clipped) {
       const mx = cur.window & 31, my = (cur.window >> 5) & 31;
-      open = { start: vertexCount, count: 0, tx: cur.tx, ty: cur.ty, depth: cur.depth,
-        cx: cur.cx, cy: cur.cy, semiMode: cur.semiMode, flags: cur.flags, clipped,
-        maskSet: maskBits.set, maskCheck: maskBits.check,
-        sx: clipRect.x0, sy: clipRect.y0, sw: clipRect.x1 - clipRect.x0 + 1, sh: clipRect.y1 - clipRect.y0 + 1,
-        uAnd: (~(mx << 3)) & 255, uOr: (((cur.window >> 10) & 31) & mx) << 3,
-        vAnd: (~(my << 3)) & 255, vOr: (((cur.window >> 15) & 31) & my) << 3 };
-      batches.push(open);
+      let b = batches[batchCount];
+      if (b === undefined) {
+        b = { start: 0, count: 0, tx: 0, ty: 0, depth: 0, cx: 0, cy: 0, semiMode: 0, flags: 0,
+          clipped: false, maskSet: 0, maskCheck: 0, sx: 0, sy: 0, sw: 0, sh: 0,
+          uAnd: 0, uOr: 0, vAnd: 0, vOr: 0 };
+        batches[batchCount] = b;
+      }
+      batchCount++;
+      b.start = vertexCount; b.count = 0; b.tx = cur.tx; b.ty = cur.ty; b.depth = cur.depth;
+      b.cx = cur.cx; b.cy = cur.cy; b.semiMode = cur.semiMode; b.flags = cur.flags; b.clipped = clipped;
+      b.maskSet = maskBits.set; b.maskCheck = maskBits.check;
+      b.sx = clipRect.x0; b.sy = clipRect.y0; b.sw = clipRect.x1 - clipRect.x0 + 1; b.sh = clipRect.y1 - clipRect.y0 + 1;
+      b.uAnd = (~(mx << 3)) & 255; b.uOr = (((cur.window >> 10) & 31) & mx) << 3;
+      b.vAnd = (~(my << 3)) & 255; b.vOr = (((cur.window >> 15) & 31) & my) << 3;
+      open = b;
     }
     open.count += count;
     const at = vertexCount;
@@ -329,7 +341,7 @@ function createHardwareGpu(canvas) {
 
   /** Draw every queued primitive into the framebuffer texture, in submission order. */
   function flush() {
-    if (batches.length === 0) return;
+    if (batchCount === 0) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, W, H);
     gl.useProgram(primProgram);
@@ -340,7 +352,8 @@ function createHardwareGpu(canvas) {
     gl.bindTexture(gl.TEXTURE_2D, vramTex);
     gl.uniform1i(prim.vram, 0);
     gl.enable(gl.STENCIL_TEST);
-    for (const b of batches) {
+    for (let i = 0; i < batchCount; i++) {
+      const b = batches[i];
       if (b.clipped && b.sw > 0 && b.sh > 0) {
         gl.enable(gl.SCISSOR_TEST);
         gl.scissor(b.sx, b.sy, b.sw, b.sh);
@@ -372,7 +385,7 @@ function createHardwareGpu(canvas) {
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     gl.disable(gl.STENCIL_TEST);
-    batches.length = 0;
+    batchCount = 0;
     open = null;
     vertexCount = 0;
   }
