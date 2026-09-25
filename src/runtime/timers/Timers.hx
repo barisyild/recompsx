@@ -96,7 +96,7 @@ class Timers {
 		65536.
 	**/
 	static inline function unsignedMod(v:Int, m:Int):Int {
-		if (v >= 0) return IntMath.mod(v, m);
+		if (v >= 0) return v < m ? v : IntMath.mod(v, m);
 		else {
 			final half = IntMath.mod(v >>> 1, m);
 			return IntMath.mod(IntMath.mul(half, 2) + (v & 1), m);
@@ -185,7 +185,12 @@ class Timers {
 		final period = periodCycles(t);
 		if (period > 0) {
 			final elapsed = (cycles - anchor[t]) | 0;
-			final n = unsignedDiv(elapsed, period);
+			// Less than one period since the anchor is the common case by far — a game polling a
+			// counter reads it every few dozen cycles, and a line is two thousand — and that case
+			// is a compare, not a divide: `0 <= elapsed < period` is exactly when the quotient is
+			// zero. The polling loop that made this the hottest read in the machine was libetc's
+			// VSync, counting hblanks on timer 1.
+			final n = (elapsed >= 0 && elapsed < period) ? 0 : unsignedDiv(elapsed, period);
 			if (n > 0) {
 				final wrapAt = wrapPoint(t);
 				base[t] = IntMath.mod((base[t] + IntMath.mul(n, periodTicks(t))) | 0, wrapAt);
@@ -197,7 +202,10 @@ class Timers {
 	/** Ticks in a *folded* elapsed count — less than one period, so the arithmetic is small. */
 	static inline function ticksIn(t:Int, elapsed:Int):Int {
 		if (isDotClock(t)) return dotsIn(elapsed);
-		else if (isHblank(t)) return IntMath.div(elapsed, TimeBase.cyclesPerLine());
+		// Folded, the residue is shorter than a line, so the quotient is zero without dividing;
+		// the divide stays for a caller that has not folded.
+		else if (isHblank(t)) return (elapsed >= 0 && elapsed < TimeBase.cyclesPerLine()) ? 0
+			: IntMath.div(elapsed, TimeBase.cyclesPerLine());
 		else return elapsed >>> dividerShift(t);
 	}
 
@@ -228,11 +236,14 @@ class Timers {
 		final den = TimeBase.VIDEO_DEN;
 		final hi = num >> 10;
 		final lo = num & 0x3FF;
+		// Each remainder is the dividend less the quotient times the divisor — the same value a
+		// `%` gives under truncating division on both targets, for one multiply instead of a
+		// second divide.
 		final q = IntMath.div(elapsed, den);
-		final r = IntMath.mod(elapsed, den);
+		final r = (elapsed - IntMath.mul(q, den)) | 0;
 		final b = IntMath.mul(r, hi);
 		final b1 = IntMath.div(b, den);
-		final b2 = IntMath.mod(b, den);
+		final b2 = (b - IntMath.mul(b1, den)) | 0;
 		final low = (IntMath.mul(b2, 1024) + IntMath.mul(r, lo)) | 0;
 		return (IntMath.mul(q, num) + IntMath.mul(b1, 1024) + IntMath.div(low, den)) | 0;
 	}
