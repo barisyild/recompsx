@@ -1173,6 +1173,15 @@ share 31.1 → 33.4 % — and removes only part of the garbage: scavenges 91–9
 frames, 194 → 160 over 9000, the loading burst 90 → 70. A scavenge here is 0.1–0.3 ms, so the
 difference over 150 s of emulated time is milliseconds. Decision: the double accumulator stays
 (ADR-0021 holds); the remaining 160 scavenges have another source, not yet attributed.
+**Accessor decode** (a proposal the user obtained from another model, verified here): the RAM
+test and the mirror mask are one operation — `r = p & 0x1F9FFFFF` keeps the region bits above
+the mirrors and drops bits 21–22, so `r < RAM_SIZE` is exactly `isRam(p)` and, when true, `r` is
+already the RAM offset; the scratchpad test is one masked compare. Applied to all eight
+accessors; every non-RAM path still takes `p`. Digests unchanged (Mem 27f9aa59, game 0e180c28 /
+ab13c60f); bytecode read32 140 → 133, write32 152 → 145; five rounds `--no-audio` mean
+15.97 → 15.76 s, min 15.45 → 15.42 s — at the noise band's edge, kept because it is free.
+Its second idea, access grouping under one condition `q <= RAM_SIZE − span` (mirror-boundary
+safe), is the right form of the grouping noted above and is recompiler work, not started.
 Next: the idle-loop skip if approved; a mobile profile decides whether GC needs more.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local

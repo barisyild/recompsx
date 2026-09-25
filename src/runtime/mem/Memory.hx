@@ -36,6 +36,12 @@ class Memory {
 	public static inline var SCRATCH_SIZE = 0x400;     // 1 KB of fast memory in the CPU
 	static inline var SCRATCH_BASE = 0x1F800000;
 
+	// Keep RAM/non-RAM tag bits, remove only the two RAM-mirror bits.
+	// A decoded value is a RAM byte offset ONLY after the RAM_SIZE check.
+	// Keep p (not r) for every non-RAM path.
+	static inline var RAM_DECODE_MASK = 0x1F9FFFFF;
+	static inline var SCRATCH_MATCH_MASK = 0x1FFFFC00;
+
 	/** The hardware register page. 0x1F801000..0x1F803FFF, 12 KB of I/O plus expansion 2. */
 	static inline var IO_BASE = 0x1F801000;
 	static inline var IO_SIZE = 0x3000;
@@ -71,7 +77,8 @@ class Memory {
 
 	public static function read8u(a:Int):Int {
 		final p = phys(a);
-		return isRam(p) ? RawMem.get8(ram(), p & RAM_MASK) : slowRead8(p);
+		final r = p & RAM_DECODE_MASK;
+		return r < RAM_SIZE ? RawMem.get8(ram(), r) : slowRead8(p);
 	}
 
 	public static function read8s(a:Int):Int {
@@ -84,8 +91,10 @@ class Memory {
 	// (Iso9660 records) never come through Memory and keep RawMem's tolerant byte composition.
 	public static function read16u(a:Int):Int {
 		final p = phys(a);
-		if (isRam(p)) return shim.MemA.get16(ram(), p & RAM_MASK);
-		else if (isScratch(p)) return shim.MemA.get16(scratch(), p - SCRATCH_BASE);
+		final r = p & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) return shim.MemA.get16(ram(), r);
+		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
+			return shim.MemA.get16(scratch(), p & (SCRATCH_SIZE - 1));
 		else return slowRead16(p);
 	}
 
@@ -107,8 +116,10 @@ class Memory {
 	**/
 	public static function read32(a:Int):Int {
 		final p = phys(a);
-		if (isRam(p)) return shim.MemA.get32(ram(), p & RAM_MASK);
-		else if (isScratch(p)) return shim.MemA.get32(scratch(), p - SCRATCH_BASE);
+		final r = p & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) return shim.MemA.get32(ram(), r);
+		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
+			return shim.MemA.get32(scratch(), p & (SCRATCH_SIZE - 1));
 		else return slowRead32(p);
 	}
 
@@ -116,21 +127,26 @@ class Memory {
 
 	public static function write8(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) RawMem.set8(ram(), p & RAM_MASK, v);
+		final r = p & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) RawMem.set8(ram(), r, v);
 		else slowWrite8(p, v);
 	}
 
 	public static function write16(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) shim.MemA.set16(ram(), p & RAM_MASK, v);
-		else if (isScratch(p)) shim.MemA.set16(scratch(), p - SCRATCH_BASE, v);
+		final r = p & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) shim.MemA.set16(ram(), r, v);
+		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
+			shim.MemA.set16(scratch(), p & (SCRATCH_SIZE - 1), v);
 		else slowWrite16(p, v);
 	}
 
 	public static function write32(a:Int, v:Int):Void {
 		final p = phys(a);
-		if (isRam(p)) shim.MemA.set32(ram(), p & RAM_MASK, v);
-		else if (isScratch(p)) shim.MemA.set32(scratch(), p - SCRATCH_BASE, v);
+		final r = p & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) shim.MemA.set32(ram(), r, v);
+		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
+			shim.MemA.set32(scratch(), p & (SCRATCH_SIZE - 1), v);
 		else slowWrite32(p, v);
 	}
 
