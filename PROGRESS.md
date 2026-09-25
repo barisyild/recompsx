@@ -1099,6 +1099,8 @@ inline them). Digests unchanged (Mem 27f9aa59, VideoTime eb49ad68, game 0e180c28
 bundle +5 KB of 9.8 MB. Wall time within noise over five interleaved rounds (min 15.38 vs
 15.68 s); the timer chain's self time in the profile fell 527 → 440 ms. Kept because it costs
 nothing — unlike the class-wide accessor inlining (B: +34 % bundle, H: +9 %), which stays rejected.
+The same call-site `inline` then went into `slowRead8` and `slowRead16` (+2.5 KB, five rounds
+within noise, mean 19.37 → 19.10 s; Mem/CdCommands/SpuVoice digests unchanged).
 Next: fewer divisions per timer read (one floor instead of two in `dotsIn(videoClocksIn())`).
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
