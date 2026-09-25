@@ -10,12 +10,18 @@ class Codegen {
 	static var optimized = false;
 	static var publishedArgument = 0;
 	static var publishedAtPump = 0;
+	/** The word an idle wait polls; a vblank callback raises it, as libetc's VSync callback does. */
+	static inline var POLL = 0x80040020;
 
 	static function dispatch(addr:Int, ctx:CpuState):Bool {
 		if (addr == 0x8000f004) {
 			publishedAtPump = ctx.v0;
 			ctx.v0 = 100;
 			ctx.a0 = 3;
+			return true;
+		} else {}
+		if (addr == 0x8000f008) {
+			Memory.write32(POLL, (Memory.read32(POLL) + 1) | 0);
 			return true;
 		} else {}
 		if (addr == 0x8000f000) {
@@ -117,6 +123,40 @@ class Codegen {
 		reset(ctx);
 		if (opt) CodegenOptimized.stackForward(ctx);
 		else CodegenReference.stackForward(ctx);
+	}
+
+	/**
+		An idle wait, the way a game does it: vblanks keep coming, each one's callback raises
+		the polled word, and the loop leaves when the word reaches `target` or its timeout runs
+		out. The reference build runs every turn; the optimized build skips all but the last of
+		each stretch, and `compare` plus the slot and the word say whether that was exact.
+	**/
+	static function runIdle(ctx:CpuState, opt:Bool, target:Int, timeout:Int, poll:Int, reload:Bool):Void {
+		optimized = opt;
+		reset(ctx);
+		Kernel.haltAt = 0;
+		Scheduler.init(ctx);
+		for (slot in 0...Scheduler.SLOTS) Scheduler.cancel(ctx, slot);
+		Scheduler.schedule(ctx, Scheduler.VBLANK_START, 8);
+		kernel.KEvents.init();
+		final event = kernel.KEvents.open(ctx, Kernel.CLASS_RCNT3, Kernel.SPEC_INTERRUPTED,
+			kernel.KEvents.MODE_CALLBACK, 0x8000f008);
+		kernel.KEvents.enable(ctx, event);
+		// The kernel's vblank handler delivers the event only when the interrupt can be taken,
+		// which is what libetc arranges: the line enabled in I_MASK, interrupts on in SR.
+		core.Irq.writeMask(1 << core.Irq.VBLANK);
+		ctx.sr = 0x401;
+		Memory.write32(POLL, 0);
+		ctx.a0 = target;
+		ctx.a1 = poll;
+		ctx.a2 = timeout;
+		if (reload) {
+			if (opt) CodegenOptimized.idleReload(ctx);
+			else CodegenReference.idleReload(ctx);
+		} else {
+			if (opt) CodegenOptimized.idleWait(ctx);
+			else CodegenReference.idleWait(ctx);
+		}
 	}
 
 	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
@@ -254,6 +294,26 @@ class Codegen {
 			Conf.expect("pump sees current locals", publishedAtPump, 0);
 			Conf.expect("reload callback register changes", b.v0, 106);
 		}
+		// The idle wait: reached after three vblanks; timed out before the second; satisfied on
+		// entry; and polling ROM, which is not plain memory, so every turn runs in both builds.
+		final idleSlot = 0x801fff00 - 32 + 16;
+		for (variant in 0...8) {
+			final scenario = variant & 3;
+			final reload = variant >= 4;
+			final target = scenario == 2 ? 0 : 3;
+			final timeout = scenario == 0 ? 200000 : (scenario == 3 ? 3000 : 50);
+			final poll = scenario == 3 ? 0xbfc00000 : POLL;
+			runIdle(a, false, target, timeout, poll, reload);
+			final refSlot = Memory.read32(idleSlot);
+			final refPoll = Memory.read32(POLL);
+			runIdle(b, true, target, timeout, poll, reload);
+			compare(a, b);
+			Conf.expect("idle wait slot", Memory.read32(idleSlot), refSlot);
+			Conf.expect("idle wait poll", Memory.read32(POLL), refPoll);
+			Conf.expect("idle wait result", b.v0, scenario == 1 || scenario == 3 ? 2 : 1);
+			Conf.feed(b.cycles);
+		}
+		Conf.expect("idle turns were skipped", core.IdleLoop.skipped > 0 ? 1 : 0, 1);
 		reset(b); b.v0 = 77; b.unwindToken = 1;
 		Runtime.call(b, 0x8000f004);
 		Conf.expect("no guest entry while unwinding", b.v0, 77);

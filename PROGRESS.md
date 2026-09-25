@@ -1182,7 +1182,29 @@ ab13c60f); bytecode read32 140 → 133, write32 152 → 145; five rounds `--no-a
 15.97 → 15.76 s, min 15.45 → 15.42 s — at the noise band's edge, kept because it is free.
 Its second idea, access grouping under one condition `q <= RAM_SIZE − span` (mirror-boundary
 safe), is the right form of the grouping noted above and is recompiler work, not started.
-Next: the idle-loop skip if approved; a mobile profile decides whether GC needs more.
+Targeted call-site `inline` of the accessors inside the GTE transform functions (the user's
+question: V8's cumulative budget of 920 bytes cannot inline all 30 `read32` sites of
+`f_800193a8`): one function +11 KB, mean 14.96 → 14.82 s, min equal; four functions +46 KB,
+mean 15.17 s. Within noise, not adopted — V8's own inlining is enough.
+**Idle-loop skip (ADR-0022, approved by the user).** `recomp.codegen.IdleLoopPlan` proves a
+natural loop is a wait (one path of blocks with the header's pump only; arithmetic, loads, one
+`lw/addiu/sw` of a `$sp` slot and branches; no loop-carried register; the count read, while a
+register holds it — through the compiler's store-then-reload too — only by its `addiu`, its
+store and one `beq`/`bne` against an invariant), and `Emitter.emitIdlePrologue` places, after
+the pump, a dry turn into shadow locals (loads guarded to plain memory and off the slot at run
+time, the store left out, invariant branches checked) followed by the count of turns before the
+next event and before the counter's exit; all but the last are taken by arithmetic, the last
+runs as code. Proof: the tool tests (391), the `Codegen` conformance test (75194be4: a
+hand-assembled VSync and libetc's exact reload shape, reached / timed out / satisfied on entry /
+polling ROM, both builds equal in every register, the slot, the polled word and the cycles),
+and the game's four digests unchanged with the skip active. Fifteen loops match in the game,
+`f_80032264` among them; 88.7 M turns over 9000 frames were taken by arithmetic (41 k skips) —
+56 % of the machine's cycles were the wait. Node `--no-audio`: `f_80032264` gone from the
+profile (2.0 % → 0), mean 15.78 → 15.31 s — small there because the software rasteriser
+dominates a headless run. In the app's browser the skip is active (60 k turns by frame 240) but
+the pane's throttling made frame rates unreadable; the fast-forward rate in the user's Chrome,
+where the wait was 30 % of the main thread, is the measurement still to take.
+Next: a mobile profile decides whether GC needs more; the remaining 160 scavenges are unattributed.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

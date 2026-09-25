@@ -73,6 +73,18 @@ class Memory {
 	/** True for the 8 MB window holding RAM and its mirrors — the hot path's test. */
 	static inline function isRam(p:Int):Bool return (p & 0xFF800000) == 0;
 
+	/**
+		RAM or scratchpad: memory whose reads have no effect and whose contents change only when
+		the machine's own code writes them. What a skipped idle loop requires of every address it
+		reads and of its counter slot — checked at run time, because a polled address is a
+		register's value, not a constant. Everything else, the ports above all, is not plain: a
+		timer's count moves without any code running, and a FIFO's read is a side effect.
+	**/
+	public static function isPlainMemory(a:Int):Bool {
+		final p = phys(a);
+		return (p & RAM_DECODE_MASK) < RAM_SIZE || (p & SCRATCH_MATCH_MASK) == SCRATCH_BASE;
+	}
+
 	// ---- reads ---------------------------------------------------------------------------------
 
 	public static function read8u(a:Int):Int {

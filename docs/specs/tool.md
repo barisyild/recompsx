@@ -245,6 +245,21 @@ and keep the one that identifies the most functions consistently.
   `$sp`/`$fp` are not treated as proof that arbitrary memory is RAM, and calls, delay slots,
   branches and scheduler boundaries are never crossed. The generated code therefore retains raw
   memory at every uncertain boundary while reducing ordinary compiler spill traffic (ADR-0016).
+- **Idle-loop skip**: `IdleLoopPlan` proves that a natural loop is a wait — one path of blocks
+  with one pump at the header; only plain arithmetic, loads, one `lw/addiu/sw` of a `$sp` slot
+  and branches; no register read before the turn writes it unless the loop never writes it;
+  the count read, while a register holds it, only by its own `addiu`, its store, the compiler's
+  reloads of the slot and one `beq`/`bne` against an invariant. The emitter then places a
+  prologue at the header, after the pump: one dry turn into shadow locals, every load checked
+  at run time for plain memory (`Memory.isPlainMemory`) and for not overlapping the slot, the
+  store left out, every invariant branch checked to be going round again; then the turns before
+  the next event (`core.IdleLoop.untilEvent`) and before the counter's exit (`untilEqual`) are
+  counted, all but the last are taken at once — cycles charged, slot advanced — and the last
+  runs as generated code. Turns are counted, not time: the pump fires at the cycle it always
+  did and every register leaves the loop with the value the loop computes. Loops that call,
+  carry a counter in a register, store elsewhere or poll a port are emitted as before. Only an
+  optimised build takes the prologue, so the reference build is the proof (`Codegen` conformance
+  test; ADR-0022).
 - **Body template**: linear chains, optionally containing single-block loops, emit sequences
   with entry guards for resumption. Conditional self-loops emit native `while` even inside a
   larger CFG. `RegionPlan` also reduces sequences and convergent branch arms inside mixed CFGs.

@@ -144,6 +144,24 @@ class TestCodegen {
 		final gte = add("gteDirect", [0x4a180001, 0x4a000002, JR, 0]);
 		final dead = add("deadWrites", [
 			imm(9, 8, 0, 1), imm(9, 8, 0, 2), imm(9, 2, 8, 3)]);
+		// libetc's VSync, hand-assembled: a timeout in a stack slot, a counter polled through a1
+		// against a0. Only the optimized build gets the idle-loop prologue; the conformance test
+		// holds both builds to the same registers, slot and cycle count.
+		final idle = add("idleWait", [imm(9, 29, 29, -32), imm(9, 3, 0, -1), imm(0x2b, 6, 29, 16),
+			imm(0x23, 2, 29, 16), imm(9, 2, 2, -1), imm(0x2b, 2, 29, 16), imm(4, 3, 2, 8), 0,
+			imm(0x23, 2, 5, 0), alu(0x2b, 2, 2, 4), imm(5, 0, 2, -8), 0,
+			imm(9, 2, 0, 1), JR, imm(9, 29, 29, 32),
+			imm(9, 2, 0, 2), JR, imm(9, 29, 29, 32)]);
+		// libetc's exact shape: the count stored, reloaded, and the branch reading the reload.
+		final reload = add("idleReload", [imm(9, 29, 29, -32), imm(9, 3, 0, -1), imm(0x2b, 6, 29, 16),
+			imm(0x23, 2, 29, 16), 0, imm(9, 2, 2, -1), imm(0x2b, 2, 29, 16), imm(0x23, 2, 29, 16), 0,
+			imm(5, 3, 2, 4), 0, imm(9, 2, 0, 2), JR, imm(9, 29, 29, 32),
+			imm(0x23, 2, 5, 0), alu(0x2b, 2, 2, 4), imm(5, 0, 2, -14), 0,
+			imm(9, 2, 0, 1), JR, imm(9, 29, 29, 32)]);
+		// The same wait with a call in the turn, and a counter carried in a register: not idle.
+		final busy = add("idleCall", [jal(next + 32), 0, imm(0x23, 2, 5, 0), alu(0x2b, 2, 2, 4),
+			imm(5, 0, 2, -5), 0, JR, 0, JR, 0]);
+		final carried = add("idleCarried", [imm(9, 2, 2, -1), imm(5, 0, 2, -2), 0, JR, 0]);
 		if (check) {
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
@@ -167,6 +185,12 @@ class TestCodegen {
 			Assert.isTrue(dead.indexOf('t0 = 2;') >= 0, "live pure write retained");
 			Assert.isTrue(gte.indexOf('Gte.cmdRtps(12, false);') >= 0, "known GTE command called by name");
 			Assert.isTrue(gte.indexOf('Gte.execute(ctx, 0x00000002);') >= 0, "unknown GTE command falls back to execute");
+			Assert.equals(idle.indexOf('core.IdleLoop.untilEvent(ctx.cycles, ctx.nextEvent, ') >= 0, opt, "idle loop prologue when optimizing");
+			Assert.equals(idle.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "idle loop counter exit");
+			Assert.equals(reload.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "stored-and-reloaded counter exit");
+			Assert.equals(reload.indexOf('idle_v0 = idleStored;') >= 0, opt, "a reload yields the stored count in the dry turn");
+			Assert.isTrue(busy.indexOf('core.IdleLoop.') < 0, "a loop with a call is not idle");
+			Assert.isTrue(carried.indexOf('core.IdleLoop.') < 0, "a register-carried counter is not idle");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'
 			+ 'import kernel.Kernel;\nimport gte.Gte;\nclass $cls {\n' + bodies.toString()

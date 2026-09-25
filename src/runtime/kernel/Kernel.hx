@@ -672,6 +672,7 @@ class Kernel {
 			+ " | spu " + spu.Spu.written + "hw/" + spu.Spu.keyedOn + "kon/"
 			+ spu.Spu.samplesOut + "smp/" + spu.Spu.nonSilent + "loud "
 			+ spu.Spu.settings()
+			+ " | idle " + core.IdleLoop.skipped + "turns/" + core.IdleLoop.entries + "skips"
 			+ " | in ra=" + hex8(mem.Memory.raHint()));
 	}
 
