@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Flycast after the GPU DMA change: gpu 274 -> ~186, fps 29.4-31.9 in busier scenes;
+emu ~323 gte ~220 build ~195 of ~940 ms. DC scene build: pal_bank_at memoised per build (exact: VRAM
+still, in-flight banks never rewritten, refusals and nearest matches stand; the steal bumps the
+generation) and vertices sent by KOS direct rendering instead of pvr_prim. Awaiting Flycast.
+
 2026-09-26 [claude] Flycast gameplay: emu 289 gte 242 gpu 274 build 189 of 1007 ms. GPU DMA now feeds GP0
 straight from RAM (desktop hw-path profile: memory-map dispatch was 47 % of the channel; per-frame
 channel time ~-57 %), and GTE's 44-bit wrap runs only on overflow. Digests unchanged: JS+C++ 9000

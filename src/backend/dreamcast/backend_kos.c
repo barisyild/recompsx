@@ -1685,6 +1685,7 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
  *  repaint, so each renders through the palette it was submitted with — which is what the
  *  PlayStation did. Staleness cannot exist: content cannot drift from itself, which is why
  *  bp_gpu_dirty has no palette work at all. */
+static uint32_t g_pal_memo_gen = 1;
 static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
     uint16_t want[16];
     uint32_t h = 2166136261u;
@@ -1760,6 +1761,9 @@ static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
         bank = g_pal_next;   /* zero banks in use — unreachable once anything has rendered */
         g_pal_conflicts++;
     }
+    /* Only the steal above can rewrite a bank this scene has already handed out; the memo
+     * below must then forget what it said about it. */
+    if(g_pal4[bank].bound_frame == g_tex_frame) g_pal_memo_gen++;
     g_pal_next = (bank + 1) % PAL_BANKS_4BPP;
     g_pal4[bank].used = 1;
     g_pal4[bank].hash = h;
@@ -1768,6 +1772,35 @@ static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
     g_pal4[bank].bound_frame = g_tex_frame;
     for(int i = 0; i < 16; i++)
         pvr_set_pal_entry(bank * 16 + i, want[i]);
+    return bank;
+}
+
+/** pal_bank_at's answers, remembered for one scene build.
+ *
+ *  Almost every primitive of a gameplay scene changes the texture state, and each change asked
+ *  pal_bank_at again: sixteen colours read and converted, a hash, a walk of sixty-four banks —
+ *  and, once the banks are full, a nearest-palette search of sixty-four by sixteen colours. A
+ *  scene asks about the same few dozen CLUT positions a thousand times. Within one build the
+ *  answer cannot change: VRAM is still (the emulation is not running), a bank handed out this
+ *  frame is never rewritten this frame (the in-flight rule), and once no bank is eligible none
+ *  becomes eligible, so a refusal and a nearest match both stand. The one exception, the steal
+ *  when no bank is in use at all, bumps the generation. Keyed by position and by whether an
+ *  approximation was allowed, since the two can answer differently. */
+#define PAL_MEMO 512
+static struct { uint32_t gen; uint16_t cx, cy; int16_t bank; uint8_t approx; } g_pal_memo[PAL_MEMO];
+
+static int pal_bank_cached(int clut_x, int clut_y, int allow_approx) {
+    const uint32_t k = (((uint32_t)clut_x >> 4) ^ ((uint32_t)clut_y * 0x9E5u)
+                        ^ ((uint32_t)allow_approx << 8)) & (PAL_MEMO - 1);
+    if(g_pal_memo[k].gen == g_pal_memo_gen && g_pal_memo[k].cx == clut_x
+       && g_pal_memo[k].cy == clut_y && g_pal_memo[k].approx == allow_approx)
+        return g_pal_memo[k].bank;
+    const int bank = pal_bank_at(clut_x, clut_y, allow_approx);
+    g_pal_memo[k].gen = g_pal_memo_gen;
+    g_pal_memo[k].cx = (uint16_t)clut_x;
+    g_pal_memo[k].cy = (uint16_t)clut_y;
+    g_pal_memo[k].approx = (uint8_t)allow_approx;
+    g_pal_memo[k].bank = (int16_t)bank;
     return bank;
 }
 
@@ -1953,7 +1986,7 @@ static void palette_priority(void) {
         if(best < 0) break;
         /* A refusal means no bank is free for THIS palette; a later one may still be resident
          * and want its lease refreshed, so the pass continues rather than abandoning the list. */
-        pal_bank_at(g_prio[best].cx, g_prio[best].cy, 0);
+        pal_bank_cached(g_prio[best].cx, g_prio[best].cy, 0);
         g_prio[best].n = 0;
     }
 }
@@ -2213,6 +2246,7 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background, int
         draw_quad(sw, sh);
     }
 
+    g_pal_memo_gen++;         /* VRAM may have changed since the last build */
     palette_priority();
 
     int cur_state = -1, cur_fmt = -1, cur_dim = 0, cur_ou = 0, cur_ov = 0;
@@ -2246,11 +2280,11 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background, int
                     run_mir = page4_mirror(s);
                 else {}
                 if(run_mir) {
-                    run_bank = pal_bank_at(s->clut_x, s->clut_y, 0);
+                    run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0);
                 } else {
                     run_slot = tex_slot(s);
                     if(run_slot >= 0 && s->depth == 0)
-                        run_bank = pal_bank_at(s->clut_x, s->clut_y, 1);
+                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1);
                 }
             }
             if(run_mir && run_bank >= 0) {
@@ -2277,7 +2311,7 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background, int
                     /* Sampling wider than one patch, or the patch pool is all in flight: the
                      * nearest banked palette, which is the only lossy path left in the scene. */
                     g_bake_miss++;
-                    const int nb = pal_bank_at(s->clut_x, s->clut_y, 1);
+                    const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1);
                     mem = run_mir;
                     fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb)
                         | PVR_TXRFMT_TWIDDLED;
@@ -2350,32 +2384,39 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background, int
             }
         }
 
+        /* Vertices are written straight into a store queue and flushed to the TA (KOS direct
+         * rendering), where pvr_prim built each one on the stack and then copied it there
+         * through a call. Every field is written: the queue holds whatever went before. */
         const uint32_t a = (uint32_t)(alpha * 255.0f) << 24;
-        pvr_vertex_t vert;
-        vert.oargb = 0;
-        vert.z = 1.0f;
         if(c->is_rect) {
             const float x0 = ((float)c->x[0] - (float)s->draw_x) * scale_x;
             const float y0 = ((float)c->y[0] - (float)s->draw_y) * scale_y;
             const float x1 = ((float)(c->x[0] + c->x[1]) - (float)s->draw_x) * scale_x;
             const float y1 = ((float)(c->y[0] + c->y[1]) - (float)s->draw_y) * scale_y;
-            vert.argb = (c->argb[0] & 0x00FFFFFFu) | a;
-            vert.u = 0.0f; vert.v = 0.0f;
-            vert.flags = PVR_CMD_VERTEX;
-            vert.x = x0; vert.y = y0; pvr_prim(&vert, sizeof(vert));
-            vert.x = x1; vert.y = y0; pvr_prim(&vert, sizeof(vert));
-            vert.x = x0; vert.y = y1; pvr_prim(&vert, sizeof(vert));
-            vert.flags = PVR_CMD_VERTEX_EOL;
-            vert.x = x1; vert.y = y1; pvr_prim(&vert, sizeof(vert));
+            const uint32_t argb = (c->argb[0] & 0x00FFFFFFu) | a;
+            for(int k = 0; k < 4; k++) {
+                pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
+                v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+                v->x = (k & 1) ? x1 : x0;
+                v->y = (k & 2) ? y1 : y0;
+                v->z = 1.0f;
+                v->u = 0.0f; v->v = 0.0f;
+                v->argb = argb;
+                v->oargb = 0;
+                pvr_dr_commit(v);
+            }
         } else {
             for(int k = 0; k < 3; k++) {
-                vert.flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-                vert.x = ((float)c->x[k] - (float)s->draw_x) * scale_x;
-                vert.y = ((float)c->y[k] - (float)s->draw_y) * scale_y;
-                vert.u = ((float)c->u[k] - (float)cur_ou + 0.5f) * cur_rdim;
-                vert.v = ((float)c->v[k] - (float)cur_ov + 0.5f) * cur_rdim;
-                vert.argb = (c->argb[k] & 0x00FFFFFFu) | a;
-                pvr_prim(&vert, sizeof(vert));
+                pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
+                v->flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+                v->x = ((float)c->x[k] - (float)s->draw_x) * scale_x;
+                v->y = ((float)c->y[k] - (float)s->draw_y) * scale_y;
+                v->z = 1.0f;
+                v->u = ((float)c->u[k] - (float)cur_ou + 0.5f) * cur_rdim;
+                v->v = ((float)c->v[k] - (float)cur_ov + 0.5f) * cur_rdim;
+                v->argb = (c->argb[k] & 0x00FFFFFFu) | a;
+                v->oargb = 0;
+                pvr_dr_commit(v);
             }
         }
     }
