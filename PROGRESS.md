@@ -1240,6 +1240,14 @@ that also fed the lanes pass their constant selections directly, so the scratch 
 selectors are gone. GteOps 1cf89aa2 and Acc64 unchanged, four digests unchanged. A scratchpad
 microbenchmark (`Gte.cmdMvmva`, 3 M calls): 30.4–31.5 → 25.2–26.6 ns per call; `rtps`
 untouched at ~45 ns. Game, three rounds `--no-audio`: mean 16.66 → 16.08 s.
+**GTE register accessors fold at their call sites.** The in-game profile showed `Gte.getData`
+at 6 % self: a `switch` over thirty-two registers, called with a constant register number at
+every one of its 127 generated sites (and `setData` at 138, `setCtrl` at 139). Made `inline`,
+Haxe's analyzer folds the switch on the constant to the one case — verified on a small
+program first — so every site is now a direct static field read or write, the FIFO pushes and
+IRGB/LZCS cases included, and the bundle shrank by 7 KB. GteOps 1cf89aa2, Codegen 75194be4,
+four digests unchanged; five rounds `--no-audio` mean 15.22 → 14.11 s (−7.3 %), min 14.27 →
+13.35 s; `getData`/`setData` gone from the profile, `f_800193a8` self 933 → 686 ms.
 Next: GP0 → WebGL uniforms per batch; a mobile GC profile; the remaining 160 scavenges.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
