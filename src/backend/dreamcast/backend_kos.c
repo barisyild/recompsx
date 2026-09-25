@@ -38,6 +38,7 @@
 #include <dc/spu.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
@@ -76,6 +77,7 @@ KOS_INIT_FLAGS(INIT_DEFAULT);
  * comes first in the file. */
 #if RECOMPSX_DC_PROFILE
 static void samp_start(void);
+static void syms_load(void);
 #endif
 
 /* Whether the profiler can also paint its numbers over the picture. Needed wherever the serial
@@ -117,12 +119,12 @@ static int            g_inited;          /* bp_init has run; a second call is a 
  * Declared up here with the rest of the video state, not down beside the code that fills it in:
  * `bp_init` allocates this texture, and in C a file is read from the top. */
 /* The PVR requires both texture dimensions to be powers of two and asserts if they are not —
- * "Invalid texture V size", from pvr_poly_compile, at init, before anything is drawn. Four lines
- * of the 24-pixel BIOS font need 96, so the texture is 128 and the bottom 32 rows go unused; the
+ * "Invalid texture V size", from pvr_poly_compile, at init, before anything is drawn. Five lines
+ * of the 24-pixel BIOS font need 120, so the texture is 128 and the bottom 8 rows go unused; the
  * quad's V runs to TXT_USED/TXT_H rather than to 1. */
 #define TXT_W 512
 #define TXT_H 128
-#define TXT_USED 96
+#define TXT_USED 120
 #define TXT_LINE 24
 static pvr_ptr_t      g_txt;
 static pvr_poly_hdr_t g_txt_hdr;
@@ -1081,6 +1083,9 @@ int bp_init(const char* title) {
             tc.txr.env = PVR_TXRENV_REPLACE;
             pvr_poly_compile(&g_txt_hdr, &tc);
             bp_log(BP_LOG_INFO, "profile overlay on");
+#if RECOMPSX_DC_PROFILE
+            syms_load();
+#endif
         } else {
             bp_log(BP_LOG_WARN, "--dc-overlay: no PVR memory for the text texture");
         }
@@ -1363,6 +1368,103 @@ static void perf_window_close(uint64_t emu_us) {
 static uint32_t g_samp_key[SAMP_SLOTS], g_samp_hit[SAMP_SLOTS];
 static uint32_t g_samp_total, g_samp_lost, g_samp_frames;
 
+/* Function names for the overlay, from SYMS.BIN (scripts/dc-syms.py, written by build-dc.sh):
+ * each sample's PC is looked up here, in the interrupt, and the overlay prints the functions with
+ * the most samples in the window — a sample is a millisecond, as everywhere else. Loaded once at
+ * init and only with the overlay on; without the file the overlay says so and nothing is counted.
+ * A file from another build is refused by its anchor, samp_tick's own address. */
+#define SYM_NAME 12
+static uint32_t*          g_sym_range;          /* count x (start, end), sorted */
+static char             (*g_sym_name)[SYM_NAME];
+static volatile uint32_t* g_sym_hits;           /* samples per function this window */
+static volatile int       g_sym_count;          /* set last: the interrupt reads it */
+static volatile uint32_t  g_sym_other;          /* samples in no listed function */
+static const char*        g_sym_state = "no SYMS.BIN on the disc";
+
+static void samp_tick(irq_t code, irq_context_t* ctx, void* data);
+
+static void syms_load(void) {
+    static const char* paths[] = { "/pc/SYMS.BIN", "/cd/SYMS.BIN", "/cd/syms.bin" };
+    FILE* f = NULL;
+    for(size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && !f; i++) f = fopen(paths[i], "rb");
+    if(!f) { bp_log(BP_LOG_INFO, "syms: no SYMS.BIN — the overlay profile is off"); return; }
+    uint8_t head[12];
+    uint32_t count = 0, anchor = 0;
+    if(fread(head, 1, sizeof(head), f) == sizeof(head) && memcmp(head, "RSY1", 4) == 0) {
+        memcpy(&count, head + 4, 4);
+        memcpy(&anchor, head + 8, 4);
+    } else {}
+    if(count == 0 || count > 16384) {
+        g_sym_state = "SYMS.BIN unreadable";
+    } else if(anchor != (uint32_t)(uintptr_t)samp_tick) {
+        g_sym_state = "SYMS.BIN is from another build";
+    } else {
+        uint32_t* range = malloc(count * 8u);
+        char (*name)[SYM_NAME] = malloc(count * (size_t)SYM_NAME);
+        uint32_t* hits = calloc(count, 4u);
+        if(range && name && hits && fread(range, 8, count, f) == count
+           && fread(name, SYM_NAME, count, f) == count) {
+            for(uint32_t i = 0; i < count; i++) name[i][SYM_NAME - 1] = '\0';
+            g_sym_range = range;
+            g_sym_name = name;
+            g_sym_hits = hits;
+            g_sym_count = (int)count;
+            g_sym_state = NULL;
+        } else {
+            free(range); free(name); free(hits);
+            g_sym_state = "SYMS.BIN unreadable";
+        }
+    }
+    fclose(f);
+    char msg[80];
+    snprintf(msg, sizeof(msg), "syms: %s", g_sym_state ? g_sym_state : "function names loaded");
+    bp_log(g_sym_state ? BP_LOG_WARN : BP_LOG_INFO, msg);
+}
+
+/* The function holding `pc`, or -1. Binary search, in the interrupt: a dozen steps a millisecond. */
+static int sym_find(uint32_t pc) {
+    int lo = 0, hi = g_sym_count - 1;
+    while(lo <= hi) {
+        const int mid = (lo + hi) >> 1;
+        if(pc < g_sym_range[mid * 2]) hi = mid - 1;
+        else if(pc >= g_sym_range[mid * 2 + 1]) lo = mid + 1;
+        else return mid;
+    }
+    return -1;
+}
+
+/* The two overlay lines: the six functions with the most samples in the window, three a line,
+ * then the window's counts are cleared. */
+static void syms_top(char* a, char* b, size_t len) {
+    if(g_sym_count <= 0) {
+        snprintf(a, len, "prof: %s", g_sym_state ? g_sym_state : "-");
+        b[0] = '\0';
+        return;
+    }
+    int top[6];
+    for(int k = 0; k < 6; k++) {
+        top[k] = -1;
+        for(int i = 0; i < g_sym_count; i++) {
+            int taken = 0;
+            for(int j = 0; j < k; j++) if(top[j] == i) taken = 1;
+            if(!taken && g_sym_hits[i] > 0 && (top[k] < 0 || g_sym_hits[i] > g_sym_hits[top[k]])) top[k] = i;
+        }
+    }
+    char* out[2] = { a, b };
+    for(int line = 0; line < 2; line++) {
+        int n = 0;
+        out[line][0] = '\0';
+        for(int k = line * 3; k < line * 3 + 3; k++) {
+            if(top[k] < 0) break;
+            n += snprintf(out[line] + n, len - (size_t)n, "%-10.10s%3lu ",
+                          g_sym_name[top[k]], (unsigned long)g_sym_hits[top[k]]);
+            if(n >= (int)len) break;
+        }
+    }
+    for(int i = 0; i < g_sym_count; i++) g_sym_hits[i] = 0;
+    g_sym_other = 0;
+}
+
 static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
     (void)code; (void)data;
     /* Acknowledge FIRST and unconditionally. An SH-4 timer holds its underflow flag until
@@ -1372,6 +1474,11 @@ static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
     timer_clear(TMU1);
     const int where = g_where;
     if(where >= 0 && thd_get_current() == g_emu_thread) g_samp_where[where]++;
+    if(g_sym_count > 0) {
+        const int fn = sym_find(CONTEXT_PC(*ctx));
+        if(fn >= 0) g_sym_hits[fn]++;
+        else g_sym_other++;
+    } else {}
     const uint32_t k = CONTEXT_PC(*ctx) >> SAMP_GRAN;
     const uint32_t h = (k * 2654435761u) & (SAMP_SLOTS - 1);
     for(int i = 0; i < 8; i++) {
@@ -1495,11 +1602,11 @@ static void profile_report(void) {
 #if RECOMPSX_DC_PROFILE_OVERLAY
     /* The on-screen copy is built before the serial one is written, so the log counters describe
      * the period they belong to rather than including the cost of reporting themselves. */
-    char l0[48], l1[48], l2[48], l3[48];
+    char l0[48], l1[48], l2[48], l3[48], l4[48];
     const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
-    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps pace %lu", g_prof_frames,
+    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps pace %lu disc %lu", g_prof_frames,
              (unsigned long)(total / 1000), tenths / 10, tenths % 10,
-             (unsigned long)(g_prof_pace / 1000));
+             (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000));
     /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
      * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
     if(g_hw_voices)
@@ -1516,8 +1623,9 @@ static void profile_report(void) {
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
              (unsigned long)((g_prof_submit - g_prof_build) / 1000),
              (unsigned long)(g_prof_wait / 1000));
-    snprintf(l3, sizeof(l3), "skip %d hdr %d+%d disc %lu",
-             g_prof_skipped, g_hdr_hits, g_hdr_compiles, (unsigned long)(g_prof_disc_us / 1000));
+    /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
+     * header counts that were here are in the serial line. */
+    syms_top(l3, l4, sizeof(l3));
 
     if(g_txt) {
         memset(g_txt_buf, 0, sizeof(g_txt_buf));
@@ -1525,6 +1633,7 @@ static void profile_report(void) {
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE,     TXT_W, 0xFFFF, 0, 16, true, l1);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 2, TXT_W, 0xFFFF, 0, 16, true, l2);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 3, TXT_W, 0xFFFF, 0, 16, true, l3);
+        bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 4, TXT_W, 0xFFFF, 0, 16, true, l4);
         pvr_txr_load(g_txt_buf, g_txt, sizeof(g_txt_buf));
         g_txt_ready = 1;
     }
@@ -1564,8 +1673,8 @@ static void draw_profile_overlay(void) {
     v.z = 2.0f;
 
     const float vmax = (float)TXT_USED / (float)TXT_H;
-    v.x = 0.0f;   v.y = 384.0f; v.u = 0.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
-    v.x = 512.0f; v.y = 384.0f; v.u = 1.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
+    v.x = 0.0f;   v.y = 480.0f - TXT_USED; v.u = 0.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
+    v.x = 512.0f; v.y = 480.0f - TXT_USED; v.u = 1.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
     v.x = 0.0f;   v.y = 480.0f; v.u = 0.0f; v.v = vmax; pvr_prim(&v, sizeof(v));
     v.flags = PVR_CMD_VERTEX_EOL;
     v.x = 512.0f; v.y = 480.0f; v.u = 1.0f; v.v = vmax; pvr_prim(&v, sizeof(v));

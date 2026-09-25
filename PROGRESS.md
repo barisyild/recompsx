@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Flycast: 825 ms, 36.3 fps (emu 340 gte 203 gpu 142 build 107). DC overlay profile:
+build-dc.sh writes SYMS.BIN (scripts/dc-syms.py: short function names + ranges, anchored to
+samp_tick's address); copied to the disc root, the 1 kHz sampler attributes each PC by binary search
+and overlay lines 4-5 show the top six functions in ms per window. disc moved to line 1. Next: read it.
+
 2026-09-26 [claude] Flycast after the scene-build change: build 195 -> 93, 35.6 fps (841 ms; emu 324 gte 230
 gpu 182). GP0 takes a DMA node's whole polygon/rectangle packet in one pass (9000-frame logs identical,
 counters included; desktop channel time -25 %); RTPS skips its 44-bit checks when |TR| < 2^30 (exact:

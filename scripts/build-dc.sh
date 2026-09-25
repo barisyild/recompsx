@@ -19,6 +19,7 @@
 #
 # Produces out/<target>/build-dc/recompsx.elf, which is what dcload uploads, and — when KOS's
 # scramble utility is present — a 1ST_READ.BIN next to it, which is what a bootable disc holds.
+# Also SYMS.BIN, the function table the --dc-overlay profile names hot code with.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -89,6 +90,18 @@ if [ -n "$SIZE_TOOL" ]; then
   fi
 else
   echo "note: no sh-elf-size on PATH, cannot report the loaded image size"
+fi
+
+# The overlay's function names (scripts/dc-syms.py). Copy SYMS.BIN to the disc's root beside the
+# data; the backend refuses one from another build, so a stale copy costs names, not correctness.
+NM_TOOL=""
+for cand in "${KOS_CC_BASE:-}/bin/sh-elf-nm" sh-elf-nm; do
+  command -v "$cand" >/dev/null 2>&1 && { NM_TOOL="$cand"; break; }
+done
+if [ -n "$NM_TOOL" ] && command -v python3 >/dev/null 2>&1; then
+  python3 scripts/dc-syms.py "$NM_TOOL" "$ELF" "$BUILD/SYMS.BIN"
+else
+  echo "skipped SYMS.BIN (no sh-elf-nm or python3) — the overlay profile will be off"
 fi
 
 SCRAMBLE="$KOS_BASE/utils/scramble/scramble"
