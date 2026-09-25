@@ -1115,7 +1115,16 @@ RAM access at 14 k sites becomes a real call. Static-address dispatch in the too
 to fold (an `inline slowWrite32(0x1F801810, v)` reduces to the GP0 body) but not adopted: only
 7 `lui 0x1F80` sites exist in this game, libgpu reaches the ports through pointers in RAM,
 and for constant RAM addresses both compilers already fold the RAM test after inlining.
-Next: fewer divisions per timer read (one floor instead of two in `dotsIn(videoClocksIn())`).
+The polled counter is timer 1 (libetc's VSync counting hblanks through the pointer at
+0x80068BC0 → 0x1F801110), so a read cost three divides, not nine. All three are compares on
+the common path now, bit-identically: fold's quotient is zero exactly when
+`0 <= elapsed < period`, the folded hblank residue is shorter than a line, and `unsignedMod` is
+the identity below the modulus; the dotclock residue uses `x - q*d` for its remainders (5
+divides → 3). Digests unchanged (VideoTime eb49ad68, game 0e180c28 / ab13c60f); five rounds
+min 16.79 → 15.92 s, mean 17.36 → 16.66 s. Noted, not fixed: `fold` wraps `base` past the
+target/0xFFFF without raising the reached bits, so a wrap that lands inside a folded period is
+never flagged — pre-existing, and a game reading those bits on timer 1 would notice.
+Next: the browser's own share table — profile at 6× in the polling phase with the new bundle.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
