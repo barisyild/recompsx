@@ -2,6 +2,13 @@
 
 ## Status snapshot
 
+**2026-09-26: Dreamcast loading-screen freezes: the disc read-ahead is contiguous and adaptive.**
+The multi-second freezes (the last note looping) were disc waits: one Flycast 30-vblank window on
+a loading screen spent 2492 of 3007 ms in `disc`. A seek read a whole 128 KB window synchronously
+and each prefetch stepped back 4 KB. Now a seek reads 16 KB and the next windows follow it back to
+back, doubling to 128 KB. Simulated: worst stall -35..40 %, total -30..65 %. Awaiting Flycast.
+reflaxe.CPP `--max` is the Dreamcast baseline (the user's measurement); Hatchet is set aside.
+
 **2026-09-26: the game runs bit-identically through Hatchet (Haxe -> C++98), a reflaxe.CPP candidate.**
 `scripts/build-hatchet.sh` (fork github.com/barisyild/hatchet, branch `recompsx`) transpiles runtime +
 generated game in ~6 s instead of reflaxe.CPP's 9.5 min; every game digest matches through 70,000 frames;
@@ -1124,6 +1131,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-26 [claude] DC disc read-ahead (backend_kos.c): seek reads 16 KB, then contiguous windows
+doubling to 128 KB; reads across the seam copy from both. Cause: loading-screen overlay disc 2492 of
+3007 ms. Host harness: 471 MB random + the game's 12,100 reads byte-exact. Rebuilt
+out/dc/crashbash-reflaxe-max.cdi. Next: the user's Flycast check of `disc` on the same screen.
 
 2026-09-26 [claude] `build-dc.sh --max`: Release -O3 + LTO, -fno-exceptions -fno-rtti (neither output uses
 them), own build-dc-max dir. DC images: reflaxe-max 8.02 MB, hatchet-max 7.00 MB loaded; CDIs

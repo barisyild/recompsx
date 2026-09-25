@@ -457,15 +457,25 @@ void bp_profile_mark(int section, int begin) {
 }
 
 #define DISC_WINDOW (128 * 1024)
+/* After a seek, the first read is this small and each following one twice the last, up to a
+ * window. A load in Crash Bash jumps between files a few times and then reads on, and every jump
+ * used to read a whole 128 KB window before the game had its sector: two of those were most of
+ * a 2.5-second freeze on a loading screen, with the last note of the music looping on the AICA
+ * because nothing reached it while the emulator waited. Replayed against the reads of 30,000
+ * frames on a modelled drive, this and contiguous windows (below) cut the worst 30-frame stall
+ * by 35-40 % and the total by 30-65 % across 300-1200 KB/s. */
+#define DISC_FIRST  (16 * 1024)
 enum { WIN_EMPTY, WIN_LOADING, WIN_READY };
 typedef struct {
     int slot;   /* which file */
     int at;     /* file offset of the first byte */
+    int size;   /* bytes asked for */
     int got;    /* bytes read; -1 after a failed read */
     int state;
 } disc_win_t;
 static uint8_t    g_winbuf[2][DISC_WINDOW] __attribute__((aligned(32)));
-static disc_win_t g_win[2] = { { -1, 0, 0, WIN_EMPTY }, { -1, 0, 0, WIN_EMPTY } };
+static disc_win_t g_win[2] = { { -1, 0, 0, 0, WIN_EMPTY }, { -1, 0, 0, 0, WIN_EMPTY } };
+static int        g_ra_size = DISC_FIRST;   /* the next read-ahead's size; doubles while sequential */
 static int        g_win_cur;            /* the window reads are served from; the other is next */
 static int        g_io_request = -1;    /* a window for the I/O thread to fill, or -1 */
 static mutex_t    g_io_lock = MUTEX_INITIALIZER;
@@ -2774,9 +2784,10 @@ static void* disc_io_main(void* unused) {
         g_io_request = -1;
         FILE* f = g_files[g_win[w].slot];
         const int at = g_win[w].at;
+        const int size = g_win[w].size;
         mutex_unlock(&g_io_lock);
         int got = -1;
-        if(f && fseek(f, at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, DISC_WINDOW, f);
+        if(f && fseek(f, at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, (size_t)size, f);
         mutex_lock(&g_io_lock);
         g_win[w].got = got;
         g_win[w].state = WIN_READY;
@@ -2809,14 +2820,16 @@ static void disc_io_wait_idle(void) {
 #endif
 }
 
-static void disc_io_request(int w, int slot, int at) {
+static void disc_io_request(int w, int slot, int at, int size) {
+    if(size > DISC_WINDOW) size = DISC_WINDOW;
     g_win[w].slot = slot;
     g_win[w].at = at;
+    g_win[w].size = size;
     g_win[w].got = 0;
     if(!g_io_thread) {
         /* No thread to hand it to: read it here, synchronously, as the backend always used to. */
         int got = -1;
-        if(fseek(g_files[slot], at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, DISC_WINDOW, g_files[slot]);
+        if(fseek(g_files[slot], at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, (size_t)size, g_files[slot]);
         g_win[w].got = got;
         g_win[w].state = WIN_READY;
         return;
@@ -2824,11 +2837,6 @@ static void disc_io_request(int w, int slot, int at) {
     g_win[w].state = WIN_LOADING;
     g_io_request = w;
     cond_broadcast(&g_io_cv);
-}
-
-static int win_has(const disc_win_t* w, int slot, int offset, int len) {
-    return w->state == WIN_READY && w->slot == slot && w->got > 0
-        && offset >= w->at && offset + len <= w->at + w->got;
 }
 
 static void disc_drop_slot(int slot) {
@@ -2851,6 +2859,25 @@ static int read_direct(int slot, int offset, uint8_t* buf, int len) {
     return got;
 }
 
+/* Whether window `w` holds file bytes from `offset` on (at least one). */
+static int win_starts(const disc_win_t* w, int slot, int offset) {
+    return w->state == WIN_READY && w->slot == slot && w->got > 0
+        && offset >= w->at && offset < w->at + w->got;
+}
+
+/* Keeps one window read ahead: the bytes right after `c`, contiguous with it, so the drive only
+ * ever reads forwards (the old windows overlapped by 4 KB, a step back at every seam). */
+static void disc_read_ahead(int cur) {
+    const disc_win_t* c = &g_win[cur];
+    disc_win_t* n = &g_win[1 - cur];
+    if(c->state != WIN_READY || c->got != c->size) return;       /* end of file, or a failure */
+    const int want = c->at + c->got;
+    if(n->state != WIN_EMPTY && n->slot == c->slot && n->at == want) return;
+    if(disc_io_busy()) return;
+    disc_io_request(1 - cur, c->slot, want, g_ra_size);
+    g_ra_size = g_ra_size * 2 > DISC_WINDOW ? DISC_WINDOW : g_ra_size * 2;
+}
+
 int bp_file_read(int slot, int offset, uint8_t* buf, int len) {
     if(slot < 0 || slot >= MAX_FILES || !g_files[slot] || offset < 0 || len <= 0) return -1;
 #if RECOMPSX_DC_PROFILE
@@ -2867,43 +2894,68 @@ int bp_file_read(int slot, int offset, uint8_t* buf, int len) {
     }
 
     int cur = g_win_cur;
-    if(!win_has(&g_win[cur], slot, offset, len)) {
-        const int next = 1 - cur;
-        const disc_win_t* n = &g_win[next];
-        /* The one being read ahead: wait for it if it is still on its way, and move on to it. */
-        if(n->state != WIN_EMPTY && n->slot == slot && offset >= n->at
-           && offset + len <= n->at + DISC_WINDOW) {
+    /* The read starts in the window read ahead: wait for it if it is on its way, move on to it,
+     * and read on behind it. */
+    if(!win_starts(&g_win[cur], slot, offset)) {
+        const disc_win_t* n = &g_win[1 - cur];
+        if(n->state != WIN_EMPTY && n->slot == slot && offset >= n->at && offset < n->at + n->size) {
             disc_io_wait_idle();
-            if(win_has(n, slot, offset, len)) cur = next;
+            if(win_starts(n, slot, offset)) {
+                cur = 1 - cur;
+                g_win_cur = cur;
+                disc_read_ahead(cur);
+            }
         }
-        if(!win_has(&g_win[cur], slot, offset, len)) {
-            /* Somewhere else: a seek. Read the window that starts at the sector holding it. */
-            disc_io_wait_idle();
-            cur = g_win_cur;
-            disc_io_request(cur, slot, offset & ~2047);
-            disc_io_wait_idle();
-        }
+    }
+    /* Anywhere else is a seek: a small read to answer it now, and the read-ahead grows from there. */
+    if(!win_starts(&g_win[cur], slot, offset)) {
+        disc_io_wait_idle();
+        const int at = offset & ~2047;
+        int size = ((offset + len + 2047) & ~2047) - at;
+        if(size < DISC_FIRST) size = DISC_FIRST;
+        g_win[1 - cur].state = WIN_EMPTY;
+        disc_io_request(cur, slot, at, size);
+#if RECOMPSX_DC_PROFILE
+        g_prof_misses++;
+        const uint64_t t = bp_time_us();
+#endif
+        while(disc_io_busy()) cond_wait(&g_io_cv, &g_io_lock);
+#if RECOMPSX_DC_PROFILE
+        g_prof_disc_us += bp_time_us() - t;
+#endif
+        g_ra_size = size * 2 > DISC_WINDOW ? DISC_WINDOW : size * 2;
         g_win_cur = cur;
+        if(win_starts(&g_win[cur], slot, offset)) disc_read_ahead(cur);
     }
 
     const disc_win_t* c = &g_win[cur];
     int result;
-    if(win_has(c, slot, offset, len)) {
-        memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)len);
-        result = len;
-        /* And the next window, if the drive is free and it is not already there or on its way.
-         * It starts a little before this one ends: a PlayStation sector is 2352 bytes and a
-         * window 128 KB, so sectors straddle the seam all the time, and one that is wholly in
-         * neither window would be a seek and a stall at every crossing. */
-        const int next = 1 - cur;
-        const int want = (c->at + c->got - 4096) & ~2047;
-        const disc_win_t* n = &g_win[next];
-        if(c->got == DISC_WINDOW && !disc_io_busy()
-           && !(n->state == WIN_READY && n->slot == slot && n->at == want))
-            disc_io_request(next, slot, want);
+    if(win_starts(c, slot, offset)) {
+        const int here = c->at + c->got - offset;
+        if(len <= here) {
+            memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)len);
+            result = len;
+        } else {
+            /* Across the seam: the head from this window, the tail from the next one, which is
+             * contiguous with it (asked for now if it is not already on its way). */
+            disc_read_ahead(cur);
+            const disc_win_t* n = &g_win[1 - cur];
+            if(n->state != WIN_EMPTY && n->slot == slot && n->at == c->at + c->got) {
+                disc_io_wait_idle();
+            }
+            if(n->state == WIN_READY && n->slot == slot && n->at == c->at + c->got
+               && n->got >= len - here) {
+                memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)here);
+                memcpy(buf + here, g_winbuf[1 - cur], (size_t)(len - here));
+                result = len;
+            } else {
+                /* The file ends here, or the read failed: answered directly and honestly. */
+                disc_io_wait_idle();
+                result = read_direct(slot, offset, buf, len);
+            }
+        }
+        disc_read_ahead(cur);
     } else {
-        /* Short of what was asked for: near the end of the file, or a failure. Answered
-         * directly and honestly, as before. */
         disc_io_wait_idle();
         result = read_direct(slot, offset, buf, len);
     }
