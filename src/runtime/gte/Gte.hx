@@ -441,6 +441,37 @@ class Gte {
 	// ---- executing ------------------------------------------------------------------------------------
 
 	/** Executes a COP2 command. `imm25` carries the operation and its sf/lm/MVMVA fields. */
+	/**
+		Direct entries for the recompiler. A GTE command word is a constant in the guest code,
+		so the emitter decodes it at build time and calls the operation by name, skipping the
+		decode and the dispatch chain `execute` walks for a word it first sees at run time —
+		which the browser profile had at six percent of a frame on its own. Each entry does
+		exactly what `execute` does for its opcode, the flag reset included. `execute` stays
+		for words the emitter does not recognise and for the fixtures.
+	**/
+	public static function cmdRtps(sf:Int, lm:Bool):Void { flag = 0; rtps(sf, lm, 0, true); }
+	public static function cmdRtpt(sf:Int, lm:Bool):Void { flag = 0; rtpt(sf, lm); }
+	public static function cmdNclip():Void { flag = 0; nclip(); }
+	public static function cmdAvsz3():Void { flag = 0; avsz3(); }
+	public static function cmdAvsz4():Void { flag = 0; avsz4(); }
+	public static function cmdMvmva(sf:Int, lm:Bool, imm25:Int):Void { flag = 0; mvmva(sf, lm, imm25); }
+	public static function cmdSqr(sf:Int):Void { flag = 0; sqr(sf); }
+	public static function cmdOp(sf:Int, lm:Bool):Void { flag = 0; crossProduct(sf, lm); }
+	public static function cmdGpf(sf:Int, lm:Bool):Void { flag = 0; gpf(sf, lm); }
+	public static function cmdGpl(sf:Int, lm:Bool):Void { flag = 0; gpl(sf, lm); }
+	public static function cmdDpcs(sf:Int, lm:Bool):Void { flag = 0; dpcs(sf, lm); }
+	public static function cmdDpct(sf:Int, lm:Bool):Void { flag = 0; dpct(sf, lm); }
+	public static function cmdIntpl(sf:Int, lm:Bool):Void { flag = 0; intpl(sf, lm); }
+	public static function cmdDcpl(sf:Int, lm:Bool):Void { flag = 0; dcpl(sf, lm); }
+	public static function cmdNcs(sf:Int, lm:Bool):Void { flag = 0; ncs(sf, lm, 0); }
+	public static function cmdNct(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 0); }
+	public static function cmdNcds(sf:Int, lm:Bool):Void { flag = 0; ncds(sf, lm, 0); }
+	public static function cmdNcdt(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 1); }
+	public static function cmdNccs(sf:Int, lm:Bool):Void { flag = 0; nccs(sf, lm, 0); }
+	public static function cmdNcct(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 2); }
+	public static function cmdCc(sf:Int, lm:Bool):Void { flag = 0; cc(sf, lm); }
+	public static function cmdCdp(sf:Int, lm:Bool):Void { flag = 0; cdp(sf, lm); }
+
 	public static function execute(ctx:CpuState, imm25:Int):Void {
 		flag = 0;
 		final op = imm25 & 0x3F;

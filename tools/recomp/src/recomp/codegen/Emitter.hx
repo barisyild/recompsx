@@ -871,10 +871,46 @@ class Emitter {
 			case CTC2: 'Gte.setCtrl(ctx, ${i.rd}, ${reg(rt)});';
 			case LWC2: 'Gte.setData(ctx, ${i.rt}, Memory.read32(${addrExpr(i)}));';
 			case SWC2: 'Memory.write32(${addrExpr(i)}, Gte.getData(ctx, ${i.rt}));';
-			case COP2CMD: 'Gte.execute(ctx, ${hex(i.code)});';
+			case COP2CMD: gteCommand(i.code);
 
 			case _: '// unhandled: ${Disasm.text(i)}';
 		}
+	}
+
+	/**
+		A GTE command word is a constant, so its operation is called by name with the fields the
+		runtime's `execute` would have decoded from it; `execute` itself is kept for any word the
+		table below does not know, so an unknown operation still reports itself at run time.
+	**/
+	static function gteCommand(code:Int):String {
+		final sf = (code & 0x80000) != 0 ? 12 : 0;
+		final lm = (code & 0x400) != 0 ? "true" : "false";
+		final args = '$sf, $lm';
+		return switch (code & 0x3F) {
+			case 0x01: 'Gte.cmdRtps($args);';
+			case 0x30: 'Gte.cmdRtpt($args);';
+			case 0x06: 'Gte.cmdNclip();';
+			case 0x2D: 'Gte.cmdAvsz3();';
+			case 0x2E: 'Gte.cmdAvsz4();';
+			case 0x12: 'Gte.cmdMvmva($args, ${hex(code)});';
+			case 0x28: 'Gte.cmdSqr($sf);';
+			case 0x0C: 'Gte.cmdOp($args);';
+			case 0x3D: 'Gte.cmdGpf($args);';
+			case 0x3E: 'Gte.cmdGpl($args);';
+			case 0x10: 'Gte.cmdDpcs($args);';
+			case 0x2A: 'Gte.cmdDpct($args);';
+			case 0x11: 'Gte.cmdIntpl($args);';
+			case 0x29: 'Gte.cmdDcpl($args);';
+			case 0x1E: 'Gte.cmdNcs($args);';
+			case 0x20: 'Gte.cmdNct($args);';
+			case 0x13: 'Gte.cmdNcds($args);';
+			case 0x16: 'Gte.cmdNcdt($args);';
+			case 0x1B: 'Gte.cmdNccs($args);';
+			case 0x3F: 'Gte.cmdNcct($args);';
+			case 0x1C: 'Gte.cmdCc($args);';
+			case 0x14: 'Gte.cmdCdp($args);';
+			case _: 'Gte.execute(ctx, ${hex(code)});';
+		};
 	}
 
 	/** `rs + offset`, with the offset folded away when it is zero. */
