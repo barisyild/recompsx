@@ -25,4 +25,8 @@ class IntMath {
 
 	public static inline function divPow2Trunc(a:Int, shift:Int):Int
 		return a < 0 ? -((-a) >> shift) : (a >> shift);
+
+	/** Leading zero bits of the 32-bit pattern; 32 for zero. One instruction on every host. */
+	public static inline function clz32(a:Int):Int
+		return js.Syntax.code("Math.clz32({0})", a);
 }

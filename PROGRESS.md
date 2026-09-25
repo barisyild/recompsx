@@ -1224,8 +1224,14 @@ same representative and a chain that does not overflow — nearly all — pays t
 `>> 12` / `>> 16` shifts multiply by 2^-12 / 2^-16 instead of dividing: exact, the exponent
 moves. GteOps 1cf89aa2 and Acc64 0deeafe0 unchanged, four digests unchanged; five rounds
 `--no-audio` mean 17.16 → 16.41 s (−4.4 %), min 16.62 → 15.87 s, GTE share 31.0 → 29.7 %.
-Next: the rest of `rtps` (leading-zero count in the divide, static traffic); GP0 → WebGL
-uniforms per batch; a mobile GC profile.
+The perspective divide's leading-zero count was a loop of up to sixteen turns per RTPS; it is
+`IntMath.clz32` now (`Math.clz32` / `__builtin_clz`, 32 for zero), exact by definition.
+Digests unchanged; five rounds min 15.39 → 14.81 s, mean within noise, GTE share 30.2 → 29.3 %.
+What remains in `rtps` is the arithmetic itself — nine multiply-adds with their range checks,
+the table divide, the saturations, two FIFOs — and V8 loads a static field at a constant
+offset, so the static traffic is not the lever it looks like. GTE closed here: −4.4 % mean and
+−3.8 % min over the two steps.
+Next: GP0 → WebGL uniforms per batch; a mobile GC profile; the remaining 160 scavenges.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
