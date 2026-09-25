@@ -236,11 +236,9 @@ class Memory {
 
 	static function romRead8(p:Int):Int {
 		if (p == ROM_REGION_BYTE) return romRegion & 0xFF;
-		else {}
-		if (p >= ROM_FONT_BASE && p < ROM_FONT_BASE + RomFont.COUNT * RomFont.BYTES_PER_GLYPH)
+		else if (p >= ROM_FONT_BASE && p < ROM_FONT_BASE + RomFont.COUNT * RomFont.BYTES_PER_GLYPH)
 			return RomFont.byteAt(p - ROM_FONT_BASE);
-		else {}
-		return 0;
+		else return 0;
 	}
 
 	static inline function isRom(p:Int):Bool
@@ -454,20 +452,30 @@ class Memory {
 		else return unmapped8();
 	}
 
+	/**
+		The I/O reads are inlined here, at the call site, and nowhere else.
+
+		A game polls a timer through `read32`, and the profile showed the chain as five frames:
+		`read32 → slowRead32 → Timers.read → value → fold`. Inlining the accessors class-wide
+		copies their bodies into fourteen thousand generated sites and measured slower both times
+		it was tried (PROGRESS 2026-09-25); `inline` on these calls copies each body once, into
+		this one function, and grows the bundle by five kilobytes. Haxe can only do it for a body
+		whose every `return` is final, which is why `romRead8` is one if/else chain.
+	**/
 	static function slowRead32(p:Int):Int {
 		if (isScratch(p)) return RawMem.get32(scratch(), p - SCRATCH_BASE);
-		else if (isSio(p)) return sio.Sio0.read32(p);
-		else if (isTimer(p)) return timers.Timers.read(p, cycleHint());
+		else if (isSio(p)) return inline sio.Sio0.read32(p);
+		else if (isTimer(p)) return inline timers.Timers.read(p, cycleHint());
 		// The CD's four registers were reachable by byte and halfword but not by word, so a
 		// 32-bit read of the status register fell through to the unknown-I/O path and answered
 		// zero — a drive that reports nothing, to a driver that reads it that way.
-		else if (isCdrom(p)) return cdWord(p);
-		else if (dma.Dma.contains(p)) return dma.Dma.read(p);
-		else if (spu.Spu.contains(p)) return spuWord(p);
-		else if (isIo(p)) return ioRead32(p);
+		else if (isCdrom(p)) return inline cdWord(p);
+		else if (dma.Dma.contains(p)) return inline dma.Dma.read(p);
+		else if (spu.Spu.contains(p)) return inline spuWord(p);
+		else if (isIo(p)) return inline ioRead32(p);
 		else if (p == CACHE_CONTROL_REG) return cacheControl;
-		else if (isRom(p)) return romRead8(p) | (romRead8(p + 1) << 8)
-			| (romRead8(p + 2) << 16) | (romRead8(p + 3) << 24);
+		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8)
+			| ((inline romRead8(p + 2)) << 16) | ((inline romRead8(p + 3)) << 24);
 		else return unmapped8();
 	}
 

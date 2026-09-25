@@ -64,7 +64,7 @@ class Timers {
 		stepping — the counter "reached" its target however many times ago, whether anyone was
 		reading or not, which is exactly how the hardware's flag behaves.
 	**/
-	static function value(t:Int, cycles:Int):Int {
+	static inline function value(t:Int, cycles:Int):Int {
 		// `>>>`, not a divide, and no sign check anywhere.
 		//
 		// The cycle counter wraps past 2^31 about once a minute of emulated time, so `cycles -
@@ -95,21 +95,22 @@ class Timers {
 		under the modulus. Every intermediate stays well inside 32 bits because `m` is at most
 		65536.
 	**/
-	static function unsignedMod(v:Int, m:Int):Int {
+	static inline function unsignedMod(v:Int, m:Int):Int {
 		if (v >= 0) return IntMath.mod(v, m);
-		else {}
-		final half = IntMath.mod(v >>> 1, m);
-		return IntMath.mod(IntMath.mul(half, 2) + (v & 1), m);
+		else {
+			final half = IntMath.mod(v >>> 1, m);
+			return IntMath.mod(IntMath.mul(half, 2) + (v & 1), m);
+		}
 	}
 
-	static function wrapPoint(t:Int):Int {
+	static inline function wrapPoint(t:Int):Int {
 		// Reset-at-target only means something with a target above zero; a zero target would make
 		// the counter sit at zero forever, which no game means.
 		if ((mode[t] & 0x08) != 0 && target[t] > 0) return target[t] + 1;
 		else return 0x10000;
 	}
 
-	static function markWrapped(t:Int):Void {
+	static inline function markWrapped(t:Int):Void {
 		if ((mode[t] & 0x08) != 0) reached[t] |= 0x800;    // reached target
 		else reached[t] |= 0x1000;                          // overflowed 0xFFFF
 	}
@@ -122,7 +123,7 @@ class Timers {
 		runtime does not carve up yet — they run at system clock for now, and say so once, because
 		a game timing against them would run fast and that must be traceable to a line in a log.
 	**/
-	static function dividerShift(t:Int):Int {
+	static inline function dividerShift(t:Int):Int {
 		final src = (mode[t] >> 8) & 3;
 		if (t == 2) return src >= 2 ? 3 : 0;               // sysclk/8 or sysclk
 		else return 0;
@@ -152,13 +153,13 @@ class Timers {
 	}
 
 	/** How many CPU cycles a whole period of the source takes, and how many ticks that is. */
-	static function periodCycles(t:Int):Int {
+	static inline function periodCycles(t:Int):Int {
 		if (isDotClock(t)) return IntMath.mul(TimeBase.VIDEO_DEN, dotDivider());
 		else if (isHblank(t)) return TimeBase.cyclesPerLine();
 		else return 0;
 	}
 
-	static function periodTicks(t:Int):Int {
+	static inline function periodTicks(t:Int):Int {
 		if (isDotClock(t)) return TimeBase.videoNumerator();
 		else return 1;
 	}
@@ -170,7 +171,7 @@ class Timers {
 		7. The bits are the ones `gpu.Scanout` reads to pick a width, which is why the rule is
 		written the same way in both places — they are one decision seen from two sides.
 	**/
-	static function dotDivider():Int {
+	static inline function dotDivider():Int {
 		final m = gpu.Gpu.displayModeBits();
 		if ((m & 0x40) != 0) return 7;
 		else if ((m & 3) == 0) return 10;
@@ -180,27 +181,27 @@ class Timers {
 	}
 
 	/** Moves whole periods out of the elapsed cycles and into the counter, exactly. */
-	static function fold(t:Int, cycles:Int):Void {
+	static inline function fold(t:Int, cycles:Int):Void {
 		final period = periodCycles(t);
-		if (period <= 0) return;
-		else {}
-		final elapsed = (cycles - anchor[t]) | 0;
-		final n = unsignedDiv(elapsed, period);
-		if (n <= 0) return;
-		else {}
-		final wrapAt = wrapPoint(t);
-		base[t] = IntMath.mod((base[t] + IntMath.mul(n, periodTicks(t))) | 0, wrapAt);
-		anchor[t] = (anchor[t] + IntMath.mul(n, period)) | 0;
+		if (period > 0) {
+			final elapsed = (cycles - anchor[t]) | 0;
+			final n = unsignedDiv(elapsed, period);
+			if (n > 0) {
+				final wrapAt = wrapPoint(t);
+				base[t] = IntMath.mod((base[t] + IntMath.mul(n, periodTicks(t))) | 0, wrapAt);
+				anchor[t] = (anchor[t] + IntMath.mul(n, period)) | 0;
+			} else {}
+		} else {}
 	}
 
 	/** Ticks in a *folded* elapsed count — less than one period, so the arithmetic is small. */
-	static function ticksIn(t:Int, elapsed:Int):Int {
+	static inline function ticksIn(t:Int, elapsed:Int):Int {
 		if (isDotClock(t)) return dotsIn(elapsed);
 		else if (isHblank(t)) return IntMath.div(elapsed, TimeBase.cyclesPerLine());
 		else return elapsed >>> dividerShift(t);
 	}
 
-	static function dotsIn(elapsed:Int):Int {
+	static inline function dotsIn(elapsed:Int):Int {
 		// The divisor is one of five constants, but reaching it through a function makes it a
 		// runtime value — and SH-4 has no integer divide instruction, so that is a call to
 		// __sdivsi3 on every dot-clock read. Dividing inside the branches instead lets the
@@ -222,7 +223,7 @@ class Timers {
 		largest is the low part's `remainder * 1024`, which is under 2^29 for any residue this is
 		called with.
 	**/
-	static function videoClocksIn(elapsed:Int):Int {
+	static inline function videoClocksIn(elapsed:Int):Int {
 		final num = TimeBase.videoNumerator();
 		final den = TimeBase.VIDEO_DEN;
 		final hi = num >> 10;
@@ -243,13 +244,14 @@ class Timers {
 		the halved quotient plus whatever the doubled remainder contributes. Every intermediate
 		stays inside 32 bits because `m` is at most a few million.
 	**/
-	static function unsignedDiv(v:Int, m:Int):Int {
+	static inline function unsignedDiv(v:Int, m:Int):Int {
 		if (v >= 0) return IntMath.div(v, m);
-		else {}
-		final half = v >>> 1;
-		final q = IntMath.div(half, m);
-		final r = (half - IntMath.mul(q, m)) | 0;
-		return (IntMath.mul(q, 2) + IntMath.div((IntMath.mul(r, 2) + (v & 1)) | 0, m)) | 0;
+		else {
+			final half = v >>> 1;
+			final q = IntMath.div(half, m);
+			final r = (half - IntMath.mul(q, m)) | 0;
+			return (IntMath.mul(q, 2) + IntMath.div((IntMath.mul(r, 2) + (v & 1)) | 0, m)) | 0;
+		}
 	}
 
 	/**
