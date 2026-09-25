@@ -52,6 +52,20 @@ class GenMain {
 			shim.Backend.log(shim.Backend.LOG_INFO, "audio: off — voices advance, nothing is mixed");
 		} else {}
 
+		// The SPU's voices on the backend's own sampler, if asked for and offered: the SPU then
+		// advances as with no listener and describes its voices instead of mixing them.
+		if (kernel.Kernel.haltAt == 0 && hasFlag("--audio-hw")) {
+			if (shim.Backend.caps(5) != 0) {
+				spu.Spu.outputEnabled = false;
+				spu.Spu.voicesToBackend = true;
+				shim.Backend.spuRam(spu.Spu.ram);
+				shim.Backend.log(shim.Backend.LOG_INFO, "audio: the SPU's voices go to the backend's sampler");
+			} else {
+				shim.Backend.log(shim.Backend.LOG_WARN,
+					"--audio-hw asked for, but this backend has no sampler — mixing in software");
+			}
+		} else {}
+
 		if (kernel.Kernel.haltAt == 0 && hasFlag("--video-hw")) {
 			if (shim.Backend.caps(4) != 0) {
 				gpu.Gpu.hw = true;

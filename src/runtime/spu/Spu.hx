@@ -166,6 +166,24 @@ class Spu {
 	**/
 	public static var outputEnabled = true;
 
+	/**
+		The voices described to a backend that plays them on a sampler of its own (the Dreamcast's
+		AICA, BP_CAP_SPU_VOICES) instead of mixed here. Set with `outputEnabled` off, so every
+		state a game can read still advances exactly as with no listener; after each batch the
+		voices whose audible state changed are sent (`syncVoices`), and the sound RAM written
+		since the last batch with them. A presentation fork like hardware drawing: never on a
+		path that hashes anything.
+	**/
+	public static var voicesToBackend = false;
+	static var keyCount:Array<Int>;     // key-ons per voice: a new count is a new note
+	static var sentKey:Array<Int>;
+	static var sentOn:Array<Int>;
+	static var sentPitch:Array<Int>;
+	static var sentL:Array<Int>;
+	static var sentR:Array<Int>;
+	static var dirtyLo = RAM_BYTES;     // sound RAM written since the last sync: [lo, hi)
+	static var dirtyHi = 0;
+
 	public static function init():Void {
 		ram = RawMem.alloc(RAM_BYTES);
 		out = RawMem.alloc(OUT_PAIRS * 4);
@@ -191,6 +209,14 @@ class Spu {
 		envLevel = [for (_ in 0...VOICES) 0];
 		envPhase = [for (_ in 0...VOICES) PHASE_OFF];
 		envCounter = [for (_ in 0...VOICES) 0];
+		keyCount = [for (_ in 0...VOICES) 0];
+		sentKey = [for (_ in 0...VOICES) -1];
+		sentOn = [for (_ in 0...VOICES) -1];
+		sentPitch = [for (_ in 0...VOICES) -1];
+		sentL = [for (_ in 0...VOICES) -1];
+		sentR = [for (_ in 0...VOICES) -1];
+		dirtyLo = RAM_BYTES;
+		dirtyHi = 0;
 
 		mainVolL = 0;
 		mainVolR = 0;
@@ -410,6 +436,7 @@ class Spu {
 			envCounter[v] = 0;
 			envPhase[v] = PHASE_ATTACK;
 			endx &= ~(1 << v);
+			keyCount[v] = (keyCount[v] + 1) & 0x7FFFFFFF;
 			// The first voice to start, in full. A silent mixer has half a dozen possible causes
 			// and they are all visible here: a pitch of zero, volumes of zero, an envelope whose
 			// attack takes minutes, or a start address pointing at nothing.
@@ -478,6 +505,8 @@ class Spu {
 		Backend.profileMark(Backend.PROFILE_SPU, 1);
 		catchUp(cycles);
 		Backend.profileMark(Backend.PROFILE_SPU, 0);
+		if (voicesToBackend) syncVoices();
+		else {}
 		flush();
 		Scheduler.scheduleAt(Scheduler.SPU_BATCH, (cycles + CYCLES_PER_SAMPLE * BATCH) | 0);
 	}
@@ -1166,6 +1195,51 @@ class Spu {
 		RawMem.set8(ram, a, v & 0xFF);
 		RawMem.set8(ram, a + 1, (v >>> 8) & 0xFF);
 		written++;
+		if (voicesToBackend) {
+			if (a < dirtyLo) dirtyLo = a;
+			else {}
+			if (a + 2 > dirtyHi) dirtyHi = a + 2;
+			else {}
+		} else {}
+	}
+
+	/**
+		What a backend playing the voices itself needs, sent only where it changed: the sound RAM
+		written since the last batch, then each voice whose key count, on/off, pitch or volumes
+		moved. The volumes are magnitudes (a negative SPU volume inverts the phase, which a sampler
+		need not reproduce) with the envelope and the main volume folded in; each product stays
+		under 2^31.
+	**/
+	static function syncVoices():Void {
+		if (dirtyHi > dirtyLo) {
+			Backend.spuDirty(dirtyLo, dirtyHi - dirtyLo);
+			dirtyLo = RAM_BYTES;
+			dirtyHi = 0;
+		} else {}
+		final mainL = abs(volumeOf(mainVolL));
+		final mainR = abs(volumeOf(mainVolR));
+		for (v in 0...VOICES) {
+			final on = envPhase[v] != PHASE_OFF ? 1 : 0;
+			var l = 0;
+			var r = 0;
+			if (on != 0) {
+				final env = envLevel[v];
+				l = (((abs(volumeOf(volL[v])) * env) >> 15) * mainL) >> 15;
+				r = (((abs(volumeOf(volR[v])) * env) >> 15) * mainR) >> 15;
+			} else {}
+			var p = pitch[v] & 0xFFFF;
+			if (p > 0x4000) p = 0x4000;
+			else {}
+			if (keyCount[v] != sentKey[v] || on != sentOn[v] || p != sentPitch[v] || l != sentL[v]
+					|| r != sentR[v]) {
+				Backend.spuVoice(v, keyCount[v], on, startAddr[v], p, l, r);
+				sentKey[v] = keyCount[v];
+				sentOn[v] = on;
+				sentPitch[v] = p;
+				sentL[v] = l;
+				sentR[v] = r;
+			} else {}
+		}
 	}
 
 	// ---- what is still missing ------------------------------------------------------------------

@@ -2,6 +2,12 @@
 
 ## Status snapshot
 
+**2026-09-25: on the Dreamcast the AICA plays the SPU's voices (ADR-0024, `--audio-hw`).**
+The SPU (244 ms of 1517 per 30 gameplay vblanks) now only advances state; each voice is an
+AICA channel playing its sample decoded once into sound RAM, with the SPU's envelope sent as
+volume. A presentation fork like `--video-hw`: off on every run that hashes. Awaiting a Flycast
+measurement.
+
 **2026-09-25: the machine's integers stay unboxed on V8 (ADR-0023); JS 9000 frames 15.6 → 9.4 s.**
 A -0 from `%`, a -0 from a negated SPU envelope step and SRL/SRLV's unsigned reading had turned
 `CpuState`'s register fields into V8 double fields, and every read or call crossing boxed a
@@ -1102,6 +1108,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] SPU voices on the Dreamcast's AICA under `--audio-hw` (ADR-0024; ABI 37:
+`bp_spu_ram/dirty/voice`, `BP_CAP_SPU_VOICES`). C ADPCM decode identical to the runtime's on 128
+samples; digests unchanged on JS and C++. Details in the Dreamcast entry below. Next: the user's
+Flycast run with the overlay, to read `spu`/`aica` against the 244 ms before.
+
 2026-09-25 [claude] Call-site `inline` for the I/O reads inside `slowRead32` (Timers, SIO, DMA,
 CD, SPU, ROM) and `inline` on the Timers read chain (`value/fold/ticksIn/dotsIn/videoClocksIn/
 unsignedDiv/unsignedMod` and the small helpers, early returns turned into if/else so Haxe can
@@ -1344,7 +1355,17 @@ upload two texels a word through the store queues; the disc read ahead on a KOS 
 aligned 128 KB windows (host-tested on pthreads: 200,000 reads, 471 MB, no byte different).
 ABI function 34, `bp_profile_mark(section, begin)`: the runtime brackets the SPU's decoding
 and mixing and the Dreamcast backend times it (`spu` in the overlay); nothing returns to Haxe.
-Digests unchanged on JS and C++ (0e180c28 / ab13c60f / c346c0af). Not yet re-measured.
+Digests unchanged on JS and C++ (0e180c28 / ab13c60f / c346c0af). Gameplay then read 1517 ms
+per 30 vblanks (19.7 fps): emu 1150, of it spu 244; build 365.
+**The SPU's voices on the AICA (ADR-0024, ABI functions 35-37, `BP_CAP_SPU_VOICES`).** Under
+`--audio-hw` the SPU advances with output off and after each 128-sample batch sends the voices
+whose key-on count, on/off, pitch or folded volume changed, plus the sound RAM span written
+since. The Dreamcast backend decodes a sample once, start to end block, into AICA RAM (LRU,
+invalidated by writes) and plays each SPU voice on its own AICA channel via the KOS firmware;
+the mixed stream is destroyed. The C decoder matches the runtime's `decodeBlock`/`advanceBlock`
+at every key-on of 9000 frames: 4847 key-ons, 128 distinct samples, 1,239,336 PCM values, loop
+points and lengths identical. Overlay line two reads `emu … spu … aica <ms>/<decodes> wait …`.
+Not yet heard or measured on the user's Flycast.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

@@ -35,7 +35,8 @@ enum {
     BP_CAP_HAS_AUDIO        = 1,
     BP_CAP_HAS_STORAGE      = 2,
     BP_CAP_PREFERRED_SCALE  = 3,
-    BP_CAP_GPU_DRAW         = 4    /* nonzero: this backend can rasterise primitives itself */
+    BP_CAP_GPU_DRAW         = 4,   /* nonzero: this backend can rasterise primitives itself */
+    BP_CAP_SPU_VOICES       = 5    /* nonzero: this backend can play the SPU's voices itself */
 };
 int  bp_caps(int cap_id);
 
@@ -118,6 +119,33 @@ void bp_gpu_clip(int x0, int y0, int x1, int y1);
  * Bash's warning screen is the visible case: the text is drawn with set_bit, then a circle over
  * it with check_bit, and without the check the circle paints across the letters. */
 void bp_gpu_mask(int set_bit, int check_bit);
+
+/* ---- hardware sound (optional; only when bp_caps(BP_CAP_SPU_VOICES) is nonzero) -------------
+ * A backend with a sampler of its own (the Dreamcast's AICA) can play the SPU's voices instead of
+ * being handed the finished mix. The runtime keeps every piece of SPU state a game can read —
+ * envelopes, block positions, ENDX, the loop flags — exactly as it does with no listener at
+ * all, and describes the voices instead of mixing them. Like hardware drawing it is a fork in
+ * presentation, never in state, taken only when a host asks for it (--audio-hw); what is heard
+ * is the backend's approximation, not the SPU's arithmetic.
+ *
+ * Sample data is the SPU's own ADPCM in its 512 KB of sound RAM, which the backend decodes as
+ * it likes. Blocks carry the loop flags: bit 2 of a block's second byte marks a loop start, bit
+ * 0 the end, bit 1 whether the end loops back to the last loop start (or to the start address
+ * when there was none) or stops. */
+
+/* Hands over the SPU's sound RAM, borrowed until shutdown. Called once, before any voice. */
+void bp_spu_ram(const uint8_t* ram);
+
+/* Sound RAM changed from `addr` for `len` bytes: anything decoded from there is stale. Batched —
+ * one call covers every write since the previous voice update. */
+void bp_spu_dirty(int addr, int len);
+
+/* A voice's audible state, sent whenever any of it changes (the runtime compares; at most once
+ * per voice per batch of 128 samples). `key` counts the voice's key-ons: a different value with
+ * `on` set means start from `start`, a byte address in sound RAM. `on` is zero once the voice's
+ * envelope has finished. `pitch` is the SPU's pitch register (0x1000 = 44100 Hz, capped at
+ * 0x4000). `vol_l`/`vol_r` are 0..0x7FFF and already include the envelope and the main volume. */
+void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
 
 /* ---- audio -------------------------------------------------------------------------------
  * 44100 Hz stereo signed 16-bit, interleaved. frame_count is stereo frames, not samples.

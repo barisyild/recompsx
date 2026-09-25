@@ -33,6 +33,9 @@
 #include <dc/biosfont.h>
 #include <dc/sound/sound.h>
 #include <dc/sound/stream.h>
+#include <dc/sound/aica_comm.h>
+#include <dc/sound/sfxmgr.h>
+#include <dc/spu.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -500,9 +503,11 @@ static int file_exists(const char* path) {
  * `bp_present` either: a machine running at five frames a second would present five times a
  * second, and the buffer holds 93 ms. Four milliseconds is far below the half-buffer that decides
  * an underrun, and far above the rate the SPU asks at. */
+static int g_hw_voices;   /* the AICA plays the SPU's voices; the mixed stream is gone */
+
 static void pump_audio(void) {
     static uint64_t last_us;
-    if(g_stream == SND_STREAM_INVALID) return;
+    if(g_stream == SND_STREAM_INVALID || g_hw_voices) return;
 
     const uint64_t now = bp_time_us();
     if(now - last_us < 4000ull) return;
@@ -512,6 +517,267 @@ static void pump_audio(void) {
 #if RECOMPSX_DC_PROFILE
     g_prof_audio += bp_time_us() - now;
     g_prof_polls++;
+#endif
+}
+
+/* ---- the SPU's voices on the AICA (BP_CAP_SPU_VOICES, --audio-hw; ADR-0024) ----------------
+ * The runtime's SPU keeps every state a game can read, as it does with no listener, and says
+ * which voices sound, from where, at what pitch and how loud. Here each of its twenty-four voices
+ * is an AICA channel. A sample is the PlayStation's ADPCM from where the voice starts to the
+ * block that ends it, decoded once to 16-bit PCM with the SPU's own arithmetic and kept in sound
+ * RAM, keyed by its start address; the loop point is found the way the SPU finds it, from the
+ * block flags. Envelopes are the SPU's, arriving as volumes once a batch (every 2.9 ms), because
+ * the AICA's own ADSR has other curves. What is heard is an approximation: no reverb, no noise
+ * voices, no pitch modulation, and a loop's seam restarts the ADPCM filter from the first pass.
+ * The mixing that cost 8 ms a vblank of SH-4 time is the AICA's now. */
+
+#define SPU_RAM_BYTES   (512 * 1024)
+#define SPU_VOICES      24
+#define SPU_SAMPLES      192
+#define SPU_SAMPLE_MAX    65534          /* an AICA channel's loop registers are sixteen bits */
+
+typedef struct {
+    int      start;       /* byte address in sound RAM; -1 for an empty slot */
+    int      bytes;       /* sound RAM the decode read, for invalidation */
+    uint32_t aica;        /* sound RAM address on the AICA side */
+    int      len;         /* samples */
+    int      loop_start;  /* sample index the end jumps back to */
+    int      loops;
+    int      stale;       /* the PlayStation RAM under it changed: never found again, freed when idle */
+    int      refs;        /* voices playing it */
+    uint32_t used_at;
+} spu_samp_t;
+
+static const uint8_t* g_spu_ram;
+static spu_samp_t g_spu_samp[SPU_SAMPLES];
+static uint32_t   g_spu_samp_clock;
+static int        g_vchn[SPU_VOICES];
+static int        g_vkey[SPU_VOICES];
+static int        g_vsamp[SPU_VOICES];
+static int        g_vvol[SPU_VOICES], g_vpan[SPU_VOICES], g_vfreq[SPU_VOICES];
+static int16_t    g_spu_pcm[SPU_SAMPLE_MAX + 64] __attribute__((aligned(32)));
+#if RECOMPSX_DC_PROFILE
+static uint64_t   g_prof_aica;        /* decoding, uploading and commanding, inside `emu` */
+static int        g_prof_aica_decodes;
+#endif
+
+static inline int spu_sat16(int v) { return v > 32767 ? 32767 : (v < -32768 ? -32768 : v); }
+
+/* The SPU's decode (Spu.decodeBlock) and its loop rule (Spu.advanceBlock), over a whole sample:
+ * blocks from `start` until one carries the end flag, the most recent loop-start block (or the
+ * start, as a key-on leaves the repeat address) being where a looping end goes back to. */
+static int spu_decode(int start, int* len, int* loop_start, int* loops, int* bytes) {
+    static const int f0[5] = { 0, 60, 115, 98, 122 };
+    static const int f1[5] = { 0, 0, -52, -55, -60 };
+    int at = start & (SPU_RAM_BYTES - 1);
+    int old = 0, older = 0, n = 0, read = 0, loop_at = 0;
+    *loops = 0;
+    for(;;) {
+        const int header = g_spu_ram[at];
+        const int flags = g_spu_ram[(at + 1) & (SPU_RAM_BYTES - 1)];
+        int shift = header & 0x0F;
+        if(shift > 12) shift = 9;
+        int f = (header >> 4) & 0x0F;
+        if(f > 4) f = 4;
+        if(flags & 0x04) loop_at = n;
+        for(int i = 0; i < 28; i++) {
+            const int byte = g_spu_ram[(at + 2 + (i >> 1)) & (SPU_RAM_BYTES - 1)];
+            const int nib = (i & 1) == 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
+            const int t = ((nib > 7 ? nib - 16 : nib) << 12) >> shift;
+            const int smp = spu_sat16(t + ((old * f0[f] + older * f1[f] + 32) >> 6));
+            g_spu_pcm[n + i] = (int16_t)smp;
+            older = old;
+            old = smp;
+        }
+        n += 28;
+        read += 16;
+        if(flags & 0x01) { *loops = (flags & 0x02) != 0; break; }
+        if(n + 28 > SPU_SAMPLE_MAX) break;           /* longer than a channel can hold: cut */
+        at = (at + 16) & (SPU_RAM_BYTES - 1);
+    }
+    *len = n;
+    *loop_start = loop_at;
+    *bytes = read;
+    return n;
+}
+
+static void spu_samp_release(int s) {
+    if(s < 0) return;
+    if(g_spu_samp[s].refs > 0) g_spu_samp[s].refs--;
+    if(g_spu_samp[s].stale && g_spu_samp[s].refs == 0) {
+        if(g_spu_samp[s].aica) snd_mem_free(g_spu_samp[s].aica);
+        g_spu_samp[s].aica = 0;
+        g_spu_samp[s].start = -1;
+        g_spu_samp[s].stale = 0;
+    }
+}
+
+/* Frees the least recently used idle sample; 0 if there was none to free. */
+static int spu_evict_one(void) {
+    int best = -1;
+    for(int i = 0; i < SPU_SAMPLES; i++) {
+        if(g_spu_samp[i].start < 0 || g_spu_samp[i].refs > 0) continue;
+        if(best < 0 || g_spu_samp[i].used_at < g_spu_samp[best].used_at) best = i;
+    }
+    if(best < 0) return 0;
+    if(g_spu_samp[best].aica) snd_mem_free(g_spu_samp[best].aica);
+    g_spu_samp[best].aica = 0;
+    g_spu_samp[best].start = -1;
+    g_spu_samp[best].stale = 0;
+    return 1;
+}
+
+/* The sample a voice starting at `start` plays: kept, or decoded and uploaded now. */
+static int spu_samp_for(int start) {
+    for(int i = 0; i < SPU_SAMPLES; i++)
+        if(g_spu_samp[i].start == start && !g_spu_samp[i].stale) {
+            g_spu_samp[i].used_at = ++g_spu_samp_clock;
+            return i;
+        }
+    int slot = -1;
+    for(int i = 0; i < SPU_SAMPLES && slot < 0; i++) if(g_spu_samp[i].start < 0) slot = i;
+    while(slot < 0) {
+        if(!spu_evict_one()) return -1;
+        for(int i = 0; i < SPU_SAMPLES && slot < 0; i++) if(g_spu_samp[i].start < 0) slot = i;
+    }
+    int len, loop_start, loops, bytes;
+    spu_decode(start, &len, &loop_start, &loops, &bytes);
+    const size_t size = ((size_t)len * 2 + 31) & ~(size_t)31;
+    uint32_t mem = snd_mem_malloc(size);
+    while(!mem) {
+        if(!spu_evict_one()) return -1;
+        mem = snd_mem_malloc(size);
+    }
+    spu_memload_sq(mem, g_spu_pcm, size);
+#if RECOMPSX_DC_PROFILE
+    g_prof_aica_decodes++;
+#endif
+    spu_samp_t* e = &g_spu_samp[slot];
+    e->start = start; e->bytes = bytes; e->aica = mem; e->len = len;
+    e->loop_start = loop_start; e->loops = loops; e->stale = 0; e->refs = 0;
+    e->used_at = ++g_spu_samp_clock;
+    return slot;
+}
+
+static void aica_chan(int chn, uint32_t what, uint32_t base, int len, int loops, int loop_start,
+                      int freq, int vol, int pan) {
+    AICA_CMDSTR_CHANNEL(tmp, cmd, chan);
+    cmd->cmd = AICA_CMD_CHAN;
+    cmd->timestamp = 0;
+    cmd->size = AICA_CMDSTR_CHANNEL_SIZE;
+    cmd->cmd_id = (uint32_t)chn;
+    chan->cmd = what;
+    chan->base = base;
+    chan->type = AICA_SM_16BIT;
+    chan->length = (uint32_t)len;
+    chan->loop = (uint32_t)loops;
+    chan->loopstart = (uint32_t)loop_start;
+    chan->loopend = (uint32_t)len;
+    chan->freq = (uint32_t)freq;
+    chan->vol = (uint32_t)vol;
+    chan->pan = (uint32_t)pan;
+    snd_sh4_to_aica(tmp, cmd->size);
+}
+
+/* Silences and gives back every channel the voices hold; their samples go with the sound RAM
+ * allocator when the sound system shuts down. */
+static void spu_voices_off(void) {
+    if(!g_hw_voices) return;
+    for(int v = 0; v < SPU_VOICES; v++) {
+        if(g_vchn[v] < 0) continue;
+        snd_sfx_stop(g_vchn[v]);
+        snd_sfx_chn_free(g_vchn[v]);
+        g_vchn[v] = -1;
+    }
+    g_spu_ram = 0;
+    g_hw_voices = 0;
+}
+
+void bp_spu_ram(const uint8_t* ram) {
+    if(!g_snd_up || g_hw_voices) return;       /* no sound system, or already handed over */
+    g_spu_ram = ram;
+    for(int i = 0; i < SPU_SAMPLES; i++) { g_spu_samp[i].start = -1; g_spu_samp[i].aica = 0; g_spu_samp[i].refs = 0; }
+    int got = 0;
+    for(int v = 0; v < SPU_VOICES; v++) {
+        g_vchn[v] = snd_sfx_chn_alloc();
+        if(g_vchn[v] >= 0) got++;
+        g_vkey[v] = -1; g_vsamp[v] = -1; g_vvol[v] = g_vpan[v] = g_vfreq[v] = -1;
+    }
+    /* The mixed stream has nothing to carry any more. Destroying it gives its two channels and its
+     * sound RAM back, and stops anything polling it. */
+    if(g_stream != SND_STREAM_INVALID) {
+        snd_stream_stop(g_stream);
+        snd_stream_destroy(g_stream);
+        g_stream = SND_STREAM_INVALID;
+    }
+    g_hw_voices = 1;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "audio: %d of %d SPU voices on AICA channels", got, SPU_VOICES);
+    bp_log(got == SPU_VOICES ? BP_LOG_INFO : BP_LOG_WARN, msg);
+}
+
+void bp_spu_dirty(int addr, int len) {
+    if(!g_spu_ram) return;
+    for(int i = 0; i < SPU_SAMPLES; i++) {
+        spu_samp_t* e = &g_spu_samp[i];
+        if(e->start < 0 || e->stale) continue;
+        if(e->start + e->bytes <= addr || addr + len <= e->start) continue;
+        if(e->refs == 0) {
+            if(e->aica) snd_mem_free(e->aica);
+            e->aica = 0;
+            e->start = -1;
+        } else {
+            e->stale = 1;
+        }
+    }
+}
+
+void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r) {
+    if(!g_spu_ram || v < 0 || v >= SPU_VOICES || g_vchn[v] < 0) return;
+#if RECOMPSX_DC_PROFILE
+    const uint64_t t0 = bp_time_us();
+#endif
+    const int chn = g_vchn[v];
+    const int loud = vol_l > vol_r ? vol_l : vol_r;
+    const int vol = loud >> 7;                                  /* 0..0x7FFF to 0..255 */
+    const int pan = (vol_l + vol_r) > 0 ? (vol_r * 255) / (vol_l + vol_r) : 128;
+    const int freq = (int)(((uint32_t)pitch * 44100u) >> 12);  /* 0x1000 is the recorded rate */
+
+    if(on && key != g_vkey[v]) {
+        g_vkey[v] = key;
+        spu_samp_release(g_vsamp[v]);
+        g_vsamp[v] = -1;
+        const int s = spu_samp_for(start);
+        if(s < 0) {
+            snd_sfx_stop(chn);
+        } else {
+            g_spu_samp[s].refs++;
+            g_vsamp[v] = s;
+            aica_chan(chn, AICA_CH_CMD_START, g_spu_samp[s].aica, g_spu_samp[s].len, g_spu_samp[s].loops,
+                      g_spu_samp[s].loop_start, freq, vol, pan);
+            g_vvol[v] = vol; g_vpan[v] = pan; g_vfreq[v] = freq;
+        }
+    } else if(!on) {
+        g_vkey[v] = key;
+        if(g_vsamp[v] >= 0) {
+            snd_sfx_stop(chn);
+            spu_samp_release(g_vsamp[v]);
+            g_vsamp[v] = -1;
+        }
+    } else if(g_vsamp[v] >= 0) {
+        uint32_t what = 0;
+        if(vol != g_vvol[v]) what |= AICA_CH_UPDATE_SET_VOL;
+        if(pan != g_vpan[v]) what |= AICA_CH_UPDATE_SET_PAN;
+        if(freq != g_vfreq[v]) what |= AICA_CH_UPDATE_SET_FREQ;
+        if(what) {
+            const spu_samp_t* e = &g_spu_samp[g_vsamp[v]];
+            aica_chan(chn, AICA_CH_CMD_UPDATE | what, e->aica, e->len, e->loops, e->loop_start,
+                      freq, vol, pan);
+            g_vvol[v] = vol; g_vpan[v] = pan; g_vfreq[v] = freq;
+        }
+    }
+#if RECOMPSX_DC_PROFILE
+    g_prof_aica += bp_time_us() - t0;
 #endif
 }
 
@@ -778,6 +1044,7 @@ void bp_shutdown(void) {
         snd_stream_destroy(g_stream);
         g_stream = SND_STREAM_INVALID;
     }
+    spu_voices_off();
     if(g_snd_up) { snd_stream_shutdown(); g_snd_up = 0; }
 
     if(g_ready) {
@@ -797,6 +1064,8 @@ int bp_caps(int cap_id) {
         /* This machine has a rasteriser of its own and would rather use it. Whether the runtime
          * takes the offer is the host's decision, not ours — see --video-hw and ADR-0011. */
         case BP_CAP_GPU_DRAW:        return 1;
+        /* And a sampler of its own: the AICA plays the SPU's voices (--audio-hw, ADR-0024). */
+        case BP_CAP_SPU_VOICES:      return g_snd_up;
         default:                     return 0;
     }
 }
@@ -1140,13 +1409,14 @@ static void profile_report(void) {
      * exactly the mistake this line exists to prevent. */
     const uint64_t emu = g_prof_emu > g_prof_disc_us ? g_prof_emu - g_prof_disc_us : 0;
 
-    char msg[220];
+    char msg[240];
     snprintf(msg, sizeof(msg),
-             "dc: %d frames in %lu ms | emu %lu (spu %lu) | disc %lu (%d rd, %d miss)"
+             "dc: %d frames in %lu ms | emu %lu (spu %lu, aica %lu/%d) | disc %lu (%d rd, %d miss)"
              " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | empty %d | log %d in %lu",
              g_prof_frames,
              (unsigned long)(total / 1000),
              (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
+             (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes,
              (unsigned long)(g_prof_disc_us / 1000), g_prof_reads, g_prof_misses,
              (unsigned long)(g_prof_wait / 1000),
              (unsigned long)(g_prof_audio / 1000), g_prof_polls,
@@ -1163,9 +1433,15 @@ static void profile_report(void) {
     const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
     snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps", g_prof_frames, (unsigned long)(total / 1000),
              tenths / 10, tenths % 10);
-    snprintf(l1, sizeof(l1), "emu %lu spu %lu wait %lu",
-             (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
-             (unsigned long)(g_prof_wait / 1000));
+    if(g_hw_voices)
+        snprintf(l1, sizeof(l1), "emu %lu spu %lu aica %lu/%d wait %lu",
+                 (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
+                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes,
+                 (unsigned long)(g_prof_wait / 1000));
+    else
+        snprintf(l1, sizeof(l1), "emu %lu spu %lu wait %lu",
+                 (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
+                 (unsigned long)(g_prof_wait / 1000));
     snprintf(l2, sizeof(l2), "up %lu build %lu fin %lu",
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
              (unsigned long)((g_prof_submit - g_prof_build) / 1000));
@@ -1194,6 +1470,8 @@ static void profile_report(void) {
     g_prof_build = 0;
     g_prof_skipped = 0;
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_prof_section_us[i] = 0;
+    g_prof_aica = 0;
+    g_prof_aica_decodes = 0;
     g_hdr_hits = g_hdr_compiles = 0;
     g_prof_disc_us = 0;
     g_prof_reads = g_prof_misses = 0;

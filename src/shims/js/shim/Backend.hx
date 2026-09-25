@@ -28,6 +28,11 @@ class Backend {
 	public static inline var PROFILE_SPU = 0;
 	public static inline function profileMark(section:Int, begin:Int):Void {}
 
+	/** No sampler here (caps(5) is 0), so the runtime never calls these; they compile to nothing. */
+	public static inline function spuRam(ram:RawBuf):Void {}
+	public static inline function spuDirty(addr:Int, len:Int):Void {}
+	public static inline function spuVoice(v:Int, key:Int, on:Int, start:Int, pitch:Int, volL:Int, volR:Int):Void {}
+
 	public static inline var PRESENT_24BPP     = 1;
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;
