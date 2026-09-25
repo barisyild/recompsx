@@ -129,8 +129,14 @@ function createHardwareGpu(canvas) {
       bool blending = (flags & 2) != 0;
       vec3 c;
       if ((flags & 1) != 0) {
-        int tu = (int(floor(vUv.x)) & vWindow.x) | vWindow.y;
-        int tv = (int(floor(vUv.y)) & vWindow.z) | vWindow.w;
+        // The texel is the interpolated coordinate floored, as the PlayStation truncates its
+        // own — but where the exact value is a whole number the interpolation lands a hair
+        // below it about half the time, and floor() then takes the texel before: a seam of
+        // wrong or transparent texels along polygon edges, the lines across floors and models.
+        // Nudged up by 1/1024 (any bias from 1e-4 to 3e-3 measured the same), mismatches
+        // against the software rasteriser fall by 90-96 %; nudged down, they grow tenfold.
+        int tu = (int(floor(vUv.x + (1.0 / 1024.0))) & vWindow.x) | vWindow.y;
+        int tv = (int(floor(vUv.y + (1.0 / 1024.0))) & vWindow.z) | vWindow.w;
         int row = vPage.y + tv;
         uint t;
         if (vPage.z == 2) {
