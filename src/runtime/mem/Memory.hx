@@ -382,10 +382,10 @@ class Memory {
 		if (isScratch(p)) return RawMem.get8(scratch(), p - SCRATCH_BASE);
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
 		// a 32-bit word would read three neighbours that mean something else entirely.
-		else if (isCdrom(p)) return cd.Cdrom.readPolled(p, raHint());
-		else if (isSio(p)) return sio.Sio0.read8(p);
-		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
-		else if (isRom(p)) return romRead8(p);
+		else if (isCdrom(p)) return inline cd.Cdrom.readPolled(p, raHint());
+		else if (isSio(p)) return inline sio.Sio0.read8(p);
+		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 3) << 3)) & 0xFF;
+		else if (isRom(p)) return inline romRead8(p);
 		else return unmapped8();
 	}
 
@@ -443,17 +443,18 @@ class Memory {
 
 	static function slowRead16(p:Int):Int {
 		if (isScratch(p)) return RawMem.get16(scratch(), p - SCRATCH_BASE);
-		else if (isCdrom(p)) return cd.Cdrom.read8(p) | (cd.Cdrom.read8(p + 1) << 8);
-		else if (isSio(p)) return sio.Sio0.read16(p);
-		else if (isTimer(p)) return timers.Timers.read(p, cycleHint()) & 0xFFFF;
-		else if (spu.Spu.contains(p)) return spu.Spu.read16(p);
-		else if (isIo(p)) return (ioRead32(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
-		else if (isRom(p)) return romRead8(p) | (romRead8(p + 1) << 8);
+		else if (isCdrom(p)) return (inline cd.Cdrom.read8(p)) | ((inline cd.Cdrom.read8(p + 1)) << 8);
+		else if (isSio(p)) return inline sio.Sio0.read16(p);
+		else if (isTimer(p)) return (inline timers.Timers.read(p, cycleHint())) & 0xFFFF;
+		else if (spu.Spu.contains(p)) return inline spu.Spu.read16(p);
+		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 2) << 3)) & 0xFFFF;
+		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8);
 		else return unmapped8();
 	}
 
 	/**
-		The I/O reads are inlined here, at the call site, and nowhere else.
+		The I/O reads are inlined here, at the call site, and nowhere else — and the same in
+		`slowRead8` and `slowRead16`.
 
 		A game polls a timer through `read32`, and the profile showed the chain as five frames:
 		`read32 → slowRead32 → Timers.read → value → fold`. Inlining the accessors class-wide
