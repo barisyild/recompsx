@@ -1138,9 +1138,13 @@ the phase's own code and the block header by `startBlock`, in the per-sample ord
 three ways: `SpuAdvance` (new conformance test, 7172e474) snapshots six voices of six shapes
 after every batch on both paths and requires equality; the `--no-audio` game digest is the
 per-sample walk's exactly (c346c0af / 53e5c7fd); sound-on digests unchanged. Node `--no-audio`:
-min 7 → 7 s, mean 17.09 → 15.80 s; SPU share 6.8 → 2.1 %.
-Next: a "Hız sınırı" switch — fast-forward: the browser loop runs on a time budget instead of
-wall time, presents once per display interval.
+min 17.09 → 15.80 s, mean 17.51 → 16.34 s; SPU share 6.8 → 2.1 %.
+**Fast-forward** ("Hız sınırı" off, `host.unpaced`): the browser loop runs on a fourteen-
+millisecond budget per tick instead of holding to wall time, keeps its origin fresh so pacing
+resumes cleanly, and the page presents at most once per display interval and shows the frame
+rate reached. Live switch, presentation only (golden rule 3). Verified in the app's browser:
+58 kare/s locked → 371 and 246 unlocked (menu / gameplay) → 60 locked again, console clean.
+Next: the browser's own share table — profile at 6× with sound off and the lock off.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
