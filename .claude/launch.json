@@ -22,6 +22,16 @@
         "web"
       ],
       "port": 8000
+    },
+    {
+      "name": "web-https",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "scripts/serve-https.py",
+        "8443"
+      ],
+      "port": 8443,
+      "url": "https://localhost:8443"
     }
   ]
 }

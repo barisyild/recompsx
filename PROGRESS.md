@@ -1298,6 +1298,19 @@ Next: what remains on 31-bit engines is guest words beyond ±2^30 crossing un-in
 and the double register fields; candidates are a rotated register encoding (KSEG0 pointers and
 small numbers both fit 31 bits after a one-bit rotation) and inline RAM paths in the emitter.
 Safari's 10 fps (rAF every ~150 ms) still needs the replay benchmark run in Safari.
+**iPhone at ~60 fps: WebKit without its JIT on insecure origins.** The user reported the game
+capped near 60 fps on an iPhone (over 1000 before). A WKWebView harness (`wkrun`, scratchpad)
+showed the same WebKit build running the page at 757–3279 fps from `http://localhost` and ~70
+from `http://192.168.1.238`, whatever the bundle (old renderer, old runtime, sound off: all
+~60–100); a plain integer loop took 44 ms against 396 ms. The LAN origin is not a secure
+context, and WebKit runs such a page without its optimising JIT. Over HTTPS with a self-signed
+certificate the LAN origin is secure again: 45 ms, 808–2818 fps, AudioWorklet back.
+`scripts/serve-https.py` (launch configuration `web-https`) makes the certificate once per LAN
+address in `out/_web/tls/` and serves `web/` on 8443; the page's build line says when it is not
+a secure context. The SPU's lent buffer is now `host.audioLend(bytes, byteLength)`; a page
+without it gets the old `audioPush(slice)`, so a cached page cannot play the whole buffer.
+(An earlier "collapse" in the harness was its own window being occluded — rAF stops; the
+window now floats and App Nap is off.)
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
