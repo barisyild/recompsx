@@ -442,6 +442,10 @@ function createHardwareGpu(canvas) {
 
   function present(_vramBytes, sx, sy, sw, sh, flags) {
     flush();
+    // Nothing composites a hidden page, and a blit into its drawing buffer can stall the main
+    // thread on the GPU process instead: measured at about a millisecond a frame. The
+    // framebuffer texture is complete either way; the next visible present shows it.
+    if (document.hidden) { primitives = 0; return; }
     if (sw > W) sw = W;
     if (sh > H) sh = H;
     if (canvas.width !== sw || canvas.height !== sh) {
