@@ -150,7 +150,7 @@ class Gte {
 
 	// ---- data register access ----------------------------------------------------------------------
 
-	public static function getData(ctx:CpuState, reg:Int):Int {
+	public static inline function getData(ctx:CpuState, reg:Int):Int {
 		return switch (reg) {
 			case 0: vxy0;
 			case 1: vz0;
@@ -190,7 +190,7 @@ class Gte {
 		}
 	}
 
-	public static function setData(ctx:CpuState, reg:Int, value:Int):Void {
+	public static inline function setData(ctx:CpuState, reg:Int, value:Int):Void {
 		switch (reg) {
 			case 0: vxy0 = value;
 			case 1: vz0 = sext16(value);
@@ -273,7 +273,7 @@ class Gte {
 
 	// ---- control register access ---------------------------------------------------------------------
 
-	public static function getCtrl(ctx:CpuState, reg:Int):Int {
+	public static inline function getCtrl(ctx:CpuState, reg:Int):Int {
 		return switch (reg) {
 			case 0: pack(rt11, rt12);
 			case 1: pack(rt13, rt21);
@@ -312,7 +312,7 @@ class Gte {
 		}
 	}
 
-	public static function setCtrl(ctx:CpuState, reg:Int, value:Int):Void {
+	public static inline function setCtrl(ctx:CpuState, reg:Int, value:Int):Void {
 		switch (reg) {
 			case 0: { rt11 = lowOf(value); rt12 = highOf(value); }
 			case 1: { rt13 = lowOf(value); rt21 = highOf(value); }
