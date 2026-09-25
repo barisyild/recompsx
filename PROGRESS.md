@@ -2,6 +2,11 @@
 
 ## Status snapshot
 
+**2026-09-25: Dreamcast gameplay 19.7 -> 25.2 fps with the AICA; silent SPU path 3.5x cheaper.**
+Flycast overlay after ADR-0024: gameplay spu 244 -> 20 ms per 30 vblanks. The menu still read
+spu 366 ms: fading notes walked tick by tick. `Spu.fallRun` now takes releases, decays and
+falling sustains in exact stretches (SpuFall). Presents are held to the video rate.
+
 **2026-09-25: on the Dreamcast the AICA plays the SPU's voices (ADR-0024, `--audio-hw`).**
 The SPU (244 ms of 1517 per 30 gameplay vblanks) now only advances state; each voice is an
 AICA channel playing its sample decoded once into sound RAM, with the SPU's envelope sent as
@@ -1107,6 +1112,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] Silent SPU path: falling envelopes (release, decay, falling sustain) taken
+a stretch of equal steps at a time (`Spu.fallRun`), exact; new `SpuFall` conformance test sweeps
+every shift/step on both targets (fe04d507). JS catchUp over 17,500 frames 590-623 -> 160-183 ms;
+digests unchanged incl. --no-audio 17500 = 1831e9c7 on JS and C++. Dreamcast: presents paced to
+59.94/50 Hz (`pace` on the overlay); a cutscene had run at 75 fps. Next: the user's missing sounds.
 
 2026-09-25 [claude] SPU voices on the Dreamcast's AICA under `--audio-hw` (ADR-0024; ABI 37:
 `bp_spu_ram/dirty/voice`, `BP_CAP_SPU_VOICES`). C ADPCM decode identical to the runtime's on 128
