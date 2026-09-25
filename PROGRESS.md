@@ -1092,6 +1092,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] SPU: voice-major batch mixer (`mixBatch`/`mixVoice`): each voice runs its
+samples into accumulators in one loop with its volumes decoded once, main volume and saturation in
+one pass, halfword output stores. Bit-identical: SpuVoice d7680e93, game 0e180c28 / ab13c60f.
+Node 9000 frames min of three 21.66 → 19.70 s (−9 %), SPU share ~10 → 7.1 %; the user's 6×
+browser profile puts the mixer subtree at 14.7 → 8.6 %. Next: inline I64 pair ops, inline RAM path.
+
 2026-09-25 [claude] Page profile follow-up: status line written four times a second instead
 of per tick (it forced a layout each tick), audio batches sent to the worklet once per tick
 instead of 344 times a second, the loop keeps one scheduler at a time (rAF visible, timer hidden)
