@@ -23,6 +23,11 @@ class Backend {
 	public static inline var LOG_WARN  = 2;
 	public static inline var LOG_ERROR = 3;
 
+	/** The C backends can time a stretch of the runtime's work (see bp_profile_mark); here the
+	    browser's and Node's own profilers already see every function, so it compiles to nothing. */
+	public static inline var PROFILE_SPU = 0;
+	public static inline function profileMark(section:Int, begin:Int):Void {}
+
 	public static inline var PRESENT_24BPP     = 1;
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;

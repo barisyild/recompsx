@@ -437,6 +437,9 @@ void bp_sleep_us(uint64_t us) {
     if (us >= 1000ull) SDL_Delay((Uint32)(us / 1000ull));
 }
 
+/* Nothing shows these on the desktop; the profilers there see the functions themselves. */
+void bp_profile_mark(int section, int begin) { (void)section; (void)begin; }
+
 void bp_pace_frame(int target_us) {
     static uint64_t next_deadline;
     const uint64_t now = bp_time_us();

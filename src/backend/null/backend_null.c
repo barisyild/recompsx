@@ -115,6 +115,7 @@ void bp_file_close(int slot) {
 uint64_t bp_time_us(void) { return 0; }
 void     bp_sleep_us(uint64_t us) { (void)us; }
 void     bp_pace_frame(int target_us) { (void)target_us; }
+void bp_profile_mark(int section, int begin) { (void)section; (void)begin; }
 
 void bp_log(int level, const char* msg) {
     static const char* names[] = { "debug", "info", "warn", "error" };

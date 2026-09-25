@@ -166,6 +166,14 @@ void     bp_sleep_us(uint64_t us);
  * the reference point (after a pause, or when fast-forwarding). */
 void bp_pace_frame(int target_us);
 
+/* Optional instrumentation. The runtime brackets a stretch of its own work — `begin` non-zero
+ * at its start, zero at its end — and a backend may time it on its own clock and show the
+ * total, or do nothing at all. Nothing comes back, so host time still has no path into the
+ * runtime. BP_PROFILE_SPU is the sound processor's decoding and mixing, which otherwise hides
+ * inside the emulated frame. */
+enum { BP_PROFILE_SPU = 0, BP_PROFILE_SECTIONS = 4 };
+void bp_profile_mark(int section, int begin);
+
 enum { BP_LOG_DEBUG = 0, BP_LOG_INFO = 1, BP_LOG_WARN = 2, BP_LOG_ERROR = 3 };
 void bp_log(int level, const char* msg);
 

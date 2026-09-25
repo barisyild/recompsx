@@ -75,6 +75,11 @@ class Backend {
 
 	public static inline function audioBuffered():Int return BackendNative.bp_audio_buffered();
 
+	/** Brackets a stretch of the runtime's own work for a backend that times it (the Dreamcast's
+	    overlay). One-way: nothing about the host's clock comes back. */
+	public static inline var PROFILE_SPU = 0;
+	public static inline function profileMark(section:Int, begin:Int):Void BackendNative.bp_profile_mark(section, begin);
+
 	/**
 		A native host has one thread and nothing to hand it back to, so a suspended program is
 		simply resumed until it ends.

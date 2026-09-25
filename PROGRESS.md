@@ -1335,6 +1335,16 @@ v0.0.4 rebuilt from gitlab.com/simulant/mkdcdisc (libisofs from Homebrew) and ke
 "recompsx Crash Bash" -a recompsx -o out/dc/crashbash.cdi` wrote a 208,930,473-byte CDI whose
 RECOMPSX.CFG adds `--video-hw` (PVR drawing). Not yet run: the user's Flycast or console.
 The Dreamcast backend's `bp_gpu_clip` records and `bp_gpu_mask` has no stencil (ADR-0020).
+**Dreamcast, measured in Flycast with the overlay (`--dc-overlay`).** Eurocom logo: 30 vblanks
+924 ms (emu 656, up 163, sub 104). Gameplay: 1981 ms (emu 1108, sub 709, up 163). Loading:
+1762 ms, 1018 of them in the drive. Fixed since: the overlay drawn after the game; the VRAM
+background skipped under an opaque fill covering the picture (every gameplay frame); a scene
+with nothing new not built again (a 30 fps game presented each frame twice); the background
+upload two texels a word through the store queues; the disc read ahead on a KOS thread in two
+aligned 128 KB windows (host-tested on pthreads: 200,000 reads, 471 MB, no byte different).
+ABI function 34, `bp_profile_mark(section, begin)`: the runtime brackets the SPU's decoding
+and mixing and the Dreamcast backend times it (`spu` in the overlay); nothing returns to Haxe.
+Digests unchanged on JS and C++ (0e180c28 / ab13c60f / c346c0af). Not yet re-measured.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
