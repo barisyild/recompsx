@@ -99,6 +99,22 @@
     // reports the answer is the last report less what the rendering thread has consumed since,
     // at 44.1 frames a millisecond, plus what was pushed in the meantime.
     let reportedFrames = 0, reportedAt = 0, pushedSinceReport = 0;
+    // Batches pushed during one tick travel to the worklet in one message at the tick's end
+    // (from `progress`): the SPU pushes 344 times a second and a message each cost more than
+    // the sound. A tick's worth is under 16 ms of audio, well inside the queue's slack.
+    const audioPending = [];
+    let audioPendingSamples = 0;
+    function flushAudio() {
+      if (!audioNode || audioPending.length === 0) return;
+      const merged = new Int16Array(audioPendingSamples);
+      let at = 0;
+      for (const chunk of audioPending) { merged.set(chunk, at); at += chunk.length; }
+      audioPending.length = 0; audioPendingSamples = 0;
+      audioNode.port.postMessage(merged.buffer, [merged.buffer]);
+    }
+    // The status line is DOM: written per tick it forced a layout each time (2 % of a frame in
+    // the profile, and as much again in layout). Four times a second is plenty to read.
+    let shownFrames = -15;
     function workletBuffered() {
       const drained = (performance.now() - reportedAt) * 44.1;
       return Math.max(0, Math.round(reportedFrames - drained + pushedSinceReport));
@@ -148,6 +164,7 @@
         start.textContent = host.paused ? 'Devam et' : 'Duraklat';
         if (host.paused) {
           audioQueue.length = 0; queuedFrames = 0;
+          audioPending.length = 0; audioPendingSamples = 0;
           reportedFrames = 0; reportedAt = performance.now(); pushedSinceReport = 0;
           if (audioNode) audioNode.port.postMessage('flush');
         }
@@ -218,8 +235,8 @@
             const copy = new Int16Array(samples);
             const frames = copy.length >> 1;
             if (audioNode) {
-              // Transferred, not copied again: the worklet owns the buffer from here.
-              audioNode.port.postMessage(copy.buffer, [copy.buffer]);
+              audioPending.push(copy);
+              audioPendingSamples += copy.length;
               pushedSinceReport += frames;
               return;
             }
@@ -238,6 +255,9 @@
             else if (value === 'stopped') status.textContent = 'Oyun durdu.';
           },
           progress(frames, yields) {
+            flushAudio();
+            if (frames - shownFrames < 15) return;
+            shownFrames = frames;
             status.textContent = `${frames} kare · çalışıyor`;
             status.dataset.frames = frames;
             status.dataset.yields = yields;

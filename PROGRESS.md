@@ -1092,6 +1092,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Page profile follow-up: status line written four times a second instead
+of per tick (it forced a layout each tick), audio batches sent to the worklet once per tick
+instead of 344 times a second, the loop keeps one scheduler at a time (rAF visible, timer hidden)
+instead of racing both, and `Cooperative.wantsYield` is an inline two-load fast path with the
+full test behind it (Yielding 203c40c1 unchanged). Main-thread CPU per emulated frame over frames
+11506–13509: 2.43 → 1.86 ms at a steady 60 fps. SPU mixer (14.7 % in the page profile) is next.
+
 2026-09-25 [claude] Browser page: sound moved to an AudioWorklet (`web/audio-worklet.js`), the
 JS backend now forwards the host's `audioBuffered` so the SPU's pacing holds the queue near its
 cap, runtime logs go to the console only (writing them into the page re-rendered it per line),

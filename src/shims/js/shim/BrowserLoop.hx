@@ -12,20 +12,26 @@ class BrowserLoop {
 			let base = {0}, t0 = performance.now(), active = true;
 			function frames() { return {0}; }
 			function state(value) { if (host && host.state) host.state(value); }
-			function schedule() {
-				let ran = false;
-				const raf = requestAnimationFrame(go);
-				const timer = setTimeout(go, 20);
-				function go() {
-					if (ran || !active) return;
-					ran = true; cancelAnimationFrame(raf); clearTimeout(timer);
-					try { tick(); } catch (e) {
-						active = false;
-						if (host && host.log) host.log(3, '[fatal] ' + (e.stack || String(e)));
-						state('error');
-					}
+			// One scheduler at a time: the animation frame while the page is visible, a timer while
+			// it is hidden (frames do not fire then, and the sound goes on). Racing both and
+			// cancelling the loser cost a clearTimeout per tick, which profiled at 3 % of a frame.
+			let pendingRaf = 0;
+			function go() {
+				pendingRaf = 0;
+				if (!active) return;
+				try { tick(); } catch (e) {
+					active = false;
+					if (host && host.log) host.log(3, '[fatal] ' + (e.stack || String(e)));
+					state('error');
 				}
 			}
+			function schedule() {
+				if (document.hidden) setTimeout(go, 16);
+				else pendingRaf = requestAnimationFrame(go);
+			}
+			document.addEventListener('visibilitychange', () => {
+				if (document.hidden && pendingRaf) { cancelAnimationFrame(pendingRaf); pendingRaf = 0; setTimeout(go, 16); }
+			});
 			function tick() {
 				const start = performance.now();
 				if (host && host.paused) { base = frames(); t0 = start; schedule(); return; }
