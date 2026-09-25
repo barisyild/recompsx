@@ -77,3 +77,16 @@ Main-thread time of the renderer, Chromium on the development Mac, harness cost 
 minimum of ten interleaved runs of 300 vblanks: 26.1 → 6.0 ms (menu), 28.1 → 6.2 ms
 (gameplay), 79.3 → 10.3 ms (Select Game Type). Safari, which carries every GL call to another
 process, is where the call count should matter most, and is not yet measured.
+
+## Revision (2026-09-25): texel coordinates are nudged before flooring
+
+The user saw lines across floors and models, from the first version on. A texel is the
+interpolated coordinate floored, and where the exact coordinate is a whole number the
+interpolation lands a hair below it about half the time, so the texel before is taken — a seam
+of wrong or transparent texels along polygon edges. Compared with the software rasteriser at the
+same vblank (renderer calls replayed from a trace, the reference from the same bundle rendering
+in software), pixels off by 6/31 or more at frames 2450, 2600, 5250 and 5400 were 412, 432, 518,
+623 and are 20, 17, 49, 55 with the coordinate nudged up by 1/1024; every bias from 1e-4 to
+3e-3 gave the same counts, and a bias down gave ten times more. The lines are gone from the
+difference image; what remains is scattered pixels at the edges of moving objects.
+

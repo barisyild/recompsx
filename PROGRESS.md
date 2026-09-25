@@ -1311,6 +1311,12 @@ a secure context. The SPU's lent buffer is now `host.audioLend(bytes, byteLength
 without it gets the old `audioPush(slice)`, so a cached page cannot play the whole buffer.
 (An earlier "collapse" in the harness was its own window being occluded — rAF stops; the
 window now floats and App Nap is off.)
+**Lines across floors and models (ADR-0020 revision).** The WebGL renderer floored the
+interpolated texel coordinate; landing a hair below a whole number, it took the previous texel
+along polygon edges. `compare.html` (scratchpad) replays a trace to a vblank and diffs the
+framebuffer against the software rasteriser's picture of the same vblank (`refgrab.js`): pixels
+off by >= 6/31 at 2450/2600/5250/5400 went 412/432/518/623 → 20/17/49/55 with a 1/1024 nudge
+(1e-4 … 3e-3 identical; a nudge down ×10 worse). Present since the first renderer.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
