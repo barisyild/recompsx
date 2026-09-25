@@ -337,9 +337,9 @@ class Memory {
 	public static inline function raHint():Int return machine == null ? 0 : machine.ra;
 
 	static function ioWrite32(p:Int, v:Int):Void {
-		if (p == 0x1F801070) core.Irq.writeStat(v);
+		if (p == 0x1F801070) inline core.Irq.writeStat(v);
 		else if (p == 0x1F801074) core.Irq.writeMask(v);
-		else if (p == 0x1F801810) gpu.Gpu.writeGp0(v);
+		else if (p == 0x1F801810) inline gpu.Gpu.writeGp0(v);
 		else if (p == 0x1F801814) gpu.Gpu.writeGp1(v);
 		else if (isMemControl(p)) memControl[(p - MEMCTRL_BASE) >> 2] = v;
 		else if (p == RAM_SIZE_REG) ramSizeReg = v;
@@ -454,7 +454,8 @@ class Memory {
 
 	/**
 		The I/O reads are inlined here, at the call site, and nowhere else — and the same in
-		`slowRead8` and `slowRead16`.
+		`slowRead8`, `slowRead16` and the three `slowWrite`s, where `ioWrite32` in turn inlines
+		`Gpu.writeGp0`, so a GP0 word reaches the GPU's dispatcher from `write32` in one call.
 
 		A game polls a timer through `read32`, and the profile showed the chain as five frames:
 		`read32 → slowRead32 → Timers.read → value → fold`. Inlining the accessors class-wide
@@ -500,9 +501,9 @@ class Memory {
 
 	static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch(), p - SCRATCH_BASE, v);
-		else if (isCdrom(p)) cd.Cdrom.write8(p, v, cycleHint());
-		else if (isSio(p)) sio.Sio0.write8(p, v);
-		else if (isIo(p)) ioWriteNarrow(p, v & 0xFF, 0xFF);
+		else if (isCdrom(p)) inline cd.Cdrom.write8(p, v, cycleHint());
+		else if (isSio(p)) inline sio.Sio0.write8(p, v);
+		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFF, 0xFF);
 		else unmappedAccesses++;
 	}
 
@@ -521,21 +522,21 @@ class Memory {
 
 	static function slowWrite16(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set16(scratch(), p - SCRATCH_BASE, v);
-		else if (isSio(p)) sio.Sio0.write16(p, v);
-		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint());
-		else if (isCdrom(p)) cdHalfWrite(p, v & 0xFFFF);
-		else if (spu.Spu.contains(p)) spu.Spu.write16(p, v & 0xFFFF);
-		else if (isIo(p)) ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
+		else if (isSio(p)) inline sio.Sio0.write16(p, v);
+		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());
+		else if (isCdrom(p)) inline cdHalfWrite(p, v & 0xFFFF);
+		else if (spu.Spu.contains(p)) inline spu.Spu.write16(p, v & 0xFFFF);
+		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		else unmappedAccesses++;
 	}
 
 	static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch(), p - SCRATCH_BASE, v);
-		else if (isTimer(p)) timers.Timers.write(p, v & 0xFFFF, cycleHint());
-		else if (isCdrom(p)) cdWordWrite(p, v);
-		else if (dma.Dma.contains(p)) dma.Dma.write(p, v);
-		else if (spu.Spu.contains(p)) spuWordWrite(p, v);
-		else if (isIo(p)) ioWrite32(p, v);
+		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());
+		else if (isCdrom(p)) inline cdWordWrite(p, v);
+		else if (dma.Dma.contains(p)) inline dma.Dma.write(p, v);
+		else if (spu.Spu.contains(p)) inline spuWordWrite(p, v);
+		else if (isIo(p)) inline ioWrite32(p, v);
 		// The cache-control word. Nothing here has a cache, so this is storage — but it is the
 		// register a game uses to enable the scratchpad, and one that read back zero after being
 		// written would be a machine no game has ever run on.
