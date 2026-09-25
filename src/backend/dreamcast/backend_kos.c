@@ -2965,10 +2965,14 @@ void bp_pace_frame(int target_us) {
 
     next_deadline += (uint64_t)target_us;
 
-    /* If we fell far behind — which on a 200 MHz SH-4 is the ordinary case, not the exception —
-     * give up on catching up rather than sprinting through frames nobody will see. */
+    /* Falling behind is the ordinary case on a 200 MHz SH-4. The debt is capped at four frames,
+     * so a stall is never sprinted through, but it is kept rather than wiped: wiping it set the
+     * next deadline a whole frame ahead, and a quick frame (a present whose scene was not rebuilt)
+     * then waited for it even though the game as a whole ran behind: 53 ms of every 30 frames in
+     * Crash Bash's menu at 38 fps. Kept, a game that is behind never waits, and one that is ahead
+     * is still held to the rate. */
     const uint64_t after = bp_time_us();
-    if(next_deadline + (uint64_t)target_us * 4ull < after) next_deadline = after + (uint64_t)target_us;
+    if(next_deadline + (uint64_t)target_us * 4ull < after) next_deadline = after - (uint64_t)target_us * 4ull;
 }
 
 void bp_log(int level, const char* msg) {

@@ -1118,6 +1118,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Flycast menu with the silent-path fix: spu 366 -> 19 ms, 28.0 -> 38.6 fps
+per 30 frames, but pace 53 ms while below 60 fps. The pacer wiped its debt after four frames
+behind, making the next quick frame wait; it now keeps four frames of debt (both backends).
+Host simulation: slow menu 37.8 -> 38.5 fps with no waiting; fast scenes still 60.0. Next:
+emu (617 ms) is the cost now.
+
 2026-09-25 [claude] Missing Dreamcast sounds traced: Crash Bash has no XA/CD-DA; its intro
 cutscene streams 220,528-sample SPU notes, longer than an AICA channel. bp_spu_voice now answers
 at the key-on; declined notes are mixed by the runtime into the kept stream (ADR-0024 revision,

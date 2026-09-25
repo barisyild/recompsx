@@ -467,10 +467,11 @@ void bp_pace_frame(int target_us) {
 
     next_deadline += (uint64_t)target_us;
 
-    /* If we fell far behind (a stall, or a debugger breakpoint), give up on catching up rather
-     * than sprinting through frames the user will never see. */
+    /* After a stall (or a debugger breakpoint) the debt is capped at four frames, so nothing is
+     * sprinted through, but it is kept rather than wiped: wiping it made a quick frame wait even
+     * while the game as a whole ran behind. Same rule as the Dreamcast backend. */
     const uint64_t after = bp_time_us();
-    if (next_deadline + (uint64_t)target_us * 4ull < after) next_deadline = after + (uint64_t)target_us;
+    if (next_deadline + (uint64_t)target_us * 4ull < after) next_deadline = after - (uint64_t)target_us * 4ull;
 }
 
 void bp_log(int level, const char* msg) {
