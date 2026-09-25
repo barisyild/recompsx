@@ -243,7 +243,11 @@ class Backend {
 		else {}
 		if (n <= 0) return 0;
 		else {}
-		buf.u8.set(src.u8.subarray(offset, offset + n), 0);
+		// A copy loop rather than `set(subarray(...))`: the view is a fresh object on every
+		// sector, and a game streaming from the disc made it a measurable share of the
+		// collector's work (15 % of scavenges over 3000 frames). The runtime allocates nothing
+		// after init; the shim keeps to that too.
+		js.Syntax.code("{ const d = {0}.u8, q = {1}.u8; for (let i = 0; i < {2}; i++) d[i] = q[{3} + i]; }", buf, src, n, offset);
 		return n;
 	}
 

@@ -1157,7 +1157,18 @@ User's 6× and 20× Chrome profiles (sound off, lock on): `read16u` 8 % at 6×, 
 0.2 % in Node on the identical Closure bundle — a throttling artefact, not a cost. Profile at 1×
 for shares. The VSync wait loop (`f_80032264`, libetc) is the largest single item left: 8 % self
 locked, 30 % in fast-forward; an exact idle-skip in the recompiler is proposed, not started.
-Next: the idle-loop skip, if approved; otherwise GTE (`cmdRtps`/`rtps`) and the GP0 → WebGL path.
+**GC.** Node's sampling heap profiler is blind to HeapNumbers, typed-array views and other
+allocations made from JIT code or builtins (measured: a micro-test boxing 310 MB of doubles
+sampled 0.2 MB), so the source was found with the inspector's allocation tracker (inline
+allocation disabled) and by bisecting bundle copies: the garbage is 16-byte HeapNumbers from the
+GTE's double accumulator (`rtps`, `mvmvaNormal`, inlined into the transform functions), mostly
+in deopt/re-opt windows at loading (frames 1320–1380: 21 scavenges; the last sixth of a
+9000-frame run: 5), with `--no-opt` doubling the count. Fixed two certain allocators: the
+`subarray` view per CD sector in the JS shim's `fileRead` (a copy loop now; within noise on the
+scavenge count) and the WebGL renderer's per-batch record objects (pooled; browser only,
+rendering verified). Digests unchanged. A hi/lo int-pair accumulator (pre-ADR-0021 `Gte.hx`) is
+being measured against the double one for speed and scavenges; result in the next entry.
+Next: decide the accumulator representation from that measurement; then the idle-loop skip.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
