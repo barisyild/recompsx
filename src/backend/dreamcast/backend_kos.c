@@ -23,6 +23,7 @@
 #include <dc/video.h>
 #include <dc/pvr.h>
 #include <dc/perfctr.h>
+#include <dc/sq.h>
 #include <arch/timer.h>
 #include <kos/irq.h>
 #include <dc/maple.h>
@@ -178,12 +179,18 @@ static int      g_cmd_overflowed;
  * other vblank. Clearing the buffer at present time instead would show that game its background
  * on one frame and its world on the next, alternating — which is exactly what it did. */
 static int      g_frame_shown;
+/* Whether anything the picture is made of has changed since the last scene went to the PVR: a
+ * primitive, a VRAM write, the display window. When nothing has, the scene is not built at all —
+ * the PVR keeps showing the last one it rendered. A game at thirty frames a second presents
+ * every frame twice, and building the same list the second time cost as much as the first. */
+static int      g_scene_dirty = 1;
 /* How many presents arrived with no primitives submitted since the last one. The theory that
  * half of them are redundant comes from the game flipping every second vblank — but it submits
  * ~772 primitives on every vblank in this scene, which would mean it draws each frame across
  * two of them and this counter stays at zero. Measure before skipping anything: presenting a
  * half-built scene and presenting nothing are different mistakes. */
 static int      g_empty_presents;
+static int      g_prof_skipped;
 /* `submit` covers two very different things — walking the command buffer into TA commands, and
  * handing the finished scene to the hardware — and its spikes have now survived two confident
  * explanations of mine. Splitting it is cheaper than a third guess. */
@@ -802,26 +809,51 @@ static void declare_texture(int w, int h) {
     pvr_poly_compile(&g_hdr, &cxt);
 }
 
+/* BGR555 to ARGB1555 is red and blue exchanged, green in place and bit 15 dropped (the quad
+ * replaces, so alpha is never read). Done two texels to a 32-bit word and written straight into
+ * the store queues, eight words a flush: one pass over the row. It used to be a 16-bit loop
+ * into a staging line and then a second pass to copy that line out, about 11 ms for a 512x240
+ * picture — and the picture is uploaded at every buffer flip of every menu. */
+static inline uint32_t bgr555x2_to_argb1555x2(uint32_t p) {
+    return (p & 0x03E003E0u) | ((p & 0x001F001Fu) << 10) | ((p >> 10) & 0x001F001Fu);
+}
+
 static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh) {
     const int row_bytes = (sw * 2 + 31) & ~31;
+    const int row_words = row_bytes >> 2;
     uint8_t* dst = (uint8_t*)g_txr;
+    const uintptr_t tex = ((uintptr_t)g_txr & 0xffffff) | PVR_TA_TEX_MEM;
+    /* The fast path reads whole words up to the store-queue boundary, so the row must start on a
+     * word and the words it reads must still be inside this row of VRAM. */
+    const int fast = (sx & 1) == 0 && sx + row_words * 2 <= VRAM_W;
 
     for(int y = 0; y < sh; y++) {
         const uint16_t* src = vram + (size_t)((sy + y) & (VRAM_H - 1)) * VRAM_W;
-        if(sx + sw <= VRAM_W) {
-            src += sx;
-            for(int x = 0; x < sw; x++) {
-                const uint16_t p = src[x];
-                g_line[x] = (uint16_t)((p & 0x03E0u) | ((p & 0x001Fu) << 10) | ((p >> 10) & 0x001Fu));
+        if(fast) {
+            const uint32_t* s32 = (const uint32_t*)(const void*)(src + sx);
+            uint32_t* d = sq_lock((void*)(tex + (size_t)y * g_txw * 2));
+            for(int w = 0; w < row_words; w += 8) {
+                d[0] = bgr555x2_to_argb1555x2(s32[w]);
+                d[1] = bgr555x2_to_argb1555x2(s32[w + 1]);
+                d[2] = bgr555x2_to_argb1555x2(s32[w + 2]);
+                d[3] = bgr555x2_to_argb1555x2(s32[w + 3]);
+                d[4] = bgr555x2_to_argb1555x2(s32[w + 4]);
+                d[5] = bgr555x2_to_argb1555x2(s32[w + 5]);
+                d[6] = bgr555x2_to_argb1555x2(s32[w + 6]);
+                d[7] = bgr555x2_to_argb1555x2(s32[w + 7]);
+                sq_flush(d);
+                d += 8;
             }
+            sq_unlock();
         } else {
             for(int x = 0; x < sw; x++) {
                 const uint16_t p = src[(sx + x) & (VRAM_W - 1)];
                 g_line[x] = (uint16_t)((p & 0x03E0u) | ((p & 0x001Fu) << 10) | ((p >> 10) & 0x001Fu));
             }
+            pvr_txr_load(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
         }
-        pvr_txr_load(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
     }
+    if(fast) sq_wait();
 }
 
 /* 24bpp is how the PS1 shows MDEC video: the row is packed RGB888 starting at byte offset sx*2,
@@ -1091,11 +1123,11 @@ static void profile_report(void) {
              tenths / 10, tenths % 10);
     snprintf(l1, sizeof(l1), "emu %lu wait %lu",
              (unsigned long)(emu / 1000), (unsigned long)(g_prof_wait / 1000));
-    snprintf(l2, sizeof(l2), "up %lu sub %lu log %d/%lu",
-             (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_submit / 1000),
-             g_prof_logs, (unsigned long)(g_prof_log_us / 1000));
-    snprintf(l3, sizeof(l3), "disc %lu ms %d rd %d miss",
-             (unsigned long)(g_prof_disc_us / 1000), g_prof_reads, g_prof_misses);
+    snprintf(l2, sizeof(l2), "up %lu build %lu fin %lu",
+             (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
+             (unsigned long)((g_prof_submit - g_prof_build) / 1000));
+    snprintf(l3, sizeof(l3), "skip %d hdr %d+%d disc %lu",
+             g_prof_skipped, g_hdr_hits, g_hdr_compiles, (unsigned long)(g_prof_disc_us / 1000));
 
     if(g_txt) {
         memset(g_txt_buf, 0, sizeof(g_txt_buf));
@@ -1117,6 +1149,7 @@ static void profile_report(void) {
     g_prof_polls = 0;
     g_empty_presents = 0;
     g_prof_build = 0;
+    g_prof_skipped = 0;
     g_hdr_hits = g_hdr_compiles = 0;
     g_prof_disc_us = 0;
     g_prof_reads = g_prof_misses = 0;
@@ -1532,6 +1565,7 @@ static void palette_priority(void) {
 
 void bp_gpu_vram(const uint16_t* vram) {
     g_vram = vram;
+    g_scene_dirty = 1;
     if(!g_mir_base) {
         /* One megabyte, taken first and in one piece, because it is the entire PlayStation
          * VRAM and every other allocation here is a luxury next to it. */
@@ -1626,6 +1660,7 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
 
 static gcmd_t* cmd_new(void) {
     begin_frame_if_needed();
+    g_scene_dirty = 1;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }
     gcmd_t* c = &g_cmds[g_cmd_count++];
     c->state = (uint16_t)(g_state_count > 0 ? g_state_count - 1 : 0);
@@ -1680,6 +1715,7 @@ void bp_gpu_mask(int set_bit, int check_bit) {
 }
 
 void bp_gpu_dirty(int x, int y, int w, int h) {
+    g_scene_dirty = 1;
     if(!(g_bg_x + g_bg_w <= x || x + w <= g_bg_x
       || g_bg_y + g_bg_h <= y || y + h <= g_bg_y)) g_bg_stale = 1;
     else {}
@@ -1753,7 +1789,24 @@ static float blend_setup(pvr_poly_cxt_t* cxt, const gstate_t* s) {
 	greater-or-equal, so a later primitive always wins against an earlier one whatever list either
 	landed in. Autosorting is off for the same reason — the order is already decided.
 **/
-static void build_scene(int sx, int sy, int sw, int sh, int with_background) {
+/* The last opaque fill rectangle that covers the whole picture, or -1. The list draws in
+ * submission order, so everything before it — the VRAM background included — is painted over:
+ * none of it has to be uploaded or built. A game that clears its buffer with a fill every frame
+ * (Crash Bash does, 512x240, from its first 3D scene on) otherwise paid for a full background
+ * upload at every buffer flip, to be hidden by the first primitive. */
+static int last_cover(int sw, int sh) {
+    for(int i = g_cmd_count - 1; i >= 0; i--) {
+        const gcmd_t* c = &g_cmds[i];
+        if(!c->is_rect) continue;
+        const gstate_t* s = &g_states[c->state];
+        if(s->flags & BP_GPU_SEMI) continue;
+        const int x0 = c->x[0] - s->draw_x, y0 = c->y[0] - s->draw_y;
+        if(x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh) return i;
+    }
+    return -1;
+}
+
+static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
     const float scale_y = 480.0f / (float)sh;
@@ -1778,7 +1831,7 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background) {
     int run_state = -1, run_bank = -1, run_slot = -1;
     pvr_ptr_t run_mir = NULL;
     float alpha = 1.0f;
-    for(int i = 0; i < g_cmd_count; i++) {
+    for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
         const gstate_t* s = &g_states[c->state];
 
@@ -1998,6 +2051,22 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
 
     const int blank = (sw <= 0 || sh <= 0);
 
+    static int shown_x = -1, shown_y = -1, shown_w = -1, shown_h = -1, shown_flags = -1;
+    if(!g_scene_dirty && g_frame_shown && sx == shown_x && sy == shown_y && sw == shown_w
+       && sh == shown_h && flags == shown_flags) {
+#if RECOMPSX_DC_PROFILE
+        g_prof_skipped++;
+        g_prof_end = bp_time_us();
+        g_prof_submit += g_prof_end - t0;
+        profile_report();
+        if(g_pc_armed || g_pc_frames == 0) perf_window_open();
+        else {}
+#endif
+        return;
+    }
+    shown_x = sx; shown_y = sy; shown_w = sw; shown_h = sh; shown_flags = flags;
+    g_scene_dirty = 0;
+
     /* Wait first, upload second. There is one texture and the PVR may still be reading it for the
      * previous frame; overwriting it mid-render would tear a picture that is otherwise correct,
      * which is the kind of fault that gets blamed on the emulator for a week. */
@@ -2013,7 +2082,10 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     if(sx != last_x || sy != last_y || sw != last_w || sh != last_h) g_bg_stale = 1;
     last_x = sx; last_y = sy; last_w = sw; last_h = sh;
 
-    if(!blank && (g_bg_stale || g_vram == NULL)) {
+    /* Covered: no upload, and the background stays marked stale for the next picture that
+     * does show it. */
+    const int cover = (!blank && g_cmd_count > 0) ? last_cover(sw, sh) : -1;
+    if(!blank && cover < 0 && (g_bg_stale || g_vram == NULL)) {
         declare_texture(pot(sw, TXR_MAX_W), pot(sh, TXR_MAX_H));
         if(flags & BP_PRESENT_24BPP) upload_24bpp(vram, sx, sy, sw, sh);
         else                         upload_15bpp(vram, sx, sy, sw, sh);
@@ -2028,7 +2100,7 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     pvr_scene_begin();
     if(g_cmd_count > 0) {
         /* Hardware drawing: the picture is geometry, over whatever VRAM already held. */
-        build_scene(sx, sy, sw, sh, !blank);
+        build_scene(sx, sy, sw, sh, !blank && cover < 0, cover < 0 ? 0 : cover);
 #if RECOMPSX_DC_PROFILE
         g_prof_build += bp_time_us() - t2;
 #endif
