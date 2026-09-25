@@ -140,6 +140,8 @@ class TestCodegen {
 			imm(0x23, 10, 29, 0), imm(9, 29, 29, 4),
 			imm(0x23, 11, 29, -4), imm(9, 29, 29, -4),
 			imm(0x23, 12, 29, 0), JR, 0]);
+		// A GTE command word is decoded at build time: RTPS with sf=1, then a word no operation owns.
+		final gte = add("gteDirect", [0x4a180001, 0x4a000002, JR, 0]);
 		final dead = add("deadWrites", [
 			imm(9, 8, 0, 1), imm(9, 8, 0, 2), imm(9, 2, 8, 3)]);
 		if (check) {
@@ -163,6 +165,8 @@ class TestCodegen {
 			Assert.equals(multi.indexOf('switch (bb)') < 0, opt, "multi-block loop needs no dispatcher");
 			Assert.equals(multi.indexOf('; break;') >= 0, opt, "loop exit records its target and breaks");
 			Assert.isTrue(dead.indexOf('t0 = 2;') >= 0, "live pure write retained");
+			Assert.isTrue(gte.indexOf('Gte.cmdRtps(12, false);') >= 0, "known GTE command called by name");
+			Assert.isTrue(gte.indexOf('Gte.execute(ctx, 0x00000002);') >= 0, "unknown GTE command falls back to execute");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'
 			+ 'import kernel.Kernel;\nimport gte.Gte;\nclass $cls {\n' + bodies.toString()
