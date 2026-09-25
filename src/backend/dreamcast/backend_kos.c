@@ -1763,9 +1763,6 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background) {
     if(with_background) {
         pvr_prim(&g_hdr, sizeof(g_hdr));
         draw_quad(sw, sh);
-#if RECOMPSX_DC_PROFILE_OVERLAY
-        draw_profile_overlay();
-#endif
     }
 
     palette_priority();
@@ -1934,6 +1931,11 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background) {
             }
         }
     }
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    /* Last: the list is drawn in submission order, so anything submitted before the game's
+     * primitives is painted over by them — as the overlay was, when it followed the background. */
+    draw_profile_overlay();
+#endif
     pvr_list_finish();
 
 #if RECOMPSX_DC_PROFILE
