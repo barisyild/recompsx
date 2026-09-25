@@ -140,6 +140,15 @@ class Spu {
 	/** The cycle the last sample was generated at. Time is caught up to, never stepped through. */
 	static var lastSample = 0;
 
+	/**
+		The mix in progress: every voice's contribution to each sample of one catch-up, summed.
+		Sized for the longest catch-up the guard allows, and allocated once — the portable subset
+		allocates nothing after init.
+	**/
+	static var accL:Array<Int>;
+	static var accR:Array<Int>;
+	static inline var MAX_CATCHUP = 4097;
+
 	public static function init():Void {
 		ram = RawMem.alloc(RAM_BYTES);
 		out = RawMem.alloc(OUT_PAIRS * 4);
@@ -160,6 +169,8 @@ class Spu {
 		older = [for (_ in 0...VOICES) 0];
 		old = [for (_ in 0...VOICES) 0];
 		decoded = [for (_ in 0...VOICES * SAMPLES_PER_BLOCK) 0];
+		accL = [for (_ in 0...MAX_CATCHUP) 0];
+		accR = [for (_ in 0...MAX_CATCHUP) 0];
 		envLevel = [for (_ in 0...VOICES) 0];
 		envPhase = [for (_ in 0...VOICES) PHASE_OFF];
 		envCounter = [for (_ in 0...VOICES) 0];
@@ -432,7 +443,7 @@ class Spu {
 	// ---- generating sound ---------------------------------------------------------------------
 
 	/**
-		Catches the sound up to the clock, one sample at a time.
+		Catches the sound up to the clock, a batch of samples at a time.
 
 		The scheduler arms a batch rather than a sample because a deadline every 768 cycles would
 		cost more than the mixing does. Between batches the machine is silent in the sense that no
@@ -447,16 +458,20 @@ class Spu {
 
 	static function catchUp(cycles:Int):Void {
 		// Wrap-safe, like every other comparison against the cycle counter (ADR-0004).
-		var guard = 0;
-		while (((cycles - lastSample) | 0) >= CYCLES_PER_SAMPLE) {
-			lastSample = (lastSample + CYCLES_PER_SAMPLE) | 0;
-			mixOne();
-			guard++;
-			// A catch-up longer than a frame means something stopped the scheduler, and grinding
-			// through it a sample at a time would turn a stall into a hang.
-			if (guard > 4096) return fellBehind(cycles);
-			else {}
+		var due = 0;
+		var last = lastSample;
+		while (((cycles - last) | 0) >= CYCLES_PER_SAMPLE && due < MAX_CATCHUP) {
+			last = (last + CYCLES_PER_SAMPLE) | 0;
+			due++;
 		}
+		lastSample = last;
+		if (due > 0) mixBatch(due);
+		else {}
+		// A catch-up longer than a frame means something stopped the scheduler, and grinding
+		// through it a sample at a time would turn a stall into a hang. The bound mixes what the
+		// old per-sample loop mixed before it gave up, then gives up the same way.
+		if (due >= MAX_CATCHUP) fellBehind(cycles);
+		else {}
 	}
 
 	static function fellBehind(cycles:Int):Void {
@@ -464,28 +479,67 @@ class Spu {
 		Runtime.reportOnce(0x68000000, "the SPU fell more than 4096 samples behind the clock");
 	}
 
-	/** One stereo pair: every voice, summed, scaled by the main volume. */
+	/** One stereo pair: every voice, summed, scaled by the main volume. The fixture's unit. */
 	static function mixOne():Void {
-		var left = 0;
-		var right = 0;
+		mixBatch(1);
+	}
+
+	/**
+		`n` stereo pairs, voice by voice rather than sample by sample.
+
+		The sample-major loop this replaces asked every voice for one sample and paid, per voice
+		and per sample, three volume decodes, two peak checks and the loop's own bookkeeping —
+		about ten calls for one multiply-add, and the largest cost in the browser's profile. Here
+		each voice runs its `n` samples in one tight loop into the accumulators, with its volumes
+		decoded once, and the main volume and saturation are applied in one pass at the end.
+
+		Same numbers, in the same order of emission: voices do not affect one another (nothing
+		modulates a voice by its neighbour here), a voice's registers and the sound RAM change
+		only between batches, addition wraps the same whichever voice comes first, and a voice
+		that falls silent mid-batch stops contributing exactly where the per-sample loop skipped
+		it. `SpuVoice` and the game digests hold it to that.
+	**/
+	static function mixBatch(n:Int):Void {
+		for (i in 0...n) {
+			accL[i] = 0;
+			accR[i] = 0;
+		}
 		for (v in 0...VOICES) {
 			if (envPhase[v] == PHASE_OFF) continue;
+			else {}
+			mixVoice(v, n);
+		}
+		final mainL = volumeOf(mainVolL);
+		final mainR = volumeOf(mainVolR);
+		for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
+	}
+
+	/** One voice's next `n` samples into the accumulators, until it goes silent. */
+	static function mixVoice(v:Int, n:Int):Void {
+		final vl = volumeOf(volL[v]);
+		final vr = volumeOf(volR[v]);
+		// Three factors multiply into every sample, and a silent mixer is one of them being
+		// zero. Watching all three separately is the difference between "no sound" and a
+		// specific wrong register. The volume is constant across the batch; the sample peak is
+		// gathered locally and merged once.
+		if (abs(vl) > peakVoiceVol) peakVoiceVol = abs(vl);
+		else {}
+		var peak = peakSample;
+		var i = 0;
+		while (i < n) {
+			if (envPhase[v] == PHASE_OFF) break;
 			else {}
 			stepEnvelope(v);
 			final raw = voiceSample(v);
 			final s = (raw * envLevel[v]) >> 15;
-			// Three factors multiply into every sample, and a silent mixer is one of them being
-			// zero. Watching all three separately is the difference between "no sound" and a
-			// specific wrong register.
-			if (abs(raw) > peakSample) peakSample = abs(raw);
+			final magnitude = raw < 0 ? -raw : raw;
+			if (magnitude > peak) peak = magnitude;
 			else {}
-			final pv = volumeOf(volL[v]);
-			if (abs(pv) > peakVoiceVol) peakVoiceVol = abs(pv);
-			else {}
-			left = (left + ((s * volumeOf(volL[v])) >> 15)) | 0;
-			right = (right + ((s * volumeOf(volR[v])) >> 15)) | 0;
+			accL[i] = (accL[i] + ((s * vl) >> 15)) | 0;
+			accR[i] = (accR[i] + ((s * vr) >> 15)) | 0;
+			i++;
 		}
-		emit((sat16(left) * volumeOf(mainVolL)) >> 15, (sat16(right) * volumeOf(mainVolR)) >> 15);
+		peakSample = peak;
 	}
 
 	/**
@@ -511,13 +565,12 @@ class Spu {
 	static function emit(l:Int, r:Int):Void {
 		if (outCount >= OUT_PAIRS) return;
 		else {}
-		final at = outCount * 4;
 		final ls = sat16(l);
 		final rs = sat16(r);
-		RawMem.set8(out, at, ls & 0xFF);
-		RawMem.set8(out, at + 1, (ls >> 8) & 0xFF);
-		RawMem.set8(out, at + 2, rs & 0xFF);
-		RawMem.set8(out, at + 3, (rs >> 8) & 0xFF);
+		// Two halfword stores, little-endian on both targets by the shim's contract: the same
+		// four bytes the byte stores wrote.
+		RawMem.set16Index(out, outCount * 2, ls);
+		RawMem.set16Index(out, outCount * 2 + 1, rs);
 		outCount++;
 		samplesOut++;
 		if (ls != 0 || rs != 0) nonSilent++;
