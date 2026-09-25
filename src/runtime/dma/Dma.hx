@@ -3,6 +3,7 @@ package dma;
 import core.Irq;
 import core.Runtime;
 import mem.Memory;
+import shim.Backend;
 
 /**
 	The DMA controller — and, for a PlayStation game, the thing that actually draws.
@@ -143,13 +144,25 @@ class Dma {
 	**/
 	static function run(ch:Int):Void {
 		final sync = (chcr[ch] >>> 9) & 3;
-		if (ch == CH_GPU && sync == 2) walkList();
-		else if (ch == CH_GPU) blockToGpu();
+		if (ch == CH_GPU) toGpu(sync);
 		else if (ch == CH_CDROM) sectorToRam();
 		else if (ch == CH_SPU) ramToSpu();
 		else if (ch == CH_OTC) clearOrderingTable();
 		else unimplementedChannel(ch);
 		finish(ch);
+	}
+
+	/**
+		Channel 2, bracketed for a backend that shows where a frame goes (the Dreamcast's overlay):
+		walking the list, decoding each primitive and handing it to the backend is the drawing
+		that happens inside the emulated frame. 99.9 % of Crash Bash's GP0 words arrive this way,
+		so the direct port writes are left unbracketed rather than marked once a word.
+	**/
+	static function toGpu(sync:Int):Void {
+		Backend.profileMark(Backend.PROFILE_GPU, 1);
+		if (sync == 2) walkList();
+		else blockToGpu();
+		Backend.profileMark(Backend.PROFILE_GPU, 0);
 	}
 
 	/**

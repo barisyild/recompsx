@@ -88,7 +88,8 @@ void bp_file_close(int slot);
 /* time & diagnostics */
 uint64_t bp_time_us(void);            /* monotonic; PACING ONLY */
 void bp_profile_mark(int section, int begin); /* optional: the runtime brackets its own work
-                                      (BP_PROFILE_SPU); a backend may time it, nothing returns */
+                                      (BP_PROFILE_SPU/GTE/GPU); a backend may time or sample it,
+                                      nothing returns */
 enum { BP_LOG_DEBUG = 0, BP_LOG_INFO = 1, BP_LOG_WARN = 2, BP_LOG_ERROR = 3 };
 void bp_log(int level, const char* msg);
 void bp_fatal(const char* msg);       /* logs, tears down, exits; never returns */

@@ -2,6 +2,13 @@
 
 ## Status snapshot
 
+**2026-09-26: the Dreamcast overlay splits the emulated frame: `emu gte spu aica` / `gpu up build fin wait`.**
+`emu` is now only what remains (recompiled code, kernel, memory, timers); GTE commands, GPU DMA
+(list walk + primitive decode + backend recording), SPU, AICA and disc come out of it, so every
+number is its own and they add up. GPU and SPU are timed; GTE (thousands a frame) is sampled by the
+1 kHz TMU1 sampler, a tick = 1 ms. PVR setup is already minimal (one TR list, no autosort, depth
+ALWAYS, no modifiers/fog/FSAA) and `wait` ~2 ms / 30 frames: the SH-4 is the bottleneck, not the PVR.
+
 **2026-09-26: Dreamcast loading-screen freezes: the disc read-ahead is contiguous and adaptive.**
 The multi-second freezes (the last note looping) were disc waits: one Flycast 30-vblank window on
 a loading screen spent 2492 of 3007 ms in `disc`. A seek read a whole 128 KB window synchronously
@@ -1131,6 +1138,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-26 [claude] Profile sections BP_PROFILE_GTE (sampled) and BP_PROFILE_GPU (timed, per GPU DMA —
+99.93 % of GP0 words); DC overlay `emu` exclusive of gte/gpu/spu/aica/disc. Digests unchanged:
+JS and C++ 9000 = ab13c60f, GteOps 1cf89aa2 on both. Rebuilt out/dc/crashbash-reflaxe-max.cdi.
+Next: the user's gte/gpu/build readings pick the target (build -> KOS pvr_dr direct rendering).
 
 2026-09-26 [claude] DC disc read-ahead (backend_kos.c): seek reads 16 KB, then contiguous windows
 doubling to 128 KB; reads across the seam copy from both. Cause: loading-screen overlay disc 2492 of

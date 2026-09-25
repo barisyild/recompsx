@@ -440,13 +440,33 @@ static uint64_t g_prof_audio;
 static int      g_prof_polls;
 
 /* The runtime's own brackets (bp_profile_mark), timed on this side of the ABI: the SPU's decoding
- * and mixing. Part of `emu` — the overlay prints it beside it — and the runtime never sees the
- * clock, only says where the stretch begins and ends. */
+ * and mixing, and each GPU DMA transfer. Taken out of `emu` and printed beside it, and the runtime
+ * never sees the clock, only says where the stretch begins and ends. */
 static uint64_t g_prof_section_us[BP_PROFILE_SECTIONS];
 static uint64_t g_prof_section_at[BP_PROFILE_SECTIONS];
 
+/* Where the emulation is, for the sampler (samp_tick): the innermost open bracket, or -1, and the
+ * ones it sits inside. A GTE command is too short and too frequent to time — two clock reads cost
+ * more than most commands do — so it is only noted here, and the 1 kHz sampler counts the ticks
+ * that land inside one: a tick is a millisecond, the unit of every other number. Only ticks that
+ * interrupt the emulation thread count; the disc and audio threads can run while it is preempted
+ * in the middle of a command. */
+#define WHERE_DEPTH 4
+static volatile int      g_where = -1;
+static int               g_where_outer[WHERE_DEPTH];
+static int               g_where_depth;
+static kthread_t*        g_emu_thread;
+static volatile uint32_t g_samp_where[BP_PROFILE_SECTIONS];
+
 void bp_profile_mark(int section, int begin) {
     if(section < 0 || section >= BP_PROFILE_SECTIONS) return;
+    if(begin) {
+        if(g_where_depth < WHERE_DEPTH) g_where_outer[g_where_depth++] = g_where;
+        g_where = section;
+    } else {
+        g_where = g_where_depth > 0 ? g_where_outer[--g_where_depth] : -1;
+    }
+    if(section == BP_PROFILE_GTE) return;    /* sampled only */
     const uint64_t now = bp_time_us();
     if(begin) {
         g_prof_section_at[section] = now;
@@ -1025,6 +1045,7 @@ int bp_init(const char* title) {
     }
     g_ready = 1;
 #if RECOMPSX_DC_PROFILE
+    g_emu_thread = thd_get_current();        /* bp_init runs on the thread that emulates */
     samp_start();
 #endif
 
@@ -1349,6 +1370,8 @@ static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
      * forever: the machine stops making progress and the symptom is simply "it does not boot".
      * KOS's own millisecond handler clears the same bit for the same reason. */
     timer_clear(TMU1);
+    const int where = g_where;
+    if(where >= 0 && thd_get_current() == g_emu_thread) g_samp_where[where]++;
     const uint32_t k = CONTEXT_PC(*ctx) >> SAMP_GRAN;
     const uint32_t h = (k * 2654435761u) & (SAMP_SLOTS - 1);
     for(int i = 0; i < 8; i++) {
@@ -1437,18 +1460,27 @@ static void profile_report(void) {
     if(++g_prof_frames < PROFILE_EVERY) return;
 
     const uint64_t total = g_prof_emu + g_prof_wait + g_prof_upload + g_prof_submit + g_prof_pace;
-    /* Disc time is taken out of `emu` rather than printed beside it: the reads happen inside the
-     * emulated frame, so leaving it in would credit the CPU with the drive's bill — which is
-     * exactly the mistake this line exists to prevent. */
-    const uint64_t emu = g_prof_emu > g_prof_disc_us ? g_prof_emu - g_prof_disc_us : 0;
+    /* Everything the emulated frame contains that has a column of its own is taken out of `emu`
+     * rather than left inside it: the disc's reads, the SPU, the AICA, the GTE and the GPU's
+     * drawing. Leaving the disc in credited the CPU with the drive's bill, and leaving the drawing
+     * in read as if the CPU were slow when the GPU was — so `emu` is what remains, the recompiled
+     * code with the kernel, memory and timers it calls, and every number on the overlay is its own
+     * and they add up to the total. GTE time is sampled (a tick is a millisecond), the rest timed,
+     * so the remainder is clamped rather than trusted to the last millisecond. */
+    const uint64_t spu_us = g_prof_section_us[BP_PROFILE_SPU];
+    const uint64_t gpu_us = g_prof_section_us[BP_PROFILE_GPU];
+    const uint64_t gte_us = (uint64_t)g_samp_where[BP_PROFILE_GTE] * 1000ull;
+    const uint64_t inside = g_prof_disc_us + spu_us + gpu_us + gte_us + g_prof_aica;
+    const uint64_t emu = g_prof_emu > inside ? g_prof_emu - inside : 0;
 
-    char msg[240];
+    char msg[300];
     snprintf(msg, sizeof(msg),
-             "dc: %d frames in %lu ms | emu %lu (spu %lu, aica %lu/%d/%d) | disc %lu (%d rd, %d miss)"
+             "dc: %d frames in %lu ms | emu %lu | gte %lu | gpu %lu | spu %lu | aica %lu/%d/%d | disc %lu (%d rd, %d miss)"
              " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | pace %lu | empty %d | log %d in %lu",
              g_prof_frames,
              (unsigned long)(total / 1000),
-             (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
+             (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000), (unsigned long)(gpu_us / 1000),
+             (unsigned long)(spu_us / 1000),
              (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined,
              (unsigned long)(g_prof_disc_us / 1000), g_prof_reads, g_prof_misses,
              (unsigned long)(g_prof_wait / 1000),
@@ -1468,18 +1500,22 @@ static void profile_report(void) {
     snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps pace %lu", g_prof_frames,
              (unsigned long)(total / 1000), tenths / 10, tenths % 10,
              (unsigned long)(g_prof_pace / 1000));
+    /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
+     * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
     if(g_hw_voices)
-        snprintf(l1, sizeof(l1), "emu %lu spu %lu aica %lu/%d/%d wait %lu",
-                 (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
-                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined,
-                 (unsigned long)(g_prof_wait / 1000));
+        snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu aica %lu/%d/%d",
+                 (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
+                 (unsigned long)(spu_us / 1000),
+                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined);
     else
-        snprintf(l1, sizeof(l1), "emu %lu spu %lu wait %lu",
-                 (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
-                 (unsigned long)(g_prof_wait / 1000));
-    snprintf(l2, sizeof(l2), "up %lu build %lu fin %lu",
+        snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
+                 (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
+                 (unsigned long)(spu_us / 1000));
+    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu fin %lu wait %lu",
+             (unsigned long)(gpu_us / 1000),
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
-             (unsigned long)((g_prof_submit - g_prof_build) / 1000));
+             (unsigned long)((g_prof_submit - g_prof_build) / 1000),
+             (unsigned long)(g_prof_wait / 1000));
     snprintf(l3, sizeof(l3), "skip %d hdr %d+%d disc %lu",
              g_prof_skipped, g_hdr_hits, g_hdr_compiles, (unsigned long)(g_prof_disc_us / 1000));
 
@@ -1505,7 +1541,7 @@ static void profile_report(void) {
     g_empty_presents = 0;
     g_prof_build = 0;
     g_prof_skipped = 0;
-    for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_prof_section_us[i] = 0;
+    for(int i = 0; i < BP_PROFILE_SECTIONS; i++) { g_prof_section_us[i] = 0; g_samp_where[i] = 0; }
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
     g_prof_aica_declined = 0;

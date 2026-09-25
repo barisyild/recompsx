@@ -205,9 +205,14 @@ void bp_pace_frame(int target_us);
 /* Optional instrumentation. The runtime brackets a stretch of its own work — `begin` non-zero
  * at its start, zero at its end — and a backend may time it on its own clock and show the
  * total, or do nothing at all. Nothing comes back, so host time still has no path into the
- * runtime. BP_PROFILE_SPU is the sound processor's decoding and mixing, which otherwise hides
- * inside the emulated frame. */
-enum { BP_PROFILE_SPU = 0, BP_PROFILE_SECTIONS = 4 };
+ * runtime. Brackets nest properly but may nest; all three sections hide inside the emulated
+ * frame otherwise:
+ *   BP_PROFILE_SPU  the sound processor's decoding and mixing, a batch at a time;
+ *   BP_PROFILE_GTE  one GTE command — entered thousands of times a frame, so a backend should
+ *                   note where the emulation is and sample it, never read a clock here;
+ *   BP_PROFILE_GPU  one GPU DMA transfer: the ordering table walked and each primitive decoded
+ *                   and handed to the backend (bp_gpu_*), including the backend's own share. */
+enum { BP_PROFILE_SPU = 0, BP_PROFILE_GTE = 1, BP_PROFILE_GPU = 2, BP_PROFILE_SECTIONS = 4 };
 void bp_profile_mark(int section, int begin);
 
 enum { BP_LOG_DEBUG = 0, BP_LOG_INFO = 1, BP_LOG_WARN = 2, BP_LOG_ERROR = 3 };

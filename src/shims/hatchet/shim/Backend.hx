@@ -15,6 +15,8 @@ extern class Backend {
 	public static inline var PRESENT_INTERLACE:Int = 2;
 	public static inline var PRESENT_PAL:Int = 4;
 	public static inline var PROFILE_SPU:Int = 0;
+	public static inline var PROFILE_GTE:Int = 1;
+	public static inline var PROFILE_GPU:Int = 2;
 
 	public static function init(title:String):Int;
 	public static function shutdown():Void;

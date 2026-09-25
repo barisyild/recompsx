@@ -145,6 +145,8 @@ struct Backend {
     static const int PRESENT_INTERLACE = 2;
     static const int PRESENT_PAL = 4;
     static const int PROFILE_SPU = 0;
+    static const int PROFILE_GTE = 1;
+    static const int PROFILE_GPU = 2;
 
     static inline int init(const std::string& title) { return bp_init(title.c_str()); }
     static inline void shutdown() { bp_shutdown(); }

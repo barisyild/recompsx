@@ -5,6 +5,7 @@ import core.Runtime;
 import shim.I64;
 import shim.IntMath;
 import shim.Acc;
+import shim.Backend;
 
 /**
 	The Geometry Transformation Engine — coprocessor 2, and the reason PlayStation games have
@@ -448,31 +449,31 @@ class Gte {
 		exactly what `execute` does for its opcode, the flag reset included. `execute` stays
 		for words the emitter does not recognise and for the fixtures.
 	**/
-	public static function cmdRtps(sf:Int, lm:Bool):Void { flag = 0; rtps(sf, lm, 0, true); }
-	public static function cmdRtpt(sf:Int, lm:Bool):Void { flag = 0; rtpt(sf, lm); }
-	public static function cmdNclip():Void { flag = 0; nclip(); }
-	public static function cmdAvsz3():Void { flag = 0; avsz3(); }
-	public static function cmdAvsz4():Void { flag = 0; avsz4(); }
-	public static function cmdMvmva(sf:Int, lm:Bool, imm25:Int):Void { flag = 0; mvmva(sf, lm, imm25); }
-	public static function cmdSqr(sf:Int):Void { flag = 0; sqr(sf); }
-	public static function cmdOp(sf:Int, lm:Bool):Void { flag = 0; crossProduct(sf, lm); }
-	public static function cmdGpf(sf:Int, lm:Bool):Void { flag = 0; gpf(sf, lm); }
-	public static function cmdGpl(sf:Int, lm:Bool):Void { flag = 0; gpl(sf, lm); }
-	public static function cmdDpcs(sf:Int, lm:Bool):Void { flag = 0; dpcs(sf, lm); }
-	public static function cmdDpct(sf:Int, lm:Bool):Void { flag = 0; dpct(sf, lm); }
-	public static function cmdIntpl(sf:Int, lm:Bool):Void { flag = 0; intpl(sf, lm); }
-	public static function cmdDcpl(sf:Int, lm:Bool):Void { flag = 0; dcpl(sf, lm); }
-	public static function cmdNcs(sf:Int, lm:Bool):Void { flag = 0; ncs(sf, lm, 0); }
-	public static function cmdNct(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 0); }
-	public static function cmdNcds(sf:Int, lm:Bool):Void { flag = 0; ncds(sf, lm, 0); }
-	public static function cmdNcdt(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 1); }
-	public static function cmdNccs(sf:Int, lm:Bool):Void { flag = 0; nccs(sf, lm, 0); }
-	public static function cmdNcct(sf:Int, lm:Bool):Void { flag = 0; ncTriple(sf, lm, 2); }
-	public static function cmdCc(sf:Int, lm:Bool):Void { flag = 0; cc(sf, lm); }
-	public static function cmdCdp(sf:Int, lm:Bool):Void { flag = 0; cdp(sf, lm); }
+	public static function cmdRtps(sf:Int, lm:Bool):Void { enter(); rtps(sf, lm, 0, true); leave(); }
+	public static function cmdRtpt(sf:Int, lm:Bool):Void { enter(); rtpt(sf, lm); leave(); }
+	public static function cmdNclip():Void { enter(); nclip(); leave(); }
+	public static function cmdAvsz3():Void { enter(); avsz3(); leave(); }
+	public static function cmdAvsz4():Void { enter(); avsz4(); leave(); }
+	public static function cmdMvmva(sf:Int, lm:Bool, imm25:Int):Void { enter(); mvmva(sf, lm, imm25); leave(); }
+	public static function cmdSqr(sf:Int):Void { enter(); sqr(sf); leave(); }
+	public static function cmdOp(sf:Int, lm:Bool):Void { enter(); crossProduct(sf, lm); leave(); }
+	public static function cmdGpf(sf:Int, lm:Bool):Void { enter(); gpf(sf, lm); leave(); }
+	public static function cmdGpl(sf:Int, lm:Bool):Void { enter(); gpl(sf, lm); leave(); }
+	public static function cmdDpcs(sf:Int, lm:Bool):Void { enter(); dpcs(sf, lm); leave(); }
+	public static function cmdDpct(sf:Int, lm:Bool):Void { enter(); dpct(sf, lm); leave(); }
+	public static function cmdIntpl(sf:Int, lm:Bool):Void { enter(); intpl(sf, lm); leave(); }
+	public static function cmdDcpl(sf:Int, lm:Bool):Void { enter(); dcpl(sf, lm); leave(); }
+	public static function cmdNcs(sf:Int, lm:Bool):Void { enter(); ncs(sf, lm, 0); leave(); }
+	public static function cmdNct(sf:Int, lm:Bool):Void { enter(); ncTriple(sf, lm, 0); leave(); }
+	public static function cmdNcds(sf:Int, lm:Bool):Void { enter(); ncds(sf, lm, 0); leave(); }
+	public static function cmdNcdt(sf:Int, lm:Bool):Void { enter(); ncTriple(sf, lm, 1); leave(); }
+	public static function cmdNccs(sf:Int, lm:Bool):Void { enter(); nccs(sf, lm, 0); leave(); }
+	public static function cmdNcct(sf:Int, lm:Bool):Void { enter(); ncTriple(sf, lm, 2); leave(); }
+	public static function cmdCc(sf:Int, lm:Bool):Void { enter(); cc(sf, lm); leave(); }
+	public static function cmdCdp(sf:Int, lm:Bool):Void { enter(); cdp(sf, lm); leave(); }
 
 	public static function execute(ctx:CpuState, imm25:Int):Void {
-		flag = 0;
+		enter();
 		final op = imm25 & 0x3F;
 		final sf = (imm25 & 0x80000) != 0 ? 12 : 0;
 		final lm = (imm25 & 0x400) != 0;
@@ -499,6 +500,21 @@ class Gte {
 		else if (op == 0x1C) cc(sf, lm);
 		else if (op == 0x14) cdp(sf, lm);
 		else unimplementedOp(op);
+		leave();
+	}
+
+	/**
+		Every command starts with FLAG cleared, and is bracketed for a backend that shows where a
+		frame goes (the Dreamcast's overlay). There are thousands a frame, so that backend samples
+		rather than times them. One-way markers: nothing about the host comes back.
+	**/
+	static inline function enter():Void {
+		Backend.profileMark(Backend.PROFILE_GTE, 1);
+		flag = 0;
+	}
+
+	static inline function leave():Void {
+		Backend.profileMark(Backend.PROFILE_GTE, 0);
 	}
 
 	static function unimplementedOp(op:Int):Void {

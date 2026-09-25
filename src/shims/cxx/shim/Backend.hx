@@ -78,6 +78,8 @@ class Backend {
 	/** Brackets a stretch of the runtime's own work for a backend that times it (the Dreamcast's
 	    overlay). One-way: nothing about the host's clock comes back. */
 	public static inline var PROFILE_SPU = 0;
+	public static inline var PROFILE_GTE = 1;
+	public static inline var PROFILE_GPU = 2;
 	public static inline function profileMark(section:Int, begin:Int):Void BackendNative.bp_profile_mark(section, begin);
 
 	/** The SPU's voices on a backend's own sampler (BP_CAP_SPU_VOICES); see backend_c_api.h. */

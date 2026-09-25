@@ -26,6 +26,8 @@ class Backend {
 	/** The C backends can time a stretch of the runtime's work (see bp_profile_mark); here the
 	    browser's and Node's own profilers already see every function, so it compiles to nothing. */
 	public static inline var PROFILE_SPU = 0;
+	public static inline var PROFILE_GTE = 1;
+	public static inline var PROFILE_GPU = 2;
 	public static inline function profileMark(section:Int, begin:Int):Void {}
 
 	/** No sampler here (caps(5) is 0), so the runtime never calls these; they compile to nothing. */
