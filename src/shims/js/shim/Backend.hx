@@ -164,7 +164,15 @@ class Backend {
 		})({0}.u8, {1})", frames, frameCount);
 	}
 
-	public static function audioBuffered():Int return 0;
+	/**
+		What the page still holds, for the SPU's pacing (see `spu.Spu.flush`). A page without
+		the function is reported as holding nothing, which switches the pacing off; Node holds
+		nothing because nobody is listening.
+	**/
+	public static function audioBuffered():Int {
+		if (!hosted()) return 0;
+		else return js.Syntax.code("({0}.audioBuffered ? ({0}.audioBuffered() | 0) : 0)", host());
+	}
 
 	public static function inputPoll():Void {}
 	public static function padConnected(pad:Int):Bool return pad == 0;

@@ -17,7 +17,16 @@ Run `npm install` once after checkout. The build uses `npx --no-install`, so a m
 compiler is an explicit build error rather than an accidental version change.
 
 Open <http://127.0.0.1:8000/> and press **Oyunu başlat**. The same button pauses/resumes. The
-page displays the bundle's content hash.
+page displays the bundle's content hash. **Runtime logs go to the browser console, never into
+the page**: the runtime writes hundreds of lines a second at boot, and an element rebuilt per
+line re-rendered the page. Read them in the developer console.
+
+Sound is an `AudioWorkletNode` (`web/audio-worklet.js`): the SPU's 44100 Hz stereo batches are
+transferred to the rendering thread, which plays them in order and reports what it still holds;
+the JS backend forwards that report as `audioBuffered`, so the SPU's pacing holds the queue at
+its 4410-frame cap (about 100 ms). A browser without worklets falls back to the deprecated
+`ScriptProcessorNode`. The loop paces to real time by the backlog between vblanks and wall time,
+rebasing only when it falls more than a second behind.
 
 **WebGL çizim** (on by default where WebGL2 exists) hands the PlayStation's primitives to
 `web/gpu-webgl.js` instead of the software rasteriser: the page passes `--video-hw` and a `gpu`

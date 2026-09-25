@@ -1092,6 +1092,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Browser page: sound moved to an AudioWorklet (`web/audio-worklet.js`), the
+JS backend now forwards the host's `audioBuffered` so the SPU's pacing holds the queue near its
+cap, runtime logs go to the console only (writing them into the page re-rendered it per line),
+and `BrowserLoop` paces by backlog rather than the origin's age — it had rebased every tick
+after the first second and run two to three times real time. Now 60 fps, ~75 ms of audio.
+
 2026-09-25 [claude] Browser WebGL2 presentation fork (ADR-0020): shader-decoded texels from a
 VRAM texture, framebuffer texture refreshed by dirty rects, four blend modes, two-pass textured
 blending, `bp_gpu_clip` added to the ABI for drawing-area scissoring. Main-thread CPU per frame
