@@ -1322,6 +1322,15 @@ from `http://…:8000` again, so it still ran without the JIT. `scripts/serve-ht
 --http 8000` is now the `web` launch configuration: HTTP serves localhost and redirects any
 other host to `https://<host>:8443`. In WebKit, `http://192.168.1.238:8000/` lands on the HTTPS
 page: secure context, AudioWorklet, 1112–3379 fps.
+**The C++ path compiles again; a Dreamcast build.** First C++ build since the JS-only stretch:
+reflaxe.CPP translated the game (4 min 51 s, 61 files), and the desktop compile stopped at
+`gpu_Gpu.cpp` — `bp_gpu_clip`/`bp_gpu_mask` had been declared without their own
+`@:include`/`@:topLevel` (metadata binds to one declaration), so they became members of the
+module's field class. Fixed in `src/shims/cxx/shim/BackendNative.hx`. Desktop C++ (null
+backend) then matches JavaScript exactly: 0e180c28 / ab13c60f at 3000 / 9000, `--no-audio`
+c346c0af / 53e5c7fd; 9000 frames in 3.50 s. KallistiOS (sh-elf GCC 15.2) builds
+`out/_gen/build-dc/recompsx.elf` and `1ST_READ.BIN`: loaded image 6,388,751 bytes. Not yet run
+on a Dreamcast or in Flycast: the disc image needs `mkdcdisc`, which is no longer on disk.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

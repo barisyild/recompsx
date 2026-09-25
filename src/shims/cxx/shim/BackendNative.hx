@@ -41,7 +41,13 @@ extern function bp_gpu_rect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int, semiM
 
 @:include("backend_c_api.h") @:topLevel
 extern function bp_gpu_dirty(x:Int, y:Int, w:Int, h:Int):Void;
+
+// Metadata binds to the one declaration after it: without their own `@:topLevel` these two were
+// emitted as members of the module's field class, and the C++ build stopped at gpu_Gpu.cpp.
+@:include("backend_c_api.h") @:topLevel
 extern function bp_gpu_clip(x0:Int, y0:Int, x1:Int, y1:Int):Void;
+
+@:include("backend_c_api.h") @:topLevel
 extern function bp_gpu_mask(setBit:Int, checkBit:Int):Void;
 
 @:include("backend_c_api.h") @:topLevel
