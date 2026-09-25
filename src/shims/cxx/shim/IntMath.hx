@@ -47,6 +47,9 @@ class IntMath {
 	    (`-1 / 2 == 0` but `-1 >> 1 == -1`). Named so the choice is visible at the call site. */
 	public static inline function divPow2Trunc(a:Int, shift:Int):Int
 		return a < 0 ? -((-a) >> shift) : (a >> shift);
+
+	/** Leading zero bits of the 32-bit pattern; 32 for zero, which the builtin leaves undefined. */
+	public static inline function clz32(a:Int):Int return NativeIntOps.clz32(a);
 }
 
 /**
@@ -62,4 +65,8 @@ private extern class NativeIntOps {
 
 	@:nativeFunctionCode("(({arg0}) * ({arg1}))")
 	public static function mul(a:Int, b:Int):Int;
+
+	// GCC and Clang, which every backend in docs/specs/backend.md §0 builds with.
+	@:nativeFunctionCode("((((unsigned int)({arg0})) == 0u) ? 32 : __builtin_clz((unsigned int)({arg0})))")
+	public static function clz32(a:Int):Int;
 }

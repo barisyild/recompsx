@@ -3,6 +3,7 @@ package gte;
 import core.CpuState;
 import core.Runtime;
 import shim.I64;
+import shim.IntMath;
 import shim.Acc;
 
 /**
@@ -429,14 +430,11 @@ class Gte {
 	}
 
 	/** How far a 16-bit value must shift left before its top bit is set. */
-	static function countLeadingZeros16(v:Int):Int {
-		var n = 0;
-		var x = v & 0xFFFF;
-		while (n < 16 && (x & 0x8000) == 0) {
-			n++;
-			x = (x << 1) & 0xFFFF;
-		}
-		return n;
+	/** Leading zeros of a 16-bit value, 16 for zero: one instruction, where a loop of up to
+	    sixteen used to run on every perspective divide. */
+	static inline function countLeadingZeros16(v:Int):Int {
+		final x = v & 0xFFFF;
+		return x == 0 ? 16 : IntMath.clz32(x) - 16;
 	}
 
 	// ---- executing ------------------------------------------------------------------------------------
