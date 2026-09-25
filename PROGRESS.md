@@ -1118,6 +1118,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Hatchet spike (github.com/andrewglind/hatchet v0.3.4, MIT, Rust, own Haxe
+parser, C++98 out). With a source adapter and one literal fix, Arith 14b7201f and Mul b5a873d9
+match JS/reflaxe.CPP bit for bit under g++ -std=c++98 -fwrapv. All 622k generated lines parse (~3 s).
+Gaps: Int hex literals >= 0x80000000 emitted unsigned (45,060 in generated code; silent); no inference
+for untyped statics (void*); pkg.Class.x emitted with dots (17,600); parser: bare-return bodies (91),
+multi-declarations (57), #if around members; inline constants become mutable globals. No decision.
+
 2026-09-25 [claude] Flycast menu with the silent-path fix: spu 366 -> 19 ms, 28.0 -> 38.6 fps
 per 30 frames, but pace 53 ms while below 60 fps. The pacer wiped its debt after four frames
 behind, making the next quick frame wait; it now keeps four frames of debt (both backends).
