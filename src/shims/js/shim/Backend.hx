@@ -147,7 +147,10 @@ class Backend {
 	**/
 	public static function audioPush(frames:RawBuf, frameCount:Int):Void {
 		if (hosted()) {
-			js.Syntax.code("{0}.audioPush({1}.u8.slice(0, {2} * 4))", host(), frames, frameCount);
+			// The buffer itself, lent for the call, and how many bytes of it are this batch: the
+			// page copies what it keeps. A `slice` here was a new ArrayBuffer every 128 frames of
+			// sound, the collector's to find, and more of them the faster the loop ran.
+			js.Syntax.code("{0}.audioPush({1}.u8, {2} * 4)", host(), frames, frameCount);
 			return;
 		} else {}
 		js.Syntax.code("(function(u8, n){

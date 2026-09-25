@@ -93,9 +93,12 @@ class KEvents {
 		// What a game listens for is the shortest description of what it expects to happen, and a
 		// game stuck waiting is stuck on one of these. Named once each, so the list is the set of
 		// promises the kernel has made.
-		Runtime.noteOnce(0x55100000 | slot, "OpenEvent " + hex(DESCRIPTOR_BASE | slot)
-			+ ": class " + hex(cls) + " spec " + hex(spec) + " mode " + hex(mode)
-			+ (handler != 0 ? " callback " + hex(handler) : " polled"));
+		final noteKey = 0x55100000 | slot;
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, "OpenEvent " + hex(DESCRIPTOR_BASE | slot)
+				+ ": class " + hex(cls) + " spec " + hex(spec) + " mode " + hex(mode)
+				+ (handler != 0 ? " callback " + hex(handler) : " polled"));
+		} else {}
 		return DESCRIPTOR_BASE | slot;
 	}
 

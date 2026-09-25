@@ -59,10 +59,13 @@ class KHandlers {
 			head[priority] = element;
 			// Which library installed what, once per element. The chain is where every driver
 			// meets the machine, so this line is the register of who is listening.
-			Runtime.noteOnce(0x53100000 | (element & 0xFFFF),
-				"SysEnqIntRP chain " + priority + ": element " + hex(element)
-				+ " verifier " + hex(Memory.read32(element + OFF_FUNC1))
-				+ " handler " + hex(Memory.read32(element + OFF_FUNC2)));
+			final noteKey = 0x53100000 | (element & 0xFFFF);
+			if (!Runtime.alreadyReported(noteKey)) {
+				Runtime.noteOnce(noteKey,
+					"SysEnqIntRP chain " + priority + ": element " + hex(element)
+					+ " verifier " + hex(Memory.read32(element + OFF_FUNC1))
+					+ " handler " + hex(Memory.read32(element + OFF_FUNC2)));
+			} else {}
 		}
 	}
 

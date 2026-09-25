@@ -114,8 +114,11 @@ class Irq {
 
 	public static function writeMask(v:Int):Void {
 		mask = v;
-		Runtime.noteOnce(0x5A100000 | (v & 0x7FF), "I_MASK set to " + hex(v)
-			+ " — lines now enabled: " + names(v));
+		final noteKey = 0x5A100000 | (v & 0x7FF);
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, "I_MASK set to " + hex(v)
+				+ " — lines now enabled: " + names(v));
+		} else {}
 	}
 
 	/** Which sources the game is listening to, by name, because a bitmask is not a diagnosis. */

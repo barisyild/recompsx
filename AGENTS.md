@@ -28,7 +28,9 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
    Dynamic, no reflection, no anon structs, no closures in hot paths, no exceptions, no
    allocation after init, I64 abstract for 64-bit. `scripts/check.sh` enforces what grep can.
    Arithmetic (ADR-0004): wrap every overflowing result with `| 0` — JS does NOT wrap `+`/`-`,
-   C++ does, and the hardware does; `| 0` costs nothing on C++. Never `a / b` on Ints (yields
+   C++ does, and the hardware does; `| 0` costs nothing on C++. Never store -0 or an unsigned
+   reading either: `%` and a negated zero give -0 on JS, `>>> 0` gives a number above 2^31, and
+   one such value turns a field or array into boxed doubles for good — the page's GC (ADR-0023). Never `a / b` on Ints (yields
    Float) and never bare `a * b` past 31 bits — use `IntMath.div` / `IntMath.mul`. 64-bit values
    are hi/lo Int pairs via `shim.I64`, never `haxe.Int64` (it allocates per value on both our
    targets — measured 6x slower on the GTE workload).

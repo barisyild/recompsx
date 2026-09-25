@@ -162,6 +162,13 @@ class TestCodegen {
 		final busy = add("idleCall", [jal(next + 32), 0, imm(0x23, 2, 5, 0), alu(0x2b, 2, 2, 4),
 			imm(5, 0, 2, -5), 0, JR, 0, JR, 0]);
 		final carried = add("idleCarried", [imm(9, 2, 2, -1), imm(5, 0, 2, -2), 0, JR, 0]);
+		// A logical shift by zero, by register (SRLV, amount 32 & 31) and by immediate (SRL 0),
+		// each compared with its source by BEQ. On JavaScript `x >>> 0` is the unsigned reading,
+		// which `==` finds unequal to the signed value C++ holds; the result must be the word.
+		final shift = add("shiftByZero", [alu(0x06, 2, 5, 4), alu(0x02, 3, 0, 4),
+			imm(4, 4, 2, 3), imm(9, 8, 0, 0), JR, imm(9, 8, 0, 1),
+			imm(4, 4, 3, 3), imm(9, 9, 0, 0), JR, imm(9, 9, 0, 1),
+			JR, imm(9, 10, 0, 7)]);
 		if (check) {
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
@@ -176,7 +183,7 @@ class TestCodegen {
 			Assert.equals(fused.indexOf('Ops.divuHi(ctx') >= 0, opt, "fused unsigned divide high");
 			Assert.equals(fused.indexOf('t6 = 0x12345678;') >= 0, opt, "fused constant formation");
 			Assert.equals(stack.indexOf('t2 = t1;') >= 0, opt, "stack load forwarding");
-			Assert.equals(stack.indexOf('Memory.write32(ctx.sp, ctx.t0);') >= 0, !opt,
+			Assert.equals(stack.indexOf('Memory.write32(ctx.sp & 0x1FFFFFFF, ctx.t0);') >= 0, !opt,
 				"superseded stack store shape");
 			Assert.equals(dead.indexOf('t0 = 1;') >= 0, !opt, "dead pure write elimination");
 			Assert.equals(multi.indexOf('while (true) {') >= 0, opt, "multi-block loop is a native loop");
@@ -191,6 +198,8 @@ class TestCodegen {
 			Assert.equals(reload.indexOf('idle_v0 = idleStored;') >= 0, opt, "a reload yields the stored count in the dry turn");
 			Assert.isTrue(busy.indexOf('core.IdleLoop.') < 0, "a loop with a call is not idle");
 			Assert.isTrue(carried.indexOf('core.IdleLoop.') < 0, "a register-carried counter is not idle");
+			Assert.isTrue(shift.indexOf('>>> 0') < 0, "a logical shift by zero is the value itself");
+			Assert.isTrue(shift.indexOf('& 31)) | 0;') >= 0, "a logical shift by register is truncated to a word");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'
 			+ 'import kernel.Kernel;\nimport gte.Gte;\nclass $cls {\n' + bodies.toString()
