@@ -10,6 +10,7 @@ import recomp.mips.Disasm;
 import recomp.mips.Instr;
 import recomp.mips.Op;
 import recomp.codegen.PatternMatcher.FusedKind;
+import recomp.codegen.IdleLoopPlan;
 
 /**
 	Turns analysed MIPS into Haxe.
@@ -66,6 +67,10 @@ class Emitter {
 	var loopFrame:Int = 0;
 	// Region emission declares `resume`; block emission then resets it at every block start.
 	var inRegions:Bool = false;
+	// Loops proved idle (IdleLoopPlan), by header address: the header emits the skip prologue.
+	var idlePlans:Map<Int, IdleLoopPlan> = [];
+	// While the idle prologue evaluates a dry turn, the registers it writes are these locals.
+	var shadow:Null<Map<Int, String>> = null;
 
 	/**
 		The class a call to this address should go to, or null to dispatch it by address.
@@ -112,6 +117,8 @@ class Emitter {
 		loopFrame = 0;
 		inRegions = false;
 		while (frames.length > 0) frames.pop();
+		idlePlans = [];
+		shadow = null;
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.
@@ -228,6 +235,7 @@ class Emitter {
 				linearNext = follow;
 				final loopExit = block.selfLoopExit();
 				if (loopExit != null) {
+					planIdle([block.resumeId], block.resumeId);
 					nativeLoop = block.addr;
 					buf.add(ind + 'while (true) {\n');
 					emitPump(buf, ind + '\t', block.resumeId);
@@ -273,6 +281,7 @@ class Emitter {
 				loopMembers = [for (id in body.members) id => true];
 				loopFrame = frames.length;
 				final headId = ir.byAddress.get(body.entry).resumeId;
+				planIdle(body.members, headId);
 				buf.add(ind + 'while (true) {\n');
 				emitRegion(buf, fn, body, indexOf, ind + '\t', null);
 				// Reached with a recorded target only: one outside the loop leaves it, and the
@@ -429,6 +438,8 @@ class Emitter {
 		final block = ir.byAddress.get(blockAddr);
 		// Arriving here ends whatever `resume` was steering towards.
 		if (inRegions) buf.add(ind + 'resume = -1;\n');
+		final idle = idlePlans.get(blockAddr);
+		if (idle != null) emitIdlePrologue(buf, ind, idle);
 		final stackPlan = optimize ? StackMemoryForwarding.plan(block.body) : null;
 		var i = 0;
 		while (i < block.body.length) {
@@ -504,6 +515,102 @@ class Emitter {
 	/** A discarded MFLO/MFHI still leaves the multiply/divide result in HI:LO. */
 	function fusedResult(dest:Int, result:String, sideEffect:String):String
 		return dest == 0 ? '$sideEffect;' : assign(dest, result, false);
+
+	/** Records the skip prologue for a loop that proves idle; only an optimized build takes it. */
+	function planIdle(members:Array<Int>, headerId:Int):Void {
+		if (!optimize) return;
+		final plan = IdleLoopPlan.analyze(ir, members, headerId);
+		if (plan != null) idlePlans.set(ir.blocks[headerId].addr, plan);
+	}
+
+	/**
+		The idle-loop prologue, at the head of a turn, after the pump.
+
+		First a dry turn: the loop's instructions are evaluated once into shadow locals — loads
+		guarded to plain memory and away from the counter slot, the slot's store left out, each
+		invariant branch checked to be going round again. If all of that holds, how many turns
+		can run before the next event and before the counter's branch leaves is computed, and
+		all but the last of them are taken at once: the cycles are charged, the slot is advanced,
+		and the turn below runs as the last one, leaving every register as the loop itself
+		would. Exact by construction: IdleLoopPlan says what a turn is, core.IdleLoop counts.
+	**/
+	function emitIdlePrologue(buf:StringBuf, ind:String, plan:IdleLoopPlan):Void {
+		final in1 = ind + '\t', in2 = ind + '\t\t', in3 = ind + '\t\t\t';
+		buf.add(ind + '// Idle loop: all but the last of the turns before the next event are taken by\n');
+		buf.add(ind + '// arithmetic (exact; core.IdleLoop), and the last one runs below.\n');
+		buf.add(ind + '{\n');
+		buf.add(in1 + 'var idleOk = true;\n');
+		final names:Map<Int, String> = [];
+		for (r in plan.written) {
+			final name = 'idle_' + Instr.regName(r);
+			names.set(r, name);
+			buf.add(in1 + 'var $name = 0;\n');
+		}
+		final slot = plan.slot;
+		if (slot != null) {
+			buf.add(in1 + 'final idleSlot = ${addrExpr(slot.load)};\n');
+			buf.add(in1 + 'var idleTop = 0;\n');
+		}
+		shadow = names;
+		var loads = 0;
+		for (entry in plan.list) {
+			final i = entry.decoded;
+			if (i.isNop) continue;
+			switch (i.op) {
+				case LW if (plan.isReload(i)):
+					buf.add(in1 + '${reg(i.rt)} = idleStored;\n');
+				case LB | LBU | LH | LHU | LW:
+					final addr = 'idleAddr$loads';
+					final diff = 'idleDiff$loads';
+					loads++;
+					final width = switch (i.op) { case LW: 4; case LH | LHU: 2; case _: 1; };
+					final read = switch (i.op) {
+						case LW: 'read32'; case LH: 'read16s'; case LHU: 'read16u';
+						case LB: 'read8s'; case _: 'read8u';
+					};
+					buf.add(in1 + 'final $addr = ${addrExpr(i)};\n');
+					if (plan.isSlotLoad(i)) {
+						buf.add(in1 + 'if (Memory.isPlainMemory($addr)) { ${reg(i.rt)} = Memory.read32($addr); idleTop = ${reg(i.rt)}; } else { idleOk = false; }\n');
+					} else if (slot != null) {
+						buf.add(in1 + 'final $diff = ($addr - idleSlot) | 0;\n');
+						buf.add(in1 + 'if (Memory.isPlainMemory($addr) && ($diff <= -$width || $diff >= 4)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
+					} else {
+						buf.add(in1 + 'if (Memory.isPlainMemory($addr)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
+					}
+				case SW:
+					if (slot != null) buf.add(in1 + 'final idleStored = ${reg(i.rt)};\n');
+				case J:
+				case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ:
+					final exit = plan.invariantExit(i.addr);
+					if (exit != null) buf.add(in1 + 'if ((${condition(i)}) != ${exit.continueWhen}) idleOk = false; else {}\n');
+				case _:
+					final line = simple(i);
+					if (line != "") buf.add(in1 + line + '\n');
+			}
+		}
+		shadow = null;
+		buf.add(in1 + 'if (idleOk) {\n');
+		buf.add(in2 + 'var idleTurns = core.IdleLoop.untilEvent(ctx.cycles, ctx.nextEvent, ${plan.cycles});\n');
+		final exit = plan.counterExit;
+		if (slot != null && exit != null) {
+			final other = reg(exit.other);
+			if (exit.exitOnEqual) buf.add(in2 + 'final idleExit = core.IdleLoop.untilEqual(idleTop, ${slot.delta}, $other);\n');
+			else buf.add(in2 + 'final idleExit = ((idleTop + ${slot.delta}) | 0) == $other ? 2 : 1;\n');
+			buf.add(in2 + 'if (idleExit - 1 < idleTurns) idleTurns = idleExit - 1; else {}\n');
+		}
+		buf.add(in2 + 'if (idleTurns >= 2) {\n');
+		buf.add(in3 + 'final idleSkip = idleTurns - 1;\n');
+		buf.add(in3 + 'ctx.cycles = (ctx.cycles + shim.IntMath.mul(${plan.cycles}, idleSkip)) | 0;\n');
+		if (slot != null) buf.add(in3 + 'Memory.write32(idleSlot, (idleTop + shim.IntMath.mul(${slot.delta}, idleSkip)) | 0);\n');
+		buf.add(in3 + '#if recompsx_insns\n');
+		buf.add(in3 + 'Runtime.insns = (Runtime.insns + shim.IntMath.mul(${plan.instructions}, idleSkip)) | 0;\n');
+		buf.add(in3 + 'Runtime.blocks = (Runtime.blocks + shim.IntMath.mul(${plan.turn.length}, idleSkip)) | 0;\n');
+		buf.add(in3 + '#end\n');
+		buf.add(in3 + 'core.IdleLoop.note(idleSkip);\n');
+		buf.add(in2 + '} else {}\n');
+		buf.add(in1 + '} else {}\n');
+		buf.add(ind + '}\n');
+	}
 
 	/** Charge every original instruction, including eliminated instructions and delay slots. */
 	static function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
@@ -954,9 +1061,11 @@ class Emitter {
 
 	// ---- naming -----------------------------------------------------------------------------------
 
-	/** `$zero` is a literal, not a field: it is the most-read register and costs nothing. */
+	/** `$zero` is a literal, not a field: it is the most-read register and costs nothing. A
+	    register the idle prologue shadows is its shadow local while the dry turn is emitted. */
 	inline function reg(n:Int):String
-		return n == 0 ? "0" : (registers != null && registers.used.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n);
+		return n == 0 ? "0" : (shadow != null && shadow.exists(n) ? shadow.get(n)
+			: (registers != null && registers.used.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n));
 
 	static function hex(v:Int):String {
 		final digits = "0123456789abcdef";
