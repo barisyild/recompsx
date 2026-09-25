@@ -2,8 +2,10 @@ package dma;
 
 import core.Irq;
 import core.Runtime;
+import gpu.Gpu;
 import mem.Memory;
 import shim.Backend;
+import shim.MemA;
 
 /**
 	The DMA controller — and, for a PlayStation game, the thing that actually draws.
@@ -176,11 +178,17 @@ class Dma {
 	static function walkList():Void {
 		var addr = madr[CH_GPU] & 0x1FFFFC;
 		var guard = 0;
+		final ram = Memory.ram();
 		while (true) {
-			final header = Memory.read32(addr);
+			final header = MemA.get32(ram, addr);
 			final count = (header >>> 24) & 0xFF;
+			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
+			// addresses RAM, wrapping at 2 MB exactly as `Memory.read32`'s decode does for these
+			// addresses, and GP0 is all 0x1F801810 is. Going through `write32` cost each word a
+			// read, a write, a region search and three calls — half of all the time spent in this
+			// channel, measured on the hardware-drawing path.
 			for (i in 0...count) {
-				Memory.write32(0x1F801810, Memory.read32(addr + 4 + (i << 2)));
+				inline Gpu.writeGp0(MemA.get32(ram, (addr + 4 + (i << 2)) & 0x1FFFFC));
 			}
 			wordsToGpu += count;
 			addr = header & 0x1FFFFC;
@@ -209,8 +217,9 @@ class Dma {
 		// Direction bit 0: 1 is RAM to device. Reading VRAM back is not carried out yet.
 		if ((chcr[CH_GPU] & 1) == 0) return notReadable();
 		else {}
+		final ram = Memory.ram();
 		for (i in 0...total) {
-			Memory.write32(0x1F801810, Memory.read32(addr));
+			inline Gpu.writeGp0(MemA.get32(ram, addr & 0x1FFFFC));   // as walkList
 			addr += 4;
 		}
 		wordsToGpu += total;

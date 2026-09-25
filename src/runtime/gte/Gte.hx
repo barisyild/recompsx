@@ -997,10 +997,15 @@ class Gte {
 		stays in a local — a register, on both targets — rather than in a static field.
 	**/
 	static inline function step44(m:Acc, posBit:Int, negBit:Int):Acc {
+		// In range, the wrap is the identity, so only an overflow pays for it: on a 32-bit CPU
+		// the wrap is a pair of 64-bit shifts, and this runs nine times a vertex.
 		final over = Acc.check44(m);
+		return over == 0 ? m : overflow44(m, over, posBit, negBit);
+	}
+
+	static function overflow44(m:Acc, over:Int, posBit:Int, negBit:Int):Acc {
 		if (over > 0) flag |= (1 << posBit);
-		else if (over < 0) flag |= (1 << negBit);
-		else {}
+		else flag |= (1 << negBit);
 		return Acc.wrap44(m);
 	}
 

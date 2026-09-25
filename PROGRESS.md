@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Flycast gameplay: emu 289 gte 242 gpu 274 build 189 of 1007 ms. GPU DMA now feeds GP0
+straight from RAM (desktop hw-path profile: memory-map dispatch was 47 % of the channel; per-frame
+channel time ~-57 %), and GTE's 44-bit wrap runs only on overflow. Digests unchanged: JS+C++ 9000
+ab13c60f, 30000 4b78c2de; GteOps 1cf89aa2 both. CDI rebuilt; next: the user's gpu/gte readings.
+
 2026-09-26 [claude] Profile sections BP_PROFILE_GTE (sampled) and BP_PROFILE_GPU (timed, per GPU DMA —
 99.93 % of GP0 words); DC overlay `emu` exclusive of gte/gpu/spu/aica/disc. Digests unchanged:
 JS and C++ 9000 = ab13c60f, GteOps 1cf89aa2 on both. Rebuilt out/dc/crashbash-reflaxe-max.cdi.
