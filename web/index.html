@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="tr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -25,13 +25,13 @@
   <main>
     <header>
       <h1>recompsx JS</h1>
-      <label><input type="checkbox" id="hw" checked> WebGL çizim</label>
-      <label><input type="checkbox" id="audio" checked> Ses</label>
-      <label><input type="checkbox" id="pace" checked> Hız sınırı</label>
-      <button id="start">Oyunu başlat</button>
+      <label><input type="checkbox" id="hw" checked> WebGL rendering</label>
+      <label><input type="checkbox" id="audio" checked> Sound</label>
+      <label><input type="checkbox" id="pace" checked> Speed limit</label>
+      <button id="start">Start game</button>
     </header>
     <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
-    <div id="status">Başlatmak için düğmeye bas.</div>
+    <div id="status">Press the button to start.</div>
     <small id="build"></small>
     <!--
       LOGS GO TO THE BROWSER CONSOLE, NEVER INTO THE PAGE. The runtime writes hundreds of lines a
@@ -58,7 +58,7 @@
     // where WebGL2 exists; the software rasteriser and the 2D canvas remain the fallback.
     let renderer = null;
     if (!(typeof createHardwareGpu === 'function') || !glCanvas.getContext('webgl2')) {
-      hwBox.checked = false; hwBox.disabled = true; hwBox.parentElement.title = 'WebGL2 yok';
+      hwBox.checked = false; hwBox.disabled = true; hwBox.parentElement.title = 'No WebGL2';
     }
     const ctx = canvas.getContext('2d', { alpha: false });
     const frame = document.createElement('canvas');
@@ -69,11 +69,11 @@
     let image;
     let buildInfo;
     fetch('build.json', { cache: 'no-store' }).then(r => {
-      if (!r.ok) throw new Error('Önce scripts/build-web.sh ile derle.');
+      if (!r.ok) throw new Error('Build first with scripts/build-web.sh.');
       return r.json();
     }).then(info => {
       buildInfo = info;
-      document.querySelector('#build').textContent = `Derleme ${info.version}`;
+      document.querySelector('#build').textContent = `Build ${info.version}`;
       document.querySelector('h1').textContent = `${info.title} · recompsx JS`;
       document.title = `recompsx — ${info.title}`;
     }).catch(error => { status.textContent = error.message; });
@@ -84,7 +84,7 @@
 
     async function fetchBytes(path, label) {
       const response = await fetch(path);
-      if (!response.ok) throw new Error(`${label} yüklenemedi: HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`Could not load ${label}: HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length')) || 0;
       if (!response.body || !total) return new Uint8Array(await response.arrayBuffer());
       const out = new Uint8Array(total);
@@ -95,7 +95,7 @@
         if (done) break;
         out.set(value, offset);
         offset += value.length;
-        status.textContent = `${label} yükleniyor: %${Math.floor(offset * 100 / total)}`;
+        status.textContent = `Loading ${label}: ${Math.floor(offset * 100 / total)}%`;
       }
       return out;
     }
@@ -143,7 +143,7 @@
           audioNode.connect(audioContext.destination);
           return;
         } catch (error) {
-          writeLog(`[ses] worklet yüklenemedi (${error.message}); ScriptProcessorNode kullanılıyor`);
+          writeLog(`[audio] worklet failed to load (${error.message}); using ScriptProcessorNode`);
           audioNode = null;
         }
       }
@@ -172,21 +172,21 @@
       if (globalThis.recompsxHost) {
         const host = globalThis.recompsxHost;
         host.paused = !host.paused;
-        start.textContent = host.paused ? 'Devam et' : 'Duraklat';
+        start.textContent = host.paused ? 'Resume' : 'Pause';
         if (host.paused) {
           audioQueue.length = 0; queuedFrames = 0;
           audioPending.length = 0; audioPendingSamples = 0;
           reportedFrames = 0; reportedAt = performance.now(); pushedSinceReport = 0;
           if (audioNode) audioNode.port.postMessage('flush');
         }
-        status.textContent = host.paused ? 'Duraklatıldı' : 'Devam ediyor…';
+        status.textContent = host.paused ? 'Paused' : 'Resuming…';
         return;
       }
       start.disabled = true;
       try {
         if (!buildInfo) {
           const response = await fetch('build.json', { cache: 'no-store' });
-          if (!response.ok) throw new Error('Tarayıcı derlemesi bulunamadı.');
+          if (!response.ok) throw new Error('No browser build found.');
           buildInfo = await response.json();
         }
         // Off, the SPU still advances every voice (a game reads ENDX and the envelopes) but
@@ -194,13 +194,13 @@
         audioBox.disabled = true;
         if (audioBox.checked) await startAudio();
         const boot = await fetchBytes('boot.exe', 'PS-EXE');
-        const disc = await fetchBytes('disc.bin', 'Disk görüntüsü');
-        status.textContent = 'Oyun başlatılıyor…';
+        const disc = await fetchBytes('disc.bin', 'disc image');
+        status.textContent = 'Starting the game…';
 
         hwBox.disabled = true;
         if (hwBox.checked) {
           try { renderer = createHardwareGpu(glCanvas); }
-          catch (error) { writeLog(`[webgl] ${error.message}; yazılım çizimine dönüldü`); renderer = null; }
+          catch (error) { writeLog(`[webgl] ${error.message}; falling back to software rendering`); renderer = null; }
         }
         if (renderer) { canvas.hidden = true; glCanvas.hidden = false; }
 
@@ -275,9 +275,9 @@
           audioBuffered() { return audioNode ? workletBuffered() : (audioContext ? queuedFrames : 0); },
           state(value) {
             start.disabled = value !== 'running';
-            start.textContent = value === 'running' ? 'Duraklat' : 'Oyunu başlat';
-            if (value === 'error') status.textContent = 'Oyun bir hatayla durdu; ayrıntılar aşağıda.';
-            else if (value === 'stopped') status.textContent = 'Oyun durdu.';
+            start.textContent = value === 'running' ? 'Pause' : 'Start game';
+            if (value === 'error') status.textContent = 'The game stopped with an error; details are in the browser console.';
+            else if (value === 'stopped') status.textContent = 'The game stopped.';
           },
           progress(frames, yields) {
             flushAudio();
@@ -286,22 +286,22 @@
             if (now - shownAt < 500) return;
             const fps = shownAt > 0 ? Math.round((frames - shownFrames) * 1000 / (now - shownAt)) : 0;
             shownAt = now; shownFrames = frames;
-            status.textContent = `${frames} kare · ${fps} kare/s · çalışıyor`;
+            status.textContent = `${frames} frames · ${fps} fps · running`;
             status.dataset.frames = frames;
             status.dataset.yields = yields;
           },
           log(level, line) { writeLog(line); },
-          storageWrite(name, bytes) { writeLog(`[dosya] ${name}: ${bytes.length} bayt`); }
+          storageWrite(name, bytes) { writeLog(`[file] ${name}: ${bytes.length} bytes`); }
         };
         const script = document.createElement('script');
         script.src = `game.js?v=${encodeURIComponent(buildInfo.version)}`;
         script.onerror = () => {
-          status.textContent = 'Hata: game.js yüklenemedi';
+          status.textContent = 'Error: could not load game.js';
           start.disabled = false;
         };
         document.body.appendChild(script);
       } catch (error) {
-        status.textContent = `Hata: ${error.message}`;
+        status.textContent = `Error: ${error.message}`;
         writeLog(error.stack || String(error));
         start.disabled = false;
       }
