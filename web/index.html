@@ -19,7 +19,6 @@
     #screen-gl { object-fit: fill; }
     label { font-size: 13px; color: #aab3c2; display: flex; align-items: center; gap: 6px; }
     #status { min-height: 1.4em; color: #aab3c2; }
-    #log { height: 130px; overflow: auto; margin: 0; padding: 10px; background: #11151d; border-radius: 8px; color: #8691a3; font-size: 11px; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -32,13 +31,17 @@
     <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
     <div id="status">Başlatmak için düğmeye bas.</div>
     <small id="build"></small>
-    <pre id="log"></pre>
+    <!--
+      LOGS GO TO THE BROWSER CONSOLE, NEVER INTO THE PAGE. The runtime writes hundreds of lines a
+      second while the game boots; writing them into an element re-renders the page on every line
+      and slows the game. Open the developer console to read them (an agent reads them with its
+      console tool). Do not add a log element back.
+    -->
   </main>
   <script src="gpu-webgl.js"></script>
   <script>
     const start = document.querySelector('#start');
     const status = document.querySelector('#status');
-    const log = document.querySelector('#log');
     const canvas = document.querySelector('#screen');
     const glCanvas = document.querySelector('#screen-gl');
     const hwBox = document.querySelector('#hw');
@@ -66,11 +69,9 @@
       document.title = `recompsx — ${info.title}`;
     }).catch(error => { status.textContent = error.message; });
 
-    function writeLog(line) {
-      log.textContent += line + '\n';
-      if (log.textContent.length > 24000) log.textContent = log.textContent.slice(-18000);
-      log.scrollTop = log.scrollHeight;
-    }
+    // Logs go to the browser console only — see the note in the markup. Writing them into the
+    // page re-rendered it on every line, and the runtime writes hundreds a second at boot.
+    function writeLog(line) { console.log(line); }
 
     async function fetchBytes(path, label) {
       const response = await fetch(path);
@@ -90,8 +91,35 @@
       return out;
     }
 
-    function startAudio() {
+    // Sound goes to an AudioWorklet (audio-worklet.js): the SPU's frames are transferred to the
+    // rendering thread, which plays them and reports what it still holds. The deprecated
+    // ScriptProcessorNode remains only as a fallback for a browser without worklets.
+    let audioNode = null;
+    // The worklet reports its queue every 23 ms or so and the SPU asks far more often; between
+    // reports the answer is the last report less what the rendering thread has consumed since,
+    // at 44.1 frames a millisecond, plus what was pushed in the meantime.
+    let reportedFrames = 0, reportedAt = 0, pushedSinceReport = 0;
+    function workletBuffered() {
+      const drained = (performance.now() - reportedAt) * 44.1;
+      return Math.max(0, Math.round(reportedFrames - drained + pushedSinceReport));
+    }
+    async function startAudio() {
       audioContext = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      if (audioContext.audioWorklet) {
+        try {
+          await audioContext.audioWorklet.addModule('audio-worklet.js');
+          audioNode = new AudioWorkletNode(audioContext, 'recompsx-audio',
+            { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+          audioNode.port.onmessage = event => {
+            reportedFrames = event.data; reportedAt = performance.now(); pushedSinceReport = 0;
+          };
+          audioNode.connect(audioContext.destination);
+          return;
+        } catch (error) {
+          writeLog(`[ses] worklet yüklenemedi (${error.message}); ScriptProcessorNode kullanılıyor`);
+          audioNode = null;
+        }
+      }
       const node = audioContext.createScriptProcessor(2048, 0, 2);
       node.onaudioprocess = event => {
         const left = event.outputBuffer.getChannelData(0);
@@ -118,7 +146,11 @@
         const host = globalThis.recompsxHost;
         host.paused = !host.paused;
         start.textContent = host.paused ? 'Devam et' : 'Duraklat';
-        if (host.paused) { audioQueue.length = 0; queuedFrames = 0; }
+        if (host.paused) {
+          audioQueue.length = 0; queuedFrames = 0;
+          reportedFrames = 0; reportedAt = performance.now(); pushedSinceReport = 0;
+          if (audioNode) audioNode.port.postMessage('flush');
+        }
         status.textContent = host.paused ? 'Duraklatıldı' : 'Devam ediyor…';
         return;
       }
@@ -129,7 +161,7 @@
           if (!response.ok) throw new Error('Tarayıcı derlemesi bulunamadı.');
           buildInfo = await response.json();
         }
-        startAudio();
+        await startAudio();
         const boot = await fetchBytes('boot.exe', 'PS-EXE');
         const disc = await fetchBytes('disc.bin', 'Disk görüntüsü');
         status.textContent = 'Oyun başlatılıyor…';
@@ -185,6 +217,12 @@
             const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
             const copy = new Int16Array(samples);
             const frames = copy.length >> 1;
+            if (audioNode) {
+              // Transferred, not copied again: the worklet owns the buffer from here.
+              audioNode.port.postMessage(copy.buffer, [copy.buffer]);
+              pushedSinceReport += frames;
+              return;
+            }
             audioQueue.push({ samples: copy, frames, at: 0 });
             queuedFrames += frames;
             while (queuedFrames > 11025 && audioQueue.length > 1) {
@@ -192,7 +230,7 @@
               queuedFrames -= dropped.frames - dropped.at;
             }
           },
-          audioBuffered() { return queuedFrames; },
+          audioBuffered() { return audioNode ? workletBuffered() : queuedFrames; },
           state(value) {
             start.disabled = value !== 'running';
             start.textContent = value === 'running' ? 'Duraklat' : 'Oyunu başlat';

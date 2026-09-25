@@ -29,7 +29,13 @@ class BrowserLoop {
 			function tick() {
 				const start = performance.now();
 				if (host && host.paused) { base = frames(); t0 = start; schedule(); return; }
-				if (document.hidden || start - t0 > 1000) { base = frames(); t0 = start; }
+				// Rebase only when the page cannot keep up — more than a second of backlog, as a
+				// throttled tab leaves — never merely because a second has passed, and not for
+				// being hidden either: the sound still plays then. Comparing the age of the
+				// origin instead of the backlog rebased every tick after the first second, and
+				// with the origin always fresh a tick could never be ahead of schedule, so the
+				// game ran as fast as the ticks allowed, two to three times real time.
+				if ((start - t0) - (frames() - base) * frameMs > 1000) { base = frames(); t0 = start; }
 				while (performance.now() - start < 8) {
 					if ((frames() - base) * frameMs > performance.now() - t0 + frameMs) break;
 					if (!step()) { active = false; state('stopped'); return; }
