@@ -1329,8 +1329,12 @@ reflaxe.CPP translated the game (4 min 51 s, 61 files), and the desktop compile 
 module's field class. Fixed in `src/shims/cxx/shim/BackendNative.hx`. Desktop C++ (null
 backend) then matches JavaScript exactly: 0e180c28 / ab13c60f at 3000 / 9000, `--no-audio`
 c346c0af / 53e5c7fd; 9000 frames in 3.50 s. KallistiOS (sh-elf GCC 15.2) builds
-`out/_gen/build-dc/recompsx.elf` and `1ST_READ.BIN`: loaded image 6,388,751 bytes. Not yet run
-on a Dreamcast or in Flycast: the disc image needs `mkdcdisc`, which is no longer on disk.
+`out/_gen/build-dc/recompsx.elf` and `1ST_READ.BIN`: loaded image 6,388,751 bytes. `mkdcdisc`
+v0.0.4 rebuilt from gitlab.com/simulant/mkdcdisc (libisofs from Homebrew) and kept in
+`~/toolchains/dc/bin`; `mkdcdisc -N -e out/_gen/build-dc/recompsx.elf -D out/dc/data -n
+"recompsx Crash Bash" -a recompsx -o out/dc/crashbash.cdi` wrote a 208,930,473-byte CDI whose
+RECOMPSX.CFG adds `--video-hw` (PVR drawing). Not yet run: the user's Flycast or console.
+The Dreamcast backend's `bp_gpu_clip` records and `bp_gpu_mask` has no stencil (ADR-0020).
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
