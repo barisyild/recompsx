@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# scripts/build-dc.sh [<target>] [--run] [--build-type <t>] — compile a generated C++ tree for
-# the Sega Dreamcast.
+# scripts/build-dc.sh [<target>] [--run] [--build-type <t>] [--max] — compile a generated C++
+# tree for the Sega Dreamcast.
 #
 #   <target>       a directory under out/ (default: _demo, the walking skeleton)
 #   --run          upload and start it with $KOS_LOADER when the build succeeds
 #   --build-type   CMake build type (default Release; MinSizeRel is the one to reach for when
 #                  the binary will not fit in 16 MB alongside 3.5 MB of emulated machine)
+#   --max          the fastest build: Release (-O3) with link-time optimisation, and without
+#                  exceptions or RTTI, which no generated or runtime code uses (checked: no
+#                  throw, try, dynamic_cast or typeid in either transpiler's output). Built in
+#                  build-dc-max so its cache never mixes with the ordinary build's. Not
+#                  -funroll-loops: it grows code, and the SH-4 has an 8 KB instruction cache.
 #
 # Needs a KallistiOS environment: `source /opt/toolchains/dc/kos/environ.sh` (or wherever yours
 # lives) before running this. Everything the cross-compiler needs comes from there — this script
@@ -20,11 +25,13 @@ cd "$ROOT"
 
 TARGET="_demo"
 RUN=0
+MAX=0
 BUILD_TYPE="Release"
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)        RUN=1 ;;
     --build-type) shift; BUILD_TYPE="${1:?--build-type needs a value}" ;;
+    --max)        MAX=1 ;;
     *)            TARGET="$1" ;;
   esac
   shift
@@ -45,12 +52,18 @@ if [ ! -d "$DIR/cpp/src" ] && [ -f "$DIR/cpp/GenMain.h" ]; then TRANSPILER=hatch
 # A separate build directory from the desktop one: same sources, different machine, and a shared
 # CMake cache between two toolchains is a morning wasted.
 BUILD="$DIR/build-dc"
+EXTRA=()
+if [ "$MAX" = 1 ]; then
+  BUILD="$DIR/build-dc-max"
+  BUILD_TYPE="Release"
+  EXTRA=(-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON "-DCMAKE_CXX_FLAGS=-fno-exceptions -fno-rtti")
+fi
 
 cp build/templates/CMakeLists.txt "$DIR/CMakeLists.txt"
 cmake -S "$DIR" -B "$BUILD" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-  -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" >/dev/null
+  -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
 cmake --build "$BUILD"
 
 ELF="$BUILD/recompsx.elf"
