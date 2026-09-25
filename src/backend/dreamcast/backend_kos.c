@@ -72,10 +72,12 @@ KOS_INIT_FLAGS(INIT_DEFAULT);
 static void samp_start(void);
 #endif
 
-/* Whether the profiler also paints its numbers over the picture. Needed on redream, which does
- * not surface the serial port; unnecessary on Flycast, which does. Off costs nothing at all —
- * no texture, no font, no 96 KB buffer. */
-#define RECOMPSX_DC_PROFILE_OVERLAY 0
+/* Whether the profiler can also paint its numbers over the picture. Needed wherever the serial
+ * port is out of sight: redream does not surface it, and Flycast only prints it to the terminal
+ * it was started from, which a player launching it from the Finder does not have. Compiled in,
+ * and switched on per disc by a `--dc-overlay` line in recompsx.cfg: without it no texture is
+ * allocated and nothing is drawn, so the only cost is the 128 KB text buffer in main RAM. */
+#define RECOMPSX_DC_PROFILE_OVERLAY 1
 
 /* Diagnosis mode: every texture cache slot decodes to one solid colour instead of its real
  * texels. The picture stops being a picture and becomes a map of which slot each surface binds:
@@ -508,6 +510,11 @@ static void arg_add(const char* s) {
     g_argc++;
 }
 
+static int has_arg(const char* s) {
+    for(int i = 0; i < g_argc; i++) if(strcmp(g_args[i], s) == 0) return 1;
+    return 0;
+}
+
 static int args_from_file(const char* path) {
     FILE* f = fopen(path, "rb");
     if(!f) return 0;
@@ -674,20 +681,6 @@ int bp_init(const char* title) {
     samp_start();
 #endif
 
-#if RECOMPSX_DC_PROFILE_OVERLAY
-    g_txt = pvr_mem_malloc(TXT_W * TXT_H * 2);
-    if(g_txt) {
-        pvr_poly_cxt_t tc;
-        pvr_poly_cxt_txr(&tc, PVR_LIST_TR_POLY,
-                         PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
-                         TXT_W, TXT_H, g_txt, PVR_FILTER_NONE);
-        tc.gen.culling = PVR_CULLING_NONE;
-        tc.txr.uv_clamp = PVR_UVCLAMP_UV;
-        tc.txr.env = PVR_TXRENV_REPLACE;
-        pvr_poly_compile(&g_txt_hdr, &tc);
-    }
-#endif
-
     if(snd_stream_init() == 0) {
         g_snd_up = 1;
         g_stream = snd_stream_alloc(audio_pull, STREAM_BYTES_PER_CHANNEL);
@@ -705,6 +698,26 @@ int bp_init(const char* title) {
 
     find_storage();
     load_args();
+
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    /* After the arguments, because they are what asks for it. */
+    if(has_arg("--dc-overlay")) {
+        g_txt = pvr_mem_malloc(TXT_W * TXT_H * 2);
+        if(g_txt) {
+            pvr_poly_cxt_t tc;
+            pvr_poly_cxt_txr(&tc, PVR_LIST_TR_POLY,
+                             PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+                             TXT_W, TXT_H, g_txt, PVR_FILTER_NONE);
+            tc.gen.culling = PVR_CULLING_NONE;
+            tc.txr.uv_clamp = PVR_UVCLAMP_UV;
+            tc.txr.env = PVR_TXRENV_REPLACE;
+            pvr_poly_compile(&g_txt_hdr, &tc);
+            bp_log(BP_LOG_INFO, "profile overlay on");
+        } else {
+            bp_log(BP_LOG_WARN, "--dc-overlay: no PVR memory for the text texture");
+        }
+    }
+#endif
     return 0;
 }
 
@@ -1073,7 +1086,9 @@ static void profile_report(void) {
     /* The on-screen copy is built before the serial one is written, so the log counters describe
      * the period they belong to rather than including the cost of reporting themselves. */
     char l0[48], l1[48], l2[48], l3[48];
-    snprintf(l0, sizeof(l0), "%d fr in %lu ms", g_prof_frames, (unsigned long)(total / 1000));
+    const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
+    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps", g_prof_frames, (unsigned long)(total / 1000),
+             tenths / 10, tenths % 10);
     snprintf(l1, sizeof(l1), "emu %lu wait %lu",
              (unsigned long)(emu / 1000), (unsigned long)(g_prof_wait / 1000));
     snprintf(l2, sizeof(l2), "up %lu sub %lu log %d/%lu",
