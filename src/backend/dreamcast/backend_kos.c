@@ -503,11 +503,11 @@ static int file_exists(const char* path) {
  * `bp_present` either: a machine running at five frames a second would present five times a
  * second, and the buffer holds 93 ms. Four milliseconds is far below the half-buffer that decides
  * an underrun, and far above the rate the SPU asks at. */
-static int g_hw_voices;   /* the AICA plays the SPU's voices; the mixed stream is gone */
+static int g_hw_voices;   /* the AICA plays the SPU's voices; the stream carries the ones it declines */
 
 static void pump_audio(void) {
     static uint64_t last_us;
-    if(g_stream == SND_STREAM_INVALID || g_hw_voices) return;
+    if(g_stream == SND_STREAM_INVALID) return;
 
     const uint64_t now = bp_time_us();
     if(now - last_us < 4000ull) return;
@@ -529,7 +529,13 @@ static void pump_audio(void) {
  * block flags. Envelopes are the SPU's, arriving as volumes once a batch (every 2.9 ms), because
  * the AICA's own ADSR has other curves. What is heard is an approximation: no reverb, no noise
  * voices, no pitch modulation, and a loop's seam restarts the ADPCM filter from the first pass.
- * The mixing that cost 8 ms a vblank of SH-4 time is the AICA's now. */
+ * The mixing that cost 8 ms a vblank of SH-4 time is the AICA's now.
+ *
+ * A note the AICA cannot hold is declined at its key-on and the runtime mixes that one voice into
+ * the ordinary stream, which therefore stays up. The case that forced it: Crash Bash's intro
+ * cutscene streams its sound through two halves of sound RAM, each played as one ten-second note
+ * of 220,528 samples, and an AICA channel's loop registers are sixteen bits. Cut at 65,534 the
+ * cutscene went silent for seven seconds in every ten. */
 
 #define SPU_RAM_BYTES   (512 * 1024)
 #define SPU_VOICES      24
@@ -559,7 +565,19 @@ static int16_t    g_spu_pcm[SPU_SAMPLE_MAX + 64] __attribute__((aligned(32)));
 #if RECOMPSX_DC_PROFILE
 static uint64_t   g_prof_aica;        /* decoding, uploading and commanding, inside `emu` */
 static int        g_prof_aica_decodes;
+static int        g_prof_aica_declined;
 #endif
+
+/* Blocks from `start` through the one that ends the sample, or -1 if none does within what a
+ * channel holds: read from the flags alone, so a note that will be declined costs no decode. */
+static int spu_sample_blocks(int start) {
+    int at = start & (SPU_RAM_BYTES - 1);
+    for(int b = 1; b * 28 <= SPU_SAMPLE_MAX; b++) {
+        if(g_spu_ram[(at + 1) & (SPU_RAM_BYTES - 1)] & 0x01) return b;
+        at = (at + 16) & (SPU_RAM_BYTES - 1);
+    }
+    return -1;
+}
 
 static inline int spu_sat16(int v) { return v > 32767 ? 32767 : (v < -32768 ? -32768 : v); }
 
@@ -627,13 +645,15 @@ static int spu_evict_one(void) {
     return 1;
 }
 
-/* The sample a voice starting at `start` plays: kept, or decoded and uploaded now. */
+/* The sample a voice starting at `start` plays: kept, or decoded and uploaded now. -1 when it
+ * cannot be had: longer than a channel holds, or no sound RAM to put it in. */
 static int spu_samp_for(int start) {
     for(int i = 0; i < SPU_SAMPLES; i++)
         if(g_spu_samp[i].start == start && !g_spu_samp[i].stale) {
             g_spu_samp[i].used_at = ++g_spu_samp_clock;
             return i;
         }
+    if(spu_sample_blocks(start) < 0) return -1;
     int slot = -1;
     for(int i = 0; i < SPU_SAMPLES && slot < 0; i++) if(g_spu_samp[i].start < 0) slot = i;
     while(slot < 0) {
@@ -703,13 +723,8 @@ void bp_spu_ram(const uint8_t* ram) {
         if(g_vchn[v] >= 0) got++;
         g_vkey[v] = -1; g_vsamp[v] = -1; g_vvol[v] = g_vpan[v] = g_vfreq[v] = -1;
     }
-    /* The mixed stream has nothing to carry any more. Destroying it gives its two channels and its
-     * sound RAM back, and stops anything polling it. */
-    if(g_stream != SND_STREAM_INVALID) {
-        snd_stream_stop(g_stream);
-        snd_stream_destroy(g_stream);
-        g_stream = SND_STREAM_INVALID;
-    }
+    /* The stream stays: it carries the voices declined at their key-on (see above), and is
+     * silent the rest of the time. */
     g_hw_voices = 1;
     char msg[96];
     snprintf(msg, sizeof(msg), "audio: %d of %d SPU voices on AICA channels", got, SPU_VOICES);
@@ -732,8 +747,8 @@ void bp_spu_dirty(int addr, int len) {
     }
 }
 
-void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r) {
-    if(!g_spu_ram || v < 0 || v >= SPU_VOICES || g_vchn[v] < 0) return;
+int bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r) {
+    if(!g_spu_ram || v < 0 || v >= SPU_VOICES || g_vchn[v] < 0) return 0;
 #if RECOMPSX_DC_PROFILE
     const uint64_t t0 = bp_time_us();
 #endif
@@ -749,7 +764,13 @@ void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int v
         g_vsamp[v] = -1;
         const int s = spu_samp_for(start);
         if(s < 0) {
+            /* Declined: the runtime mixes this note, and the channel falls silent for it. */
             snd_sfx_stop(chn);
+#if RECOMPSX_DC_PROFILE
+            g_prof_aica += bp_time_us() - t0;
+            g_prof_aica_declined++;
+#endif
+            return 0;
         } else {
             g_spu_samp[s].refs++;
             g_vsamp[v] = s;
@@ -779,6 +800,7 @@ void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int v
 #if RECOMPSX_DC_PROFILE
     g_prof_aica += bp_time_us() - t0;
 #endif
+    return 1;
 }
 
 static int ring_count(void) {
@@ -1412,12 +1434,12 @@ static void profile_report(void) {
 
     char msg[240];
     snprintf(msg, sizeof(msg),
-             "dc: %d frames in %lu ms | emu %lu (spu %lu, aica %lu/%d) | disc %lu (%d rd, %d miss)"
+             "dc: %d frames in %lu ms | emu %lu (spu %lu, aica %lu/%d/%d) | disc %lu (%d rd, %d miss)"
              " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | pace %lu | empty %d | log %d in %lu",
              g_prof_frames,
              (unsigned long)(total / 1000),
              (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
-             (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes,
+             (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined,
              (unsigned long)(g_prof_disc_us / 1000), g_prof_reads, g_prof_misses,
              (unsigned long)(g_prof_wait / 1000),
              (unsigned long)(g_prof_audio / 1000), g_prof_polls,
@@ -1437,9 +1459,9 @@ static void profile_report(void) {
              (unsigned long)(total / 1000), tenths / 10, tenths % 10,
              (unsigned long)(g_prof_pace / 1000));
     if(g_hw_voices)
-        snprintf(l1, sizeof(l1), "emu %lu spu %lu aica %lu/%d wait %lu",
+        snprintf(l1, sizeof(l1), "emu %lu spu %lu aica %lu/%d/%d wait %lu",
                  (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
-                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes,
+                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined,
                  (unsigned long)(g_prof_wait / 1000));
     else
         snprintf(l1, sizeof(l1), "emu %lu spu %lu wait %lu",
@@ -1476,6 +1498,7 @@ static void profile_report(void) {
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_prof_section_us[i] = 0;
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
+    g_prof_aica_declined = 0;
     g_hdr_hits = g_hdr_compiles = 0;
     g_prof_disc_us = 0;
     g_prof_reads = g_prof_misses = 0;

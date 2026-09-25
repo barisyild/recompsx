@@ -80,6 +80,6 @@ extern function bp_file_read(slot:Int, offset:Int, buf:Ptr<UInt8>, len:Int):Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_spu_ram(ram:Ptr<UInt8>):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_spu_dirty(addr:Int, len:Int):Void;
 @:include("backend_c_api.h") @:topLevel
-extern function bp_spu_voice(v:Int, key:Int, on:Int, start:Int, pitch:Int, volL:Int, volR:Int):Void;
+extern function bp_spu_voice(v:Int, key:Int, on:Int, start:Int, pitch:Int, volL:Int, volR:Int):Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_log(level:Int, msg:ConstCharPtr):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_fatal(msg:ConstCharPtr):Void;

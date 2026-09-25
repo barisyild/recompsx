@@ -3,6 +3,30 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-09-25: the third mini-game, and where the cutscene's sound comes from
+
+**stage3.** At about frame 18060 of the attract loop (after Select Game Type) `boot` calls
+0x800c0b94 through a pointer from 0x80078d10. The runtime reported the block in the 0x800b32b4
+window as missing: CRASHBSH.DAT sector 28241, offset (28241 - 236) * 2048 = 57354240, 63488
+bytes. 0x800c0b94 is a 26-instruction initialiser that stores seven callbacks into the table at
+0x8005aa70 (0x800b36cc, 0x800b3b20, 0x800b40ac, 0x800c0b7c, 0x800c0b84, 0x800bfd9c,
+0x800b9728); the tool had refused the hint because its plausibility check read past the
+function's `jr ra` into the data behind it (fixed in the tool, not here). Before the fix the call
+was skipped and the demo ran on the previous game's callbacks. Hints then added from the
+runtime's reports: stage3 0x800c0760, 0x800b4efc, 0x800c0a74; boot 0x80086f78, 0x80086714;
+base 0x80015758, 0x8002694c, 0x80026ad8, 0x80026b70. The attract loop now runs 70,000 frames
+with no missing code. SPU key-ons from frame 18000 rose by about 9 %.
+
+**Sound sources.** No CD-XA: every sector of CRASHBSH.DAT and BASHY is a form-1 data sector (the
+only XA file on the disc, SPYRO3/SPEECH.STR, is the Spyro 3 demo's). No CD-DA: the disc has one
+data track, and the single CdlPlay in the attract loop plays nothing. No noise, pitch
+modulation, reverb or volume sweeps in 30,000 frames. Everything is SPU voices. The intro
+cutscene (Uka Uka, from frame ~24100) streams its sound: the game reads a chunk from the disc
+into one half of sound RAM (0x1010 or 0x1fc90) while the other half plays, each half one note of
+220,528 samples at pitch 0x7fa (21,985 Hz, 10.03 s), keyed alternately on voices 0 and 1 every
+~597 frames. That is longer than an AICA channel holds, which is why the Dreamcast lost it
+(ADR-0024).
+
 ## 2026-09-09: main reconciled with the committed console branch
 
 The earlier claim that working features existed only in an untracked JS bundle was incorrect.

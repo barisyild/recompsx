@@ -2,6 +2,11 @@
 
 ## Status snapshot
 
+**2026-09-25: the cutscene's sound is back on the Dreamcast; the attract loop has no missing code.**
+Notes longer than an AICA channel (the intro cutscene streams 10-second notes) are declined at
+their key-on and mixed by the runtime; everything else stays on the AICA. The third mini-game's
+overlay was missing (its initialiser refused by an over-strict tool check); 70,000 frames clean.
+
 **2026-09-25: Dreamcast gameplay 19.7 -> 25.2 fps with the AICA; silent SPU path 3.5x cheaper.**
 Flycast overlay after ADR-0024: gameplay spu 244 -> 20 ms per 30 vblanks. The menu still read
 spu 366 ms: fading notes walked tick by tick. `Spu.fallRun` now takes releases, decays and
@@ -1112,6 +1117,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] Missing Dreamcast sounds traced: Crash Bash has no XA/CD-DA; its intro
+cutscene streams 220,528-sample SPU notes, longer than an AICA channel. bp_spu_voice now answers
+at the key-on; declined notes are mixed by the runtime into the kept stream (ADR-0024 revision,
+SpuFall checks state and emitted audio). Tool: overlay entry check stops at a function's return;
+stage3 mini-game + 9 hints, attract loop clean to 70,000 frames. Next: Flycast listen.
 
 2026-09-25 [claude] Silent SPU path: falling envelopes (release, decay, falling sustain) taken
 a stretch of equal steps at a time (`Spu.fallRun`), exact; new `SpuFall` conformance test sweeps

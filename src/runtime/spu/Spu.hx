@@ -183,6 +183,14 @@ class Spu {
 	static var sentR:Array<Int>;
 	static var dirtyLo = RAM_BYTES;     // sound RAM written since the last sync: [lo, hi)
 	static var dirtyHi = 0;
+	/**
+		Voices the backend declined at their key-on, one bit each: mixed here for the rest of that
+		note, into the ordinary audio output, while the others play on the backend's sampler. A
+		sampler has limits the SPU does not — the AICA's channels hold 65,534 samples, and a game
+		that streams a cutscene through sound RAM plays ten-second notes — and a voice it cannot
+		hold is better heard through the mix than cut off.
+	**/
+	static var softMask = 0;
 
 	public static function init():Void {
 		ram = RawMem.alloc(RAM_BYTES);
@@ -217,6 +225,7 @@ class Spu {
 		sentR = [for (_ in 0...VOICES) -1];
 		dirtyLo = RAM_BYTES;
 		dirtyHi = 0;
+		softMask = 0;
 
 		mainVolL = 0;
 		mainVolR = 0;
@@ -437,6 +446,8 @@ class Spu {
 			envPhase[v] = PHASE_ATTACK;
 			endx &= ~(1 << v);
 			keyCount[v] = (keyCount[v] + 1) & 0x7FFFFFFF;
+			if (voicesToBackend) keyOnToBackend(v);
+			else {}
 			// The first voice to start, in full. A silent mixer has half a dozen possible causes
 			// and they are all visible here: a pitch of zero, volumes of zero, an envelope whose
 			// attack takes minutes, or a start address pointing at nothing.
@@ -555,8 +566,10 @@ class Spu {
 		it. `SpuVoice` and the game digests hold it to that.
 	**/
 	static function mixBatch(n:Int):Void {
-		if (!outputEnabled) advanceBatch(n);
-		else {
+		if (!outputEnabled) {
+			if (softMask != 0) mixDeclined(n);
+			else advanceBatch(n);
+		} else {
 			for (i in 0...n) {
 				accL[i] = 0;
 				accR[i] = 0;
@@ -570,6 +583,26 @@ class Spu {
 			final mainR = volumeOf(mainVolR);
 			for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
 		}
+	}
+
+	/**
+		The voices a backend declined, mixed; every other voice advanced as with nobody listening.
+		Voices do not affect one another, so each arrives where it would on either path.
+	**/
+	static function mixDeclined(n:Int):Void {
+		for (i in 0...n) {
+			accL[i] = 0;
+			accR[i] = 0;
+		}
+		for (v in 0...VOICES) {
+			if (envPhase[v] == PHASE_OFF) continue;
+			else {}
+			if (((softMask >> v) & 1) != 0) mixVoice(v, n);
+			else advanceVoice(v, n);
+		}
+		final mainL = volumeOf(mainVolL);
+		final mainR = volumeOf(mainVolR);
+		for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
 	}
 
 	/** `n` samples of every voice's state, and no sound: what `mixBatch` does with nobody listening. */
@@ -855,8 +888,14 @@ class Spu {
 	/** `mixBatch` for a test: the batch the scheduler would run, without a scheduler. */
 	public static function mixBatchForTest(n:Int):Void {
 		mixBatch(n);
+		var h = core.Hash.FNV_OFFSET;
+		for (i in 0...(outCount * 2)) h = core.Hash.word(h, RawMem.get16Index(out, i));
+		outForTest = h;
 		outCount = 0;
 	}
+
+	/** What the last `mixBatchForTest` emitted, folded: how a test compares sound, not just state. */
+	public static var outForTest(default, null) = 0;
 
 	/** What a voice will do next, folded into one word: the state the silent path must keep. */
 	public static function voiceState(v:Int):Int {
@@ -1337,11 +1376,7 @@ class Spu {
 		under 2^31.
 	**/
 	static function syncVoices():Void {
-		if (dirtyHi > dirtyLo) {
-			Backend.spuDirty(dirtyLo, dirtyHi - dirtyLo);
-			dirtyLo = RAM_BYTES;
-			dirtyHi = 0;
-		} else {}
+		flushDirty();
 		final mainL = abs(volumeOf(mainVolL));
 		final mainR = abs(volumeOf(mainVolR));
 		for (v in 0...VOICES) {
@@ -1356,8 +1391,9 @@ class Spu {
 			var p = pitch[v] & 0xFFFF;
 			if (p > 0x4000) p = 0x4000;
 			else {}
-			if (keyCount[v] != sentKey[v] || on != sentOn[v] || p != sentPitch[v] || l != sentL[v]
-					|| r != sentR[v]) {
+			// A voice mixed here is none of the backend's business until its next key-on.
+			if (((softMask >> v) & 1) == 0 && (keyCount[v] != sentKey[v] || on != sentOn[v]
+					|| p != sentPitch[v] || l != sentL[v] || r != sentR[v])) {
 				Backend.spuVoice(v, keyCount[v], on, startAddr[v], p, l, r);
 				sentKey[v] = keyCount[v];
 				sentOn[v] = on;
@@ -1366,6 +1402,38 @@ class Spu {
 				sentR[v] = r;
 			} else {}
 		}
+	}
+
+	/** Sound RAM written since the backend last heard, before it is asked to read any. */
+	static function flushDirty():Void {
+		if (dirtyHi > dirtyLo) {
+			Backend.spuDirty(dirtyLo, dirtyHi - dirtyLo);
+			dirtyLo = RAM_BYTES;
+			dirtyHi = 0;
+		} else {}
+	}
+
+	/**
+		A key-on, told to the backend as it happens rather than at the end of the batch.
+
+		The backend answers whether it will play the note. Asked here, a note it declines is mixed
+		from its first sample, from the decoder state the key-on just reset; asked at the batch's
+		end, the voice would already have advanced silently past the start, and silent advancing
+		does not decode. The level is zero at a key-on, so the volumes go as zero and the batch's
+		sync brings them up with the envelope.
+	**/
+	static function keyOnToBackend(v:Int):Void {
+		flushDirty();
+		var p = pitch[v] & 0xFFFF;
+		if (p > 0x4000) p = 0x4000;
+		else {}
+		if (Backend.spuVoice(v, keyCount[v], 1, startAddr[v], p, 0, 0) != 0) softMask &= ~(1 << v);
+		else softMask |= 1 << v;
+		sentKey[v] = keyCount[v];
+		sentOn[v] = 1;
+		sentPitch[v] = p;
+		sentL[v] = 0;
+		sentR[v] = 0;
 	}
 
 	// ---- what is still missing ------------------------------------------------------------------
