@@ -1144,7 +1144,20 @@ millisecond budget per tick instead of holding to wall time, keeps its origin fr
 resumes cleanly, and the page presents at most once per display interval and shows the frame
 rate reached. Live switch, presentation only (golden rule 3). Verified in the app's browser:
 58 kare/s locked → 371 and 246 unlocked (menu / gameplay) → 60 locked again, console clean.
-Next: the browser's own share table — profile at 6× with sound off and the lock off.
+Two refinements of the silent walk, measured by instrumenting a 9000-frame run: 13.4 M runs for
+56 M samples, 9.9 M of them one sample long and only 168 k on a pinned level. The game's voices
+spend most of their time in a period-one exponential release (`hi=dfe4`: shift 4, every tick an
+event), where the run machinery cost more than the per-sample walk it replaced. Now: (1) a
+sustain at its rail (rising at 0x7FFF, falling at 0) is "no event" and the counter wraps modulo
+the period; (2) with a period of one the phase's own code runs tick by tick in a tight loop and
+the position follows in one step, a phase change ending the run on the tick that made it.
+Same three proofs (SpuAdvance 7172e474, `--no-audio` c346c0af / 53e5c7fd, sound-on unchanged);
+Node `--no-audio` mean 16.11 → 15.53 s, SPU share → 1.8 %, SPU self 305 → 203 ms.
+User's 6× and 20× Chrome profiles (sound off, lock on): `read16u` 8 % at 6×, absent at 20×, and
+0.2 % in Node on the identical Closure bundle — a throttling artefact, not a cost. Profile at 1×
+for shares. The VSync wait loop (`f_80032264`, libetc) is the largest single item left: 8 % self
+locked, 30 % in fast-forward; an exact idle-skip in the recompiler is proposed, not started.
+Next: the idle-loop skip, if approved; otherwise GTE (`cmdRtps`/`rtps`) and the GP0 → WebGL path.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

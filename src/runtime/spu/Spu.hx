@@ -564,15 +564,39 @@ class Spu {
 	static function advanceVoice(v:Int, n:Int):Void {
 		var left = n;
 		while (left > 0 && envPhase[v] != PHASE_OFF) {
-			final envRun = envelopeRun(v);
+			final period = envelopePeriod(v);
+			final pinned = envelopePinned(v);
+			final envRun = pinned ? NEVER : envelopeRun(period, v);
 			final posRun = positionRun(v);
+			if (period == 1 && !pinned) {
+				// An event on every tick — a fast attack, an exponential release — is the common
+				// case in a game, and there the phase's own code, tick by tick, is the cheapest
+				// walk there is; the run machinery would only be overhead around it. The position
+				// follows in one step, and a phase change ends the run on the tick that made it.
+				var m = posRun < left ? posRun : left;
+				final phase = envPhase[v];
+				var i = 0;
+				while (i < m) {
+					stepEnvelope(v);
+					i++;
+					if (envPhase[v] != phase) m = i;
+					else {}
+				}
+				advancePosition(v, i);
+				left -= i;
+				continue;
+			} else {}
 			var run = envRun < posRun ? envRun : posRun;
 			if (run > left) run = left;
 			else {}
-			// Quiet ticks are the counter climbing; a run that reaches the period ends with the
-			// tick that moves the level, taken by the phase's own code.
-			if (run < envRun) envCounter[v] += run;
-			else {
+			if (run < envRun) {
+				// Quiet ticks are the counter climbing — and, on a pinned level, wrapping at the
+				// period, since every firing tick there resets it and changes nothing else.
+				if (pinned) envCounter[v] = IntMath.mod((envCounter[v] + run) | 0, period);
+				else envCounter[v] += run;
+			} else {
+				// A run that reaches the period ends with the tick that moves the level, taken by
+				// the phase's own code.
 				envCounter[v] += run - 1;
 				stepEnvelope(v);
 			}
@@ -582,9 +606,27 @@ class Spu {
 	}
 
 	/** Ticks until `ready` next lets this phase through, counting the one that does. */
-	static function envelopeRun(v:Int):Int {
-		final k = (envelopePeriod(v) - envCounter[v]) | 0;
+	static function envelopeRun(period:Int, v:Int):Int {
+		final k = (period - envCounter[v]) | 0;
 		return k < 1 ? 1 : k;
+	}
+
+	/**
+		A sustain that has reached its rail.
+
+		Most of a game's voices spend their lives here: sustain rising, at the top, with a shift
+		below twelve — so `ready` lets every tick through and `sustain` adds a step that the clamp
+		takes straight back off. The level, the phase and the peak are what they were after any
+		number of such ticks; only the counter moves, and it moves modulo the period. Treating
+		that as "no event" is what lets a steady voice advance a block at a time rather than a
+		sample at a time. Falling at zero is the same rail from below.
+	**/
+	static function envelopePinned(v:Int):Bool {
+		if (envPhase[v] != PHASE_SUSTAIN) return false;
+		else {
+			final rising = (adsrHi[v] & 0x4000) == 0;
+			return rising ? envLevel[v] >= 0x7FFF : envLevel[v] <= 0;
+		}
 	}
 
 	/** The period `ready` would compute for the current phase at the current level. */
