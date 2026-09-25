@@ -1204,7 +1204,20 @@ profile (2.0 % → 0), mean 15.78 → 15.31 s — small there because the softwa
 dominates a headless run. In the app's browser the skip is active (60 k turns by frame 240) but
 the pane's throttling made frame rates unreadable; the fast-forward rate in the user's Chrome,
 where the wait was 30 % of the main thread, is the measurement still to take.
-Next: a mobile profile decides whether GC needs more; the remaining 160 scavenges are unattributed.
+The user's Chrome profiles with the skip (1×, fast-forward, sound on): the VSync loop is gone;
+SPU ~21 % (voiceSample 6.4, mixVoice 5.5, decodeBlock 2.9, envelope 5.8), GTE ~14 %, the
+transform functions ~9 %, accessors ~7 %, GP0 → WebGL ~6 %. Ruffle (a browser extension)
+wraps the page's tick and takes 65 % "total" in those profiles; disable it before profiling.
+**Sounding mixer in runs.** `mixVoice` now moves a voice the way the silent path does:
+between the envelope's next change and the block's end every sample does the same thing, so
+a run's samples go through `mixRun` — one loop, position in locals, no calls — the counter
+jumps by the run, the event sample gets its `stepEnvelope` first, and a period of one steps
+the envelope inside the loop and ends where the phase changes. The level is read after the
+position advances, because a block that ends a one-shot zeroes it on that sample. Output bit
+for bit the same (SpuVoice d7680e93; game 0e180c28 / ab13c60f; `--no-audio` unchanged). Node
+with sound: mixer self 1022 → 698 ms, SPU share 8.6 → 6.2 %, wall time within noise
+(mean 15.91 → 16.03 s); in the browser the SPU was a fifth of the main thread.
+Next: GTE `cmdRtps`/`rtps` (14 %); GP0 → WebGL uniforms per batch; a mobile GC profile.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

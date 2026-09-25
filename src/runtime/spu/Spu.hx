@@ -705,32 +705,108 @@ class Spu {
 		return core.Hash.word(h, repeatAddr[v]);
 	}
 
-	/** One voice's next `n` samples into the accumulators, until it goes silent. */
+	/**
+		One voice's next `n` samples into the accumulators, until it goes silent — in runs.
+
+		The per-sample form called `stepEnvelope` and `voiceSample` for every sample of every
+		voice, and those calls were most of the mixer. Between two events — the envelope's next
+		change and the block's end — every sample does the same thing: read the decoded sample,
+		advance the position, multiply by the level and the volume, accumulate. So the voice
+		moves in runs, as the silent path does (`advanceVoice`): a run's quiet samples go through
+		one loop with no calls and the position in locals, the envelope's counter jumps by the
+		run, and the sample on which the envelope changes gets its `stepEnvelope` first, as it
+		always did. With a period of one every sample is an event, and then the loop steps the
+		envelope itself, ending where the phase changes. What each sample does, and in what
+		order, is unchanged — the level is read after the position advances, because a block
+		that ends a one-shot zeroes it on that very sample — so the output is bit for bit the
+		per-sample form's; `SpuVoice` and the sound-on digests hold it to that.
+	**/
 	static function mixVoice(v:Int, n:Int):Void {
 		final vl = volumeOf(volL[v]);
 		final vr = volumeOf(volR[v]);
 		// Three factors multiply into every sample, and a silent mixer is one of them being
 		// zero. Watching all three separately is the difference between "no sound" and a
-		// specific wrong register. The volume is constant across the batch; the sample peak is
-		// gathered locally and merged once.
+		// specific wrong register.
 		if (abs(vl) > peakVoiceVol) peakVoiceVol = abs(vl);
 		else {}
-		var peak = peakSample;
 		var i = 0;
-		while (i < n) {
-			if (envPhase[v] == PHASE_OFF) break;
+		while (i < n && envPhase[v] != PHASE_OFF) {
+			final period = envelopePeriod(v);
+			final pinned = envelopePinned(v);
+			final posRun = positionRun(v);
+			if (period == 1 && !pinned) {
+				final m = posRun < n - i ? posRun : n - i;
+				i += mixRun(v, i, m, vl, vr, true);
+				continue;
+			} else {}
+			final envRun = pinned ? NEVER : envelopeRun(period, v);
+			var run = envRun < posRun ? envRun : posRun;
+			if (run > n - i) run = n - i;
 			else {}
-			stepEnvelope(v);
-			final raw = voiceSample(v);
+			// The samples before the envelope's change, if it falls inside the run: on a pinned
+			// level every tick fires and changes nothing, so the counter only wraps.
+			final quiet = run < envRun ? run : run - 1;
+			if (quiet > 0) {
+				if (pinned) envCounter[v] = IntMath.mod((envCounter[v] + quiet) | 0, period);
+				else envCounter[v] += quiet;
+				mixRun(v, i, quiet, vl, vr, false);
+				i += quiet;
+			} else {}
+			if (run == envRun) {
+				stepEnvelope(v);
+				mixRun(v, i, 1, vl, vr, false);
+				i++;
+			} else {}
+		}
+	}
+
+	/**
+		`m` samples of one voice, accumulated from `at`: the per-sample work of `voiceSample`
+		and the multiply, in one loop with the position in locals. A block that ends inside it
+		is decoded where the per-sample form decoded it — while advancing, right after the
+		sample that crossed — and the level is read after that, as `mixVoice` always read it.
+		`stepping` is the period-one case: the envelope is stepped before every sample and the
+		run ends on the sample whose step changes the phase. Returns the samples done.
+	**/
+	static function mixRun(v:Int, at:Int, m:Int, vl:Int, vr:Int, stepping:Bool):Int {
+		final base = v * SAMPLES_PER_BLOCK;
+		final step = pitchStep(v);
+		final phase = envPhase[v];
+		var pos = blockPos[v];
+		var cnt = counter[v];
+		var peak = peakSample;
+		var k = 0;
+		while (k < m) {
+			if (stepping) stepEnvelope(v);
+			else {}
+			if (pos >= SAMPLES_PER_BLOCK) {
+				decodeBlock(v);
+				pos = 0;
+			} else {}
+			final raw = decoded[base + pos];
+			cnt = (cnt + step) | 0;
+			while (cnt >= 0x1000) {
+				cnt -= 0x1000;
+				pos++;
+				if (pos >= SAMPLES_PER_BLOCK) {
+					decodeBlock(v);
+					pos = 0;
+				} else {}
+			}
 			final s = (raw * envLevel[v]) >> 15;
 			final magnitude = raw < 0 ? -raw : raw;
 			if (magnitude > peak) peak = magnitude;
 			else {}
-			accL[i] = (accL[i] + ((s * vl) >> 15)) | 0;
-			accR[i] = (accR[i] + ((s * vr) >> 15)) | 0;
-			i++;
+			accL[at + k] = (accL[at + k] + ((s * vl) >> 15)) | 0;
+			accR[at + k] = (accR[at + k] + ((s * vr) >> 15)) | 0;
+			k++;
+			if (stepping && envPhase[v] != phase) break;
+			else {}
 		}
+		blockPos[v] = pos;
+		counter[v] = cnt;
 		peakSample = peak;
+		return k;
 	}
 
 	/**
