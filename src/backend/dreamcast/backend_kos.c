@@ -1216,6 +1216,7 @@ static void draw_quad(int sw, int sh) {
 
 #if RECOMPSX_DC_PROFILE
 static uint64_t g_prof_emu, g_prof_wait, g_prof_upload, g_prof_submit, g_prof_end;
+static uint64_t g_prof_pace;   /* held back to the video rate: not work, but part of the frame */
 
 
 /* The SH-4's own performance counters, aimed at the one window that matters: everything between
@@ -1403,7 +1404,7 @@ static int      g_prof_logs;
 static void profile_report(void) {
     if(++g_prof_frames < PROFILE_EVERY) return;
 
-    const uint64_t total = g_prof_emu + g_prof_wait + g_prof_upload + g_prof_submit;
+    const uint64_t total = g_prof_emu + g_prof_wait + g_prof_upload + g_prof_submit + g_prof_pace;
     /* Disc time is taken out of `emu` rather than printed beside it: the reads happen inside the
      * emulated frame, so leaving it in would credit the CPU with the drive's bill — which is
      * exactly the mistake this line exists to prevent. */
@@ -1412,7 +1413,7 @@ static void profile_report(void) {
     char msg[240];
     snprintf(msg, sizeof(msg),
              "dc: %d frames in %lu ms | emu %lu (spu %lu, aica %lu/%d) | disc %lu (%d rd, %d miss)"
-             " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | empty %d | log %d in %lu",
+             " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | pace %lu | empty %d | log %d in %lu",
              g_prof_frames,
              (unsigned long)(total / 1000),
              (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
@@ -1422,7 +1423,8 @@ static void profile_report(void) {
              (unsigned long)(g_prof_audio / 1000), g_prof_polls,
              (unsigned long)(g_prof_upload / 1000),
              (unsigned long)(g_prof_build / 1000), g_hdr_hits, g_hdr_compiles,
-             (unsigned long)((g_prof_submit - g_prof_build) / 1000), g_empty_presents,
+             (unsigned long)((g_prof_submit - g_prof_build) / 1000),
+             (unsigned long)(g_prof_pace / 1000), g_empty_presents,
              g_prof_logs,
              (unsigned long)(g_prof_log_us / 1000));
 
@@ -1431,8 +1433,9 @@ static void profile_report(void) {
      * the period they belong to rather than including the cost of reporting themselves. */
     char l0[48], l1[48], l2[48], l3[48];
     const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
-    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps", g_prof_frames, (unsigned long)(total / 1000),
-             tenths / 10, tenths % 10);
+    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps pace %lu", g_prof_frames,
+             (unsigned long)(total / 1000), tenths / 10, tenths % 10,
+             (unsigned long)(g_prof_pace / 1000));
     if(g_hw_voices)
         snprintf(l1, sizeof(l1), "emu %lu spu %lu aica %lu/%d wait %lu",
                  (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
@@ -1465,6 +1468,7 @@ static void profile_report(void) {
 
     g_prof_frames = 0;
     g_prof_emu = g_prof_wait = g_prof_upload = g_prof_submit = g_prof_audio = 0;
+    g_prof_pace = 0;
     g_prof_polls = 0;
     g_empty_presents = 0;
     g_prof_build = 0;
@@ -2349,7 +2353,7 @@ static void build_scene(int sx, int sy, int sw, int sh, int with_background, int
     }
 }
 
-void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags) {
+static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags) {
     if(!g_ready) return;
 
 #if RECOMPSX_DC_PROFILE
@@ -2499,6 +2503,33 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     if(g_pc_armed || g_pc_frames == 0) perf_window_open();
     else {}
 #endif
+}
+
+/* A game runs at its own video rate, not at whatever the host manages. Where the Dreamcast is
+ * slower than the PlayStation this waits for nothing (bp_pace_frame gives up on a deadline more
+ * than four frames behind), but a small scene can outrun it: a cutscene read 75 fps, a quarter
+ * faster than the game was written for, and a present whose scene was not rebuilt never waits
+ * for the PVR, so nothing else holds it back. With sound on the AICA playing in real time the
+ * picture would drift from it too. One present is one emulated vblank, so each is held to
+ * 59.94 Hz, or 50 Hz for a PAL display mode. The time spent holding is not the emulator's: it is
+ * shown as `pace` and kept out of `emu`. */
+static void pace_present(int flags) {
+#if RECOMPSX_DC_PROFILE
+    const uint64_t a = bp_time_us();
+#endif
+    bp_pace_frame((flags & BP_PRESENT_PAL) ? 20000 : 16683);
+#if RECOMPSX_DC_PROFILE
+    const uint64_t b = bp_time_us();
+    g_prof_pace += b - a;
+    if(g_prof_end) g_prof_end = b;
+    else {}
+#endif
+}
+
+void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags) {
+    if(!g_ready) return;
+    present_frame(vram, sx, sy, sw, sh, flags);
+    pace_present(flags);
 }
 
 /* ---- audio ------------------------------------------------------------------------------------ */

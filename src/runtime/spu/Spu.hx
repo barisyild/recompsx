@@ -604,8 +604,16 @@ class Spu {
 		while (left > 0 && envPhase[v] != PHASE_OFF) {
 			final period = envelopePeriod(v);
 			final pinned = envelopePinned(v);
-			final envRun = pinned ? NEVER : envelopeRun(period, v);
 			final posRun = positionRun(v);
+			// A falling phase moves by equal steps for long stretches, so it goes a stretch at a
+			// time (`fallRun`); on a game's voices that is nearly every tick this loop walks.
+			final fell = pinned ? 0 : fallRun(v, posRun < left ? posRun : left, period);
+			if (fell > 0) {
+				advancePosition(v, fell);
+				left -= fell;
+				continue;
+			} else {}
+			final envRun = pinned ? NEVER : envelopeRun(period, v);
 			if (period == 1 && !pinned) {
 				// An event on every tick — a fast attack, an exponential release — is the common
 				// case in a game, and there the phase's own code, tick by tick, is the cheapest
@@ -640,6 +648,124 @@ class Spu {
 			}
 			advancePosition(v, run);
 			left -= run;
+		}
+	}
+
+	/**
+		Up to `m` ticks of a falling phase at once: a release, a decay, or a sustain that falls.
+		Returns the ticks taken, stopping on the one that ends the phase (or pins a linear fall at
+		zero), or 0 when the phase does not fall and the caller walks it as before.
+
+		Why this is the whole cost: counted on 17,500 frames of a real game, exponential releases
+		were 86 % of the ticks the silent path took one at a time — the ones at period 1 because
+		they change the level every tick, the slower ones because every firing ended a run — and
+		on the Dreamcast those ticks were a third of the emulator's time.
+
+		Nothing is approximated. A firing takes `by` off the level: a constant for a linear fall,
+		`(a * level) >> 15` for an exponential one, at least 1 in a release. That product stays
+		the same across a stretch of levels — every level down to `ceil(q * 32768 / a)` gives the
+		same `q` — so the level falls by `q` for a countable number of firings, and the next
+		stretch starts where that one ends. A release from full takes a few dozen stretches where
+		it took thousands of ticks. The firings are placed on ticks exactly as `ready` places them
+		(the first when the counter reaches the period, then one every period), the level after
+		the first firing is offered to `peakEnv` as `stepEnvelope` would, and the phase ends on
+		the firing whose level reaches its end. `SpuFall` holds this to the sample-by-sample path
+		for every shift, step and direction, and `SpuAdvance` and the game digests with it.
+	**/
+	static function fallRun(v:Int, m:Int, period:Int):Int {
+		final phase = envPhase[v];
+		var a = 0;
+		var exp = false;
+		var floorOne = false;
+		var hasEnd = false;
+		var end = 0;
+		var endLevel = 0;
+		var endPhase = phase;
+		if (phase == PHASE_RELEASE) {
+			final hi = adsrHi[v];
+			a = amount(8, hi & 0x1F);
+			exp = (hi & 0x20) != 0;
+			floorOne = true;
+			hasEnd = true;
+			endPhase = PHASE_OFF;
+		} else if (phase == PHASE_DECAY) {
+			final lo = adsrLo[v];
+			a = amount(8, (lo >> 4) & 0x0F);
+			exp = true;
+			hasEnd = true;
+			end = ((lo & 0x0F) + 1) * 0x800;
+			endLevel = end > 0x7FFF ? 0x7FFF : end;
+			endPhase = PHASE_SUSTAIN;
+		} else if (phase == PHASE_SUSTAIN && (adsrHi[v] & 0x4000) != 0) {
+			final hi = adsrHi[v];
+			a = amount(8 - ((hi >> 6) & 3), (hi >> 8) & 0x1F);
+			exp = (hi & 0x8000) != 0;
+			// A linear fall clamps at zero, where the level is pinned; an exponential one never
+			// gets there, since it takes at most half of what is left.
+			hasEnd = !exp;
+		} else {
+			return 0;
+		}
+
+		// The first firing is on tick `d`, then one every `period` ticks.
+		final c = envCounter[v];
+		var d = (period - c) | 0;
+		if (d < 1) d = 1;
+		else {}
+		if (m < d) {
+			envCounter[v] = (c + m) | 0;
+			return m;
+		} else {}
+		final most = IntMath.div((m - d) | 0, period) + 1;
+
+		var level = envLevel[v];
+		var fired = 0;
+		var ended = false;
+		while (fired < most && !ended) {
+			final q = exp ? (a * level) >> 15 : a;
+			final by = floorOne && q < 1 ? 1 : q;
+			if (fired == 0) {
+				final after = (level - by) | 0;
+				final first = hasEnd && after <= end ? endLevel : after;
+				if (first > peakEnv) peakEnv = first;
+				else {}
+			} else {}
+			// The firings for which `by` stays what it is now.
+			var k = (most - fired) | 0;
+			if (exp && q > 0) {
+				final floor = IntMath.div((q * 32768 + a - 1) | 0, a);
+				final same = IntMath.div((level - floor) | 0, q) + 1;
+				if (same < k) k = same;
+				else {}
+			} else {}
+			// The firing that ends the phase, if it comes within those.
+			var j = NEVER;
+			if (hasEnd) {
+				final gap = (level - end) | 0;
+				if (gap <= 0) j = 1;
+				else if (by > 0) j = IntMath.div((gap + by - 1) | 0, by);
+				else {}
+			} else {}
+			if (j <= k) {
+				level = endLevel;
+				fired += j;
+				ended = true;
+			} else {
+				// With `by` at 0 the level never moves again in this phase, and every firing left
+				// is spent doing nothing, as it would be one tick at a time.
+				level = (level - k * by) | 0;
+				fired += k;
+			}
+		}
+		envLevel[v] = level;
+		final lastAt = (d + (fired - 1) * period) | 0;
+		if (ended) {
+			envPhase[v] = endPhase;
+			envCounter[v] = 0;
+			return lastAt;
+		} else {
+			envCounter[v] = (m - lastAt) | 0;
+			return m;
 		}
 	}
 
