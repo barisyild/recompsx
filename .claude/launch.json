@@ -8,6 +8,20 @@
         "/private/tmp/claude-501/-Users-bariscagriyildirim-Desktop-Project-recompsx/2dba6620-aa6f-4f69-9e7f-8e48556c755e/scratchpad/web/serve.js"
       ],
       "port": 8791
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8000",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "web"
+      ],
+      "port": 8000
     }
   ]
 }

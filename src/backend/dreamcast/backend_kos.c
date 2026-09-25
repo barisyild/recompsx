@@ -1651,6 +1651,13 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
  * for a picture that had not. */
 static int g_bg_x, g_bg_y, g_bg_w, g_bg_h;
 
+/* Recorded, not yet applied: the PVR's user clip rectangle is the obvious home for it, and the
+ * spill it would remove is the one the double-buffered menus show at the top of the screen. */
+static int g_clip_x0, g_clip_y0, g_clip_x1 = 1023, g_clip_y1 = 511;
+void bp_gpu_clip(int x0, int y0, int x1, int y1) {
+    g_clip_x0 = x0; g_clip_y0 = y0; g_clip_x1 = x1; g_clip_y1 = y1;
+}
+
 void bp_gpu_dirty(int x, int y, int w, int h) {
     if(!(g_bg_x + g_bg_w <= x || x + w <= g_bg_x
       || g_bg_y + g_bg_h <= y || y + h <= g_bg_y)) g_bg_stale = 1;

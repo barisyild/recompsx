@@ -17,7 +17,18 @@ Run `npm install` once after checkout. The build uses `npx --no-install`, so a m
 compiler is an explicit build error rather than an accidental version change.
 
 Open <http://127.0.0.1:8000/> and press **Oyunu başlat**. The same button pauses/resumes. The
-page displays the bundle's content hash. Reload after rebuilding; it fetches an uncached
+page displays the bundle's content hash.
+
+**WebGL çizim** (on by default where WebGL2 exists) hands the PlayStation's primitives to
+`web/gpu-webgl.js` instead of the software rasteriser: the page passes `--video-hw` and a `gpu`
+object on the host, the JS backend answers `caps(4)`, and `gpu.Gpu.hw` takes the ADR-0008
+presentation fork. Texels are decoded in the fragment shader straight out of a 16-bit copy of
+VRAM; a 1024x512 framebuffer texture stands in for the rendered VRAM, refreshed from uploads by
+dirty rectangles and blitted to the canvas at each vblank. There is no depth buffer and no depth
+test, as on the PlayStation: primitives draw in submission order. Triangles are scissored to
+the drawing area (`bp_gpu_clip`), rectangles are not, matching the software path. Headless Node
+runs have no host and never take this path, so the digest is unaffected. Untick the box for the
+software rasteriser and the 2D canvas. Reload after rebuilding; it fetches an uncached
 manifest and loads `game.js?v=<hash>`. The manifest records the source branch, commit, dirty
 status and a digest of generator/runtime/config inputs, in addition to the bundle digest.
 

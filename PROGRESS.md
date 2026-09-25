@@ -2,6 +2,23 @@
 
 ## Status snapshot
 
+**2026-09-25: the browser draws with WebGL2 (ADR-0020); main-thread CPU per frame 3.85 → 2.43 ms.**
+`web/gpu-webgl.js` takes ADR-0008's presentation fork in the page: VRAM lives in an R16UI
+texture and texels are decoded in the fragment shader (4/8-bit through the CLUT, 15-bit direct,
+texture window folded in); a 1024x512 framebuffer texture stands for the rendered VRAM, refreshed
+by dirty rectangles, drawn on in submission order with no depth buffer, and blitted per vblank
+(24-bit rows decoded from VRAM). Textured blending primitives draw in two passes as their own
+batch. The ABI gained `bp_gpu_clip` (32 functions): the first build showed a double-buffered
+game's geometry spilling from the drawing buffer onto the displayed one, which the software path
+clips at the drawing area. The runtime now tells the backend of an upload when its last word lands rather than at its
+header — the ABI speaks in the past tense, and a backend that copies the region on hearing of
+it read the palette that was there before; that was the noisy colours of the second build. The
+JS backend answers `caps(4)` only when the page supplies a `gpu` object, so headless runs and
+every digest are untouched. Measured in the page over the same
+stretch of the attract mode: 3.85 ms of main-thread CPU per emulated frame with the software
+rasteriser, 2.43 ms with WebGL. Visual check: the Select Game Type menu at frame 17000 in both
+modes. Known gaps, as on the Dreamcast: mask bits; VRAM readback of rendered pixels.
+
 **2026-09-25: the generated code is structured; 9 dispatchers remain of 632 (ADR-0019).**
 `RegionPlan` reduces natural loops (dominators, any number of exits) and forward runs (a
 single-entry slice in topological order); the emitter uses the entry-routing local `resume` as
@@ -1070,6 +1087,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-25 [claude] Browser WebGL2 presentation fork (ADR-0020): shader-decoded texels from a
+VRAM texture, framebuffer texture refreshed by dirty rects, four blend modes, two-pass textured
+blending, `bp_gpu_clip` added to the ABI for drawing-area scissoring. Main-thread CPU per frame
+3.85 → 2.43 ms in the page; digests untouched. Next: mask bits on the hardware path, the
+ScriptProcessorNode → AudioWorklet migration on the page, then the register summaries.
 
 2026-09-25 [claude] Codegen structuring (ADR-0019): natural loops with recorded exits and
 topological forward runs on `resume` as label; dispatchers 632 → 9, hottest functions

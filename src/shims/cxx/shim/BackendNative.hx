@@ -41,6 +41,7 @@ extern function bp_gpu_rect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int, semiM
 
 @:include("backend_c_api.h") @:topLevel
 extern function bp_gpu_dirty(x:Int, y:Int, w:Int, h:Int):Void;
+extern function bp_gpu_clip(x0:Int, y0:Int, x1:Int, y1:Int):Void;
 
 @:include("backend_c_api.h") @:topLevel
 extern function bp_audio_push(frames:Ptr<Int16>, frameCount:Int):Void;
