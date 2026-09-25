@@ -1217,7 +1217,15 @@ position advances, because a block that ends a one-shot zeroes it on that sample
 for bit the same (SpuVoice d7680e93; game 0e180c28 / ab13c60f; `--no-audio` unchanged). Node
 with sound: mixer self 1022 → 698 ms, SPU share 8.6 → 6.2 %, wall time within noise
 (mean 15.91 → 16.03 s); in the browser the SPU was a fifth of the main thread.
-Next: GTE `cmdRtps`/`rtps` (14 %); GP0 → WebGL uniforms per batch; a mobile GC profile.
+**GTE accumulator arithmetic (JS shim).** `Acc.wrap44` reduced modulo 2^44 by
+`floor(t / 2^44)`, a divide, a floor and a multiply on every one of the nine MAC steps of an
+RTPS; every value there is an integer below 2^53, so repeated subtraction of 2^44 lands on the
+same representative and a chain that does not overflow — nearly all — pays two compares. The
+`>> 12` / `>> 16` shifts multiply by 2^-12 / 2^-16 instead of dividing: exact, the exponent
+moves. GteOps 1cf89aa2 and Acc64 0deeafe0 unchanged, four digests unchanged; five rounds
+`--no-audio` mean 17.16 → 16.41 s (−4.4 %), min 16.62 → 15.87 s, GTE share 31.0 → 29.7 %.
+Next: the rest of `rtps` (leading-zero count in the divide, static traffic); GP0 → WebGL
+uniforms per batch; a mobile GC profile.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
