@@ -1092,6 +1092,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] JS `MemA` reads and writes the typed-array element directly (the `LE` and
+alignment tests are gone from every aligned access; `RawMem` refuses to start on a big-endian
+host instead). Digests unchanged (Mem 27f9aa59, Codegen 632ff691, game ab13c60f); five
+interleaved rounds, median 20.03 → 18.53 s (−7 %). Rejected in the same run: call-site `inline`
+for the 5,023 byte/halfword loads in generated code — bundle +9 %, no gain, as with the word
+accessors before; targeted inlining of memory accessors does not pay on V8 either.
+
 2026-09-25 [claude] GTE commands called by name: the emitter decodes the constant command word
 at build time and emits `Gte.cmdRtps(sf, lm)` etc. (22 entries, `execute` kept for unknown
 words and fixtures); Crash Bash: 66 direct calls, 0 fallbacks. Digests unchanged (Codegen
