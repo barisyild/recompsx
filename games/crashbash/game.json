@@ -19,8 +19,8 @@
         "offset": 72833024,
         "length": 387072
       },
-      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270.",
-      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384],
+      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game.",
+      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324],
       "hashWords": 64
     },
     {
@@ -54,6 +54,17 @@
       "_entryHints": "0x800b5244, 0x800b5218, 0x800b51ec, and 0x800b5ac0 which the runtime reported missing.",
       "entryHints": [2148225516, 2148225560, 2148225604, 2148227692, 2148227732, 2148227776],
       "hashWords": 64
+    },
+    {
+      "id": "stage3",
+      "_note": "The third mini-game block in the 0x800b32b4 window, reached by the attract loop at about frame 18060, after the Select Game Type menu. The runtime reported it missing: CRASHBSH.DAT sector 28241, so offset (28241 - 236) * 2048.",
+      "_loadAddr": "0x800b32b4",
+      "loadAddr": 2148217524,
+      "length": 63488,
+      "source": { "kind": "discFile", "path": "\\CRASHBSH\\CRASHBSH.DAT;1", "offset": 57354240, "length": 63488 },
+      "_entryHints": "0x800c0b94, which the runtime reported missing (called from 0x80078d10 in boot), and the seven callbacks it stores into the table at 0x8005aa70: 0x800b36cc, 0x800b3b20, 0x800b40ac, 0x800c0b7c, 0x800c0b84, 0x800bfd9c, 0x800b9728.",
+      "entryHints": [2148273044, 2148218572, 2148219680, 2148221100, 2148273020, 2148273028, 2148269468, 2148243240, 2148271968, 2148224764, 2148272756],
+      "hashWords": 64
     }
   ],
 
@@ -62,6 +73,7 @@
     2147564692,
     2147566472,
     2147570816,
+    2147571544,
     2147601416,
     2147603376,
     2147603920,
@@ -78,7 +90,10 @@
     2147621404,
     2147622356,
     2147640552,
+    2147641676,
     2147641860,
+    2147642072,
+    2147642224,
     2147643084,
     2147647512,
     2147664516,
