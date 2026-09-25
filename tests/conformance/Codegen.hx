@@ -159,6 +159,14 @@ class Codegen {
 		}
 	}
 
+	static function runShift(ctx:CpuState, opt:Bool, value:Int):Void {
+		reset(ctx);
+		ctx.a0 = value;
+		ctx.a1 = 32;   // SRLV uses the low five bits: a shift by zero
+		if (opt) CodegenOptimized.shiftByZero(ctx);
+		else CodegenReference.shiftByZero(ctx);
+	}
+
 	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
 		reset(ctx);
 		if (opt) CodegenOptimized.deadWrites(ctx);
@@ -262,6 +270,16 @@ class Codegen {
 		runDeadWrites(b, true);
 		compare(a, b);
 		Conf.expect("dead-write result", b.v0, 5);
+		for (value in [0x80000000, -1, 0x7fffffff, 0x12345678, 0]) {
+			runShift(a, false, value);
+			runShift(b, true, value);
+			compare(a, b);
+			Conf.expect("SRLV by zero is the word", b.v0, value);
+			Conf.expect("SRL by zero is the word", b.v1, value);
+			Conf.expect("BEQ finds SRLV's result equal", b.t0, 0);
+			Conf.expect("BEQ finds SRL's result equal", b.t1, 0);
+			Conf.expect("both equalities held", b.t2, 7);
+		}
 		// Every interior block remains a valid entry with its incoming context untouched.
 		for (entry in 0...3) {
 			reset(a); reset(b); a.a0 = 5; b.a0 = 5; a.v0 = 100; b.v0 = 100;

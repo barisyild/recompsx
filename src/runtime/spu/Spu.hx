@@ -357,8 +357,11 @@ class Spu {
 		final reg = p & 0x0F;
 		// Which of a voice's eight registers a game ever writes, once each. A register nobody
 		// writes reads as zero forever, and a zero in the wrong one of these is silence.
-		Runtime.noteOnce(0x6A000000 | reg, "SPU voice register +" + reg + " written, first value "
-			+ hex(w));
+		final noteKey = 0x6A000000 | reg;
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, "SPU voice register +" + reg + " written, first value "
+				+ hex(w));
+		} else {}
 		if (v >= VOICES) return;
 		else if (reg == 0x0) volL[v] = w;
 		else if (reg == 0x2) volR[v] = w;
@@ -410,14 +413,16 @@ class Spu {
 			// The first voice to start, in full. A silent mixer has half a dozen possible causes
 			// and they are all visible here: a pitch of zero, volumes of zero, an envelope whose
 			// attack takes minutes, or a start address pointing at nothing.
-			Runtime.noteOnce(0x69000000, "SPU voice " + v + " keyed on: pitch "
-				+ hex(pitch[v]) + " volL " + hex(volL[v]) + " volR " + hex(volR[v])
-				+ " adsr " + hex(adsrHi[v]) + hex(adsrLo[v])
-				+ " start " + hex(startAddr[v])
-				+ " first block " + hex(RawMem.get8(ram, startAddr[v]))
-				+ "," + hex(RawMem.get8(ram, startAddr[v] + 1))
-				+ " | main vol " + hex(mainVolL) + "/" + hex(mainVolR)
-				+ " control " + hex(control));
+			if (!Runtime.alreadyReported(0x69000000)) {
+				Runtime.noteOnce(0x69000000, "SPU voice " + v + " keyed on: pitch "
+					+ hex(pitch[v]) + " volL " + hex(volL[v]) + " volR " + hex(volR[v])
+					+ " adsr " + hex(adsrHi[v]) + hex(adsrLo[v])
+					+ " start " + hex(startAddr[v])
+					+ " first block " + hex(RawMem.get8(ram, startAddr[v]))
+					+ "," + hex(RawMem.get8(ram, startAddr[v] + 1))
+					+ " | main vol " + hex(mainVolL) + "/" + hex(mainVolR)
+					+ " control " + hex(control));
+			} else {}
 			keyedOn++;
 		}
 	}
@@ -1045,7 +1050,13 @@ class Spu {
 		final by = exponential && !rising
 			? (amount(step, shift) * envLevel[v]) >> 15
 			: amount(step, shift);
-		envLevel[v] += rising ? by : -by;
+		// Added or taken away, never added negated: on JavaScript `-by` is -0 when `by` is 0 (a
+		// slow exponential fall rounds to nothing), and `level + -0` is a double. Stored once, it
+		// turned this array into doubles, every level read from it arrived boxed — through the
+		// voice registers into the CPU's register fields — and the whole recompiled program
+		// allocated a number on every such read, in the browser's collector.
+		if (rising) envLevel[v] += by;
+		else envLevel[v] -= by;
 		clampLevel(v);
 	}
 

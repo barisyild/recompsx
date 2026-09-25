@@ -42,8 +42,11 @@ class KTimers {
 		reload[t] = reloadValue;
 		flags[t] = flagBits;
 		irqEnabled[t] = false;
-		Runtime.noteOnce(0x5F000000 | t, "init_timer on root counter " + t
-			+ " — kept, but the timer registers are not built yet");
+		final noteKey = 0x5F000000 | t;
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, "init_timer on root counter " + t
+				+ " — kept, but the timer registers are not built yet");
+		} else {}
 		return 1;
 	}
 

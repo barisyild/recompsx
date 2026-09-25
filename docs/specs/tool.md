@@ -245,6 +245,11 @@ and keep the one that identifies the most functions consistently.
   `$sp`/`$fp` are not treated as proof that arbitrary memory is RAM, and calls, delay slots,
   branches and scheduler boundaries are never crossed. The generated code therefore retains raw
   memory at every uncertain boundary while reducing ordinary compiler spill traffic (ADR-0016).
+- **Bus addresses**: every load and store passes `address & 0x1FFFFFFF` (`busAddr`), the
+  physical address each accessor computes first anyway, so on V8 with 31-bit small integers a
+  KSEG0 pointer crossing an accessor call is not a heap-allocated number; SRL by zero is the
+  register itself and SRLV is truncated with `| 0`, so no register ever holds an unsigned
+  reading (ADR-0023).
 - **Idle-loop skip**: `IdleLoopPlan` proves that a natural loop is a wait — one path of blocks
   with one pump at the header; only plain arithmetic, loads, one `lw/addiu/sw` of a `$sp` slot
   and branches; no register read before the turn writes it unless the loop never writes it;

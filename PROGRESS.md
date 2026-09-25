@@ -2,6 +2,15 @@
 
 ## Status snapshot
 
+**2026-09-25: the machine's integers stay unboxed on V8 (ADR-0023); JS 9000 frames 15.6 → 9.4 s.**
+A -0 from `%`, a -0 from a negated SPU envelope step and SRL/SRLV's unsigned reading had turned
+`CpuState`'s register fields into V8 double fields, and every read or call crossing boxed a
+number: 90 % of the page's garbage. Fixed at the source, plus physical addresses at the bus (a
+KSEG0 pointer is never a small integer in Chrome), once-built diagnostic strings and an
+allocation-free audio path. Node: garbage −97 %, scavenges 105 → 22 over 9000 frames, 40 %
+faster. Brave: scavenges per frame −67 %, speed neutral; Chrome's register fields still hold
+pointers and stay doubles — the next lever (a rotated register encoding) is in the log.
+
 **2026-09-25: the browser draws with WebGL2 (ADR-0020); main-thread CPU per frame 3.85 → 2.43 ms.**
 `web/gpu-webgl.js` takes ADR-0008's presentation fork in the page: VRAM lives in an R16UI
 texture and texels are decoded in the fragment shader (4/8-bit through the CLUT, 15-bit direct,
@@ -1264,7 +1273,31 @@ trace, alpha 255 everywhere; a deliberately wrong mode-0 weight is caught (22 M 
 Renderer main-thread time, minimum of ten, 300 vblanks: 26.1 → 6.0 ms, 28.1 → 6.2 ms,
 79.3 → 10.3 ms. The page's text is English now. Safari (reported at 10 fps, rAF every ~150 ms
 with ~25 ms of work) is unmeasured on the new renderer.
-Next: the GC source per function in the page, sound on and unpaced; Safari's numbers.
+**The page's garbage (ADR-0023).** The user saw many collections, most with the speed limit off.
+The inspector's allocation tracker — under Node on the page's bundle with a page-like host, and
+in a headless Brave (throwaway profile, DevTools protocol; V8 15.3, 31-bit Smis like Chrome) —
+put ~90 % of it in the generated functions as boxed numbers: `CpuState`'s register fields had
+become V8 double fields (`%DebugPrint`), after which reads in unoptimised code and values crossing
+un-inlined calls allocate. `--trace-generalization` and probes found why: `IntMath.mod` was JS
+`%` (-0 for DIV's remainder into HI), the SPU's `envLevel[v] += rising ? by : -by` stored a
+boxed 4095 after `-0` (array → doubles, read through the voice registers into `ctx`, then 25
+fields by contagion, frame ~2600), and SRL by zero / SRLV emitted `>>> ` untruncated — which
+also made BEQ disagree with C++ (new `Codegen` fixture: fails with 2147483648 for -2147483648
+without the fix). On 31-bit engines KSEG0 pointers are never Smis, so loads and stores now pass
+`addr & 0x1FFFFFFF` (`Emitter.busAddr`; every accessor masks first anyway). Also: 12 dynamic
+`noteOnce` messages guarded by `Runtime.alreadyReported` (built on every SPU voice write,
+key-on, I_MASK write), and the page's sound path copies into its own buffer instead of a slice
+plus a copy per push. Digests unchanged (0e180c28 / ab13c60f, c346c0af / 53e5c7fd, 329de455, all
+conformance; `Codegen` 51a15d34 with the fixture). Node, frames 5000–5300, sound on: garbage
+33.5 → 0.85 MB; 9000 frames: scavenges 105 → 22, wall min 14.27 → 8.98 s, mean 15.61 → 9.41 s
+(five interleaved rounds). Brave: objects per emulated frame ~44 k → ~21 k, scavenges per 1000
+frames 103–113 → 32–39, GC 2.0–2.3 % → 0.8 % of wall unpaced; speed neutral (vblanks
+5000–15000: 1433/1435 → 1545/1414/1408 fps sound off). Rejected on Brave: registers in an
+`Int32Array` (getters box their own), accessors cut to the RAM path (20 k vs 16.7 k objects).
+Next: what remains on 31-bit engines is guest words beyond ±2^30 crossing un-inlined accessors
+and the double register fields; candidates are a rotated register encoding (KSEG0 pointers and
+small numbers both fit 31 bits after a one-bit rotation) and inline RAM paths in the emitter.
+Safari's 10 fps (rAF every ~150 ms) still needs the replay benchmark run in Safari.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

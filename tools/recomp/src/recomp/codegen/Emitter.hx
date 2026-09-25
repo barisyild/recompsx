@@ -935,10 +935,16 @@ class Emitter {
 			case SLTIU: pureAssign(rt, '(${reg(rs)} ^ 0x80000000) < ${hex(i.immS ^ 0x80000000)} ? 1 : 0', false, afterBlock, afterIndex);
 
 			case SLL:  pureAssign(rd, '${reg(rt)} << ${i.shamt}', false, afterBlock, afterIndex);
-			case SRL:  pureAssign(rd, '${reg(rt)} >>> ${i.shamt}', false, afterBlock, afterIndex);
+			// A logical right shift by zero is the value unchanged, and on JavaScript `x >>> 0` is
+			// not: it is the unsigned reading, a number above 2^31 that no Int can hold. Such a
+			// value compares unequal to the same bits held signed (BEQ is `==`), which C++ never
+			// sees, and stored once into a CpuState field it turned the field into a boxed double
+			// for good — every later read in unoptimised code, and every trip through a call in
+			// optimised code, allocated. The same for SRLV, whose amount is only known at run time.
+			case SRL:  pureAssign(rd, i.shamt == 0 ? reg(rt) : '${reg(rt)} >>> ${i.shamt}', false, afterBlock, afterIndex);
 			case SRA:  pureAssign(rd, '${reg(rt)} >> ${i.shamt}', false, afterBlock, afterIndex);
 			case SLLV: pureAssign(rd, '${reg(rt)} << (${reg(rs)} & 31)', false, afterBlock, afterIndex);
-			case SRLV: pureAssign(rd, '${reg(rt)} >>> (${reg(rs)} & 31)', false, afterBlock, afterIndex);
+			case SRLV: pureAssign(rd, '${reg(rt)} >>> (${reg(rs)} & 31)', true, afterBlock, afterIndex);
 			case SRAV: pureAssign(rd, '${reg(rt)} >> (${reg(rs)} & 31)', false, afterBlock, afterIndex);
 
 			case MULT:  'Ops.mult(ctx, ${reg(rs)}, ${reg(rt)});';
@@ -951,19 +957,19 @@ class Emitter {
 			case MTLO:  'ctx.lo = ${reg(rs)};';
 
 			// A load into $zero still performs the read: half the address space is hardware.
-			case LB:  load(rt, 'Memory.read8s(${addrExpr(i)})');
-			case LBU: load(rt, 'Memory.read8u(${addrExpr(i)})');
-			case LH:  load(rt, 'Memory.read16s(${addrExpr(i)})');
-			case LHU: load(rt, 'Memory.read16u(${addrExpr(i)})');
-			case LW:  load(rt, 'Memory.read32(${addrExpr(i)})');
-			case LWL: load(rt, 'Memory.lwl(${addrExpr(i)}, ${reg(rt)})');
-			case LWR: load(rt, 'Memory.lwr(${addrExpr(i)}, ${reg(rt)})');
+			case LB:  load(rt, 'Memory.read8s(${busAddr(i)})');
+			case LBU: load(rt, 'Memory.read8u(${busAddr(i)})');
+			case LH:  load(rt, 'Memory.read16s(${busAddr(i)})');
+			case LHU: load(rt, 'Memory.read16u(${busAddr(i)})');
+			case LW:  load(rt, 'Memory.read32(${busAddr(i)})');
+			case LWL: load(rt, 'Memory.lwl(${busAddr(i)}, ${reg(rt)})');
+			case LWR: load(rt, 'Memory.lwr(${busAddr(i)}, ${reg(rt)})');
 
-			case SB: 'Memory.write8(${addrExpr(i)}, ${reg(rt)});';
-			case SH: 'Memory.write16(${addrExpr(i)}, ${reg(rt)});';
-			case SW: 'Memory.write32(${addrExpr(i)}, ${reg(rt)});';
-			case SWL: 'Memory.swl(${addrExpr(i)}, ${reg(rt)});';
-			case SWR: 'Memory.swr(${addrExpr(i)}, ${reg(rt)});';
+			case SB: 'Memory.write8(${busAddr(i)}, ${reg(rt)});';
+			case SH: 'Memory.write16(${busAddr(i)}, ${reg(rt)});';
+			case SW: 'Memory.write32(${busAddr(i)}, ${reg(rt)});';
+			case SWL: 'Memory.swl(${busAddr(i)}, ${reg(rt)});';
+			case SWR: 'Memory.swr(${busAddr(i)}, ${reg(rt)});';
 
 			case SYSCALL: 'ctx.pc = ${hex(i.addr)}; Kernel.syscall(ctx, ${i.code});';
 			case BREAK:   'ctx.pc = ${hex(i.addr)}; Kernel.brk(ctx, ${i.code});';
@@ -976,8 +982,8 @@ class Emitter {
 			case MTC2: 'Gte.setData(ctx, ${i.rd}, ${reg(rt)});';
 			case CFC2: assign(rt, 'Gte.getCtrl(ctx, ${i.rd})', false);
 			case CTC2: 'Gte.setCtrl(ctx, ${i.rd}, ${reg(rt)});';
-			case LWC2: 'Gte.setData(ctx, ${i.rt}, Memory.read32(${addrExpr(i)}));';
-			case SWC2: 'Memory.write32(${addrExpr(i)}, Gte.getData(ctx, ${i.rt}));';
+			case LWC2: 'Gte.setData(ctx, ${i.rt}, Memory.read32(${busAddr(i)}));';
+			case SWC2: 'Memory.write32(${busAddr(i)}, Gte.getData(ctx, ${i.rt}));';
 			case COP2CMD: gteCommand(i.code);
 
 			case _: '// unhandled: ${Disasm.text(i)}';
@@ -1025,6 +1031,22 @@ class Emitter {
 		if (i.rs == 0) return hex(i.immS);
 		if (i.immS == 0) return reg(i.rs);
 		return '(${reg(i.rs)} + ${i.immS}) | 0';
+	}
+
+	/**
+		The address a load or store hands the bus: the virtual one with its segment bits cleared,
+		which every accessor does first anyway (`Memory.phys`), so the value it sees is the same.
+
+		Done here as well for the JavaScript engines with 31-bit small integers — V8 in Chrome,
+		Edge and Brave. A KSEG0 address (0x80000000 and up) is outside that range, so every one
+		passed to an accessor the JIT did not inline was a heap-allocated number, the largest
+		share of what the browser's collector cleared; a physical address is below 2^29 and is
+		never boxed. On C++ the accessor's own mask makes this one redundant and it folds away.
+	**/
+	function busAddr(i:Instr):String {
+		if (i.rs == 0) return hex(i.immS & 0x1FFFFFFF);
+		if (i.immS == 0) return '${reg(i.rs)} & 0x1FFFFFFF';
+		return '(${reg(i.rs)} + ${i.immS}) & 0x1FFFFFFF';
 	}
 
 	/** An assignment, dropped entirely when the destination is $zero. */

@@ -111,14 +111,17 @@
     // Batches pushed during one tick travel to the worklet in one message at the tick's end
     // (from `progress`): the SPU pushes 344 times a second and a message each cost more than
     // the sound. A tick's worth is under 16 ms of audio, well inside the queue's slack.
-    const audioPending = [];
+    // The runtime lends its output buffer for the length of the call (see audioPush); what is
+    // kept is copied into this page-owned array, so a push allocates nothing and a tick makes
+    // one buffer, the one it transfers. A copy per push and a slice per push before it were a
+    // steady share of the garbage, and the share grew with the frame rate.
+    let audioPending = new Int16Array(1 << 15);
     let audioPendingSamples = 0;
+    let lentBytes = null, lentSamples = null;
     function flushAudio() {
-      if (!audioNode || audioPending.length === 0) return;
-      const merged = new Int16Array(audioPendingSamples);
-      let at = 0;
-      for (const chunk of audioPending) { merged.set(chunk, at); at += chunk.length; }
-      audioPending.length = 0; audioPendingSamples = 0;
+      if (!audioNode || audioPendingSamples === 0) return;
+      const merged = audioPending.slice(0, audioPendingSamples);
+      audioPendingSamples = 0;
       audioNode.port.postMessage(merged.buffer, [merged.buffer]);
     }
     // The status line is DOM: written per tick it forced a layout each time (2 % of a frame in
@@ -175,7 +178,7 @@
         start.textContent = host.paused ? 'Resume' : 'Pause';
         if (host.paused) {
           audioQueue.length = 0; queuedFrames = 0;
-          audioPending.length = 0; audioPendingSamples = 0;
+          audioPendingSamples = 0;
           reportedFrames = 0; reportedAt = performance.now(); pushedSinceReport = 0;
           if (audioNode) audioNode.port.postMessage('flush');
         }
@@ -254,17 +257,27 @@
             ctx.imageSmoothingEnabled = false;
             ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
           },
-          audioPush(bytes) {
+          // `bytes` is the runtime's own buffer and `byteLength` how much of it this batch is.
+          audioPush(bytes, byteLength) {
             if (!audioContext) return;
-            const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
-            const copy = new Int16Array(samples);
-            const frames = copy.length >> 1;
+            if (bytes !== lentBytes) {
+              lentBytes = bytes;
+              lentSamples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+            }
+            const count = (byteLength === undefined ? bytes.byteLength : byteLength) >> 1;
+            const frames = count >> 1;
             if (audioNode) {
-              audioPending.push(copy);
-              audioPendingSamples += copy.length;
+              if (audioPendingSamples + count > audioPending.length) {
+                const grown = new Int16Array(Math.max(audioPending.length * 2, audioPendingSamples + count));
+                grown.set(audioPending.subarray(0, audioPendingSamples));
+                audioPending = grown;
+              }
+              for (let i = 0; i < count; i++) audioPending[audioPendingSamples + i] = lentSamples[i];
+              audioPendingSamples += count;
               pushedSinceReport += frames;
               return;
             }
+            const copy = lentSamples.slice(0, count);
             audioQueue.push({ samples: copy, frames, at: 0 });
             queuedFrames += frames;
             while (queuedFrames > 11025 && audioQueue.length > 1) {

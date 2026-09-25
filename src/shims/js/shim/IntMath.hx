@@ -17,8 +17,12 @@ class IntMath {
 	public static inline function div(a:Int, b:Int):Int
 		return js.Syntax.code("(({0} / {1}) | 0)", a, b);
 
+	/** Truncated to a word like `div`: JavaScript's `%` takes the dividend's sign even when the
+	    remainder is zero, and `-4 % 2` is -0 — a double, not an Int, that C++ never produces.
+	    Stored into a register field (MIPS DIV leaves its remainder in HI) it turned that field
+	    into a boxed double for good, and register moves carried it to the others. */
 	public static inline function mod(a:Int, b:Int):Int
-		return a % b;
+		return js.Syntax.code("(({0} % {1}) | 0)", a, b);
 
 	public static inline function mul(a:Int, b:Int):Int
 		return js.Syntax.code("Math.imul({0}, {1})", a, b);

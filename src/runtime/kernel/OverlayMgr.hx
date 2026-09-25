@@ -284,8 +284,11 @@ class OverlayMgr {
 	static function evict(i:Int):Void {
 		resident[i] = false;
 		evictions++;
-		Runtime.noteOnce(0x6E100000 | i, "overlay " + i + " was overwritten and no longer "
-			+ "answers for its window");
+		final noteKey = 0x6E100000 | i;
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, "overlay " + i + " was overwritten and no longer "
+				+ "answers for its window");
+		} else {}
 	}
 
 
@@ -312,8 +315,11 @@ class OverlayMgr {
 			resident[i] = true;
 			activations++;
 			found++;
-			Runtime.noteOnce(0x6E200000 | i, "overlay " + i + " is resident: its window holds the "
-				+ "bytes the tool compiled");
+			final noteKey = 0x6E200000 | i;
+			if (!Runtime.alreadyReported(noteKey)) {
+				Runtime.noteOnce(noteKey, "overlay " + i + " is resident: its window holds the "
+					+ "bytes the tool compiled");
+			} else {}
 		}
 		if (found == 0) fruitlessRescans++;
 		else {}

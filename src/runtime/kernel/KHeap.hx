@@ -46,7 +46,9 @@ class KHeap {
 		// One free block covering everything. Allocation splits it; freeing merges neighbours.
 		if (size > HEADER) writeHeader(base, size - HEADER, false);
 		else {}
-		Runtime.noteOnce(0xA0039, "A0(39h) InitHeap — " + size + " bytes at " + hex(base));
+		if (!Runtime.alreadyReported(0xA0039)) {
+			Runtime.noteOnce(0xA0039, "A0(39h) InitHeap — " + size + " bytes at " + hex(base));
+		} else {}
 		// A zero-length heap means the size argument was read from memory that is still empty:
 		// nothing loads the executable's payload into emulated RAM yet, so every load returns 0.
 		// Worth saying out loud rather than letting a silent 0 look like a game fact.

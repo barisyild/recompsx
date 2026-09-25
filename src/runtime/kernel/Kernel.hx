@@ -431,7 +431,10 @@ class Kernel {
 	}
 
 	static function installed(what:String):Int {
-		Runtime.noteOnce(0x5E000000 + what.length, what + " — already native under HLE");
+		final noteKey = 0x5E000000 + what.length;
+		if (!Runtime.alreadyReported(noteKey)) {
+			Runtime.noteOnce(noteKey, what + " — already native under HLE");
+		} else {}
 		return 0;
 	}
 
@@ -454,9 +457,11 @@ class Kernel {
 		hookEntryInt = ctx.a0;
 		// The buffer's address alone says nothing; where it resumes names the function, which is
 		// what turns "the hook did not do what I expected" into a disassembly question.
-		noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook at "
-			+ hex8(ctx.a0) + ", resuming at " + hex8(mem.Memory.read32(ctx.a0))
-			+ " with sp " + hex8(mem.Memory.read32(ctx.a0 + 4)));
+		if (!Runtime.alreadyReported(0xB0019)) {
+			noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook at "
+				+ hex8(ctx.a0) + ", resuming at " + hex8(mem.Memory.read32(ctx.a0))
+				+ " with sp " + hex8(mem.Memory.read32(ctx.a0 + 4)));
+		} else {}
 		return 0;
 	}
 
@@ -475,8 +480,11 @@ class Kernel {
 	}
 
 	static function cardInit(fn:Int):Int {
-		noteOnce(0xB0000 | fn, (fn == 0x4A ? "B0(4Ah) InitCARD2" : "B0(4Bh) StartCARD2")
-			+ " — no card layer yet");
+		final noteKey = 0xB0000 | fn;
+		if (!Runtime.alreadyReported(noteKey)) {
+			noteOnce(noteKey, (fn == 0x4A ? "B0(4Ah) InitCARD2" : "B0(4Bh) StartCARD2")
+				+ " — no card layer yet");
+		} else {}
 		return 0;
 	}
 
