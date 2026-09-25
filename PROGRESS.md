@@ -2,6 +2,13 @@
 
 ## Status snapshot
 
+**2026-09-26: the game runs bit-identically through Hatchet (Haxe -> C++98), a reflaxe.CPP candidate.**
+`scripts/build-hatchet.sh` (fork github.com/barisyild/hatchet, branch `recompsx`) transpiles runtime +
+generated game in ~6 s instead of reflaxe.CPP's 9.5 min; every game digest matches through 70,000 frames;
+with LTO it is ~5 % faster than reflaxe.CPP with LTO on the desktop; the Dreamcast image is the same size.
+Not adopted: golden rule 2 still names reflaxe.CPP, and a switch needs an ADR plus the conformance suite
+and a Dreamcast measurement on Hatchet.
+
 **2026-09-25: the cutscene's sound is back on the Dreamcast; the attract loop has no missing code.**
 Notes longer than an AICA channel (the intro cutscene streams 10-second notes) are declined at
 their key-on and mixed by the runtime; everything else stays on the AICA. The third mini-game's
@@ -1117,6 +1124,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-26 [claude] Crash Bash through Hatchet: src/shims/hatchet (extern classes + one inline C++
+header), scripts/build-hatchet.sh, CMake template RECOMPSX_TRANSPILER=hatchet (build-dc.sh detects it).
+Digests identical to JS/reflaxe.CPP at 3000/9000/17500(no-audio)/30000/70000. Transpile 6 s (vs 9.5 min).
+Desktop 30k frames user s: reflaxe 18.2, reflaxe+LTO 16.6, hatchet 19.2, hatchet+LTO 15.6. DC image 7.16 MB
+(reflaxe 7.19); out/dc/crashbash-hatchet.cdi built, not yet run on Flycast. Fork: 8 commits, 313 tests.
 
 2026-09-25 [claude] Hatchet fork github.com/barisyild/hatchet, branch `recompsx` (6 commits, 311
 tests): negative hex literals as int, pkg.Class.x in expressions, field type inference + folded

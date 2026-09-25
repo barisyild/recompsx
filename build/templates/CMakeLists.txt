@@ -46,23 +46,39 @@ endif()
 
 # The generated sources, minus the entry point: reflaxe.CPP's _main_.cpp discards argv, so the
 # backend supplies main instead (docs/specs/backend.md §1.1).
-file(GLOB_RECURSE GEN_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/*.cpp")
-list(FILTER GEN_SRC EXCLUDE REGEX "_main_\\.cpp$")
+# Which transpiler wrote cpp/: reflaxe.CPP (the default, C++17, cpp/src + cpp/include, an
+# _main_.cpp naming the entry class) or Hatchet (C++98, one tree under cpp/, entry GenMain,
+# shim bodies in src/shims/hatchet/native) — see scripts/build-hatchet.sh and PROGRESS.md.
+if(NOT DEFINED RECOMPSX_TRANSPILER)
+  set(RECOMPSX_TRANSPILER "reflaxe")
+endif()
+if(RECOMPSX_TRANSPILER STREQUAL "hatchet")
+  set(CMAKE_CXX_STANDARD 98)
+  set(CMAKE_CXX_EXTENSIONS ON)
+  file(GLOB_RECURSE GEN_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/*.cpp")
+  set(RECOMPSX_MAIN GenMain)
+  set(GEN_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/cpp" "${RECOMPSX_ROOT}/src/shims/hatchet/native")
+  list(APPEND RECOMPSX_GEN_FLAGS -w)
+else()
+  file(GLOB_RECURSE GEN_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/*.cpp")
+  list(FILTER GEN_SRC EXCLUDE REGEX "_main_\\.cpp$")
 
-# Which class holds the entry point. Read out of the file being excluded rather than passed in:
-# the Haxe build already knows it, and anything told to the build twice eventually disagrees.
-# reflaxe.CPP emits exactly `<Class>::main();`, and a FATAL_ERROR here is the right failure —
-# if that ever changes, the build should stop, not silently link the wrong entry.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/_main_.cpp" GEN_MAIN_SRC)
-string(REGEX MATCH "([A-Za-z_][A-Za-z0-9_]*)::main\\(\\)" _ "${GEN_MAIN_SRC}")
-set(RECOMPSX_MAIN "${CMAKE_MATCH_1}")
-if(NOT RECOMPSX_MAIN)
-  message(FATAL_ERROR "could not find the entry class in cpp/src/_main_.cpp")
+  # Which class holds the entry point. Read out of the file being excluded rather than passed in:
+  # the Haxe build already knows it, and anything told to the build twice eventually disagrees.
+  # reflaxe.CPP emits exactly `<Class>::main();`, and a FATAL_ERROR here is the right failure —
+  # if that ever changes, the build should stop, not silently link the wrong entry.
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/_main_.cpp" GEN_MAIN_SRC)
+  string(REGEX MATCH "([A-Za-z_][A-Za-z0-9_]*)::main\\(\\)" _ "${GEN_MAIN_SRC}")
+  set(RECOMPSX_MAIN "${CMAKE_MATCH_1}")
+  if(NOT RECOMPSX_MAIN)
+    message(FATAL_ERROR "could not find the entry class in cpp/src/_main_.cpp")
+  endif()
+  if(GEN_SRC STREQUAL "")
+    message(FATAL_ERROR "no generated sources under ${CMAKE_CURRENT_SOURCE_DIR}/cpp/src — run the Haxe build first")
+  endif()
+  set(GEN_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/cpp/include")
 endif()
-message(STATUS "recompsx entry class: ${RECOMPSX_MAIN}")
-if(GEN_SRC STREQUAL "")
-  message(FATAL_ERROR "no generated sources under ${CMAKE_CURRENT_SOURCE_DIR}/cpp/src — run the Haxe build first")
-endif()
+message(STATUS "recompsx entry class: ${RECOMPSX_MAIN} (${RECOMPSX_TRANSPILER})")
 set_source_files_properties(${GEN_SRC} PROPERTIES COMPILE_OPTIONS "${RECOMPSX_GEN_FLAGS}")
 
 # Which backend answers the ABI. `null` is not a lesser build — it is how a run is made
@@ -94,7 +110,7 @@ set(SHIM_SRC "${RECOMPSX_ROOT}/src/shims/cxx/native/recompsx_arena.c")
 add_executable(recompsx ${GEN_SRC} ${BACKEND_SRC} ${SHIM_SRC})
 
 target_include_directories(recompsx PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/include"
+  ${GEN_INCLUDES}
   "${RECOMPSX_ROOT}/src/backend/api"
   "${RECOMPSX_ROOT}/src/shims/cxx/native")
 
