@@ -1125,6 +1125,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] `build-dc.sh --max`: Release -O3 + LTO, -fno-exceptions -fno-rtti (neither output uses
+them), own build-dc-max dir. DC images: reflaxe-max 8.02 MB, hatchet-max 7.00 MB loaded; CDIs
+out/dc/crashbash-{reflaxe,hatchet}{,-max}.cdi. Same flags on desktop keep every digest; 30k frames
+user s reflaxe 16.5, hatchet 15.9. Next: the user's Flycast comparison of the four images.
+
 2026-09-26 [claude] Crash Bash through Hatchet: src/shims/hatchet (extern classes + one inline C++
 header), scripts/build-hatchet.sh, CMake template RECOMPSX_TRANSPILER=hatchet (build-dc.sh detects it).
 Digests identical to JS/reflaxe.CPP at 3000/9000/17500(no-audio)/30000/70000. Transpile 6 s (vs 9.5 min).
