@@ -596,17 +596,28 @@ class Discovery {
 		So a lenient pass reads a seed before it believes it. Anything that cannot decode, and
 		anything with a branch in a delay slot, is not code: no compiler emits either, which is the
 		same test the tracer applies — just applied early, and answered with "no" instead of a stop.
+
+		The reading stops where the function does. After a jump that does not come back — `jr`,
+		or `j` — and its delay slot, the next word belongs to whatever the linker put there, and in
+		an overlay window that is as likely to be a table as another function. Reading on used to
+		reject short functions for their neighbours: Crash Bash's third mini-game registers its
+		callbacks in a 26-instruction initialiser followed by data, the hint was refused, and the
+		game's call to it was skipped at run time, leaving the previous game's callbacks in place.
 	**/
 	public function plausibleEntry(addr:Int):Bool {
 		if (!image.containsWord(addr)) return false;
 		var previousHadSlot = false;
+		var leaving = false;
 		for (i in 0...32) {
 			final a = addr + i * 4;
 			if (!image.containsWord(a)) return i > 0;
 			final instr = Decoder.decode(a, image.readWord(a));
 			if (instr.op == Op.INVALID) return false;
 			if (previousHadSlot && instr.op.hasDelaySlot) return false;
+			// This is the delay slot of a jump that leaves: it decoded, so the function is whole.
+			if (leaving) return true;
 			previousHadSlot = instr.op.hasDelaySlot;
+			leaving = instr.op == Op.JR || instr.op == Op.J;
 		}
 		return true;
 	}

@@ -269,6 +269,23 @@ class TestDiscovery {
 			Assert.equals(fn.instructionCount(), 2, "only jump and delay slot are reachable");
 		}
 
+		Assert.group("discovery: a seed is read only as far as its function goes");
+		{
+			// A short function, then a word no instruction decodes to (primary opcode 63): the
+			// function is whole, and what follows it is none of its business.
+			final data = 0xFFFF007A;
+			final after = new Discovery(img([ADDU_V0_ZZ, SW_RA_8, JR_RA, ADDU_V0_ZZ, data, data]));
+			Assert.isTrue(after.plausibleEntry(BASE), "data after jr ra and its slot is not held against it");
+			final tail = new Discovery(img([ADDU_V0_ZZ, j(BASE), NOP, data]));
+			Assert.isTrue(tail.plausibleEntry(BASE), "nor after a tail jump");
+			final before = new Discovery(img([ADDU_V0_ZZ, data, JR_RA, NOP]));
+			Assert.isTrue(!before.plausibleEntry(BASE), "data before the return still rejects it");
+			final slot = new Discovery(img([ADDU_V0_ZZ, JR_RA, beqz(2), NOP]));
+			Assert.isTrue(!slot.plausibleEntry(BASE), "the delay slot is still read, and a branch there rejects it");
+			final call = new Discovery(img([jal(BASE), NOP, data]));
+			Assert.isTrue(!call.plausibleEntry(BASE), "a call comes back, so what follows it is still read");
+		}
+
 		Assert.group("discovery: jalr zero participates in jump-table recovery");
 		{
 			final d = discover([
