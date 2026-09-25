@@ -21,7 +21,8 @@ class Cooperative {
 	public static var resumeEntry = -1;
 	public static var resumePump = false;
 	static var resumeDispatch:Null<Int -> Int -> CpuState -> Void> = null;
-	static var deadline = 0;
+	/** Public only so the inline check below can read it from generated code on every target. */
+	public static var deadline = 0;
 	static var checks = 0;
 	static var lastCycles = 0;
 	static var hasYielded = false;
@@ -62,8 +63,19 @@ class Cooperative {
 		resumePump = false;
 	}
 
+	/**
+		The check every safe point makes. Inline, so the hot path is two static loads and a
+		compare in the generated code; the full test runs only when a yield is possible — the
+		slice deadline has passed, or stress mode (`every`) is forcing one, which is also the
+		mode that counts calls. Same answer as the full test in every case: the pre-check is a
+		condition the full test requires.
+	**/
+	public static inline function wantsYield(ctx:CpuState):Bool {
+		return enabled && (every > 0 || ((ctx.cycles - deadline) | 0) >= 0) && wantsYieldSlow(ctx);
+	}
+
 	/** Checked BEFORE a pump, so resumption never pumps twice at the suspension point. */
-	public static function wantsYield(ctx:CpuState):Bool {
+	public static function wantsYieldSlow(ctx:CpuState):Bool {
 		if (!enabled || blocked != 0 || ctx.unwindToken != 0) return false;
 		else {}
 		checks = (checks + 1) | 0;
