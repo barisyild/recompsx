@@ -19,6 +19,8 @@
 #include <kos/init.h>
 #include <kos/fs.h>
 #include <kos/thread.h>
+#include <kos/mutex.h>
+#include <kos/cond.h>
 #include <arch/arch.h>
 #include <dc/video.h>
 #include <dc/pvr.h>
@@ -407,12 +409,20 @@ static int   g_file_size[MAX_FILES];
  * literally, each one is an fseek and an fread through KOS's ISO9660 driver onto a GD-ROM — and a
  * disc is not a thing you want to touch three hundred times a second on any machine.
  *
- * So reads are served out of one 64 KB window instead. Streaming turns thirty-two disc touches
- * into one. It cannot affect what the emulated machine sees: this side of the ABI is a byte
- * server, the file does not change while it is open, and the window is dropped whenever a slot is.
+ * So reads are served out of a window instead, and the window after it is read in the background
+ * while the emulation uses this one. The drive was the largest cost of a loading screen: 1018 ms
+ * of every 1762 spent with the whole machine stopped in fread. A thread of its own does the
+ * reading; KOS's CD driver sleeps on a semaphore through each DMA, so the emulation runs while
+ * the drive works, and waits only when it catches up with it.
  *
- * One window, not one per slot: the disc is the only thing that streams, and 64 KB is worth more
- * spent entirely on it than divided eight ways. */
+ * Two windows of 128 KB, each starting on a 2048-byte boundary of the file: an image file starts
+ * on a sector of the disc, so an aligned window of whole sectors is one multi-sector DMA read in
+ * KOS's ISO9660 driver, where an unaligned one was three commands. Only the I/O thread touches a
+ * FILE while it is working; the emulation reaches the file through it, or directly only while
+ * it is idle and the lock is held, which is also how open, close and oversized reads go.
+ *
+ * None of it can affect what the emulated machine sees: this side of the ABI is a byte server,
+ * the file does not change while it is open, and a slot's windows are dropped with the slot. */
 /* Audio is the one backend call the runtime makes from INSIDE the emulated frame, so its cost
  * has always been hiding inside `emu`. PC sampling put 24% of the machine in KOS's idle task,
  * which means something is blocking rather than computing, and snd_stream_poll waits on a G2 DMA
@@ -421,11 +431,21 @@ static int   g_file_size[MAX_FILES];
 static uint64_t g_prof_audio;
 static int      g_prof_polls;
 
-#define DISC_WINDOW 65536
-static uint8_t g_win[DISC_WINDOW] __attribute__((aligned(32)));
-static int     g_win_slot = -1;
-static int     g_win_at;      /* file offset of g_win[0] */
-static int     g_win_len;     /* valid bytes in the window */
+#define DISC_WINDOW (128 * 1024)
+enum { WIN_EMPTY, WIN_LOADING, WIN_READY };
+typedef struct {
+    int slot;   /* which file */
+    int at;     /* file offset of the first byte */
+    int got;    /* bytes read; -1 after a failed read */
+    int state;
+} disc_win_t;
+static uint8_t    g_winbuf[2][DISC_WINDOW] __attribute__((aligned(32)));
+static disc_win_t g_win[2] = { { -1, 0, 0, WIN_EMPTY }, { -1, 0, 0, WIN_EMPTY } };
+static int        g_win_cur;            /* the window reads are served from; the other is next */
+static int        g_io_request = -1;    /* a window for the I/O thread to fill, or -1 */
+static mutex_t    g_io_lock = MUTEX_INITIALIZER;
+static condvar_t  g_io_cv = COND_INITIALIZER;
+static kthread_t* g_io_thread;
 
 #if RECOMPSX_DC_PROFILE
 static uint64_t g_prof_disc_us;
@@ -2386,7 +2406,81 @@ int bp_file_size(int slot) {
     return g_file_size[slot];
 }
 
-/** Straight to the file, no window. Used to fill the window, and for reads too big to fit it. */
+/* Everything below runs with g_io_lock held unless it says otherwise. */
+
+/** The I/O thread: fills whichever window it is asked for, one at a time, forever. */
+static void* disc_io_main(void* unused) {
+    (void)unused;
+    mutex_lock(&g_io_lock);
+    for(;;) {
+        while(g_io_request < 0) cond_wait(&g_io_cv, &g_io_lock);
+        const int w = g_io_request;
+        g_io_request = -1;
+        FILE* f = g_files[g_win[w].slot];
+        const int at = g_win[w].at;
+        mutex_unlock(&g_io_lock);
+        int got = -1;
+        if(f && fseek(f, at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, DISC_WINDOW, f);
+        mutex_lock(&g_io_lock);
+        g_win[w].got = got;
+        g_win[w].state = WIN_READY;
+        cond_broadcast(&g_io_cv);
+    }
+    return NULL;
+}
+
+static void disc_io_start(void) {
+    if(g_io_thread) return;
+    g_io_thread = thd_create(true, disc_io_main, NULL);
+    /* Ahead of the emulation, so a finished DMA is followed by the next request at once. */
+    if(g_io_thread) thd_set_prio(g_io_thread, PRIO_DEFAULT - 1);
+}
+
+static int disc_io_busy(void) {
+    return g_win[0].state == WIN_LOADING || g_win[1].state == WIN_LOADING;
+}
+
+/** Waits for the I/O thread to go idle; what the emulation stalls on is counted as disc time. */
+static void disc_io_wait_idle(void) {
+    if(!disc_io_busy()) return;
+#if RECOMPSX_DC_PROFILE
+    const uint64_t at = bp_time_us();
+    g_prof_misses++;
+#endif
+    while(disc_io_busy()) cond_wait(&g_io_cv, &g_io_lock);
+#if RECOMPSX_DC_PROFILE
+    g_prof_disc_us += bp_time_us() - at;
+#endif
+}
+
+static void disc_io_request(int w, int slot, int at) {
+    g_win[w].slot = slot;
+    g_win[w].at = at;
+    g_win[w].got = 0;
+    if(!g_io_thread) {
+        /* No thread to hand it to: read it here, synchronously, as the backend always used to. */
+        int got = -1;
+        if(fseek(g_files[slot], at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, DISC_WINDOW, g_files[slot]);
+        g_win[w].got = got;
+        g_win[w].state = WIN_READY;
+        return;
+    }
+    g_win[w].state = WIN_LOADING;
+    g_io_request = w;
+    cond_broadcast(&g_io_cv);
+}
+
+static int win_has(const disc_win_t* w, int slot, int offset, int len) {
+    return w->state == WIN_READY && w->slot == slot && w->got > 0
+        && offset >= w->at && offset + len <= w->at + w->got;
+}
+
+static void disc_drop_slot(int slot) {
+    disc_io_wait_idle();
+    for(int i = 0; i < 2; i++) if(g_win[i].slot == slot) g_win[i].state = WIN_EMPTY;
+}
+
+/** Straight to the file, bypassing the windows. Only with the I/O thread idle. */
 static int read_direct(int slot, int offset, uint8_t* buf, int len) {
 #if RECOMPSX_DC_PROFILE
     const uint64_t at = bp_time_us();
@@ -2406,33 +2500,67 @@ int bp_file_read(int slot, int offset, uint8_t* buf, int len) {
 #if RECOMPSX_DC_PROFILE
     g_prof_reads++;
 #endif
+    disc_io_start();
+    mutex_lock(&g_io_lock);
 
-    if(len > DISC_WINDOW) return read_direct(slot, offset, buf, len);
-
-    const int inside = (slot == g_win_slot)
-                    && (offset >= g_win_at)
-                    && (offset + len <= g_win_at + g_win_len);
-    if(!inside) {
-        const int got = read_direct(slot, offset, g_win, DISC_WINDOW);
-        if(got < len) {
-            /* Short of what was asked for: near the end of the file, or a failure. Either way the
-             * window is not usable for this request, so answer it directly and honestly. */
-            g_win_slot = -1;
-            return got < 0 ? -1 : read_direct(slot, offset, buf, len);
-        }
-        g_win_slot = slot;
-        g_win_at = offset;
-        g_win_len = got;
+    if(len > DISC_WINDOW - 2048) {
+        disc_io_wait_idle();
+        const int got = read_direct(slot, offset, buf, len);
+        mutex_unlock(&g_io_lock);
+        return got;
     }
 
-    memcpy(buf, g_win + (offset - g_win_at), (size_t)len);
-    return len;
+    int cur = g_win_cur;
+    if(!win_has(&g_win[cur], slot, offset, len)) {
+        const int next = 1 - cur;
+        const disc_win_t* n = &g_win[next];
+        /* The one being read ahead: wait for it if it is still on its way, and move on to it. */
+        if(n->state != WIN_EMPTY && n->slot == slot && offset >= n->at
+           && offset + len <= n->at + DISC_WINDOW) {
+            disc_io_wait_idle();
+            if(win_has(n, slot, offset, len)) cur = next;
+        }
+        if(!win_has(&g_win[cur], slot, offset, len)) {
+            /* Somewhere else: a seek. Read the window that starts at the sector holding it. */
+            disc_io_wait_idle();
+            cur = g_win_cur;
+            disc_io_request(cur, slot, offset & ~2047);
+            disc_io_wait_idle();
+        }
+        g_win_cur = cur;
+    }
+
+    const disc_win_t* c = &g_win[cur];
+    int result;
+    if(win_has(c, slot, offset, len)) {
+        memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)len);
+        result = len;
+        /* And the next window, if the drive is free and it is not already there or on its way.
+         * It starts a little before this one ends: a PlayStation sector is 2352 bytes and a
+         * window 128 KB, so sectors straddle the seam all the time, and one that is wholly in
+         * neither window would be a seek and a stall at every crossing. */
+        const int next = 1 - cur;
+        const int want = (c->at + c->got - 4096) & ~2047;
+        const disc_win_t* n = &g_win[next];
+        if(c->got == DISC_WINDOW && !disc_io_busy()
+           && !(n->state == WIN_READY && n->slot == slot && n->at == want))
+            disc_io_request(next, slot, want);
+    } else {
+        /* Short of what was asked for: near the end of the file, or a failure. Answered
+         * directly and honestly, as before. */
+        disc_io_wait_idle();
+        result = read_direct(slot, offset, buf, len);
+    }
+    mutex_unlock(&g_io_lock);
+    return result;
 }
 
 void bp_file_close(int slot) {
     if(slot < 0 || slot >= MAX_FILES) return;
-    if(slot == g_win_slot) g_win_slot = -1;
+    mutex_lock(&g_io_lock);
+    disc_drop_slot(slot);
     if(g_files[slot]) { fclose(g_files[slot]); g_files[slot] = NULL; g_file_size[slot] = 0; }
+    mutex_unlock(&g_io_lock);
 }
 
 /* ---- time and diagnostics ---------------------------------------------------------------------
