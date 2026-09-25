@@ -41,15 +41,26 @@ abstract Acc(AccRaw) {
 	/** The same for the 32-bit range, which MAC0's flags are defined on. */
 	public static inline function check32(m:Acc):Int
 		return m.raw() > 2147483647.0 ? 1 : (m.raw() < -2147483648.0 ? -1 : 0);
-	/** Truncated to 44 bits, sign-extended from bit 43: the value modulo 2^44 in the signed range. */
+	/**
+		Truncated to 44 bits, sign-extended from bit 43: the value modulo 2^44 in the signed range.
+
+		By repeated subtraction rather than `floor(t / 2^44)`: every value that reaches here is an
+		integer below 2^53 in magnitude, so each step is exact and lands on the same
+		representative the division did, and a chain that does not overflow — nearly all of
+		them — pays two compares instead of a divide, a floor and a multiply. The loop form is
+		what keeps it exact for any magnitude, not only one overflow's worth.
+	**/
 	public static inline function wrap44(m:Acc):Acc {
-		final t = m.raw() + 8796093022208.0;
-		return new Acc(t - js.lib.Math.floor(t / 17592186044416.0) * 17592186044416.0 - 8796093022208.0);
+		var t = m.raw();
+		while (t >= 8796093022208.0) t -= 17592186044416.0;
+		while (t < -8796093022208.0) t += 17592186044416.0;
+		return new Acc(t);
 	}
 	/** The low 32 bits. */
 	public static inline function low32(m:Acc):Int return Std.int(m.raw());
-	/** The low 32 bits of the value shifted right by 12. */
-	public static inline function shr12(m:Acc):Int return Std.int(js.lib.Math.floor(m.raw() / 4096.0));
-	/** The low 32 bits of the value shifted right by 16. */
-	public static inline function shr16(m:Acc):Int return Std.int(js.lib.Math.floor(m.raw() / 65536.0));
+	/** The low 32 bits of the value shifted right by 12. Scaling by 2^-12 is exact in floating
+	    point (it moves the exponent), so the floor is the same as the division's, for a multiply. */
+	public static inline function shr12(m:Acc):Int return Std.int(js.lib.Math.floor(m.raw() * 0.000244140625));
+	/** The low 32 bits of the value shifted right by 16; the same scaling argument with 2^-16. */
+	public static inline function shr16(m:Acc):Int return Std.int(js.lib.Math.floor(m.raw() * 0.0000152587890625));
 }
