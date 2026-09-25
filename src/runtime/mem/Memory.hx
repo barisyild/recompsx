@@ -516,8 +516,8 @@ class Memory {
 	static function ioWriteNarrow(p:Int, v:Int, valueMask:Int):Void {
 		final reg = p & ~3;
 		final shift = (p & 3) << 3;
-		final old = ioRead32(reg);
-		ioWrite32(reg, (old & ~(valueMask << shift)) | ((v & valueMask) << shift));
+		final old = inline ioRead32(reg);
+		inline ioWrite32(reg, (old & ~(valueMask << shift)) | ((v & valueMask) << shift));
 	}
 
 	static function slowWrite16(p:Int, v:Int):Void {

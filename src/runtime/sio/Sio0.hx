@@ -54,7 +54,7 @@ class Sio0 {
 		return readWide(addr);
 	}
 
-	static function readWide(addr:Int):Int {
+	static inline function readWide(addr:Int):Int {
 		final r = addr & 0xF;
 		if (r == 0x0) return popRx();
 		else if (r == 0x4) return stat();
@@ -77,12 +77,13 @@ class Sio0 {
 		return s;
 	}
 
-	static function popRx():Int {
+	static inline function popRx():Int {
 		if (rx < 0) return 0xFF;
-		else {}
-		final b = rx;
-		rx = -1;
-		return b;
+		else {
+			final b = rx;
+			rx = -1;
+			return b;
+		}
 	}
 
 	public static function write8(addr:Int, v:Int):Void {
@@ -95,7 +96,7 @@ class Sio0 {
 		writeWide(addr, v);
 	}
 
-	static function writeWide(addr:Int, v:Int):Void {
+	static inline function writeWide(addr:Int, v:Int):Void {
 		final r = addr & 0xF;
 		if (r == 0x0) exchange(v);
 		else if (r == 0x8) mode = v & 0xFFFF;

@@ -1104,6 +1104,17 @@ within noise, mean 19.37 → 19.10 s; Mem/CdCommands/SpuVoice digests unchanged)
 three `slowWrite`s, where `ioWrite32` also inlines `Gpu.writeGp0` (its two early returns became
 an if/else chain) so a GP0 word reaches the GPU dispatcher from `write32` in one call: +2.5 KB,
 min 18.15 → 16.97 s, mean 18.88 → 18.59 s over five rounds; Raster a749a71a unchanged.
+Second level: the dispatch helpers those bodies call are `inline` in their own classes (Timers
+`readMode/writeValue/writeMode`, SIO `readWide/writeWide/popRx`, DMA `readDicr/writeDicr/
+channelRead/channelWrite`) and `ioWriteNarrow` inlines `ioRead32`/`ioWrite32`; +4.3 KB, within
+noise (min 16.87 → 16.50 s). CD, SPU and GPU internals stay calls: they do work, not dispatch.
+A `--trace-turbo-inlining` run explains the shape: V8 inlines `read32` (140 bytes of bytecode)
+and `write32` (152) into the generated functions, and refuses `slowRead32`/`slowWrite32`
+(reason 5, over the 460-byte limit) — so the slow path must stay out of the accessor, or every
+RAM access at 14 k sites becomes a real call. Static-address dispatch in the tool was verified
+to fold (an `inline slowWrite32(0x1F801810, v)` reduces to the GP0 body) but not adopted: only
+7 `lui 0x1F80` sites exist in this game, libgpu reaches the ports through pointers in RAM,
+and for constant RAM addresses both compilers already fold the RAM test after inlining.
 Next: fewer divisions per timer read (one floor instead of two in `dotsIn(videoClocksIn())`).
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local

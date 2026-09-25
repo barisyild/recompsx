@@ -278,7 +278,7 @@ class Timers {
 	**/
 
 
-	static function readMode(t:Int, cycles:Int):Int {
+	static inline function readMode(t:Int, cycles:Int):Int {
 		value(t, cycles);   // fold any pending wrap into the flags first
 		final m = (mode[t] & 0x7FF) | reached[t];
 		// Bits 11 and 12 clear on read, as the hardware's do.
@@ -286,13 +286,13 @@ class Timers {
 		return m;
 	}
 
-	static function writeValue(t:Int, v:Int, cycles:Int):Void {
+	static inline function writeValue(t:Int, v:Int, cycles:Int):Void {
 		base[t] = v & 0xFFFF;
 		anchor[t] = cycles;
 	}
 
 	/** A mode write resets the counter to zero — the idiom every driver uses to start timing. */
-	static function writeMode(t:Int, v:Int, cycles:Int):Void {
+	static inline function writeMode(t:Int, v:Int, cycles:Int):Void {
 		mode[t] = v & 0x3FF;
 		base[t] = 0;
 		anchor[t] = cycles;
