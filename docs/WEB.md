@@ -16,7 +16,19 @@ safe for the generated runtime because the page and runtime communicate through 
 Run `npm install` once after checkout. The build uses `npx --no-install`, so a missing local
 compiler is an explicit build error rather than an accidental version change.
 
-Open <http://127.0.0.1:8000/> and press **Start game**. The same button pauses/resumes. The
+Open <http://127.0.0.1:8000/> and press **Start game**.
+
+**On a phone or tablet, serve it over HTTPS** (`python3 scripts/serve-https.py`, or the
+`web-https` launch configuration) and open `https://<lan-ip>:8443/`. WebKit — Safari, and every
+browser on iOS — runs a page that is not a secure context without its optimising JIT: on one
+machine a plain integer loop took 396 ms at `http://<lan-ip>` against 44 ms at
+`http://localhost`, and the game fell from over a thousand frames a second (speed limit off) to
+about sixty. `localhost` counts as secure; a LAN address only does over HTTPS, which also brings
+the AudioWorklet back. The script makes a self-signed certificate for the machine's LAN address
+once, in `out/_web/tls/`; the phone warns the first time — accept it, or AirDrop the `.pem`,
+install it (Settings › General › VPN & Device Management) and trust it (Settings › General ›
+About › Certificate Trust Settings). The page says so in its build line when it is not a secure
+context. The same button pauses/resumes. The
 page displays the bundle's content hash. **Runtime logs go to the browser console, never into
 the page**: the runtime writes hundreds of lines a second at boot, and an element rebuilt per
 line re-rendered the page. Read them in the developer console.

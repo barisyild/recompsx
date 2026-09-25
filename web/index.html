@@ -73,7 +73,10 @@
       return r.json();
     }).then(info => {
       buildInfo = info;
-      document.querySelector('#build').textContent = `Build ${info.version}`;
+      // Safari and every iOS browser run an insecure page without their optimising JIT — about
+      // a ninth of the speed (docs/WEB.md). http://localhost is secure; a LAN address is not.
+      document.querySelector('#build').textContent = `Build ${info.version}` + (window.isSecureContext ? ''
+        : ' · not a secure context: WebKit runs this page without its JIT — open it over https (scripts/serve-https.py)');
       document.querySelector('h1').textContent = `${info.title} · recompsx JS`;
       document.title = `recompsx — ${info.title}`;
     }).catch(error => { status.textContent = error.message; });
@@ -111,7 +114,7 @@
     // Batches pushed during one tick travel to the worklet in one message at the tick's end
     // (from `progress`): the SPU pushes 344 times a second and a message each cost more than
     // the sound. A tick's worth is under 16 ms of audio, well inside the queue's slack.
-    // The runtime lends its output buffer for the length of the call (see audioPush); what is
+    // The runtime lends its output buffer for the length of the call (see audioLend); what is
     // kept is copied into this page-owned array, so a push allocates nothing and a tick makes
     // one buffer, the one it transfers. A copy per push and a slice per push before it were a
     // steady share of the garbage, and the share grew with the frame rate.
@@ -257,8 +260,9 @@
             ctx.imageSmoothingEnabled = false;
             ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
           },
-          // `bytes` is the runtime's own buffer and `byteLength` how much of it this batch is.
-          audioPush(bytes, byteLength) {
+          // `bytes` is the runtime's own buffer, lent for the call, and `byteLength` how much of
+          // it this batch is. (`audioPush(bytes)`, a copy per batch, is what older bundles call.)
+          audioLend(bytes, byteLength) {
             if (!audioContext) return;
             if (bytes !== lentBytes) {
               lentBytes = bytes;
@@ -285,6 +289,7 @@
               queuedFrames -= dropped.frames - dropped.at;
             }
           },
+          audioPush(bytes) { this.audioLend(bytes, bytes.byteLength); },
           audioBuffered() { return audioNode ? workletBuffered() : (audioContext ? queuedFrames : 0); },
           state(value) {
             start.disabled = value !== 'running';

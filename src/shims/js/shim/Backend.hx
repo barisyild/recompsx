@@ -149,8 +149,10 @@ class Backend {
 		if (hosted()) {
 			// The buffer itself, lent for the call, and how many bytes of it are this batch: the
 			// page copies what it keeps. A `slice` here was a new ArrayBuffer every 128 frames of
-			// sound, the collector's to find, and more of them the faster the loop ran.
-			js.Syntax.code("{0}.audioPush({1}.u8, {2} * 4)", host(), frames, frameCount);
+			// sound, the collector's to find, and more of them the faster the loop ran. A page
+			// that predates the loan (a cached copy, say) still gets its own slice by the old name.
+			js.Syntax.code("({0}.audioLend ? {0}.audioLend({1}.u8, {2} * 4) : {0}.audioPush({1}.u8.slice(0, {2} * 4)))",
+				host(), frames, frameCount);
 			return;
 		} else {}
 		js.Syntax.code("(function(u8, n){
