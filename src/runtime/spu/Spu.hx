@@ -149,6 +149,19 @@ class Spu {
 	static var accR:Array<Int>;
 	static inline var MAX_CATCHUP = 4097;
 
+	/**
+		Whether the mixer produces samples at all.
+
+		Presentation only, like `Gpu.hw` (ADR-0008): a host with nobody listening turns it off
+		with `--no-audio`, and the SPU still does everything a game can observe. Envelopes step,
+		voices advance through their blocks, ENDX and the loop flags are raised on time, the
+		current-volume registers read what they would have read. What stops is the arithmetic
+		that only a listener needs — the envelope and volume multiplies, the accumulators, the
+		main-volume pass and the buffer — which is the larger half of a voice's cost. `nonSilent`
+		and the peak diagnostics then measure nothing, so this is never a digest mode.
+	**/
+	public static var outputEnabled = true;
+
 	public static function init():Void {
 		ram = RawMem.alloc(RAM_BYTES);
 		out = RawMem.alloc(OUT_PAIRS * 4);
@@ -500,18 +513,44 @@ class Spu {
 		it. `SpuVoice` and the game digests hold it to that.
 	**/
 	static function mixBatch(n:Int):Void {
-		for (i in 0...n) {
-			accL[i] = 0;
-			accR[i] = 0;
+		if (!outputEnabled) advanceBatch(n);
+		else {
+			for (i in 0...n) {
+				accL[i] = 0;
+				accR[i] = 0;
+			}
+			for (v in 0...VOICES) {
+				if (envPhase[v] == PHASE_OFF) continue;
+				else {}
+				mixVoice(v, n);
+			}
+			final mainL = volumeOf(mainVolL);
+			final mainR = volumeOf(mainVolR);
+			for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
 		}
+	}
+
+	/** `n` samples of every voice's state, and no sound: what `mixBatch` does with nobody listening. */
+	static function advanceBatch(n:Int):Void {
 		for (v in 0...VOICES) {
 			if (envPhase[v] == PHASE_OFF) continue;
 			else {}
-			mixVoice(v, n);
+			advanceVoice(v, n);
 		}
-		final mainL = volumeOf(mainVolL);
-		final mainR = volumeOf(mainVolR);
-		for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
+		// What `emit` would have counted: a batch is never longer than the buffer it fills.
+		samplesOut += n > OUT_PAIRS ? OUT_PAIRS : n;
+	}
+
+	/** The state half of `mixVoice`: the envelope and the position, sample by sample, until silent. */
+	static function advanceVoice(v:Int, n:Int):Void {
+		var i = 0;
+		while (i < n) {
+			if (envPhase[v] == PHASE_OFF) break;
+			else {}
+			stepEnvelope(v);
+			voiceSample(v);
+			i++;
+		}
 	}
 
 	/** One voice's next `n` samples into the accumulators, until it goes silent. */

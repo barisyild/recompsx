@@ -26,6 +26,7 @@
     <header>
       <h1>recompsx JS</h1>
       <label><input type="checkbox" id="hw" checked> WebGL çizim</label>
+      <label><input type="checkbox" id="audio" checked> Ses</label>
       <button id="start">Oyunu başlat</button>
     </header>
     <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
@@ -45,6 +46,7 @@
     const canvas = document.querySelector('#screen');
     const glCanvas = document.querySelector('#screen-gl');
     const hwBox = document.querySelector('#hw');
+    const audioBox = document.querySelector('#audio');
     // The WebGL2 renderer draws the PlayStation's primitives itself (gpu-webgl.js). Offered only
     // where WebGL2 exists; the software rasteriser and the 2D canvas remain the fallback.
     let renderer = null;
@@ -178,7 +180,10 @@
           if (!response.ok) throw new Error('Tarayıcı derlemesi bulunamadı.');
           buildInfo = await response.json();
         }
-        await startAudio();
+        // Off, the SPU still advances every voice (a game reads ENDX and the envelopes) but
+        // mixes nothing and no AudioContext is created — the runtime is told with --no-audio.
+        audioBox.disabled = true;
+        if (audioBox.checked) await startAudio();
         const boot = await fetchBytes('boot.exe', 'PS-EXE');
         const disc = await fetchBytes('disc.bin', 'Disk görüntüsü');
         status.textContent = 'Oyun başlatılıyor…';
@@ -191,7 +196,9 @@
         if (renderer) { canvas.hidden = true; glCanvas.hidden = false; }
 
         globalThis.recompsxHost = {
-          args: renderer ? ['boot.exe', 'disc.bin', '--video-hw'] : ['boot.exe', 'disc.bin'],
+          args: ['boot.exe', 'disc.bin']
+            .concat(renderer ? ['--video-hw'] : [])
+            .concat(audioContext ? [] : ['--no-audio']),
           files: { 'boot.exe': boot, 'disc.bin': disc },
           paused: false,
           gpu: renderer,
@@ -231,6 +238,7 @@
             ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
           },
           audioPush(bytes) {
+            if (!audioContext) return;
             const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
             const copy = new Int16Array(samples);
             const frames = copy.length >> 1;
@@ -247,7 +255,7 @@
               queuedFrames -= dropped.frames - dropped.at;
             }
           },
-          audioBuffered() { return audioNode ? workletBuffered() : queuedFrames; },
+          audioBuffered() { return audioNode ? workletBuffered() : (audioContext ? queuedFrames : 0); },
           state(value) {
             start.disabled = value !== 'running';
             start.textContent = value === 'running' ? 'Duraklat' : 'Oyunu başlat';
