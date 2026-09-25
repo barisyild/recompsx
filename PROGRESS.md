@@ -7,8 +7,9 @@
 texture and texels are decoded in the fragment shader (4/8-bit through the CLUT, 15-bit direct,
 texture window folded in); a 1024x512 framebuffer texture stands for the rendered VRAM, refreshed
 by dirty rectangles, drawn on in submission order with no depth buffer, and blitted per vblank
-(24-bit rows decoded from VRAM). Textured blending primitives draw in two passes as their own
-batch. The ABI gained `bp_gpu_clip` (32 functions): the first build showed a double-buffered
+(24-bit rows decoded from VRAM). Every vertex carries its texture state and the three adding
+blend modes share one GL blend state, so a vblank of gameplay is one to three draw calls; only a
+textured mode-2 primitive draws in two passes as its own batch (ADR-0020 revision). The ABI gained `bp_gpu_clip` (32 functions): the first build showed a double-buffered
 game's geometry spilling from the drawing buffer onto the displayed one, which the software path
 clips at the drawing area. The runtime now tells the backend of an upload when its last word lands rather than at its
 header — the ABI speaks in the past tense, and a backend that copies the region on hearing of
@@ -1248,7 +1249,22 @@ program first — so every site is now a direct static field read or write, the 
 IRGB/LZCS cases included, and the bundle shrank by 7 KB. GteOps 1cf89aa2, Codegen 75194be4,
 four digests unchanged; five rounds `--no-audio` mean 15.22 → 14.11 s (−7.3 %), min 14.27 →
 13.35 s; `getData`/`setData` gone from the profile, `f_800193a8` self 933 → 686 ms.
-Next: GP0 → WebGL uniforms per batch; a mobile GC profile; the remaining 160 scavenges.
+**WebGL batching (ADR-0020 revision).** Texture page, CLUT, window, flags and blend mode moved
+into the vertex (three `uint` words, flat varyings); the adding blend modes share one GL state
+(ONE, SRC_ALPHA, colour pre-scaled in the shader), mode 2 keeps its own; GL state is shadowed
+inside a flush; sampler units set once; `dirty` allocates nothing and uploads only the rows the
+rectangle spans. GL calls per vblank of gameplay 2359 → 39, draws 192 → 3 (Node, counting stub
+context). A first version stored the shader's alpha weight: a mode-2 subtraction left zero
+alpha, which no later draw overwrote, and the user's Chrome showed the Select Game Type scene
+filling with black silhouettes; the blend now keeps the destination's alpha and the blit writes 1.
+Replay harness (scratchpad; renderer calls recorded under Node, replayed into two renderers in
+lockstep in the browser): framebuffer and presented-canvas RGB identical to the old renderer
+over six 300-frame stretches (1500, 2400, 4500, 5200, 5700, 6000) and a synthetic every-state
+trace, alpha 255 everywhere; a deliberately wrong mode-0 weight is caught (22 M bytes differ).
+Renderer main-thread time, minimum of ten, 300 vblanks: 26.1 → 6.0 ms, 28.1 → 6.2 ms,
+79.3 → 10.3 ms. The page's text is English now. Safari (reported at 10 fps, rAF every ~150 ms
+with ~25 ms of work) is unmeasured on the new renderer.
+Next: the GC source per function in the page, sound on and unpaced; Safari's numbers.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
