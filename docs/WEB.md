@@ -36,6 +36,13 @@ main-volume pass and the buffer. It is a presentation switch in the sense of ADR
 digest mode: `nonSilent` and the peak diagnostics measure nothing without a mix, so a headless
 digest taken with `--no-audio` describes a different machine and is not comparable.
 
+**Hız sınırı** (on by default) is the pacing. Off, `host.unpaced` is true and the loop in
+`shim.BrowserLoop` runs as many frames as fit in fourteen milliseconds of every tick instead of
+holding to real time; the status line shows the frame rate reached. It is a live switch — the
+loop reads it every tick — and pacing is presentation only (golden rule 3), so the emulated
+machine sees the same cycles either way. For profiling and for measuring what the machine can
+do, not for playing: the sound queue runs ahead and is dropped at the latency cap.
+
 **WebGL çizim** (on by default where WebGL2 exists) hands the PlayStation's primitives to
 `web/gpu-webgl.js` instead of the software rasteriser: the page passes `--video-hw` and a `gpu`
 object on the host, the JS backend answers `caps(4)`, and `gpu.Gpu.hw` takes the ADR-0008

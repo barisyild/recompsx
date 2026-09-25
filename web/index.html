@@ -27,6 +27,7 @@
       <h1>recompsx JS</h1>
       <label><input type="checkbox" id="hw" checked> WebGL çizim</label>
       <label><input type="checkbox" id="audio" checked> Ses</label>
+      <label><input type="checkbox" id="pace" checked> Hız sınırı</label>
       <button id="start">Oyunu başlat</button>
     </header>
     <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
@@ -47,6 +48,12 @@
     const glCanvas = document.querySelector('#screen-gl');
     const hwBox = document.querySelector('#hw');
     const audioBox = document.querySelector('#audio');
+    const paceBox = document.querySelector('#pace');
+    // Live: the loop reads host.unpaced every tick. Off, it runs as many frames as fit in a
+    // display interval — for profiling and for seeing what the machine can do, not for playing.
+    paceBox.addEventListener('change', () => {
+      if (globalThis.recompsxHost) globalThis.recompsxHost.unpaced = !paceBox.checked;
+    });
     // The WebGL2 renderer draws the PlayStation's primitives itself (gpu-webgl.js). Offered only
     // where WebGL2 exists; the software rasteriser and the 2D canvas remain the fallback.
     let renderer = null;
@@ -117,6 +124,8 @@
     // The status line is DOM: written per tick it forced a layout each time (2 % of a frame in
     // the profile, and as much again in layout). Four times a second is plenty to read.
     let shownFrames = -15;
+    let shownAt = 0;
+    let presentedAt = 0;
     function workletBuffered() {
       const drained = (performance.now() - reportedAt) * 44.1;
       return Math.max(0, Math.round(reportedFrames - drained + pushedSinceReport));
@@ -201,8 +210,16 @@
             .concat(audioContext ? [] : ['--no-audio']),
           files: { 'boot.exe': boot, 'disc.bin': disc },
           paused: false,
+          unpaced: !paceBox.checked,
           gpu: renderer,
           present(vram, sx, sy, width, height, flags) {
+            // Fast-forwarding, every emulated vblank still arrives here; one picture per display
+            // interval is all a viewer can see, so the rest are skipped before any blit.
+            if (this.unpaced) {
+              const now = performance.now();
+              if (now - presentedAt < 15) return;
+              presentedAt = now;
+            }
             if (renderer) { renderer.present(vram, sx, sy, width, height, flags); return; }
             if (width <= 0 || height <= 0) {
               ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -264,9 +281,12 @@
           },
           progress(frames, yields) {
             flushAudio();
-            if (frames - shownFrames < 15) return;
-            shownFrames = frames;
-            status.textContent = `${frames} kare · çalışıyor`;
+            // At most twice a second, whatever the frame rate: a status write re-lays the page.
+            const now = performance.now();
+            if (now - shownAt < 500) return;
+            const fps = shownAt > 0 ? Math.round((frames - shownFrames) * 1000 / (now - shownAt)) : 0;
+            shownAt = now; shownFrames = frames;
+            status.textContent = `${frames} kare · ${fps} kare/s · çalışıyor`;
             status.dataset.frames = frames;
             status.dataset.yields = yields;
           },

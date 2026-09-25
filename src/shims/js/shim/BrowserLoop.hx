@@ -41,9 +41,16 @@ class BrowserLoop {
 				// origin instead of the backlog rebased every tick after the first second, and
 				// with the origin always fresh a tick could never be ahead of schedule, so the
 				// game ran as fast as the ticks allowed, two to three times real time.
-				if ((start - t0) - (frames() - base) * frameMs > 1000) { base = frames(); t0 = start; }
-				while (performance.now() - start < 8) {
-					if ((frames() - base) * frameMs > performance.now() - t0 + frameMs) break;
+				// Unpaced, a tick is a time budget and nothing else: as many frames as fit in most
+				// of a display interval, then the browser gets the rest. The origin is kept fresh
+				// so that pacing, switched back on, resumes from now rather than racing to clear
+				// the backlog. Pacing is presentation (golden rule 3): the emulated machine sees
+				// the same cycles in the same order either way.
+				const unpaced = host && host.unpaced;
+				if (unpaced || (start - t0) - (frames() - base) * frameMs > 1000) { base = frames(); t0 = start; }
+				const budget = unpaced ? 14 : 8;
+				while (performance.now() - start < budget) {
+					if (!unpaced && (frames() - base) * frameMs > performance.now() - t0 + frameMs) break;
 					if (!step()) { active = false; state('stopped'); return; }
 				}
 				if (host && host.progress) host.progress(frames(), {1});
