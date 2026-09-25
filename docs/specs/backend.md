@@ -57,7 +57,8 @@ extern "C" {
 /* lifecycle */
 int  bp_init(const char* title);      /* 0 ok, nonzero fatal failure */
 void bp_shutdown(void);
-enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4 };
+enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4,
+       BP_CAP_SPU_VOICES = 5 };
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
@@ -152,6 +153,19 @@ from this optional path are absent from emulated VRAM, so feedback/readback effe
 this is not a bit-exact substitute for the software renderer. The original decision and its
 measurements are preserved as [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md)
 (renumbered from that branch's ADR-0008 to preserve main's machine-IR decision).
+
+`--audio-hw` is the same kind of fork for sound, taken only if `BP_CAP_SPU_VOICES` is nonzero
+and never on a headless run. The SPU then advances every voice as it does with nobody listening
+and, after each batch of 128 samples, describes the voices instead of mixing them. Only the
+Dreamcast backend offers it: it decodes the ADPCM into AICA sound RAM and plays each SPU voice
+on an AICA channel ([ADR-0024](../decisions/ADR-0024-spu-voices-on-the-aica.md)). JS, PC and
+null backends report 0 and keep the software mix:
+
+```c
+void bp_spu_ram(const uint8_t* ram);      /* the SPU's 512 KB, borrowed; once, before any voice */
+void bp_spu_dirty(int addr, int len);     /* sound RAM written since the previous voice update */
+void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
+```
 
 The native memory path uses a static aligned arena and `shim.MemA` for aligned accesses;
 byte-packed records stay on `RawMem`. Native builds pass `-fno-strict-aliasing` and `-fwrapv`.

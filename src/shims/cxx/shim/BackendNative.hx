@@ -77,5 +77,9 @@ extern function bp_file_read(slot:Int, offset:Int, buf:Ptr<UInt8>, len:Int):Int;
 // on the C side, which also spares us 64-bit clock arithmetic in the portable subset.
 @:include("backend_c_api.h") @:topLevel extern function bp_pace_frame(targetUs:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_profile_mark(section:Int, begin:Int):Void;
+@:include("backend_c_api.h") @:topLevel extern function bp_spu_ram(ram:Ptr<UInt8>):Void;
+@:include("backend_c_api.h") @:topLevel extern function bp_spu_dirty(addr:Int, len:Int):Void;
+@:include("backend_c_api.h") @:topLevel
+extern function bp_spu_voice(v:Int, key:Int, on:Int, start:Int, pitch:Int, volL:Int, volR:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_log(level:Int, msg:ConstCharPtr):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_fatal(msg:ConstCharPtr):Void;

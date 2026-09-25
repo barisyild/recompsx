@@ -80,6 +80,12 @@ class Backend {
 	public static inline var PROFILE_SPU = 0;
 	public static inline function profileMark(section:Int, begin:Int):Void BackendNative.bp_profile_mark(section, begin);
 
+	/** The SPU's voices on a backend's own sampler (BP_CAP_SPU_VOICES); see backend_c_api.h. */
+	public static inline function spuRam(ram:RawBuf):Void BackendNative.bp_spu_ram(RawMem.u8Ptr(ram));
+	public static inline function spuDirty(addr:Int, len:Int):Void BackendNative.bp_spu_dirty(addr, len);
+	public static inline function spuVoice(v:Int, key:Int, on:Int, start:Int, pitch:Int, volL:Int, volR:Int):Void
+		BackendNative.bp_spu_voice(v, key, on, start, pitch, volL, volR);
+
 	/**
 		A native host has one thread and nothing to hand it back to, so a suspended program is
 		simply resumed until it ends.
