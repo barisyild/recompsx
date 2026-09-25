@@ -1064,6 +1064,10 @@ class Gpu {
 	static function setMaskBits(v:Int):Void {
 		maskSet = (v & 1) != 0;
 		maskCheck = (v & 2) != 0;
+		// A hardware backend applies these to its own primitives; uploads and copies have them
+		// applied here, in VRAM, before it hears of the rectangle.
+		if (hw) Backend.gpuMask(maskSet ? 1 : 0, maskCheck ? 1 : 0);
+		else {}
 	}
 
 	static function raiseIrq():Void {
