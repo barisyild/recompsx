@@ -36,7 +36,11 @@ TOOLCHAIN="$KOS_BASE/utils/cmake/kallistios.toolchain.cmake"
 [ -f "$TOOLCHAIN" ] || { echo "no KOS CMake toolchain under $KOS_BASE/utils/cmake"; exit 1; }
 
 DIR="out/$TARGET"
-[ -d "$DIR/cpp/src" ] || { echo "no generated sources in $DIR/cpp/src — generate first"; exit 1; }
+# reflaxe.CPP writes cpp/src; Hatchet (scripts/build-hatchet.sh --transpile-only) one tree
+# under cpp/ with GenMain at its root. The template builds either.
+TRANSPILER=reflaxe
+if [ ! -d "$DIR/cpp/src" ] && [ -f "$DIR/cpp/GenMain.h" ]; then TRANSPILER=hatchet; fi
+[ -d "$DIR/cpp/src" ] || [ "$TRANSPILER" = hatchet ] || { echo "no generated sources in $DIR/cpp/src — generate first"; exit 1; }
 
 # A separate build directory from the desktop one: same sources, different machine, and a shared
 # CMake cache between two toolchains is a morning wasted.
@@ -46,7 +50,7 @@ cp build/templates/CMakeLists.txt "$DIR/CMakeLists.txt"
 cmake -S "$DIR" -B "$BUILD" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-  -DRECOMPSX_BACKEND=dreamcast >/dev/null
+  -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" >/dev/null
 cmake --build "$BUILD"
 
 ELF="$BUILD/recompsx.elf"
