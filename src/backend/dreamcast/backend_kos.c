@@ -207,7 +207,12 @@ static uint64_t g_prof_build;
  * thirty-two bytes every time, and a scene re-derives the same bindings frame after frame. So
  * compile once and keep it. The UV origin is deliberately NOT part of the key — it moves the
  * texture coordinates, not the header. */
-#define HDRC_N 128
+/* 1024 direct-mapped slots, chosen by the multiplicative hash's top bits. 128 were too few for a
+ * scene's texture page x palette bank x blend combinations: in gameplay the overlay counted
+ * 2,005 hits against 14,707 compiles in thirty vblanks — pairs of bindings sharing a slot and
+ * alternating, each evicting the other at every primitive. About 57 KB of main RAM. */
+#define HDRC_BITS 10
+#define HDRC_N (1 << HDRC_BITS)
 typedef struct {
     pvr_ptr_t mem;
     int       fmt, dim;
@@ -223,7 +228,7 @@ static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s) {
     h = h * 2654435761u + (uint32_t)fmt;
     h = h * 2654435761u + (uint32_t)dim;
     h = h * 2654435761u + ((uint32_t)s->flags << 8) + (uint32_t)s->semi_mode;
-    return (int)((h >> 7) & (HDRC_N - 1));
+    return (int)(h >> (32 - HDRC_BITS));
 }
 
 /* One scene's worth of GPU diagnostics, held until it can be printed without being counted. */
