@@ -28,6 +28,14 @@ its 4410-frame cap (about 100 ms). A browser without worklets falls back to the 
 `ScriptProcessorNode`. The loop paces to real time by the backlog between vblanks and wall time,
 rebasing only when it falls more than a second behind.
 
+**Ses** (on by default) is the audio output. Off, the page creates no `AudioContext` and
+passes `--no-audio`, and `spu.Spu.outputEnabled` goes false: the SPU still advances every voice
+— envelopes, block positions, ENDX and the loop flags, the current-volume registers a game can
+read — and skips only what a listener needs, the volume multiplies, the accumulators, the
+main-volume pass and the buffer. It is a presentation switch in the sense of ADR-0008, not a
+digest mode: `nonSilent` and the peak diagnostics measure nothing without a mix, so a headless
+digest taken with `--no-audio` describes a different machine and is not comparable.
+
 **WebGL çizim** (on by default where WebGL2 exists) hands the PlayStation's primitives to
 `web/gpu-webgl.js` instead of the software rasteriser: the page passes `--video-hw` and a `gpu`
 object on the host, the JS backend answers `caps(4)`, and `gpu.Gpu.hw` takes the ADR-0008

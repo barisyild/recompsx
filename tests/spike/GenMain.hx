@@ -45,7 +45,14 @@ class GenMain {
 		// Hardware drawing, if this host asked for it and its backend can actually do it. Both
 		// halves are required: the flag alone is a wish, and the capability alone is a facility
 		// nobody asked to use. Headless digests always use the deterministic software renderer.
-		if (kernel.Kernel.haltAt == 0 && videoHw()) {
+		// No listener, no mixing: the SPU keeps every state a game can read and skips the sound.
+		// Allowed in a headless run for measuring, but the digest then covers a different machine.
+		if (hasFlag("--no-audio")) {
+			spu.Spu.outputEnabled = false;
+			shim.Backend.log(shim.Backend.LOG_INFO, "audio: off — voices advance, nothing is mixed");
+		} else {}
+
+		if (kernel.Kernel.haltAt == 0 && hasFlag("--video-hw")) {
 			if (shim.Backend.caps(4) != 0) {
 				gpu.Gpu.hw = true;
 				shim.Backend.gpuVram(gpu.Vram.data);
@@ -169,11 +176,11 @@ class GenMain {
 		return 0;
 	}
 
-	static function videoHw():Bool {
+	static function hasFlag(name:String):Bool {
 		final argc = shim.Backend.argCount();
 		var i = 0;
 		while (i < argc) {
-			if (shim.Backend.arg(i) == "--video-hw") return true;
+			if (shim.Backend.arg(i) == name) return true;
 			else {}
 			i++;
 		}

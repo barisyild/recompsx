@@ -1124,7 +1124,16 @@ divides → 3). Digests unchanged (VideoTime eb49ad68, game 0e180c28 / ab13c60f)
 min 16.79 → 15.92 s, mean 17.36 → 16.66 s. Noted, not fixed: `fold` wraps `base` past the
 target/0xFFFF without raising the reached bits, so a wrap that lands inside a folded period is
 never flagged — pre-existing, and a game reading those bits on timer 1 would notice.
-Next: the browser's own share table — profile at 6× in the polling phase with the new bundle.
+**Audio off** (`--no-audio`, the page's "Ses" box): `spu.Spu.outputEnabled` false keeps every
+voice advancing — envelope, position, ENDX, loop flags — and skips the mix, the main-volume pass
+and the buffer. Verified state-identical: the 3000-frame stat lines of the two modes differ only
+in the peak diagnostics, `samplesOut` and every event count match; the digest differs only by
+`nonSilent` (c346c0af / 53e5c7fd for 3000 / 9000 frames), so it is not a digest mode. Node:
+mean 18.83 → 17.81 s, SPU share 8.0 → 6.8 %: the sample-by-sample state walk costs nearly what
+mixing did. The user's 6× browser profile (bundle b31819ef73ce, before this switch) put the SPU
+at ~13 % self: voiceSample 4.3, mixVoice 3.3, decodeBlock 2.1, envelope 3.4.
+Next: advance a silent voice from event to event (envelope period, block end) instead of sample
+by sample — exact by construction, and it removes voiceSample and the sample decode entirely.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
