@@ -38,6 +38,13 @@ what it replaces once the whole chain is counted.
 
 ## Consequences
 
-No code changes. Golden rule 1 stands without an exception, `Acc64` keeps its full 64-bit
-cases, and the numbers above are what the next person should beat before proposing a float
-representation for this accumulator again.
+No representation change. Golden rule 1 stands without an exception, `Acc64` keeps its full
+64-bit cases, and the numbers above are what the next person should beat before proposing a
+float representation for this accumulator again.
+
+Measured later the same day, once the SPU mixer was out of the profile: the pair's small
+operations made `inline` in the JS shim (`check44`/`check32` as single expressions), together
+with `Gte.step44` and `mac0From32`, won every one of five interleaved rounds of 9000 frames —
+mean 20.83 → 19.75 s, minimum 20.19 → 18.50 s — with every digest unchanged. Kept
+(`ce808eb`). The representation was the wrong lever; the call boundaries around it were a
+real one.

@@ -1092,6 +1092,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Two inlining experiments after the mixer. Kept (`ce808eb`): the JS I64
+pair's small operations and `Gte.step44`/`mac0From32` inline — every digest unchanged (Mem
+27f9aa59, GteOps 1cf89aa2, Acc64 0deeafe0, Codegen 632ff691, game ab13c60f), five interleaved
+rounds all faster, mean −5 %, min −8 %; the C++ build of the two inline GTE helpers is
+unverified (ADR-0015). Rejected: the RAM fast path inline in every guest access with a
+branch-free JS `MemA` — bundle 9.8 → 13.1 MB, medians 3 % slower, ADR-0013's finding again.
+
 2026-09-25 [claude] SPU: voice-major batch mixer (`mixBatch`/`mixVoice`): each voice runs its
 samples into accumulators in one loop with its volumes decoded once, main volume and saturation in
 one pass, halfword output stores. Bit-identical: SpuVoice d7680e93, game 0e180c28 / ab13c60f.
