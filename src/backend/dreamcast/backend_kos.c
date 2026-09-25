@@ -203,6 +203,14 @@ static int      g_prof_skipped;
  * explanations of mine. Splitting it is cheaper than a third guess. */
 static uint64_t g_prof_build;
 
+/* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
+ * can tell them apart: inlined, they all read as `present_frame`. A call each is the price. */
+#if RECOMPSX_DC_PROFILE
+#define PROF_NOINLINE __attribute__((noinline))
+#else
+#define PROF_NOINLINE
+#endif
+
 /* Compiled polygon headers, kept.
  *
  * Splitting `submit` settled where its spikes lived: entirely in scene building, never in
@@ -461,6 +469,10 @@ static kthread_t*        g_emu_thread;
 static volatile uint32_t g_samp_where[BP_PROFILE_SECTIONS];
 
 void bp_profile_mark(int section, int begin) {
+    /* A GTE command is entered ~2500 times a vblank and never runs inside another bracket or
+     * holds one, so it is a single store: the stack below cost ~20 instructions a mark, which
+     * across a window was ~15 ms of the profile measuring itself. */
+    if(section == BP_PROFILE_GTE) { g_where = begin ? BP_PROFILE_GTE : -1; return; }
     if(section < 0 || section >= BP_PROFILE_SECTIONS) return;
     if(begin) {
         if(g_where_depth < WHERE_DEPTH) g_where_outer[g_where_depth++] = g_where;
@@ -468,7 +480,6 @@ void bp_profile_mark(int section, int begin) {
     } else {
         g_where = g_where_depth > 0 ? g_where_outer[--g_where_depth] : -1;
     }
-    if(section == BP_PROFILE_GTE) return;    /* sampled only */
     const uint64_t now = bp_time_us();
     if(begin) {
         g_prof_section_at[section] = now;
@@ -1641,7 +1652,15 @@ static void profile_report(void) {
 
     g_prof_logs = 0;
     g_prof_log_us = 0;
+    /* Not while the overlay shows the same numbers. A line of this length is ~280 characters
+     * spun out of the serial port a byte at a time whether or not anything listens, and the
+     * overlay's own profile put that spin (scif_write) at 54 ms of an 824 ms window. */
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    if(!g_txt) bp_log(BP_LOG_INFO, msg);
+    else {}
+#else
     bp_log(BP_LOG_INFO, msg);
+#endif
 
     g_prof_frames = 0;
     g_prof_emu = g_prof_wait = g_prof_upload = g_prof_submit = g_prof_audio = 0;
@@ -1795,7 +1814,7 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
  *  PlayStation did. Staleness cannot exist: content cannot drift from itself, which is why
  *  bp_gpu_dirty has no palette work at all. */
 static uint32_t g_pal_memo_gen = 1;
-static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
+PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
     uint16_t want[16];
     uint32_t h = 2166136261u;
     for(int i = 0; i < 16; i++) {
@@ -1898,7 +1917,7 @@ static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
 #define PAL_MEMO 512
 static struct { uint32_t gen; uint16_t cx, cy; int16_t bank; uint8_t approx; } g_pal_memo[PAL_MEMO];
 
-static int pal_bank_cached(int clut_x, int clut_y, int allow_approx) {
+PROF_NOINLINE static int pal_bank_cached(int clut_x, int clut_y, int allow_approx) {
     const uint32_t k = (((uint32_t)clut_x >> 4) ^ ((uint32_t)clut_y * 0x9E5u)
                         ^ ((uint32_t)allow_approx << 8)) & (PAL_MEMO - 1);
     if(g_pal_memo[k].gen == g_pal_memo_gen && g_pal_memo[k].cx == clut_x
@@ -1915,7 +1934,7 @@ static int pal_bank_cached(int clut_x, int clut_y, int allow_approx) {
 
 /** The slot holding this page, decoding it first if nobody has. Round-robin eviction: a scene
  *  using more than sixteen pages will thrash, and the profiler is what would say so. */
-static int tex_slot(const gstate_t* s) {
+PROF_NOINLINE static int tex_slot(const gstate_t* s) {
     for(int i = 0; i < g_tex_big_n + g_tex_small_n; i++) {
         if(g_tex[i].used && g_tex[i].tex_x == s->tex_x && g_tex[i].tex_y == s->tex_y
            && g_tex[i].depth == s->depth && g_tex[i].window == s->window
@@ -1973,7 +1992,7 @@ static int tex_slot(const gstate_t* s) {
 
 /** The permanent 4bpp mirror slot for a texture page, decoded on first use and after any write
  *  to the VRAM it covers. Never evicted: the slot IS the page, so nothing else can want it. */
-static pvr_ptr_t page4_mirror(const gstate_t* s) {
+PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
     gpage4_t* pg = &g_page4[((s->tex_y >> 8) & 1) * PAGE4_COLS + ((s->tex_x >> 6) & 15)];
     if(!pg->mem) return NULL;
     if(!pg->valid) {
@@ -2019,7 +2038,7 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
     pvr_txr_load_ex(buf, dst, BAKE_DIM, BAKE_DIM, PVR_TXRLOAD_16BPP);
 }
 
-static int bake_slot(const gstate_t* s, int tu, int tv) {
+PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
     for(int i = 0; i < g_bake_n; i++) {
         if(g_bake[i].used && g_bake[i].tex_x == s->tex_x && g_bake[i].tex_y == s->tex_y
            && g_bake[i].clut_x == s->clut_x && g_bake[i].clut_y == s->clut_y
@@ -2068,7 +2087,7 @@ static int bake_slot(const gstate_t* s, int tu, int tv) {
 #define PRIO_SLOTS 256
 static struct { uint16_t cx, cy; uint32_t n; uint8_t used; } g_prio[PRIO_SLOTS];
 
-static void palette_priority(void) {
+PROF_NOINLINE static void palette_priority(void) {
     memset(g_prio, 0, sizeof(g_prio));
     for(int i = 0; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
@@ -2343,7 +2362,7 @@ static int last_cover(int sw, int sh) {
     return -1;
 }
 
-static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
+PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
     const float scale_y = 480.0f / (float)sh;
@@ -2716,8 +2735,15 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
     {
         g_samp_frames++;
         static int every;
+        /* The PC histogram goes to the serial port too; with the overlay naming the hot
+         * functions on screen it is only the same cost again (see profile_report). */
+#if RECOMPSX_DC_PROFILE_OVERLAY
+        if((every++ % 200) == 0 && !g_txt) samp_report();
+        else {}
+#else
         if((every++ % 200) == 0) samp_report();
         else {}
+#endif
     }
     if(g_pc_armed || g_pc_frames == 0) perf_window_open();
     else {}

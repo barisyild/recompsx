@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Overlay profile (Flycast, 767-824 ms): rtps ~133, f_800193a8 ~80 (the game's vertex
+loop), present_frame ~65, slowWrite32 ~60 (GPU DMA, inlined), scif_write 54 (the per-window serial
+line!), triangle/drawPolygon ~40 each. Serial profile lines now off while the overlay is on; GTE marks
+are one store; scene-build helpers noinline in profile builds so the overlay can split present_frame.
+
 2026-09-26 [claude] Flycast: 825 ms, 36.3 fps (emu 340 gte 203 gpu 142 build 107). DC overlay profile:
 build-dc.sh writes SYMS.BIN (scripts/dc-syms.py: short function names + ranges, anchored to
 samp_tick's address); copied to the disc root, the 1 kHz sampler attributes each PC by binary search
