@@ -34,12 +34,12 @@ class I64 {
 	public static var lo:Int = 0;
 
 	/** The accumulator becomes a sign-extended 32-bit value. */
-	public static function set(v:Int):Void {
+	public static inline function set(v:Int):Void {
 		lo = v;
 		hi = v >> 31;
 	}
 
-	public static function setZero():Void {
+	public static inline function setZero():Void {
 		lo = 0;
 		hi = 0;
 	}
@@ -52,13 +52,13 @@ class I64 {
 		so the shift is done across both words — the low word keeps what a 32-bit shift would give
 		and the high word takes the twelve bits that fell off the top, sign included.
 	**/
-	public static function setShl12(v:Int):Void {
+	public static inline function setShl12(v:Int):Void {
 		lo = (v << 12) | 0;
 		hi = v >> 20;
 	}
 
 	/** Adds a sign-extended 32-bit value. */
-	public static function addSmall(p:Int):Void {
+	public static inline function addSmall(p:Int):Void {
 		final sum = (lo + p) | 0;
 		// Carry out of bit 31, computed rather than compared: `lo` and `p` are both being read as
 		// unsigned here, and Haxe has no unsigned Int to compare them with. This is the standard
@@ -79,7 +79,7 @@ class I64 {
 
 		Callers that cannot promise that use `addProductWide`, which costs four multiplies.
 	**/
-	public static function addProduct16(a:Int, b:Int):Void {
+	public static inline function addProduct16(a:Int, b:Int):Void {
 		addSmall(IntMath.mul(a, b));
 	}
 
@@ -112,7 +112,7 @@ class I64 {
 	}
 
 	/** Adds a 64-bit value given as its two words. */
-	public static function addPair(ahi:Int, alo:Int):Void {
+	public static inline function addPair(ahi:Int, alo:Int):Void {
 		final sum = (lo + alo) | 0;
 		final carry = ((lo & alo) | ((lo | alo) & ~sum)) >>> 31;
 		hi = (hi + ahi + carry) | 0;
@@ -128,25 +128,13 @@ class I64 {
 		`-0x800_00000000`, high word -0x800 with a low word of zero, so anything below it has a
 		high word below -0x800.
 	**/
-	public static function check44():Int {
-		if (hi > 0x7FF) return 1;
-		else {}
-		if (hi < -0x800) return -1;
-		else {}
-		return 0;
+	public static inline function check44():Int {
+		return hi > 0x7FF ? 1 : (hi < -0x800 ? -1 : 0);
 	}
 
 	/** The same question for the 32-bit signed range, which is what MAC0's flags are defined on. */
-	public static function check32():Int {
-		if (hi > 0) return 1;
-		else {}
-		if (hi == 0 && lo < 0) return 1;
-		else {}
-		if (hi < -1) return -1;
-		else {}
-		if (hi == -1 && lo >= 0) return -1;
-		else {}
-		return 0;
+	public static inline function check32():Int {
+		return (hi > 0 || (hi == 0 && lo < 0)) ? 1 : ((hi < -1 || (hi == -1 && lo >= 0)) ? -1 : 0);
 	}
 
 	/**
@@ -157,22 +145,22 @@ class I64 {
 		its check, which is what makes a long chain of adds reproduce the hardware rather than
 		merely detecting that it would have differed.
 	**/
-	public static function wrap44():Void {
+	public static inline function wrap44():Void {
 		hi = ((hi & 0xFFF) << 20) >> 20;
 	}
 
 	/** The low 32 bits, which is the accumulator itself when no shift is asked for. */
-	public static function low32():Int {
+	public static inline function low32():Int {
 		return lo;
 	}
 
 	/** The low 32 bits of the value shifted right by 12 — the `sf=1` result. */
-	public static function shr12():Int {
+	public static inline function shr12():Int {
 		return (lo >>> 12) | (hi << 20);
 	}
 
 	/** The low 32 bits of the value shifted right by 16 — the screen-coordinate scale. */
-	public static function shr16():Int {
+	public static inline function shr16():Int {
 		return (lo >>> 16) | (hi << 16);
 	}
 

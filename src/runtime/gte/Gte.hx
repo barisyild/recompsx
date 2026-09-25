@@ -990,7 +990,7 @@ class Gte {
 	// ---- the pieces the operations are made of --------------------------------------------------------
 
 	/** One accumulation step: check the 44-bit range, flag it, then wrap as the hardware does. */
-	static function step44(posBit:Int, negBit:Int):Void {
+	static inline function step44(posBit:Int, negBit:Int):Void {
 		final over = I64.check44();
 		if (over > 0) flag |= (1 << posBit);
 		else if (over < 0) flag |= (1 << negBit);
@@ -1003,7 +1003,7 @@ class Gte {
 	}
 
 	/** MAC0 is 32 bits, so its flags are a range check rather than a truncation. */
-	static function mac0From32():Int {
+	static inline function mac0From32():Int {
 		final over = I64.check32();
 		if (over > 0) flag |= (1 << F_MAC0_POS);
 		else if (over < 0) flag |= (1 << F_MAC0_NEG);
