@@ -200,16 +200,18 @@ class Gpu {
 
 	public static function writeGp0(v:Int):Void {
 		wordsReceived++;
-		if (xferLeft > 0) return transferWord(v);
-		else {}
-		if (pending > 0) return consumeParameter(v);
-		else {}
-		commandsReceived++;
-		packetLen = 0;
-		push(v);
-		command(v);
-		if (pending == 0) draw();
-		else {}
+		// One if/else chain rather than two early returns: that is the shape Haxe's inliner
+		// accepts, and `Memory.ioWrite32` inlines this call so a GP0 word costs one frame less.
+		if (xferLeft > 0) transferWord(v);
+		else if (pending > 0) consumeParameter(v);
+		else {
+			commandsReceived++;
+			packetLen = 0;
+			push(v);
+			command(v);
+			if (pending == 0) draw();
+			else {}
+		}
 	}
 
 	static function consumeParameter(v:Int):Void {

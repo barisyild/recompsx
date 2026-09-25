@@ -1100,7 +1100,10 @@ bundle +5 KB of 9.8 MB. Wall time within noise over five interleaved rounds (min
 15.68 s); the timer chain's self time in the profile fell 527 → 440 ms. Kept because it costs
 nothing — unlike the class-wide accessor inlining (B: +34 % bundle, H: +9 %), which stays rejected.
 The same call-site `inline` then went into `slowRead8` and `slowRead16` (+2.5 KB, five rounds
-within noise, mean 19.37 → 19.10 s; Mem/CdCommands/SpuVoice digests unchanged).
+within noise, mean 19.37 → 19.10 s; Mem/CdCommands/SpuVoice digests unchanged), and then the
+three `slowWrite`s, where `ioWrite32` also inlines `Gpu.writeGp0` (its two early returns became
+an if/else chain) so a GP0 word reaches the GPU dispatcher from `write32` in one call: +2.5 KB,
+min 18.15 → 16.97 s, mean 18.88 → 18.59 s over five rounds; Raster a749a71a unchanged.
 Next: fewer divisions per timer read (one floor instead of two in `dotsIn(videoClocksIn())`).
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
