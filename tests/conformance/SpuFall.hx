@@ -11,6 +11,11 @@ import shim.RawMem;
 	all 24 voices on with a different pitch and waveform, releases them in waves (some from the
 	top, some mid-attack, one restarted mid-release), and snapshots every voice after every
 	batch; the silent snapshots must equal the sounding ones.
+
+	A third run takes the path of a backend with its own sampler (`voicesToBackend`): every
+	key-on is offered to the backend, and the test backends decline them all, so the runtime
+	mixes each declined voice itself while advancing the rest silently. It must arrive at the same
+	snapshots too.
 **/
 class SpuFall {
 	static inline var WAVE = 0x2000;      // two blocks, looping
@@ -19,8 +24,11 @@ class SpuFall {
 
 	public static function main():Void {
 		Conf.feedName("spufall");
-		final sounding = run(true);
-		final silent = run(false);
+		final sounding = run(true, false);
+		final heard = sound;
+		final silent = run(false, false);
+		final declined = run(false, true);
+		final heardDeclined = sound;
 		Conf.expect("as many snapshots silent as sounding", silent.length, sounding.length);
 		var same = 0;
 		var firstDiff = -1;
@@ -34,12 +42,34 @@ class SpuFall {
 		}
 		Conf.expect("first snapshot that differs", firstDiff, -1);
 		Conf.expect("the silent path matches the sounding path at every snapshot", same, sounding.length);
+		var sameDeclined = 0;
+		var j = 0;
+		while (j < sounding.length) {
+			if (j < declined.length && sounding[j] == declined[j]) sameDeclined++;
+			else {}
+			j++;
+		}
+		Conf.expect("declined voices mixed by the runtime match the sounding path", sameDeclined, sounding.length);
+		var sameSound = 0;
+		var k = 0;
+		while (k < heard.length) {
+			Conf.feed(heard[k]);
+			if (k < heardDeclined.length && heard[k] == heardDeclined[k]) sameSound++;
+			else {}
+			k++;
+		}
+		Conf.expect("and sound the same, batch by batch", sameSound, heard.length);
 		Conf.report("spufall");
 	}
 
-	static function run(output:Bool):Array<Int> {
+	/** The emitted audio of the last run, one folded value per batch. */
+	static var sound:Array<Int> = [];
+
+	static function run(output:Bool, toBackend:Bool):Array<Int> {
+		sound = [];
 		spu.Spu.init();
 		spu.Spu.outputEnabled = output;
+		spu.Spu.voicesToBackend = toBackend;
 		writeBlock(WAVE, 8, 0, 0x04, true);
 		writeBlock(WAVE + 16, 8, 0, 0x03, false);
 		writeBlock(ONESHOT, 9, 1, 0x04, true);
@@ -97,6 +127,7 @@ class SpuFall {
 			sustainRound(out, round);
 			round++;
 		}
+		spu.Spu.voicesToBackend = false;
 		return out;
 	}
 
@@ -147,6 +178,7 @@ class SpuFall {
 
 	static function step(out:Array<Int>, n:Int):Void {
 		spu.Spu.mixBatchForTest(n);
+		sound.push(spu.Spu.outForTest);
 		var v = 0;
 		while (v < 24) {
 			out.push(spu.Spu.voiceState(v));

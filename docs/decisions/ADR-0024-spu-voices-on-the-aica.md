@@ -25,6 +25,12 @@ invalidated), and plays each SPU voice on its own AICA channel through the Kalli
 firmware's channel commands. Envelopes stay the SPU's: they arrive as volumes, because the
 AICA's ADSR has different curves.
 
+A key-on is offered to the backend as it happens (after the pending sound RAM writes), and
+`bp_spu_voice` answers whether the backend will play it. A note it declines is mixed by the
+runtime for the rest of that note, into the ordinary `bp_audio_push` output, while the other
+voices stay on the sampler; the Dreamcast declines a sample with no end block within 65,534
+samples, and its audio stream stays up to carry such voices (silent when there are none).
+
 ## Alternatives
 - Mixing faster on the SH-4: the mix is already voice-major and silent voices are skipped.
   What remains is arithmetic per sample the AICA does for free.
@@ -40,9 +46,17 @@ AICA's ADSR has different curves.
 - What is heard is an approximation, a presentation fork like `--video-hw` (ADR-0011): no
   reverb, noise voices or pitch modulation. A loop's seam replays the first pass's decode, where
   the SPU carries the ADPCM filter history across the jump. A loop target the game writes after
-  key-on is not followed. Volume moves in 2.9 ms steps. A sample longer than 65534 samples (the
-  channel's 16-bit loop registers) is cut; none of Crash Bash's 128 distinct samples comes close
-  (longest 52024).
+  key-on is not followed. Volume moves in 2.9 ms steps.
+- Revision, same day: a sample longer than 65,534 samples (the channel's 16-bit loop registers)
+  was first cut there. The first 9,000 frames had no such sample, but Crash Bash's intro
+  cutscene streams its sound as alternating 220,528-sample notes, and on the Dreamcast it went
+  silent for seven seconds in every ten. Such notes are now declined and mixed by the runtime
+  (the answer from `bp_spu_voice` above). Replaying 30,000 frames of the game's voice stream
+  through the backend's engine on the host: 22 key-ons declined, the engine and the runtime's
+  rule agreeing on every one, and all 8,797 audible notes kept on the AICA sounding, with no
+  failed allocation (sound RAM peak 1,448 KB). `SpuFall` runs the declining path (the test
+  backends decline everything) and requires the same voice states and the same emitted audio as
+  the sounding path, batch by batch.
 - The first key-on of a sample pays its decode and upload on the emulator thread, shown as
   `aica <ms>/<decodes>` on the overlay.
 - Verified: the C decoder against the runtime's `decodeBlock`/`advanceBlock` at every key-on of

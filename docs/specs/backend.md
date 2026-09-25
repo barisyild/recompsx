@@ -164,7 +164,9 @@ null backends report 0 and keep the software mix:
 ```c
 void bp_spu_ram(const uint8_t* ram);      /* the SPU's 512 KB, borrowed; once, before any voice */
 void bp_spu_dirty(int addr, int len);     /* sound RAM written since the previous voice update */
-void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
+int  bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
+/* at a key-on: nonzero = the backend plays the note; zero = the runtime mixes that voice into
+   bp_audio_push until its next key-on, so a backend offering this keeps its audio output up */
 ```
 
 The native memory path uses a static aligned arena and `shim.MemA` for aligned accesses;

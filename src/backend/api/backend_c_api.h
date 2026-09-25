@@ -142,10 +142,18 @@ void bp_spu_dirty(int addr, int len);
 
 /* A voice's audible state, sent whenever any of it changes (the runtime compares; at most once
  * per voice per batch of 128 samples). `key` counts the voice's key-ons: a different value with
- * `on` set means start from `start`, a byte address in sound RAM. `on` is zero once the voice's
- * envelope has finished. `pitch` is the SPU's pitch register (0x1000 = 44100 Hz, capped at
- * 0x4000). `vol_l`/`vol_r` are 0..0x7FFF and already include the envelope and the main volume. */
-void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
+ * `on` set means start from `start`, a byte address in sound RAM, and such a call is made at the
+ * key-on itself, with both volumes zero, after bp_spu_dirty has reported every write before it.
+ * `on` is zero once the voice's envelope has finished. `pitch` is the SPU's pitch register
+ * (0x1000 = 44100 Hz, capped at 0x4000). `vol_l`/`vol_r` are 0..0x7FFF and already include the
+ * envelope and the main volume.
+ *
+ * The answer to a key-on matters: nonzero means the backend plays this note; zero means it
+ * cannot (a sample longer than its channels hold, no room left), and the runtime then mixes that
+ * voice itself into bp_audio_push for the rest of the note and sends nothing more about it until
+ * its next key-on. A backend offering this capability therefore keeps its audio output working.
+ * Answers to other calls are ignored. */
+int  bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r);
 
 /* ---- audio -------------------------------------------------------------------------------
  * 44100 Hz stereo signed 16-bit, interleaved. frame_count is stereo frames, not samples.

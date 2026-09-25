@@ -118,8 +118,9 @@ void     bp_pace_frame(int target_us) { (void)target_us; }
 void bp_profile_mark(int section, int begin) { (void)section; (void)begin; }
 void bp_spu_ram(const uint8_t* ram) { (void)ram; }
 void bp_spu_dirty(int addr, int len) { (void)addr; (void)len; }
-void bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r) {
+int bp_spu_voice(int v, int key, int on, int start, int pitch, int vol_l, int vol_r) {
     (void)v; (void)key; (void)on; (void)start; (void)pitch; (void)vol_l; (void)vol_r;
+    return 0;   /* no sampler: every voice stays in the software mix */
 }
 
 void bp_log(int level, const char* msg) {
