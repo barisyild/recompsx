@@ -473,7 +473,11 @@ class Spu {
 		how far the mixer has got.
 	**/
 	public static function onBatch(cycles:Int):Void {
+		// Decoding and mixing, bracketed for a backend that shows where a frame goes (the
+		// Dreamcast's overlay); it hides inside the emulated frame otherwise. One-way markers.
+		Backend.profileMark(Backend.PROFILE_SPU, 1);
 		catchUp(cycles);
+		Backend.profileMark(Backend.PROFILE_SPU, 0);
 		flush();
 		Scheduler.scheduleAt(Scheduler.SPU_BATCH, (cycles + CYCLES_PER_SAMPLE * BATCH) | 0);
 	}

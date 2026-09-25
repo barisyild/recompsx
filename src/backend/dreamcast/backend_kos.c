@@ -431,6 +431,23 @@ static int   g_file_size[MAX_FILES];
 static uint64_t g_prof_audio;
 static int      g_prof_polls;
 
+/* The runtime's own brackets (bp_profile_mark), timed on this side of the ABI: the SPU's decoding
+ * and mixing. Part of `emu` — the overlay prints it beside it — and the runtime never sees the
+ * clock, only says where the stretch begins and ends. */
+static uint64_t g_prof_section_us[BP_PROFILE_SECTIONS];
+static uint64_t g_prof_section_at[BP_PROFILE_SECTIONS];
+
+void bp_profile_mark(int section, int begin) {
+    if(section < 0 || section >= BP_PROFILE_SECTIONS) return;
+    const uint64_t now = bp_time_us();
+    if(begin) {
+        g_prof_section_at[section] = now;
+    } else if(g_prof_section_at[section]) {
+        g_prof_section_us[section] += now - g_prof_section_at[section];
+        g_prof_section_at[section] = 0;
+    }
+}
+
 #define DISC_WINDOW (128 * 1024)
 enum { WIN_EMPTY, WIN_LOADING, WIN_READY };
 typedef struct {
@@ -1120,11 +1137,11 @@ static void profile_report(void) {
 
     char msg[220];
     snprintf(msg, sizeof(msg),
-             "dc: %d frames in %lu ms | emu %lu | disc %lu (%d rd, %d miss)"
+             "dc: %d frames in %lu ms | emu %lu (spu %lu) | disc %lu (%d rd, %d miss)"
              " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | empty %d | log %d in %lu",
              g_prof_frames,
              (unsigned long)(total / 1000),
-             (unsigned long)(emu / 1000),
+             (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
              (unsigned long)(g_prof_disc_us / 1000), g_prof_reads, g_prof_misses,
              (unsigned long)(g_prof_wait / 1000),
              (unsigned long)(g_prof_audio / 1000), g_prof_polls,
@@ -1141,8 +1158,9 @@ static void profile_report(void) {
     const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
     snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps", g_prof_frames, (unsigned long)(total / 1000),
              tenths / 10, tenths % 10);
-    snprintf(l1, sizeof(l1), "emu %lu wait %lu",
-             (unsigned long)(emu / 1000), (unsigned long)(g_prof_wait / 1000));
+    snprintf(l1, sizeof(l1), "emu %lu spu %lu wait %lu",
+             (unsigned long)(emu / 1000), (unsigned long)(g_prof_section_us[BP_PROFILE_SPU] / 1000),
+             (unsigned long)(g_prof_wait / 1000));
     snprintf(l2, sizeof(l2), "up %lu build %lu fin %lu",
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
              (unsigned long)((g_prof_submit - g_prof_build) / 1000));
@@ -1170,6 +1188,7 @@ static void profile_report(void) {
     g_empty_presents = 0;
     g_prof_build = 0;
     g_prof_skipped = 0;
+    for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_prof_section_us[i] = 0;
     g_hdr_hits = g_hdr_compiles = 0;
     g_prof_disc_us = 0;
     g_prof_reads = g_prof_misses = 0;

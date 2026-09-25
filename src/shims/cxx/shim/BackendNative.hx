@@ -76,5 +76,6 @@ extern function bp_file_read(slot:Int, offset:Int, buf:Ptr<UInt8>, len:Int):Int;
 // Haxe at all; pacing is expressed as "hold this frame to N microseconds" and executed entirely
 // on the C side, which also spares us 64-bit clock arithmetic in the portable subset.
 @:include("backend_c_api.h") @:topLevel extern function bp_pace_frame(targetUs:Int):Void;
+@:include("backend_c_api.h") @:topLevel extern function bp_profile_mark(section:Int, begin:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_log(level:Int, msg:ConstCharPtr):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_fatal(msg:ConstCharPtr):Void;
