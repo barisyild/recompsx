@@ -1317,6 +1317,11 @@ along polygon edges. `compare.html` (scratchpad) replays a trace to a vblank and
 framebuffer against the software rasteriser's picture of the same vblank (`refgrab.js`): pixels
 off by >= 6/31 at 2450/2600/5250/5400 went 412/432/518/623 → 20/17/49/55 with a 1/1024 nudge
 (1e-4 … 3e-3 identical; a nudge down ×10 worse). Present since the first renderer.
+**The phone kept the old address.** The server log showed the iPhone (192.168.1.249) loading
+from `http://…:8000` again, so it still ran without the JIT. `scripts/serve-https.py 8443
+--http 8000` is now the `web` launch configuration: HTTP serves localhost and redirects any
+other host to `https://<host>:8443`. In WebKit, `http://192.168.1.238:8000/` lands on the HTTPS
+page: secure context, AudioWorklet, 1112–3379 fps.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

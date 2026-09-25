@@ -6,7 +6,7 @@ same pinned toolchain as the other targets; `scripts/build-web.sh` sources `scri
 ```sh
 ./scripts/setup.sh                     # once per checkout
 ./scripts/build-web.sh crashbash        # also accepts games/<id>/game.json
-python3 -m http.server 8000 --bind 127.0.0.1 --directory web
+python3 scripts/serve-https.py 8443 --http 8000
 ```
 
 The web build keeps the Haxe ES6 output as `out/_web/game.raw.js`, then runs the served bundle
@@ -18,17 +18,17 @@ compiler is an explicit build error rather than an accidental version change.
 
 Open <http://127.0.0.1:8000/> and press **Start game**.
 
-**On a phone or tablet, serve it over HTTPS** (`python3 scripts/serve-https.py`, or the
-`web-https` launch configuration) and open `https://<lan-ip>:8443/`. WebKit — Safari, and every
-browser on iOS — runs a page that is not a secure context without its optimising JIT: on one
-machine a plain integer loop took 396 ms at `http://<lan-ip>` against 44 ms at
-`http://localhost`, and the game fell from over a thousand frames a second (speed limit off) to
-about sixty. `localhost` counts as secure; a LAN address only does over HTTPS, which also brings
-the AudioWorklet back. The script makes a self-signed certificate for the machine's LAN address
-once, in `out/_web/tls/`; the phone warns the first time — accept it, or AirDrop the `.pem`,
-install it (Settings › General › VPN & Device Management) and trust it (Settings › General ›
-About › Certificate Trust Settings). The page says so in its build line when it is not a secure
-context. The same button pauses/resumes. The
+**A phone or tablet is sent to HTTPS.** The server answers `http://localhost:8000` itself and
+redirects every other host to `https://<host>:8443` (the `web` launch configuration runs it
+so). WebKit — Safari, and every browser on iOS — runs a page that is not a secure context
+without its optimising JIT: on one machine a plain integer loop took 396 ms at `http://<lan-ip>`
+against 44 ms at `http://localhost`, and the game fell from over a thousand frames a second
+(speed limit off) to about sixty. `localhost` counts as secure; a LAN address only does over
+HTTPS, which also brings the AudioWorklet back. The certificate is self-signed, made once for
+the machine's LAN address in `out/_web/tls/`; the phone warns the first time — accept it, or
+AirDrop the `.pem`, install it (Settings › General › VPN & Device Management) and trust it
+(Settings › General › About › Certificate Trust Settings). The page says so in its build line
+when it is not a secure context. The same button pauses/resumes. The
 page displays the bundle's content hash. **Runtime logs go to the browser console, never into
 the page**: the runtime writes hundreds of lines a second at boot, and an element rebuilt per
 line re-rendered the page. Read them in the developer console.
