@@ -1132,8 +1132,15 @@ in the peak diagnostics, `samplesOut` and every event count match; the digest di
 mean 18.83 → 17.81 s, SPU share 8.0 → 6.8 %: the sample-by-sample state walk costs nearly what
 mixing did. The user's 6× browser profile (bundle b31819ef73ce, before this switch) put the SPU
 at ~13 % self: voiceSample 4.3, mixVoice 3.3, decodeBlock 2.1, envelope 3.4.
-Next: advance a silent voice from event to event (envelope period, block end) instead of sample
-by sample — exact by construction, and it removes voiceSample and the sample decode entirely.
+Done: a silent voice moves from event to event (`advanceVoice`: the run is the shorter of
+ticks-to-envelope-period and ticks-to-block-end, capped by the batch; the event is applied by
+the phase's own code and the block header by `startBlock`, in the per-sample order). Proven
+three ways: `SpuAdvance` (new conformance test, 7172e474) snapshots six voices of six shapes
+after every batch on both paths and requires equality; the `--no-audio` game digest is the
+per-sample walk's exactly (c346c0af / 53e5c7fd); sound-on digests unchanged. Node `--no-audio`:
+min 7 → 7 s, mean 17.09 → 15.80 s; SPU share 6.8 → 2.1 %.
+Next: a "Hız sınırı" switch — fast-forward: the browser loop runs on a time budget instead of
+wall time, presents once per display interval.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now

@@ -5,6 +5,7 @@ import core.Scheduler;
 import core.TimeBase;
 import shim.Backend;
 import shim.RawBuf;
+import shim.IntMath;
 import shim.RawMem;
 
 /**
@@ -159,6 +160,9 @@ class Spu {
 		that only a listener needs — the envelope and volume multiplies, the accumulators, the
 		main-volume pass and the buffer — which is the larger half of a voice's cost. `nonSilent`
 		and the peak diagnostics then measure nothing, so this is never a digest mode.
+
+		Meant to be set before the first sample. A voice advanced silently skips its samples'
+		decode, so the ADPCM filter's memory is stale for two blocks after sound is turned back on.
 	**/
 	public static var outputEnabled = true;
 
@@ -541,16 +545,122 @@ class Spu {
 		samplesOut += n > OUT_PAIRS ? OUT_PAIRS : n;
 	}
 
-	/** The state half of `mixVoice`: the envelope and the position, sample by sample, until silent. */
+	// ---- the state without the sound ---------------------------------------------------------
+	//
+	// With nobody listening a voice still has to arrive at the same place: the same block at the
+	// same tick, the same envelope level, ENDX raised on the same sample. Sample by sample that
+	// is `stepEnvelope` and `voiceSample` with the value thrown away, and it costs nearly what
+	// mixing costs. But between two *events* nothing a game can read changes: the envelope's
+	// counter climbs towards its period and the position climbs towards the end of its block. So
+	// a silent voice moves in runs — the shorter of the two distances, capped by the batch — and
+	// the event that ends a run is applied by the very code the per-sample path uses, in the
+	// order that path would reach it: the envelope's tick, then the block header. `SpuAdvance`
+	// holds the two paths to the same state batch by batch, and the `--no-audio` game digest
+	// holds them over nine thousand frames of a real game.
+
+	static inline var NEVER = 0x7FFFFFFF;
+
+	/** The state half of `mixVoice`, from event to event, until silent. */
 	static function advanceVoice(v:Int, n:Int):Void {
-		var i = 0;
-		while (i < n) {
-			if (envPhase[v] == PHASE_OFF) break;
+		var left = n;
+		while (left > 0 && envPhase[v] != PHASE_OFF) {
+			final envRun = envelopeRun(v);
+			final posRun = positionRun(v);
+			var run = envRun < posRun ? envRun : posRun;
+			if (run > left) run = left;
 			else {}
-			stepEnvelope(v);
-			voiceSample(v);
-			i++;
+			// Quiet ticks are the counter climbing; a run that reaches the period ends with the
+			// tick that moves the level, taken by the phase's own code.
+			if (run < envRun) envCounter[v] += run;
+			else {
+				envCounter[v] += run - 1;
+				stepEnvelope(v);
+			}
+			advancePosition(v, run);
+			left -= run;
 		}
+	}
+
+	/** Ticks until `ready` next lets this phase through, counting the one that does. */
+	static function envelopeRun(v:Int):Int {
+		final k = (envelopePeriod(v) - envCounter[v]) | 0;
+		return k < 1 ? 1 : k;
+	}
+
+	/** The period `ready` would compute for the current phase at the current level. */
+	static function envelopePeriod(v:Int):Int {
+		final phase = envPhase[v];
+		var shift = 0;
+		var slower = false;
+		if (phase == PHASE_ATTACK) {
+			final lo = adsrLo[v];
+			shift = (lo >> 10) & 0x1F;
+			slower = (lo & 0x8000) != 0 && envLevel[v] > 0x6000;
+		} else if (phase == PHASE_DECAY) {
+			shift = (adsrLo[v] >> 4) & 0x0F;
+		} else if (phase == PHASE_SUSTAIN) {
+			final hi = adsrHi[v];
+			shift = (hi >> 8) & 0x1F;
+			slower = (hi & 0x8000) != 0 && (hi & 0x4000) == 0 && envLevel[v] > 0x6000;
+		} else {
+			shift = adsrHi[v] & 0x1F;
+		}
+		return periodOf(shift, slower);
+	}
+
+	/** Ticks until the position leaves its block, counting the one that does. */
+	static function positionRun(v:Int):Int {
+		// A block not yet started is started on the next tick, as `voiceSample` would.
+		if (blockPos[v] >= SAMPLES_PER_BLOCK) return 1;
+		else {}
+		final step = pitchStep(v);
+		if (step == 0) return NEVER;
+		else {}
+		final room = ((SAMPLES_PER_BLOCK << 12) - ((blockPos[v] << 12) + counter[v])) | 0;
+		return IntMath.div((room + step - 1) | 0, step);
+	}
+
+	static inline function pitchStep(v:Int):Int {
+		final step = pitch[v] & 0xFFFF;
+		return step > 0x4000 ? 0x4000 : step;
+	}
+
+	/** `run` ticks of `voiceSample`'s position arithmetic at once, with the block header where it falls. */
+	static function advancePosition(v:Int, run:Int):Void {
+		if (blockPos[v] >= SAMPLES_PER_BLOCK) startBlock(v);
+		else {}
+		var p = ((blockPos[v] << 12) + counter[v] + IntMath.mul(run, pitchStep(v))) | 0;
+		if (p >= (SAMPLES_PER_BLOCK << 12)) {
+			p -= SAMPLES_PER_BLOCK << 12;
+			startBlock(v);
+		} else {}
+		blockPos[v] = p >> 12;
+		counter[v] = p & 0xFFF;
+	}
+
+	/** A block's header without its samples: the part of `decodeBlock` a game can see. */
+	static function startBlock(v:Int):Void {
+		final at = curAddr[v] & (RAM_BYTES - 1);
+		final flags = RawMem.get8(ram, at + 1);
+		blockPos[v] = 0;
+		advanceBlock(v, flags);
+	}
+
+	/** `mixBatch` for a test: the batch the scheduler would run, without a scheduler. */
+	public static function mixBatchForTest(n:Int):Void {
+		mixBatch(n);
+		outCount = 0;
+	}
+
+	/** What a voice will do next, folded into one word: the state the silent path must keep. */
+	public static function voiceState(v:Int):Int {
+		var h = core.Hash.word(core.Hash.FNV_OFFSET, envLevel[v]);
+		h = core.Hash.word(h, envPhase[v]);
+		h = core.Hash.word(h, envCounter[v]);
+		h = core.Hash.word(h, counter[v]);
+		h = core.Hash.word(h, blockPos[v]);
+		h = core.Hash.word(h, curAddr[v]);
+		return core.Hash.word(h, repeatAddr[v]);
 	}
 
 	/** One voice's next `n` samples into the accumulators, until it goes silent. */
@@ -850,10 +960,13 @@ class Spu {
 		often again while an exponential rise is above three quarters — which is the whole of the
 		"exponential attack" shape, expressed as a rate rather than a curve.
 	**/
+	static inline function periodOf(shift:Int, slower:Bool):Int {
+		final period = 1 << (shift > 11 ? shift - 11 : 0);
+		return slower ? period * 4 : period;
+	}
+
 	static function ready(v:Int, shift:Int, slower:Bool):Bool {
-		var period = 1 << (shift > 11 ? shift - 11 : 0);
-		if (slower) period *= 4;
-		else {}
+		final period = periodOf(shift, slower);
 		envCounter[v]++;
 		if (envCounter[v] < period) return false;
 		else {}
