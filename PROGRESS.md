@@ -1118,6 +1118,13 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-25 [claude] Hatchet fork github.com/barisyild/hatchet, branch `recompsx` (6 commits, 311
+tests): negative hex literals as int, pkg.Class.x in expressions, field type inference + folded
+constants as `static const int`, dropped instance initialisers emitted, expression bodies, multi-
+declarators, member-level #if with -D, same-package static includes, call-site inline. Arith and
+Mul now transpile from unmodified sources and match (14b7201f, b5a873d9); runtime parse errors 19
+-> 0, generated 0/29. Next: a hatchet shim dir (RawBuf/RawMem/MemA/I64/Acc/Backend), then the game.
+
 2026-09-25 [claude] Hatchet spike (github.com/andrewglind/hatchet v0.3.4, MIT, Rust, own Haxe
 parser, C++98 out). With a source adapter and one literal fix, Arith 14b7201f and Mul b5a873d9
 match JS/reflaxe.CPP bit for bit under g++ -std=c++98 -fwrapv. All 622k generated lines parse (~3 s).
