@@ -1167,8 +1167,13 @@ in deopt/re-opt windows at loading (frames 1320–1380: 21 scavenges; the last s
 `subarray` view per CD sector in the JS shim's `fileRead` (a copy loop now; within noise on the
 scavenge count) and the WebGL renderer's per-batch record objects (pooled; browser only,
 rendering verified). Digests unchanged. A hi/lo int-pair accumulator (pre-ADR-0021 `Gte.hx`) is
-being measured against the double one for speed and scavenges; result in the next entry.
-Next: decide the accumulator representation from that measurement; then the idle-loop skip.
+was measured against the double one on today's tree (digests identical, GteOps 1cf89aa2, Acc64
+0deeafe0): the pair is slower — min 14.89 → 16.58 s (+11 %), mean 16.37 → 17.18 s (+5 %), GTE
+share 31.1 → 33.4 % — and removes only part of the garbage: scavenges 91–93 → 84 over 3000
+frames, 194 → 160 over 9000, the loading burst 90 → 70. A scavenge here is 0.1–0.3 ms, so the
+difference over 150 s of emulated time is milliseconds. Decision: the double accumulator stays
+(ADR-0021 holds); the remaining 160 scavenges have another source, not yet attributed.
+Next: the idle-loop skip if approved; a mobile profile decides whether GC needs more.
 
 2026-09-25 [claude] GTE accumulator as a value (ADR-0021): `shim.Acc`, an abstract over a local
 double on JS (exact below 2^53) and a local int64 on C++; every MAC chain in `Gte.hx` is now
