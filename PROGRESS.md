@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] DC boot logos 1-2 black since the start: the backend redraws a frame's kept geometry at
+every present, and Crash Bash draws one 511x511 black rect (present 14) then only uploads logos until
+present 1318 — the rect was painted over them (logo 2's last column showed). bp_gpu_dirty now records
+a VRAM mark in the scene order; build_scene draws that part of the background there. Self-copies no
+longer report dirty (~500/1000 vblanks). Digests unchanged. Awaiting Flycast.
+
 2026-09-26 [claude] Menu 538 ms / 55.7 fps. Dull menu text on DC: PS1 modulation is texel*c/128 (up to ~2.0),
 the PVR's MODULATE stops at 1.0. Colours are now recorded raw; a textured primitive with any channel
 above 0x80 is drawn twice, the second pass additive (dst ONE) with max(2c-255, 0) — exact by

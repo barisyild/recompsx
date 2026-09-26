@@ -386,8 +386,11 @@ class Gpu {
 		}
 		copies++;
 		// The copy lands in emulated VRAM in both modes — it is state, not presentation — but a
-		// backend holding a decoded copy of that region now holds a stale one.
-		if (hw) Backend.gpuDirty(dx0, dy0, w, h);
+		// backend holding a decoded copy of that region now holds a stale one. Unless nothing
+		// moved: a rectangle copied onto itself without the mask bit to set leaves every pixel as
+		// it was, and Crash Bash copies one 2x1 onto itself at every buffer flip. Reported, it
+		// told the Dreamcast backend the picture had changed ~500 times per 1000 vblanks.
+		if (hw && !(sx0 == dx0 && sy0 == dy0 && !maskSet)) Backend.gpuDirty(dx0, dy0, w, h);
 		else {}
 	}
 

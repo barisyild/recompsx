@@ -154,7 +154,9 @@ static uint16_t g_line[TXR_MAX_W + 16] __attribute__((aligned(32)));
  * wrong palette. "Half the map right, half a single pink wash" was this integer. */
 #define GPU_MAX_STATES (GPU_MAX_CMDS + 1)
 
-/* One primitive. A rectangle borrows the triangle's slots: corner in [0], size in [1]. */
+/* One primitive. A rectangle borrows the triangle's slots: corner in [0], size in [1]. So does a
+ * VRAM write into the picture (GCMD_VRAM, see bp_gpu_dirty): VRAM corner in [0], size in [1]. */
+enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2 };
 typedef struct {
     int16_t  x[3], y[3];
     uint8_t  u[3], v[3];
@@ -2256,7 +2258,7 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x2, int y2, int c2, int u2, int v2) {
     gcmd_t* c = cmd_new();
     if(!c) return;
-    c->is_rect = 0;
+    c->is_rect = GCMD_TRI;
     c->x[0] = (int16_t)x0; c->y[0] = (int16_t)y0; c->u[0] = (uint8_t)u0; c->v[0] = (uint8_t)v0;
     c->x[1] = (int16_t)x1; c->y[1] = (int16_t)y1; c->u[1] = (uint8_t)u1; c->v[1] = (uint8_t)v1;
     c->x[2] = (int16_t)x2; c->y[2] = (int16_t)y2; c->u[2] = (uint8_t)u2; c->v[2] = (uint8_t)v2;
@@ -2274,7 +2276,7 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     (void)semi; (void)semi_mode;
     gcmd_t* c = cmd_new();
     if(!c) return;
-    c->is_rect = 1;
+    c->is_rect = GCMD_RECT;
     c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
     c->x[1] = (int16_t)w; c->y[1] = (int16_t)h;
     c->argb[0] = (uint32_t)bgr & 0x00FFFFFFu;   /* BGR, converted at build time */
@@ -2285,6 +2287,57 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
  * front one, and treating any write anywhere as "the picture changed" made that 5.5 ms a frame
  * for a picture that had not. */
 static int g_bg_x, g_bg_y, g_bg_w, g_bg_h;
+
+/* The last two display rectangles presented: a double-buffered game shows one and writes the
+ * other, and a write into either is a write into a picture this backend draws. */
+static int g_disp[2][4];
+
+static int meets(const int* r, int x, int y, int w, int h) {
+    return r[2] > 0 && !(r[0] + r[2] <= x || x + w <= r[0] || r[1] + r[3] <= y || y + h <= r[1]);
+}
+
+/* True when rectangle a lies inside rectangle b (corner, size). */
+static int inside(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+    return ax >= bx && ay >= by && ax + aw <= bx + bw && ay + ah <= by + bh;
+}
+
+/** Records that VRAM changed under the picture, at this point in the order of drawing.
+ *
+ *  This backend keeps a frame's geometry and draws it again at every present until the game draws
+ *  something new, over the VRAM picture as background. That is right until the game writes VRAM
+ *  after drawing: on a PlayStation the primitive went into VRAM once and the write replaced it,
+ *  but here the primitive was drawn again on top of the new picture. Crash Bash clears its screen
+ *  with one 511x511 black rectangle before the boot logos and then only uploads pictures, so the
+ *  logos were drawn and painted over, all but their last column. The mark says "the background is
+ *  on top from here, inside this rectangle"; build_scene draws that part of the background
+ *  texture at its place in the order. Not a frame boundary: the kept geometry stays, because
+ *  outside the rectangle it is still the picture.
+ *
+ *  Only runs of marks with no primitive between them are compacted — among those the order does
+ *  not matter, and a mark inside another adds nothing — which keeps a screen that only uploads
+ *  (a logo, a movie) from growing the list at every frame. */
+static void mark_vram(int x, int y, int w, int h) {
+    if(w <= 0 || h <= 0) return;
+    if(!meets(g_disp[0], x, y, w, h) && !meets(g_disp[1], x, y, w, h)) return;
+    int i = g_cmd_count;
+    while(i > 0 && g_cmds[i - 1].is_rect == GCMD_VRAM) i--;
+    for(int k = i; k < g_cmd_count; k++) {
+        const gcmd_t* m = &g_cmds[k];
+        if(inside(x, y, w, h, m->x[0], m->y[0], m->x[1], m->y[1])) return;
+    }
+    int out = i;
+    for(int k = i; k < g_cmd_count; k++) {
+        const gcmd_t* m = &g_cmds[k];
+        if(!inside(m->x[0], m->y[0], m->x[1], m->y[1], x, y, w, h)) g_cmds[out++] = *m;
+    }
+    g_cmd_count = out;
+    if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return; }
+    gcmd_t* c = &g_cmds[g_cmd_count++];
+    c->is_rect = GCMD_VRAM;
+    c->state = 0;
+    c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
+    c->x[1] = (int16_t)w; c->y[1] = (int16_t)h;
+}
 
 /* Recorded, not yet applied: the PVR's user clip rectangle is the obvious home for it, and the
  * spill it would remove is the one the double-buffered menus show at the top of the screen. */
@@ -2304,6 +2357,7 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
     if(!(g_bg_x + g_bg_w <= x || x + w <= g_bg_x
       || g_bg_y + g_bg_h <= y || y + h <= g_bg_y)) g_bg_stale = 1;
     else {}
+    mark_vram(x, y, w, h);
     /* Anything decoded out of this rectangle is now a copy of what used to be there. Evict by
      * page and by palette: a CLUT is sixteen or two hundred and fifty-six halfwords on one line,
      * and repainting it changes every texture that reads through it. */
@@ -2382,13 +2436,51 @@ static float blend_setup(pvr_poly_cxt_t* cxt, const gstate_t* s) {
 static int last_cover(int sw, int sh) {
     for(int i = g_cmd_count - 1; i >= 0; i--) {
         const gcmd_t* c = &g_cmds[i];
-        if(!c->is_rect) continue;
+        if(c->is_rect != GCMD_RECT) continue;
         const gstate_t* s = &g_states[c->state];
         if(s->flags & BP_GPU_SEMI) continue;
         const int x0 = c->x[0] - s->draw_x, y0 = c->y[0] - s->draw_y;
         if(x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh) return i;
     }
     return -1;
+}
+
+/* Whether a VRAM mark from `first` on falls inside the picture (sx, sy, sw, sh): if so the
+ * background texture is needed even under a covering fill. */
+static int marks_from(int first, int sx, int sy, int sw, int sh) {
+    const int disp[4] = { sx, sy, sw, sh };
+    for(int i = first < 0 ? 0 : first; i < g_cmd_count; i++) {
+        const gcmd_t* c = &g_cmds[i];
+        if(c->is_rect == GCMD_VRAM && meets(disp, c->x[0], c->y[0], c->x[1], c->y[1])) return 1;
+    }
+    return 0;
+}
+
+/** The part of the background texture a VRAM mark covers, drawn where the mark sits in the order.
+ *  Returns 1 when something was drawn, so the caller restates its own header after it. */
+static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scale_x, float scale_y) {
+    int x0 = c->x[0], y0 = c->y[0], x1 = c->x[0] + c->x[1], y1 = c->y[0] + c->y[1];
+    if(x0 < sx) x0 = sx;
+    if(y0 < sy) y0 = sy;
+    if(x1 > sx + sw) x1 = sx + sw;
+    if(y1 > sy + sh) y1 = sy + sh;
+    if(x0 >= x1 || y0 >= y1) return 0;
+    pvr_prim(&g_hdr, sizeof(g_hdr));
+    pvr_vertex_t v;
+    v.argb = 0xFFFFFFFFu;
+    v.oargb = 0;
+    v.z = 1.0f;
+    const float u0 = (float)(x0 - sx) / (float)g_txw, u1 = (float)(x1 - sx) / (float)g_txw;
+    const float w0 = (float)(y0 - sy) / (float)g_txh, w1 = (float)(y1 - sy) / (float)g_txh;
+    const float px0 = (float)(x0 - sx) * scale_x, px1 = (float)(x1 - sx) * scale_x;
+    const float py0 = (float)(y0 - sy) * scale_y, py1 = (float)(y1 - sy) * scale_y;
+    v.flags = PVR_CMD_VERTEX;
+    v.x = px0; v.y = py0; v.u = u0; v.v = w0; pvr_prim(&v, sizeof(v));
+    v.x = px1; v.y = py0; v.u = u1; v.v = w0; pvr_prim(&v, sizeof(v));
+    v.x = px0; v.y = py1; v.u = u0; v.v = w1; pvr_prim(&v, sizeof(v));
+    v.flags = PVR_CMD_VERTEX_EOL;
+    v.x = px1; v.y = py1; v.u = u1; v.v = w1; pvr_prim(&v, sizeof(v));
+    return 1;
 }
 
 /** Submits the header for this binding, compiled once and kept (see g_hdrc), and returns the
@@ -2494,6 +2586,11 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
     float alpha = 1.0f;
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
+        if(c->is_rect == GCMD_VRAM) {
+            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) cur_state = -1;
+            else {}
+            continue;
+        } else {}
         const gstate_t* s = &g_states[c->state];
 
         const int textured = (s->flags & BP_GPU_TEXTURED) && !c->is_rect;
@@ -2712,10 +2809,16 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
     if(sx != last_x || sy != last_y || sw != last_w || sh != last_h) g_bg_stale = 1;
     last_x = sx; last_y = sy; last_w = sw; last_h = sh;
 
+    if(!blank && (sx != g_disp[0][0] || sy != g_disp[0][1] || sw != g_disp[0][2] || sh != g_disp[0][3])) {
+        memcpy(g_disp[1], g_disp[0], sizeof(g_disp[0]));
+        g_disp[0][0] = sx; g_disp[0][1] = sy; g_disp[0][2] = sw; g_disp[0][3] = sh;
+    } else {}
+
     /* Covered: no upload, and the background stays marked stale for the next picture that
-     * does show it. */
+     * does show it — unless a VRAM mark after the cover needs the texture. */
     const int cover = (!blank && g_cmd_count > 0) ? last_cover(sw, sh) : -1;
-    if(!blank && cover < 0 && (g_bg_stale || g_vram == NULL)) {
+    const int need_bg = cover < 0 || marks_from(cover, sx, sy, sw, sh);
+    if(!blank && need_bg && (g_bg_stale || g_vram == NULL)) {
         declare_texture(pot(sw, TXR_MAX_W), pot(sh, TXR_MAX_H));
         if(flags & BP_PRESENT_24BPP) upload_24bpp(vram, sx, sy, sw, sh);
         else                         upload_15bpp(vram, sx, sy, sw, sh);
