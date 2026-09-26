@@ -12,6 +12,9 @@ presents, and the Flycast build records between the first two and quits at the t
     --top N      functions to list (default 40)
     --hot FUNC   also list FUNC's hottest addresses (substring of the demangled name), with
                  the instruction at each — disassembled from the ELF
+
+A profile recorded with RXPROF_CALLERS (scripts/dc-flycast-prof.sh --callers) also lists, for
+each watched function, its callers by the return address.
 """
 import bisect
 import os
@@ -21,10 +24,15 @@ import sys
 
 def load_profile(path):
     meta, samples = {}, []
+    meta["callers"] = []
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
                 meta["kind"] = line.split()[-1]
+                continue
+            if line.startswith("caller "):
+                _, lo, pr, n = line.split()
+                meta["callers"].append((int(lo, 16), int(pr, 16), int(n)))
                 continue
             a, b = line.split()
             if a in ("samples", "other", "timeslice", "cycles"):
@@ -92,6 +100,19 @@ def main():
     print(f"{'share':>6} {'ms@200MHz':>9}  function")
     for k, count in sorted(per_fn.items(), key=lambda kv: -kv[1])[:top]:
         print(f"{100.0 * count / total:5.1f}% {count * slice_ / 200e3:9.1f}  {names[k]}")
+    def name_of(addr):
+        k = bisect.bisect_right(starts, addr) - 1
+        return names[k] if k >= 0 and addr < ends[k] else f"{addr:08x}"
+    by_callee = {}
+    for lo, pr, n in meta["callers"]:
+        by_callee.setdefault(lo, {})
+        caller = name_of(pr)
+        by_callee[lo][caller] = by_callee[lo].get(caller, 0) + n
+    for lo, callers in by_callee.items():
+        n_all = sum(callers.values())
+        print(f"\ncallers of {name_of(lo)} ({n_all} samples, by the return address):")
+        for caller, n in sorted(callers.items(), key=lambda kv: -kv[1])[:12]:
+            print(f"  {100.0 * n / n_all:5.1f}%  {caller}")
     if hot:
         matches = [k for k in per_fn if hot in names[k]]
         if not matches:
