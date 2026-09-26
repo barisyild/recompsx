@@ -1901,40 +1901,47 @@ static void draw_profile_overlay(void) {
 
 /* ---- hardware drawing ---------------------------------------------------------------------- */
 
-/** A GP0 command word's 24-bit BGR, as a PVR ARGB8888. */
-static uint32_t bgr_to_argb(uint32_t c) {
+/* ---- colour conversion ------------------------------------------------------------------------
+ * A primitive's colour is the PlayStation's 24-bit BGR; the PVR wants ARGB. These run for every
+ * vertex of every scene, so all three channels are done at once in one word, without branches:
+ * clamping a doubled channel is a matter of whether its top bit was set, and that bit can be
+ * spread over its byte with a shift and a subtraction. The host test checks each against the
+ * per-channel form it replaced, for every one of the 2^24 colours. */
+
+/** BGR to ARGB8888, alpha 0xFF: bytes 0 and 2 change places. */
+static inline uint32_t bgr_to_argb(uint32_t c) {
     return 0xFF000000u | ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
 }
 
+/* 0xFF in every byte of `c` whose top bit is set, 0 elsewhere (c's other bits must be clear). */
+static inline uint32_t byte_mask(uint32_t top_bits) {
+    return (top_bits << 1) - (top_bits >> 7);
+}
+
 /** The same, doubled: PlayStation modulation is texel*colour/128, so 0x80 means "unchanged",
- *  where the PVR's multiply wants 0xFF for that. Brightening past 1.0 is not representable and
- *  clamps — which is the one place this path is dimmer than the software rasteriser. */
-static uint32_t bgr_to_argb_mod(uint32_t c);
+ *  where the PVR's multiply wants 0xFF for that — min(2c, 255) per channel. What the clamp
+ *  loses is bgr_to_argb_over's. */
+static inline uint32_t bgr_to_argb_mod(uint32_t c) {
+    const uint32_t d = ((c << 1) & 0x00FEFEFEu) | byte_mask(c & 0x00808080u);
+    return bgr_to_argb(d);
+}
 
 /** What the doubled colour loses to the clamp: 2c - 255 per channel, floored at zero. Drawn as a
  *  second, additive pass it restores PlayStation modulation above 1.0 — texel*(2c) is
- *  texel*min(2c, 1) + texel*max(2c - 1, 0), and blending is linear in the source. */
-static uint32_t bgr_to_argb_over(uint32_t c) {
-    int r = (int)(c & 0xFFu) * 2 - 255, g = (int)((c >> 8) & 0xFFu) * 2 - 255;
-    int b = (int)((c >> 16) & 0xFFu) * 2 - 255;
-    if(r < 0) r = 0;
-    if(g < 0) g = 0;
-    if(b < 0) b = 0;
-    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+ *  texel*min(2c, 1) + texel*max(2c - 1, 0), and blending is linear in the source. For a channel
+ *  of 0x80 or more, 2c - 255 is 2(c - 0x80) + 1. */
+static inline uint32_t bgr_to_argb_over(uint32_t c) {
+    const uint32_t v = ((c & 0x007F7F7Fu) << 1) | 0x00010101u;
+    return bgr_to_argb(v & byte_mask(c & 0x00808080u));
 }
 
-/** Whether any channel brightens (above 0x80, the PlayStation's 1.0). */
-static int bgr_brightens(uint32_t c) {
-    return (c & 0xFFu) > 0x80u || ((c >> 8) & 0xFFu) > 0x80u || ((c >> 16) & 0xFFu) > 0x80u;
+/** Whether any channel brightens: above 0x80, the PlayStation's 1.0 — top bit set and some other
+ *  bit too. Adding 0x7F to a byte's low seven bits sets its top bit exactly when they are not all
+ *  zero, and cannot carry into the next byte. */
+static inline int bgr_brightens(uint32_t c) {
+    return (c & ((c & 0x007F7F7Fu) + 0x007F7F7Fu) & 0x00808080u) != 0;
 }
-
-static uint32_t bgr_to_argb_mod(uint32_t c) {
-    uint32_t r = (c & 0xFFu) << 1, g = ((c >> 8) & 0xFFu) << 1, b = ((c >> 16) & 0xFFu) << 1;
-    if(r > 255) r = 255;
-    if(g > 255) g = 255;
-    if(b > 255) b = 255;
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
-}
+/* ---- end of colour conversion ---- */
 
 /** BGR555 as VRAM holds it, to the ARGB1555 the PVR samples. Texel zero is the PlayStation's
  *  "nothing here", and becomes alpha 0 so punch-through drops it. */
@@ -2584,10 +2591,24 @@ static struct { uint16_t cx, cy; uint32_t n; uint8_t used; } g_prio[PRIO_SLOTS];
 
 PROF_NOINLINE static void palette_priority(void) {
     memset(g_prio, 0, sizeof(g_prio));
+    /* The slots in use, collected as they fill: the ranking below then sorts a few dozen entries
+     * where it used to scan all 256 slots once per bank — sixty-four passes, some sixteen
+     * thousand iterations a scene, for a list that is sorted once. And primitives arrive in runs
+     * sharing a state, so a run's palette is looked up once and counted by increment. */
+    int used[PRIO_SLOTS];
+    int n_used = 0, last_state = -1, last_slot = -1;
     for(int i = 0; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
+        if(c->is_rect) continue;
+        if((int)c->state == last_state) {
+            if(last_slot >= 0) g_prio[last_slot].n++;
+            else {}
+            continue;
+        } else {}
+        last_state = (int)c->state;
+        last_slot = -1;
         const gstate_t* s = &g_states[c->state];
-        if(c->is_rect || !(s->flags & BP_GPU_TEXTURED) || s->depth != 0) continue;
+        if(!(s->flags & BP_GPU_TEXTURED) || s->depth != 0) continue;
         const uint32_t base = (uint32_t)s->clut_x * 31u + (uint32_t)s->clut_y * 17u;
         for(int probe = 0; probe < 4; probe++) {
             const int hh = (int)((base + (uint32_t)probe) & (PRIO_SLOTS - 1));
@@ -2596,22 +2617,32 @@ PROF_NOINLINE static void palette_priority(void) {
                 g_prio[hh].cx = s->clut_x;
                 g_prio[hh].cy = s->clut_y;
                 g_prio[hh].n = 1;
+                used[n_used++] = hh;
+                last_slot = hh;
                 break;
             }
-            if(g_prio[hh].cx == s->clut_x && g_prio[hh].cy == s->clut_y) { g_prio[hh].n++; break; }
+            if(g_prio[hh].cx == s->clut_x && g_prio[hh].cy == s->clut_y) {
+                g_prio[hh].n++;
+                last_slot = hh;
+                break;
+            }
         }
     }
-    for(int k = 0; k < PAL_BANKS_4BPP; k++) {
-        int best = -1;
-        for(int i = 0; i < PRIO_SLOTS; i++)
-            if(g_prio[i].used && g_prio[i].n > 0
-               && (best < 0 || g_prio[i].n > g_prio[best].n)) best = i;
-        if(best < 0) break;
-        /* A refusal means no bank is free for THIS palette; a later one may still be resident
-         * and want its lease refreshed, so the pass continues rather than abandoning the list. */
-        pal_bank_cached(g_prio[best].cx, g_prio[best].cy, 0);
-        g_prio[best].n = 0;
+    /* Most primitives first; a tie goes to the lower slot, the order the scan gave. */
+    for(int a = 1; a < n_used; a++) {
+        const int v = used[a];
+        int b = a - 1;
+        while(b >= 0 && (g_prio[used[b]].n < g_prio[v].n
+                         || (g_prio[used[b]].n == g_prio[v].n && used[b] > v))) {
+            used[b + 1] = used[b];
+            b--;
+        }
+        used[b + 1] = v;
     }
+    /* A refusal means no bank is free for THIS palette; a later one may still be resident and
+     * want its lease refreshed, so the pass continues rather than abandoning the list. */
+    for(int k = 0; k < n_used && k < PAL_BANKS_4BPP; k++)
+        pal_bank_cached(g_prio[used[k]].cx, g_prio[used[k]].cy, 0);
 }
 
 void bp_gpu_vram(const uint16_t* vram) {
@@ -3043,17 +3074,22 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
 }
 
 /** One triangle's vertices, written straight into a store queue and flushed to the TA (KOS direct
- *  rendering). Every field is written: the queue holds whatever went before. */
-static inline void put_tri(const gcmd_t* c, const gstate_t* s, const uint32_t* col,
-                           float scale_x, float scale_y, float ou, float ov, float rdim) {
+ *  rendering). Every field is written: the queue holds whatever went before.
+ *
+ *  Each coordinate is one conversion and one multiply-add: the offsets — the drawing area's
+ *  origin in screen units, the texel centre and patch origin in texture units — are the caller's,
+ *  converted once per run. They were converted again at every vertex, six int-to-float
+ *  conversions and ten float operations where four and four do. */
+static inline void put_tri(const gcmd_t* c, const uint32_t* col, float scale_x, float scale_y,
+                           float xo, float yo, float rdim, float uo, float vo) {
     for(int k = 0; k < 3; k++) {
         pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
         v->flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-        v->x = ((float)c->x[k] - (float)s->draw_x) * scale_x;
-        v->y = ((float)c->y[k] - (float)s->draw_y) * scale_y;
+        v->x = (float)c->x[k] * scale_x + xo;
+        v->y = (float)c->y[k] * scale_y + yo;
         v->z = 1.0f;
-        v->u = ((float)c->u[k] - ou + 0.5f) * rdim;
-        v->v = ((float)c->v[k] - ov + 0.5f) * rdim;
+        v->u = (float)c->u[k] * rdim + uo;
+        v->v = (float)c->v[k] * rdim + vo;
         v->argb = col[k];
         v->oargb = 0;
         pvr_dr_commit(v);
@@ -3096,6 +3132,8 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
      * arena brightens a quarter of them. Now the run's header is kept when first emitted and
      * copied back (`restate`), and the brightening header is looked up once per run. */
     int restate = 0, over_ready = 0;
+    float cur_xo = 0.0f, cur_yo = 0.0f, cur_uo = 0.0f, cur_vo = 0.0f;
+    uint32_t cur_a = 0xFF000000u;
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
         if(c->is_rect == GCMD_VRAM) {
@@ -3177,6 +3215,14 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
             alpha = emit_header(mem, fmt, dim, s, 0, &g_run_hdr);
             restate = 0;
             over_ready = 0;
+            /* What put_tri adds after scaling: the drawing area's origin, and in the texture the
+             * texel centre less the patch origin. rdim is a power of two, so the texture terms
+             * are exact either way round. */
+            cur_xo = -(float)s->draw_x * scale_x;
+            cur_yo = -(float)s->draw_y * scale_y;
+            cur_uo = (0.5f - (float)ou) * cur_rdim;
+            cur_vo = (0.5f - (float)ov) * cur_rdim;
+            cur_a = (uint32_t)(alpha * 255.0f) << 24;
         } else if(restate) {
             pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
             restate = 0;
@@ -3184,12 +3230,12 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
 
         /* Vertices go by KOS direct rendering (put_tri), where pvr_prim built each one on the
          * stack and copied it through a call. */
-        const uint32_t a = (uint32_t)(alpha * 255.0f) << 24;
+        const uint32_t a = cur_a;
         if(c->is_rect) {
-            const float x0 = ((float)c->x[0] - (float)s->draw_x) * scale_x;
-            const float y0 = ((float)c->y[0] - (float)s->draw_y) * scale_y;
-            const float x1 = ((float)(c->x[0] + c->x[1]) - (float)s->draw_x) * scale_x;
-            const float y1 = ((float)(c->y[0] + c->y[1]) - (float)s->draw_y) * scale_y;
+            const float x0 = (float)c->x[0] * scale_x + cur_xo;
+            const float y0 = (float)c->y[0] * scale_y + cur_yo;
+            const float x1 = (float)(c->x[0] + c->x[1]) * scale_x + cur_xo;
+            const float y1 = (float)(c->y[0] + c->y[1]) * scale_y + cur_yo;
             const uint32_t argb = (bgr_to_argb(c->argb[0]) & 0x00FFFFFFu) | a;
             for(int k = 0; k < 4; k++) {
                 pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
@@ -3215,7 +3261,7 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                           & 0x00FFFFFFu) | a;
                 if(mem && bgr_brightens(c->argb[k])) bright = 1;
             }
-            put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
+            put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
             if(bright && !(s->flags & BP_GPU_RAW)) {
                 if(over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
                 else {
@@ -3224,7 +3270,7 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                 }
                 for(int k = 0; k < 3; k++)
                     col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
-                put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
+                put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
                 restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
                 g_bright_prims++;

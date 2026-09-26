@@ -1147,6 +1147,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Scene build: colours branch-free in one word (host: all 2^24 identical to the per-channel
+forms), vertex offsets/alpha converted once per run (fmac; 66 -> 57 instr a vertex), palette_priority sorts
+the few used slots once instead of 64 scans of 256 (host: 3000 random streams, same pal_bank_cached order;
+a flipped tie-break is caught). fastmem: Flycast has no MMU for this disc ("BAD", no fault); check costs
+~25 ns/access (D-A) -> ~5% ceiling on hardware; dropped. Next: user's bench (B1500) + profile.
+
 2026-09-26 [claude] GTE rewrite (d19ebe4): 32-bit rows, RTPT one body; GteProject 148c8cbc before and after.
 Found IR0 = sat(MAC0) where the spec says >> 12 — fixed, GteOps/GteProject digests moved (de71ee8a/43a78d52),
 game digests did not: Crash Bash never reads RTPS's IR0 (0 of 28.7M reads). --dc-fastmem-test (ee16117) times
