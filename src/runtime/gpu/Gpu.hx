@@ -92,6 +92,15 @@ class Gpu {
 	static var xferW = 0;
 	static var xferH = 0;
 	static var xferI = 0;
+	// The next texel's column and row in the rectangle, stepped rather than derived from xferI:
+	// `xferI % xferW` and `xferI / xferW` were two divisions a texel, in software on the SH-4.
+	static var xferCol = 0;
+	static var xferRow = 0;
+	// Whether any texel of this upload (or of the current copy) differed from what VRAM held. A
+	// hardware backend is told of a write only when it changed something: games upload the same
+	// palette or texture again and again, and each report made the Dreamcast decode a page anew.
+	static var xferChanged = false;
+	static var copyChanged = false;
 
 	/** Pixels delivered by upload rather than by rasterisation. */
 	public static var uploaded(default, null) = 0;
@@ -281,7 +290,7 @@ class Gpu {
 		// past tense, and a backend that copies the region on hearing of it (the browser's)
 		// must hear of it after the words are in. Telling it at the header, as this used to,
 		// handed it the palette that was there before the upload.
-		if (xferLeft == 0 && hw) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		if (xferLeft == 0 && hw && xferChanged) Backend.gpuDirty(xferX, xferY, xferW, xferH);
 		else {}
 	}
 
@@ -300,16 +309,25 @@ class Gpu {
 	static function putTexel(p:Int):Void {
 		if (xferI >= xferW * xferH) return;
 		else {}
-		final x = (xferX + (xferI % xferW)) & 1023;
-		final y = (xferY + shim.IntMath.div(xferI, xferW)) & 511;
-		if (maskCheck && (Vram.get(x, y) & 0x8000) != 0) {
-			xferI++;
-			uploaded++;
-			return;
-		} else {}
-		Vram.set(x, y, maskSet ? p | 0x8000 : p);
+		final x = (xferX + xferCol) & 1023;
+		final y = (xferY + xferRow) & 511;
+		nextTexel();
+		if (maskCheck && (Vram.get(x, y) & 0x8000) != 0) return;
+		else {}
+		final v = maskSet ? p | 0x8000 : p;
+		if (hw && Vram.get(x, y) != v) xferChanged = true;
+		else {}
+		Vram.set(x, y, v);
+	}
+
+	static inline function nextTexel():Void {
 		xferI++;
 		uploaded++;
+		xferCol++;
+		if (xferCol == xferW) {
+			xferCol = 0;
+			xferRow++;
+		} else {}
 	}
 
 	/** Arms the transfer once its header words are in. */
@@ -323,6 +341,9 @@ class Gpu {
 		if (xferH == 0) xferH = 512;
 		else {}
 		xferI = 0;
+		xferCol = 0;
+		xferRow = 0;
+		xferChanged = false;
 		// Two pixels to a word, rounded up: an odd-width rectangle pads its last word.
 		xferLeft = (xferW * xferH + 1) >> 1;
 		// The backend is told when the last word lands (transferWord), not here: the rectangle
@@ -378,6 +399,7 @@ class Gpu {
 		final dy0 = (packet[2] >>> 16) & 0x1FF;
 		final w = ((packet[3] - 1) & 0x3FF) + 1;
 		final h = (((packet[3] >>> 16) - 1) & 0x1FF) + 1;
+		copyChanged = false;
 		for (y in 0...h) {
 			for (x in 0...w) {
 				final src = Vram.get((sx0 + x) & 0x3FF, (sy0 + y) & 0x1FF);
@@ -386,11 +408,10 @@ class Gpu {
 		}
 		copies++;
 		// The copy lands in emulated VRAM in both modes — it is state, not presentation — but a
-		// backend holding a decoded copy of that region now holds a stale one. Unless nothing
-		// moved: a rectangle copied onto itself without the mask bit to set leaves every pixel as
-		// it was, and Crash Bash copies one 2x1 onto itself at every buffer flip. Reported, it
+		// backend holding a decoded copy of that region now holds a stale one — if a pixel changed.
+		// Crash Bash copies one 2x1 onto itself at every buffer flip, which changes nothing and
 		// told the Dreamcast backend the picture had changed ~500 times per 1000 vblanks.
-		if (hw && !(sx0 == dx0 && sy0 == dy0 && !maskSet)) Backend.gpuDirty(dx0, dy0, w, h);
+		if (hw && copyChanged) Backend.gpuDirty(dx0, dy0, w, h);
 		else {}
 	}
 
@@ -400,7 +421,10 @@ class Gpu {
 		final dy = (dy0 + y) & 0x1FF;
 		if (maskCheck && (Vram.get(dx, dy) & 0x8000) != 0) return;
 		else {}
-		Vram.set(dx, dy, maskSet ? src | 0x8000 : src);
+		final v = maskSet ? src | 0x8000 : src;
+		if (hw && Vram.get(dx, dy) != v) copyChanged = true;
+		else {}
+		Vram.set(dx, dy, v);
 		pixels++;
 	}
 

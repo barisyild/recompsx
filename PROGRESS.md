@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Ballistix after the twiddle uploader: 1098 -> ~860 ms, build 468 -> ~232; tex_decode now ~94.
+Runtime reports a VRAM write to the backend only if a pixel changed (uploads and copies compare as they
+write; up to 72 % of texture-area writes changed nothing), and steps upload col/row instead of two
+divisions a texel. Digests and 9000-frame JS logs unchanged. Overlay line 3: dec mirror/slot/bake.
+
 2026-09-26 [claude] Boot logos confirmed on Flycast. Ballistix arena: 1098 ms, build 468, pvr_txr_load_ex 160 +
 __udivsi3 136. KOS's pvr_txr_load_ex divides twice per texel (x/min + y/min, zero for square textures)
 and stores texels one uncached halfword at a time; replaced by twid_load4/16: KOS's layout produced in

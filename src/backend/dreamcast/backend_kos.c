@@ -207,6 +207,9 @@ static int      g_prof_skipped;
 static uint64_t g_prof_build;
 /* Textured primitives drawn twice this window, for colours above the PVR's 1.0 (put_tri). */
 static int      g_bright_prims;
+/* Texture decodes this window, by cache: 4bpp page mirrors, pool slots, baked palette patches.
+ * The overlay's `dec m/s/b`: what tells an invalidated texture from a cache that is too small. */
+static int      g_win_mir, g_win_slot, g_win_bake;
 
 /* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
  * can tell them apart: inlined, they all read as `present_frame`. A call each is the price. */
@@ -1640,11 +1643,12 @@ static void profile_report(void) {
         snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
                  (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
                  (unsigned long)(spu_us / 1000));
-    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu fin %lu wait %lu x2 %d",
+    /* fin and wait (hand-over and the PVR's wait) have read 0 for a long while; they stay in the
+     * serial line, and their room goes to the texture decodes. */
+    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d",
              (unsigned long)(gpu_us / 1000),
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
-             (unsigned long)((g_prof_submit - g_prof_build) / 1000),
-             (unsigned long)(g_prof_wait / 1000), g_bright_prims);
+             g_bright_prims, g_win_mir, g_win_slot, g_win_bake);
     /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
      * header counts that were here are in the serial line. */
     syms_top(l3, l4, sizeof(l3));
@@ -1681,6 +1685,7 @@ static void profile_report(void) {
     g_prof_build = 0;
     g_prof_skipped = 0;
     g_bright_prims = 0;
+    g_win_mir = g_win_slot = g_win_bake = 0;
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) { g_prof_section_us[i] = 0; g_samp_where[i] = 0; }
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
@@ -2104,6 +2109,7 @@ PROF_NOINLINE static int tex_slot(const gstate_t* s) {
     g_tex[slot].depth = s->depth;
     g_tex[slot].window = s->window;
     g_tex_decodes++;
+    g_win_slot++;
     tex_decode(g_tex[slot].mem, s);
     return slot;
 }
@@ -2128,6 +2134,7 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
             pg->valid = 1;
             pg->defer = 0;
             g_mir_decodes++;
+            g_win_mir++;
         }
     }
     pg->bound_frame = g_tex_frame;
@@ -2193,6 +2200,7 @@ PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
     g_bake[slot].bound_frame = g_tex_frame;
     g_bake_live++;
     g_bake_decodes++;
+    g_win_bake++;
     bake_decode(g_bake[slot].mem, s, tu, tv);
     return slot;
 }
