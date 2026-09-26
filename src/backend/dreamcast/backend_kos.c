@@ -360,6 +360,7 @@ typedef struct {
     pvr_ptr_t mem;
     uint16_t  tex_x, tex_y, clut_x, clut_y;
     uint8_t   tu, tv, used;
+    uint8_t   depth;            /* 0: a 4bpp page's patch, 1: an 8bpp page's — see bake_slot */
     uint32_t  bound_frame;
 } gbake_t;
 static gbake_t g_bake[BAKE_MAX];
@@ -2221,6 +2222,29 @@ static void twid_bake(uint32_t* d, int px, int py, const uint32_t* lo, const uin
     }
 }
 
+/** A 64x64 patch of an 8bpp page with its CLUT applied (tables as twid8_page, 256 entries):
+ *  VRAM halfword column px, row py, two halfwords — four texels — per tile row. */
+static void twid_bake8(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
+    for(int ty = 0; ty < 16; ty += 2) {
+        const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        for(int tx = 0; tx < 16; tx++) {
+            const uint32_t* s = (const uint32_t*)(r0 + ((px + 2 * tx) & 1023));
+            const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
+            for(int h = 0; h < 2; h++) {
+                uint32_t p[8];
+                for(int y = 0; y < 4; y++) {
+                    const uint32_t v = s[(4 * h + y) * (VRAM_W / 2)];
+                    p[2 * y]     = lo[v & 0xFF] | hi[(v >> 8) & 0xFF];
+                    p[2 * y + 1] = lo[(v >> 16) & 0xFF] | hi[v >> 24];
+                }
+                uint32_t* o = d + ((g_spread[4 * (ty + h)] | xbits) >> 1);
+                tile16(o, p);
+                sq_flush(o);
+            }
+        }
+    }
+}
+
 /* The store-queue address of a texture, for the routines above, and the end of a batch of them. */
 static uint32_t* twid_open(pvr_ptr_t dst) {
     return sq_lock((void*)(((uintptr_t)dst & 0xffffff) | PVR_TA_TEX_MEM));
@@ -2535,24 +2559,36 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
     return pg->mem;
 }
 
-/** One 64x64 patch of a page with a CLUT already applied, for palettes that got no bank. */
+/** One 64x64 patch of a page with its CLUT already applied: a 4bpp page's, for palettes that
+ *  got no bank, or an 8bpp page's (bake_slot). */
 static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
-    uint32_t lo[16], hi[16];
-    for(int i = 0; i < 16; i++) {
+    static uint32_t lo[256], hi[256];
+    const int n = s->depth == 1 ? 256 : 16;
+    for(int i = 0; i < n; i++) {
         lo[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
         hi[i] = lo[i] << 16;
     }
-    /* The patch origin is a multiple of four texels, so each tile row is one VRAM halfword. */
+    /* The patch origin is a multiple of four texels, so each tile row is one VRAM halfword at
+     * 4bpp and two at 8bpp. */
     uint32_t* d = twid_open(dst);
-    twid_bake(d, s->tex_x + tu * (BAKE_DIM / 4), s->tex_y + tv * BAKE_DIM, lo, hi);
+    if(s->depth == 1)
+        twid_bake8(d, s->tex_x + tu * (BAKE_DIM / 2), s->tex_y + tv * BAKE_DIM, lo, hi);
+    else
+        twid_bake(d, s->tex_x + tu * (BAKE_DIM / 4), s->tex_y + tv * BAKE_DIM, lo, hi);
     twid_close();
 }
 
+/** The patch holding this 64x64 part of a page through its CLUT, baking it first if needed.
+ *  4bpp pages come here only when their palette got no bank; 8bpp pages always do when a
+ *  primitive samples within one patch. An 8bpp page through each of its CLUTs was a whole
+ *  128 KB ARGB slot, and Crash Bandicoot: Warped binds seventeen such pairs a frame — every one
+ *  of them sampling a single 64x64 corner — against twelve slots: five whole-page decodes a
+ *  frame and slots evicted while the PVR still read them. As patches it is ~26 x 8 KB. */
 PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
     for(int i = 0; i < g_bake_n; i++) {
         if(g_bake[i].used && g_bake[i].tex_x == s->tex_x && g_bake[i].tex_y == s->tex_y
            && g_bake[i].clut_x == s->clut_x && g_bake[i].clut_y == s->clut_y
-           && g_bake[i].tu == tu && g_bake[i].tv == tv) {
+           && g_bake[i].tu == tu && g_bake[i].tv == tv && g_bake[i].depth == s->depth) {
             if(g_bake[i].bound_frame != g_tex_frame) g_bake_live++;
             g_bake[i].bound_frame = g_tex_frame;
             return i;
@@ -2582,6 +2618,7 @@ PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
     g_bake[slot].clut_y = s->clut_y;
     g_bake[slot].tu = (uint8_t)tu;
     g_bake[slot].tv = (uint8_t)tv;
+    g_bake[slot].depth = (uint8_t)s->depth;
     g_bake[slot].bound_frame = g_tex_frame;
     g_bake_live++;
     g_bake_decodes++;
@@ -2915,12 +2952,15 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
     /* A baked patch has the CLUT inside it, so it goes stale from either direction. */
     for(int i = 0; i < g_bake_n; i++) {
         if(!g_bake[i].used) continue;
-        const int bx = g_bake[i].tex_x + g_bake[i].tu * (BAKE_DIM / 4);
+        /* A patch is 64 texels: 16 halfwords at 4bpp, 32 at 8bpp; its CLUT 16 or 256. */
+        const int bw = g_bake[i].depth == 1 ? BAKE_DIM / 2 : BAKE_DIM / 4;
+        const int cw = g_bake[i].depth == 1 ? 256 : 16;
+        const int bx = g_bake[i].tex_x + g_bake[i].tu * bw;
         const int by = g_bake[i].tex_y + g_bake[i].tv * BAKE_DIM;
-        const int page_hit = !(bx + BAKE_DIM / 4 <= x || x + w <= bx
+        const int page_hit = !(bx + bw <= x || x + w <= bx
                             || by + BAKE_DIM <= y || y + h <= by);
         const int clut_hit = g_bake[i].clut_y >= y && g_bake[i].clut_y < y + h
-                          && g_bake[i].clut_x < x + w && g_bake[i].clut_x + 16 > x;
+                          && g_bake[i].clut_x < x + w && g_bake[i].clut_x + cw > x;
         if(page_hit || clut_hit) g_bake[i].used = 0;
     }
     /* No palette-bank work here, and that is the point of content-addressed banks: sixteen
@@ -3132,7 +3172,7 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
     float cur_rdim = 1.0f / (float)TEX_DIM;
     pvr_ptr_t cur_mem = NULL;
     /* Resolved once per run of primitives sharing a state — which is how they arrive. */
-    int run_state = -1, run_bank = -1, run_slot = -1;
+    int run_state = -1, run_bank = -1, run_slot = -1, run_patch8 = 0;
     pvr_ptr_t run_mir = NULL;
     float alpha = 1.0f;
     /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
@@ -3167,13 +3207,18 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                    && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
                     run_mir = page4_mirror(s);
                 else {}
+                /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
+                 * (bake_slot); the whole page is decoded only for a primitive sampling across
+                 * patches, below. */
+                run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
+                          && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
                 if(run_mir) {
                     run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0);
-                } else {
+                } else if(!run_patch8) {
                     run_slot = tex_slot(s);
                     if(run_slot >= 0 && s->depth == 0)
                         run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1);
-                }
+                } else {}
             }
             if(run_mir && run_bank >= 0) {
                 mem = run_mir;
@@ -3203,6 +3248,31 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                     mem = run_mir;
                     fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb)
                         | PVR_TXRFMT_TWIDDLED;
+                }
+            } else if(run_patch8) {
+                int umin = c->u[0], umax = c->u[0], vmin = c->v[0], vmax = c->v[0];
+                for(int k = 1; k < 3; k++) {
+                    if(c->u[k] < umin) umin = c->u[k];
+                    if(c->u[k] > umax) umax = c->u[k];
+                    if(c->v[k] < vmin) vmin = c->v[k];
+                    if(c->v[k] > vmax) vmax = c->v[k];
+                }
+                const int tu = umin / BAKE_DIM, tv = vmin / BAKE_DIM;
+                const int b = (umax / BAKE_DIM == tu && vmax / BAKE_DIM == tv)
+                            ? bake_slot(s, tu, tv) : -1;
+                if(b >= 0) {
+                    mem = g_bake[b].mem;
+                    fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+                    dim = BAKE_DIM; ou = tu * BAKE_DIM; ov = tv * BAKE_DIM;
+                } else {
+                    /* Sampling wider than one patch, or every patch in flight: the page. */
+                    if(run_slot < 0) run_slot = tex_slot(s);
+                    else {}
+                    if(run_slot < 0) continue;
+                    else {}
+                    g_tex[run_slot].bound_frame = g_tex_frame;
+                    mem = g_tex[run_slot].mem;
+                    fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
                 }
             } else if(run_slot >= 0) {
                 g_tex[run_slot].bound_frame = g_tex_frame;

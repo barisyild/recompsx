@@ -2,6 +2,16 @@
 
 ## Status snapshot
 
+**2026-09-27: Dreamcast 8bpp textures from 64x64 patches — Crash 3 ~30 % -> ~48 % speed.**
+An 8bpp page through each of its CLUTs was a whole 128 KB ARGB slot; Crash 3's medieval demo binds
+17 such pairs a frame against 12 slots: 5-19 whole-page decodes a frame (`tex_decode` 37 %) and
+slots evicted while the PVR still read them. Every 8bpp primitive there samples within one 64x64
+patch (273/273, 293/293; ~26 patches a frame), so they now go through the bake pool with their CLUT
+applied (`twid_bake8`, patch key carries the depth, invalidation by 32-halfword / 256-entry extents);
+a primitive sampling across patches still gets the whole page. Host check: every texel of 64 patches
+equals the full-page decoder's and the CLUT lookup (262,144 texels). Flycast, vblanks 4700-5000:
+3280 -> 2080 M cycles, no page conflicts left. Crash Bash 18800-20300: 6411.5 -> 6414.8 M (noise).
+
 **2026-09-27: Crash 3's second demo (the diving level) runs; relocatable keys cover code only.**
 The fish's seven-word GOOL native routine was keyed on eight words, the eighth an entry reference
 the game turns into a pointer on load: missed in RAM, the demo froze at ~10150. Keys now hash only
@@ -1197,6 +1207,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] DC backend: 8bpp pages drawn from 64x64 CLUT-baked patches (bake pool) instead of
+whole 128 KB slots; Crash 3 demo 16.4 -> 10.4 s per 5 s of game, no conflicts; Crash Bash unchanged.
+Next: Crash 3 on DC is CPU-bound now (GTE, dispatch, memory) — profile for the next step.
 
 2026-09-27 [claude] Crash 3 diving demo froze: relocatable key reached into data the game rewrites
 (EID -> pointer). Keys now code-only, variable length, masked separating rows (ADR-0025 rev.,
