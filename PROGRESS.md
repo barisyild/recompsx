@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Menu 538 ms / 55.7 fps. Dull menu text on DC: PS1 modulation is texel*c/128 (up to ~2.0),
+the PVR's MODULATE stops at 1.0. Colours are now recorded raw; a textured primitive with any channel
+above 0x80 is drawn twice, the second pass additive (dst ONE) with max(2c-255, 0) — exact by
+linearity. Overlay line 3 counts them (x2). bp_log drops INFO under the overlay (heartbeat = scif).
+
 2026-09-26 [claude] Flycast gameplay 701 ms / 42.7 fps after the serial fix (emu 348 -> 253). Loading screen:
 disc 2611 of 2987 ms, thd_idle 2602 — the drive, ~70 KB/s effective. Cause: disc FILEs were buffered,
 so newlib refilled a small unaligned buffer and KOS's ISO9660 read every 2048-byte sector with its own

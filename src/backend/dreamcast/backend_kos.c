@@ -202,6 +202,8 @@ static int      g_prof_skipped;
  * handing the finished scene to the hardware — and its spikes have now survived two confident
  * explanations of mine. Splitting it is cheaper than a third guess. */
 static uint64_t g_prof_build;
+/* Textured primitives drawn twice this window, for colours above the PVR's 1.0 (put_tri). */
+static int      g_bright_prims;
 
 /* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
  * can tell them apart: inlined, they all read as `present_frame`. A call each is the price. */
@@ -229,15 +231,15 @@ static uint64_t g_prof_build;
 typedef struct {
     pvr_ptr_t mem;
     int       fmt, dim;
-    uint8_t   flags, semi_mode, used;
+    uint8_t   flags, semi_mode, used, over;
     float     alpha;
     pvr_poly_hdr_t hdr;
 } ghdr_t;
 static ghdr_t g_hdrc[HDRC_N];
 static int    g_hdr_hits, g_hdr_compiles;
 
-static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s) {
-    uint32_t h = (uint32_t)(uintptr_t)mem;
+static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over) {
+    uint32_t h = (uint32_t)(uintptr_t)mem + (uint32_t)over * 0x9E3779B9u;
     h = h * 2654435761u + (uint32_t)fmt;
     h = h * 2654435761u + (uint32_t)dim;
     h = h * 2654435761u + ((uint32_t)s->flags << 8) + (uint32_t)s->semi_mode;
@@ -1634,11 +1636,11 @@ static void profile_report(void) {
         snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
                  (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
                  (unsigned long)(spu_us / 1000));
-    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu fin %lu wait %lu",
+    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu fin %lu wait %lu x2 %d",
              (unsigned long)(gpu_us / 1000),
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
              (unsigned long)((g_prof_submit - g_prof_build) / 1000),
-             (unsigned long)(g_prof_wait / 1000));
+             (unsigned long)(g_prof_wait / 1000), g_bright_prims);
     /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
      * header counts that were here are in the serial line. */
     syms_top(l3, l4, sizeof(l3));
@@ -1674,6 +1676,7 @@ static void profile_report(void) {
     g_empty_presents = 0;
     g_prof_build = 0;
     g_prof_skipped = 0;
+    g_bright_prims = 0;
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) { g_prof_section_us[i] = 0; g_samp_where[i] = 0; }
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
@@ -1717,6 +1720,25 @@ static uint32_t bgr_to_argb(uint32_t c) {
 /** The same, doubled: PlayStation modulation is texel*colour/128, so 0x80 means "unchanged",
  *  where the PVR's multiply wants 0xFF for that. Brightening past 1.0 is not representable and
  *  clamps — which is the one place this path is dimmer than the software rasteriser. */
+static uint32_t bgr_to_argb_mod(uint32_t c);
+
+/** What the doubled colour loses to the clamp: 2c - 255 per channel, floored at zero. Drawn as a
+ *  second, additive pass it restores PlayStation modulation above 1.0 — texel*(2c) is
+ *  texel*min(2c, 1) + texel*max(2c - 1, 0), and blending is linear in the source. */
+static uint32_t bgr_to_argb_over(uint32_t c) {
+    int r = (int)(c & 0xFFu) * 2 - 255, g = (int)((c >> 8) & 0xFFu) * 2 - 255;
+    int b = (int)((c >> 16) & 0xFFu) * 2 - 255;
+    if(r < 0) r = 0;
+    if(g < 0) g = 0;
+    if(b < 0) b = 0;
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+/** Whether any channel brightens (above 0x80, the PlayStation's 1.0). */
+static int bgr_brightens(uint32_t c) {
+    return (c & 0xFFu) > 0x80u || ((c >> 8) & 0xFFu) > 0x80u || ((c >> 16) & 0xFFu) > 0x80u;
+}
+
 static uint32_t bgr_to_argb_mod(uint32_t c) {
     uint32_t r = (c & 0xFFu) << 1, g = ((c >> 8) & 0xFFu) << 1, b = ((c >> 16) & 0xFFu) << 1;
     if(r > 255) r = 255;
@@ -2238,10 +2260,11 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
     c->x[0] = (int16_t)x0; c->y[0] = (int16_t)y0; c->u[0] = (uint8_t)u0; c->v[0] = (uint8_t)v0;
     c->x[1] = (int16_t)x1; c->y[1] = (int16_t)y1; c->u[1] = (uint8_t)u1; c->v[1] = (uint8_t)v1;
     c->x[2] = (int16_t)x2; c->y[2] = (int16_t)y2; c->u[2] = (uint8_t)u2; c->v[2] = (uint8_t)v2;
-    const int textured = g_state_count > 0 && (g_states[c->state].flags & BP_GPU_TEXTURED);
-    c->argb[0] = textured ? bgr_to_argb_mod((uint32_t)c0) : bgr_to_argb((uint32_t)c0);
-    c->argb[1] = textured ? bgr_to_argb_mod((uint32_t)c1) : bgr_to_argb((uint32_t)c1);
-    c->argb[2] = textured ? bgr_to_argb_mod((uint32_t)c2) : bgr_to_argb((uint32_t)c2);
+    /* As the PlayStation gave them, BGR: a textured primitive's colour becomes one or two passes
+     * at build time (put_modulated), and clamping it here would lose the second. */
+    c->argb[0] = (uint32_t)c0 & 0x00FFFFFFu;
+    c->argb[1] = (uint32_t)c1 & 0x00FFFFFFu;
+    c->argb[2] = (uint32_t)c2 & 0x00FFFFFFu;
 }
 
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
@@ -2254,7 +2277,7 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     c->is_rect = 1;
     c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
     c->x[1] = (int16_t)w; c->y[1] = (int16_t)h;
-    c->argb[0] = bgr_to_argb((uint32_t)bgr);
+    c->argb[0] = (uint32_t)bgr & 0x00FFFFFFu;   /* BGR, converted at build time */
 }
 
 /* The rectangle of VRAM the background was last built from, so a write that lands somewhere else
@@ -2368,6 +2391,81 @@ static int last_cover(int sw, int sh) {
     return -1;
 }
 
+/** Submits the header for this binding, compiled once and kept (see g_hdrc), and returns the
+ *  vertex alpha its blend needs. `over` is the second pass of a brightened primitive: the same
+ *  texture and source factor, but added to what is there (dst ONE) instead of replacing it. */
+static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over) {
+    const int hs = hdr_slot(mem, fmt, dim, s, over);
+    if(g_hdrc[hs].used && g_hdrc[hs].mem == mem && g_hdrc[hs].fmt == fmt
+       && g_hdrc[hs].dim == dim && g_hdrc[hs].flags == s->flags
+       && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over) {
+        g_hdr_hits++;
+        pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
+        return g_hdrc[hs].alpha;
+    }
+    float alpha;
+    pvr_poly_cxt_t cxt;
+    if(mem) {
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim, dim, mem, PVR_FILTER_NONE);
+        /* MODULATE keeps the texel's own alpha: a transparent texel reaches the blender with
+         * alpha 0 and the blend below keeps the destination, which is what the PlayStation's
+         * "texel zero draws nothing" means. */
+        cxt.txr.env = (s->flags & BP_GPU_RAW) ? PVR_TXRENV_REPLACE
+                    : ((s->flags & BP_GPU_SEMI) ? PVR_TXRENV_MODULATEALPHA
+                                                : PVR_TXRENV_MODULATE);
+        cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
+    } else {
+        pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
+    }
+    cxt.gen.culling = PVR_CULLING_NONE;
+    /* No depth. The list renders in submission order; nothing may re-decide it. */
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    cxt.depth.write = false;
+    if(s->flags & BP_GPU_SEMI) {
+        alpha = blend_setup(&cxt, s);
+    } else if(mem) {
+        /* Opaque textured: solid texels replace, transparent texels keep what is there. */
+        cxt.blend.src = PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+        alpha = 1.0f;
+    } else {
+        cxt.blend.src = PVR_BLEND_ONE;
+        cxt.blend.dst = PVR_BLEND_ZERO;
+        alpha = 1.0f;
+    }
+    if(over) cxt.blend.dst = PVR_BLEND_ONE;
+    pvr_poly_compile(&g_hdrc[hs].hdr, &cxt);
+    g_hdrc[hs].used = 1;
+    g_hdrc[hs].mem = mem;
+    g_hdrc[hs].fmt = fmt;
+    g_hdrc[hs].dim = dim;
+    g_hdrc[hs].flags = s->flags;
+    g_hdrc[hs].semi_mode = s->semi_mode;
+    g_hdrc[hs].over = (uint8_t)over;
+    g_hdrc[hs].alpha = alpha;
+    g_hdr_compiles++;
+    pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
+    return alpha;
+}
+
+/** One triangle's vertices, written straight into a store queue and flushed to the TA (KOS direct
+ *  rendering). Every field is written: the queue holds whatever went before. */
+static inline void put_tri(const gcmd_t* c, const gstate_t* s, const uint32_t* col,
+                           float scale_x, float scale_y, float ou, float ov, float rdim) {
+    for(int k = 0; k < 3; k++) {
+        pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
+        v->flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        v->x = ((float)c->x[k] - (float)s->draw_x) * scale_x;
+        v->y = ((float)c->y[k] - (float)s->draw_y) * scale_y;
+        v->z = 1.0f;
+        v->u = ((float)c->u[k] - ou + 0.5f) * rdim;
+        v->v = ((float)c->v[k] - ov + 0.5f) * rdim;
+        v->argb = col[k];
+        v->oargb = 0;
+        pvr_dr_commit(v);
+    }
+}
+
 PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
@@ -2467,67 +2565,18 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
             cur_state = (int)c->state;
             cur_mem = mem; cur_fmt = fmt; cur_dim = dim; cur_ou = ou; cur_ov = ov;
             cur_rdim = 1.0f / (float)dim;
-            const int hs = hdr_slot(mem, fmt, dim, s);
-            if(g_hdrc[hs].used && g_hdrc[hs].mem == mem && g_hdrc[hs].fmt == fmt
-               && g_hdrc[hs].dim == dim && g_hdrc[hs].flags == s->flags
-               && g_hdrc[hs].semi_mode == s->semi_mode) {
-                alpha = g_hdrc[hs].alpha;
-                g_hdr_hits++;
-                pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
-            } else {
-            pvr_poly_cxt_t cxt;
-            if(mem) {
-                pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt,
-                                 dim, dim, mem, PVR_FILTER_NONE);
-                /* MODULATE keeps the texel's own alpha: a transparent texel reaches the blender
-                 * with alpha 0 and the blend below keeps the destination, which is what the
-                 * PlayStation's "texel zero draws nothing" means. */
-                cxt.txr.env = (s->flags & BP_GPU_RAW) ? PVR_TXRENV_REPLACE
-                            : ((s->flags & BP_GPU_SEMI) ? PVR_TXRENV_MODULATEALPHA
-                                                        : PVR_TXRENV_MODULATE);
-                cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
-            } else {
-                pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
-            }
-            cxt.gen.culling = PVR_CULLING_NONE;
-            /* No depth. The list renders in submission order; nothing may re-decide it. */
-            cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
-            cxt.depth.write = false;
-            if(s->flags & BP_GPU_SEMI) {
-                alpha = blend_setup(&cxt, s);
-            } else if(mem) {
-                /* Opaque textured: solid texels replace, transparent texels keep what is there. */
-                cxt.blend.src = PVR_BLEND_SRCALPHA;
-                cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-                alpha = 1.0f;
-            } else {
-                cxt.blend.src = PVR_BLEND_ONE;
-                cxt.blend.dst = PVR_BLEND_ZERO;
-                alpha = 1.0f;
-            }
-            pvr_poly_compile(&g_hdrc[hs].hdr, &cxt);
-            g_hdrc[hs].used = 1;
-            g_hdrc[hs].mem = mem;
-            g_hdrc[hs].fmt = fmt;
-            g_hdrc[hs].dim = dim;
-            g_hdrc[hs].flags = s->flags;
-            g_hdrc[hs].semi_mode = s->semi_mode;
-            g_hdrc[hs].alpha = alpha;
-            g_hdr_compiles++;
-            pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
-            }
+            alpha = emit_header(mem, fmt, dim, s, 0);
         }
 
-        /* Vertices are written straight into a store queue and flushed to the TA (KOS direct
-         * rendering), where pvr_prim built each one on the stack and then copied it there
-         * through a call. Every field is written: the queue holds whatever went before. */
+        /* Vertices go by KOS direct rendering (put_tri), where pvr_prim built each one on the
+         * stack and copied it through a call. */
         const uint32_t a = (uint32_t)(alpha * 255.0f) << 24;
         if(c->is_rect) {
             const float x0 = ((float)c->x[0] - (float)s->draw_x) * scale_x;
             const float y0 = ((float)c->y[0] - (float)s->draw_y) * scale_y;
             const float x1 = ((float)(c->x[0] + c->x[1]) - (float)s->draw_x) * scale_x;
             const float y1 = ((float)(c->y[0] + c->y[1]) - (float)s->draw_y) * scale_y;
-            const uint32_t argb = (c->argb[0] & 0x00FFFFFFu) | a;
+            const uint32_t argb = (bgr_to_argb(c->argb[0]) & 0x00FFFFFFu) | a;
             for(int k = 0; k < 4; k++) {
                 pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
                 v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -2540,18 +2589,29 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                 pvr_dr_commit(v);
             }
         } else {
+            /* A textured primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to
+             * nearly 2.0 — which the PVR's modulate cannot, so a menu's text drawn in a bright
+             * gradient over a grey font came out at half its brightness, dull and olive. The part
+             * above 1.0 is drawn as a second, additive pass of the same triangle (emit_header's
+             * `over`); only primitives that brighten pay for it. */
+            uint32_t col[3];
+            int bright = 0;
             for(int k = 0; k < 3; k++) {
-                pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
-                v->flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-                v->x = ((float)c->x[k] - (float)s->draw_x) * scale_x;
-                v->y = ((float)c->y[k] - (float)s->draw_y) * scale_y;
-                v->z = 1.0f;
-                v->u = ((float)c->u[k] - (float)cur_ou + 0.5f) * cur_rdim;
-                v->v = ((float)c->v[k] - (float)cur_ov + 0.5f) * cur_rdim;
-                v->argb = (c->argb[k] & 0x00FFFFFFu) | a;
-                v->oargb = 0;
-                pvr_dr_commit(v);
+                col[k] = ((mem ? bgr_to_argb_mod(c->argb[k]) : bgr_to_argb(c->argb[k]))
+                          & 0x00FFFFFFu) | a;
+                if(mem && bgr_brightens(c->argb[k])) bright = 1;
             }
+            put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
+            if(bright && !(s->flags & BP_GPU_RAW)) {
+                emit_header(mem, fmt, dim, s, 1);
+                for(int k = 0; k < 3; k++)
+                    col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
+                put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
+                cur_state = -1;   /* the next primitive restates its own header */
+#if RECOMPSX_DC_PROFILE
+                g_bright_prims++;
+#endif
+            } else {}
         }
     }
 #if RECOMPSX_DC_PROFILE_OVERLAY
@@ -3261,6 +3321,13 @@ void bp_pace_frame(int target_us) {
 }
 
 void bp_log(int level, const char* msg) {
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    /* With the overlay on, nobody is reading the serial port, and every line is still spun out of
+     * it a byte at a time: the runtime's heartbeat alone kept scif_write in the overlay's top six.
+     * Warnings and errors still go out. */
+    if(g_txt && level < BP_LOG_WARN) return;
+    else {}
+#endif
     static const char* names[] = { "debug", "info", "warn", "error" };
     const char* n = (level >= 0 && level <= 3) ? names[level] : "?";
 #if RECOMPSX_DC_PROFILE
