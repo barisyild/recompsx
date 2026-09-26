@@ -517,6 +517,7 @@ static kthread_t* g_io_thread;
 
 #if RECOMPSX_DC_PROFILE
 static uint64_t g_prof_disc_us;
+static uint32_t g_prof_disc_bytes;   /* fetched from the drive this window, read-ahead included */
 static int      g_prof_reads, g_prof_misses;
 #endif
 
@@ -1615,9 +1616,13 @@ static void profile_report(void) {
      * the period they belong to rather than including the cost of reporting themselves. */
     char l0[48], l1[48], l2[48], l3[48], l4[48];
     const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
-    snprintf(l0, sizeof(l0), "%d fr %lu ms %lu.%lu fps pace %lu disc %lu", g_prof_frames,
+    /* The window is always PROFILE_EVERY presents, so it is not printed; the disc's wait is
+     * followed by what the drive delivered in it, which is what tells a slow drive from a busy
+     * one. */
+    snprintf(l0, sizeof(l0), "%lu ms %lu.%lu fps pace %lu disc %lu/%luk",
              (unsigned long)(total / 1000), tenths / 10, tenths % 10,
-             (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000));
+             (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000),
+             (unsigned long)(g_prof_disc_bytes / 1024));
     /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
      * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
     if(g_hw_voices)
@@ -1675,6 +1680,7 @@ static void profile_report(void) {
     g_prof_aica_declined = 0;
     g_hdr_hits = g_hdr_compiles = 0;
     g_prof_disc_us = 0;
+    g_prof_disc_bytes = 0;
     g_prof_reads = g_prof_misses = 0;
 }
 
@@ -2971,6 +2977,14 @@ int bp_file_open(int slot, const char* path) {
     bp_file_close(slot);
     FILE* f = fopen(path, "rb");
     if(!f) return -1;
+    /* Unbuffered, which is what makes the drive fast. Buffered, newlib's fread refills its own
+     * small, unaligned buffer over and over, so KOS's ISO9660 driver saw sub-sector reads into
+     * memory it could not DMA to and fetched every 2048-byte sector with a GD-ROM command of its
+     * own: a 128 KB window was 64 commands, and a loading screen waited 2.6 s of every 3 on the
+     * disc. Unbuffered, the window buffer (32-byte aligned, 2048-byte aligned offsets) reaches
+     * the driver as it is, and the driver streams it — and keeps streaming across contiguous
+     * windows, because a seek to where the stream already is does not stop it. */
+    setvbuf(f, NULL, _IONBF, 0);
     if(fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     const long size = ftell(f);
     if(size < 0) { fclose(f); return -1; }
@@ -3001,6 +3015,9 @@ static void* disc_io_main(void* unused) {
         int got = -1;
         if(f && fseek(f, at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, (size_t)size, f);
         mutex_lock(&g_io_lock);
+#if RECOMPSX_DC_PROFILE
+        if(got > 0) g_prof_disc_bytes += (uint32_t)got;
+#endif
         g_win[w].got = got;
         g_win[w].state = WIN_READY;
         cond_broadcast(&g_io_cv);
@@ -3042,6 +3059,9 @@ static void disc_io_request(int w, int slot, int at, int size) {
         /* No thread to hand it to: read it here, synchronously, as the backend always used to. */
         int got = -1;
         if(fseek(g_files[slot], at, SEEK_SET) == 0) got = (int)fread(g_winbuf[w], 1, (size_t)size, g_files[slot]);
+#if RECOMPSX_DC_PROFILE
+        if(got > 0) g_prof_disc_bytes += (uint32_t)got;
+#endif
         g_win[w].got = got;
         g_win[w].state = WIN_READY;
         return;
@@ -3067,6 +3087,7 @@ static int read_direct(int slot, int offset, uint8_t* buf, int len) {
         got = (int)fread(buf, 1, (size_t)len, g_files[slot]);
 #if RECOMPSX_DC_PROFILE
     g_prof_disc_us += bp_time_us() - at;
+    if(got > 0) g_prof_disc_bytes += (uint32_t)got;
 #endif
     return got;
 }

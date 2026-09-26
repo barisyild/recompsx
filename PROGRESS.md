@@ -1139,6 +1139,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Flycast gameplay 701 ms / 42.7 fps after the serial fix (emu 348 -> 253). Loading screen:
+disc 2611 of 2987 ms, thd_idle 2602 — the drive, ~70 KB/s effective. Cause: disc FILEs were buffered,
+so newlib refilled a small unaligned buffer and KOS's ISO9660 read every 2048-byte sector with its own
+GD-ROM command. Now _IONBF: aligned windows reach iso_read whole and stream. Overlay: disc ms/KB.
+
 2026-09-26 [claude] Overlay profile (Flycast, 767-824 ms): rtps ~133, f_800193a8 ~80 (the game's vertex
 loop), present_frame ~65, slowWrite32 ~60 (GPU DMA, inlined), scif_write 54 (the per-window serial
 line!), triangle/drawPolygon ~40 each. Serial profile lines now off while the overlay is on; GTE marks
