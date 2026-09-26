@@ -2808,13 +2808,18 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
 /** Submits the header for this binding, compiled once and kept (see g_hdrc), and returns the
  *  vertex alpha its blend needs. `over` is the second pass of a brightened primitive: the same
  *  texture and source factor, but added to what is there (dst ONE) instead of replacing it. */
-static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over) {
+/* `keep`, when given, receives a copy of the header emitted, for build_scene to restate without
+ * asking the cache again (the slot itself may be taken by the next header that hashes there). */
+static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over,
+                         pvr_poly_hdr_t* keep) {
     const int hs = hdr_slot(mem, fmt, dim, s, over);
     if(g_hdrc[hs].used && g_hdrc[hs].mem == mem && g_hdrc[hs].fmt == fmt
        && g_hdrc[hs].dim == dim && g_hdrc[hs].flags == s->flags
        && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over) {
         g_hdr_hits++;
         pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
+        if(keep) *keep = g_hdrc[hs].hdr;
+        else {}
         return g_hdrc[hs].alpha;
     }
     float alpha;
@@ -2859,6 +2864,8 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     g_hdrc[hs].alpha = alpha;
     g_hdr_compiles++;
     pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
+    if(keep) *keep = g_hdrc[hs].hdr;
+    else {}
     return alpha;
 }
 
@@ -2879,6 +2886,10 @@ static inline void put_tri(const gcmd_t* c, const gstate_t* s, const uint32_t* c
         pvr_dr_commit(v);
     }
 }
+
+/* The current run's header and its brightening header, as build_scene last emitted them. */
+static pvr_poly_hdr_t g_run_hdr __attribute__((aligned(32)));
+static pvr_poly_hdr_t g_run_over __attribute__((aligned(32)));
 
 PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
@@ -2906,10 +2917,16 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
     int run_state = -1, run_bank = -1, run_slot = -1;
     pvr_ptr_t run_mir = NULL;
     float alpha = 1.0f;
+    /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
+     * and the run's next primitive must say its own again. That used to be a full lookup — the
+     * state compared, the cache hashed and searched — twice per brightened primitive, and a busy
+     * arena brightens a quarter of them. Now the run's header is kept when first emitted and
+     * copied back (`restate`), and the brightening header is looked up once per run. */
+    int restate = 0, over_ready = 0;
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
         if(c->is_rect == GCMD_VRAM) {
-            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) cur_state = -1;
+            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) restate = 1;
             else {}
             continue;
         } else {}
@@ -2984,8 +3001,13 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
             cur_state = (int)c->state;
             cur_mem = mem; cur_fmt = fmt; cur_dim = dim; cur_ou = ou; cur_ov = ov;
             cur_rdim = 1.0f / (float)dim;
-            alpha = emit_header(mem, fmt, dim, s, 0);
-        }
+            alpha = emit_header(mem, fmt, dim, s, 0, &g_run_hdr);
+            restate = 0;
+            over_ready = 0;
+        } else if(restate) {
+            pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
+            restate = 0;
+        } else {}
 
         /* Vertices go by KOS direct rendering (put_tri), where pvr_prim built each one on the
          * stack and copied it through a call. */
@@ -3022,11 +3044,15 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
             }
             put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
             if(bright && !(s->flags & BP_GPU_RAW)) {
-                emit_header(mem, fmt, dim, s, 1);
+                if(over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
+                else {
+                    emit_header(mem, fmt, dim, s, 1, &g_run_over);
+                    over_ready = 1;
+                }
                 for(int k = 0; k < 3; k++)
                     col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
                 put_tri(c, s, col, scale_x, scale_y, (float)cur_ou, (float)cur_ov, cur_rdim);
-                cur_state = -1;   /* the next primitive restates its own header */
+                restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
                 g_bright_prims++;
 #endif

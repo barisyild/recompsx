@@ -147,6 +147,7 @@ class Gte {
 		ofx = 0; ofy = 0; h = 0; dqa = 0; dqb = 0; zsf3 = 0; zsf4 = 0;
 		flag = 0;
 		buildUnrTable();
+		buildClzTable();
 	}
 
 	// ---- data register access ----------------------------------------------------------------------
@@ -430,12 +431,35 @@ class Gte {
 		return 0x1FFFF;
 	}
 
-	/** How far a 16-bit value must shift left before its top bit is set. */
-	/** Leading zeros of a 16-bit value, 16 for zero: one instruction, where a loop of up to
-	    sixteen used to run on every perspective divide. */
+	/** Leading zeros of a byte, 8 for zero: the table countLeadingZeros16 reads. */
+	static var clz8:Array<Int>;
+
+	static function buildClzTable():Void {
+		clz8 = [for (_ in 0...256) 0];
+		for (i in 0...256) {
+			var n = 8;
+			var v = i;
+			while (v != 0) {
+				n--;
+				v = v >> 1;
+			}
+			clz8[i] = n;
+		}
+	}
+
+	/**
+		Leading zeros of a 16-bit value, 16 for zero — how far the divisor must shift left before
+		its top bit is set, on every perspective divide.
+
+		A table rather than `IntMath.clz32`: a count-leading-zeros instruction is what that
+		becomes on most CPUs, but the SH-4 has none, and there it was a call into libgcc's
+		`__clzsi2` from the middle of every RTPS, with the caller's registers saved around it.
+		Two bytes, one lookup, the same answer everywhere.
+	**/
 	static inline function countLeadingZeros16(v:Int):Int {
 		final x = v & 0xFFFF;
-		return x == 0 ? 16 : IntMath.clz32(x) - 16;
+		final hi = x >>> 8;
+		return hi != 0 ? clz8[hi] : 8 + clz8[x];
 	}
 
 	// ---- executing ------------------------------------------------------------------------------------

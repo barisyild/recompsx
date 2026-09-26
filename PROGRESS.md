@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Ballistix 723-794 ms, gpu 155 -> 126-136. "slowWrite32 ~100 ms" is the GPU list: LTO inlines
+DMA2 -> walkList -> polygonHw into it (8.3 KB); JS count per frame: 15k W32, 14 slow; ~2980 OT nodes (2048
+empty), 8256 words. RAM/scratch fast paths are already inlined into guest code on DC (LTO); Crash Bash's
+stack is in the scratchpad (87% of sp accesses). Done: sendState inline (da671d5), RTPS clz by byte table
+(no __clzsi2 call), build_scene restates a run's header from a copy. Digests unchanged. Next: user's numbers.
+
 2026-09-26 [claude] New-texture cost: pages went VRAM -> buffer -> per-texel gather (~1.6 ms a 4bpp page on SH-4).
 Now VRAM -> twiddled store-queue bursts directly, one 8x8 (4bpp) or 4x4 (16-bit) tile per burst, rearranged
 with word-wide masks (8 texels an op): twid4_tiles (whole page and dirty-rect patch), twid8_page, twid15_page,
