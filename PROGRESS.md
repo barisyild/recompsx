@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Menu at full speed (490 ms/61 fps); arenas ~740-800. slowWrite32 was one 9.2 KB function (LTO
+inlined DMA2 -> walkList -> polygonHw); its polygon code was a third spills/constant reloads. walkList and
+polygonHw now `@:specifier("__attribute__((noinline))")` (verified in the emitted headers; JS ignores it), so
+the overlay names them. New `--dc-bench=FROM:TO` (recompsx.cfg): deterministic range, ms/frame on the overlay's
+last line; out/dc/data has 18800:20300 (Ballistix in the attract loop). Digests + GPU-stream hash unchanged.
+
 2026-09-26 [claude] Ballistix 723-794 ms, gpu 155 -> 126-136. "slowWrite32 ~100 ms" is the GPU list: LTO inlines
 DMA2 -> walkList -> polygonHw into it (8.3 KB); JS count per frame: 15k W32, 14 slow; ~2980 OT nodes (2048
 empty), 8256 words. RAM/scratch fast paths are already inlined into guest code on DC (LTO); Crash Bash's

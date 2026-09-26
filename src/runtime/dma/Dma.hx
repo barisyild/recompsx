@@ -175,6 +175,9 @@ class Dma {
 		because a game builds its table back to front — nearest last. The terminator is any address
 		with bit 23 set, which is how the BIOS's own `ClearOTagR` ends a table.
 	**/
+	/** Out of line on C++ for the reason `Gpu.polygonHw` gives: inlined into the register write
+	    that starts it, the walk shared one starved frame with everything else in `slowWrite32`. */
+	@:specifier("__attribute__((noinline))")
 	static function walkList():Void {
 		var addr = madr[CH_GPU] & 0x1FFFFC;
 		var guard = 0;

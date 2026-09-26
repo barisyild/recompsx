@@ -293,7 +293,14 @@ class Gpu {
 		filled: nothing reads it before the next command overwrites it. An untextured vertex
 		passes u = v = 0 where the software arrays held whatever the last textured one left;
 		backends do not read them for an untextured primitive.
+
+		Kept out of line on C++ (`noinline`). Left to itself the compiler inlined this, the list
+		walk and the DMA register write into one function — `slowWrite32`, 9 KB — and on the SH-4
+		that function ran out of registers: a third of this code's instructions were stack spills
+		and reloads of the same constants, some of them two instructions just to address a frame
+		too large for a displacement. Here it has its own frame, and a profile names it.
 	**/
+	@:specifier("__attribute__((noinline))")
 	static function polygonHw(ram:RawBuf, at:Int, op:Int):Void {
 		final gouraud = (op & 0x10) != 0;
 		final textured = (op & 0x04) != 0;

@@ -211,6 +211,11 @@ static int      g_bright_prims;
  * The overlay's `dec m/s/b`: what tells an invalidated texture from a cache that is too small. */
 static int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
 
+/* `--dc-bench=FROM:TO`, read at init; the benchmark itself is with profile_report. */
+#if RECOMPSX_DC_PROFILE
+static int g_bench_from = -1, g_bench_to = -1;
+#endif
+
 /* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
  * can tell them apart: inlined, they all read as `present_frame`. A call each is the price. */
 #if RECOMPSX_DC_PROFILE
@@ -911,6 +916,13 @@ static int has_arg(const char* s) {
     return 0;
 }
 
+/* What follows `prefix` in the first argument that starts with it (`--name=value`), or NULL. */
+static const char* arg_value(const char* prefix) {
+    const size_t n = strlen(prefix);
+    for(int i = 0; i < g_argc; i++) if(strncmp(g_args[i], prefix, n) == 0) return g_args[i] + n;
+    return NULL;
+}
+
 static int args_from_file(const char* path) {
     FILE* f = fopen(path, "rb");
     if(!f) return 0;
@@ -1096,6 +1108,19 @@ int bp_init(const char* title) {
 
     find_storage();
     load_args();
+
+#if RECOMPSX_DC_PROFILE
+    {
+        const char* b = arg_value("--dc-bench=");
+        int from, to;
+        if(b && sscanf(b, "%d:%d", &from, &to) == 2 && from >= 0 && to > from) {
+            g_bench_from = from;
+            g_bench_to = to;
+        } else if(b) {
+            bp_log(BP_LOG_WARN, "--dc-bench=FROM:TO wants two present counts, FROM below TO");
+        } else {}
+    }
+#endif
 
 #if RECOMPSX_DC_PROFILE_OVERLAY
     /* After the arguments, because they are what asks for it. */
@@ -1591,7 +1616,46 @@ static int      g_prof_logs;
  * couple of frames a second, thirty of them is half a minute between signs of life. */
 #define PROFILE_EVERY 30
 
+/* ---- the benchmark range ------------------------------------------------------------------------
+ * `--dc-bench=FROM:TO` in recompsx.cfg measures presents FROM..TO counted from boot as one block and
+ * leaves the result on the overlay's last line. There is one present per emulated frame and the
+ * emulation is deterministic, so a game left in its attract loop replays the same frames on every
+ * boot: two builds measured over the same range differ by what changed between them. The rolling
+ * window cannot promise that — it moves by five percent with whatever is on screen, which is as
+ * much as most single optimisations are worth. The range is measured in whole windows, starting
+ * with a fresh one at FROM. */
+static int      g_bench_state;        /* 0 waiting, 1 on, 2 done; the range is g_bench_from/to */
+static uint32_t g_presents;
+static uint64_t g_bench_sum[5];       /* total, emu, gte, gpu, build — microseconds */
+static uint32_t g_bench_frames;
+static char     g_bench_line[48];
+
+static void profile_reset(void);
+
+static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, uint64_t build) {
+    g_bench_sum[0] += total; g_bench_sum[1] += emu; g_bench_sum[2] += gte;
+    g_bench_sum[3] += gpu;   g_bench_sum[4] += build;
+    g_bench_frames += (uint32_t)g_prof_frames;
+    if(g_presents < (uint32_t)g_bench_to) return;
+    g_bench_state = 2;
+    /* Milliseconds per frame, tenths: full speed is 16.7. */
+    unsigned long t[5];
+    for(int i = 0; i < 5; i++) t[i] = (unsigned long)(g_bench_sum[i] / ((uint64_t)g_bench_frames * 100u));
+    snprintf(g_bench_line, sizeof(g_bench_line), "B%lu %lu.%lu emu %lu.%lu gte %lu.%lu gpu %lu.%lu bld %lu.%lu",
+             (unsigned long)g_bench_frames, t[0] / 10, t[0] % 10, t[1] / 10, t[1] % 10,
+             t[2] / 10, t[2] % 10, t[3] / 10, t[3] % 10, t[4] / 10, t[4] % 10);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "bench %d..%d: %s (ms a frame)", g_bench_from, g_bench_to, g_bench_line);
+    bp_log(BP_LOG_WARN, msg);   /* WARN: the overlay silences INFO, and this line is the point */
+}
+
 static void profile_report(void) {
+    g_presents++;
+    if(g_bench_state == 0 && g_bench_from >= 0 && g_presents == (uint32_t)g_bench_from) {
+        profile_reset();        /* the range starts with a window of its own */
+        g_bench_state = 1;
+        return;
+    } else {}
     if(++g_prof_frames < PROFILE_EVERY) return;
 
     const uint64_t total = g_prof_emu + g_prof_wait + g_prof_upload + g_prof_submit + g_prof_pace;
@@ -1607,6 +1671,8 @@ static void profile_report(void) {
     const uint64_t gte_us = (uint64_t)g_samp_where[BP_PROFILE_GTE] * 1000ull;
     const uint64_t inside = g_prof_disc_us + spu_us + gpu_us + gte_us + g_prof_aica;
     const uint64_t emu = g_prof_emu > inside ? g_prof_emu - inside : 0;
+    if(g_bench_state == 1) bench_add(total, emu, gte_us, gpu_us, g_prof_build);
+    else {}
 
     char msg[300];
     snprintf(msg, sizeof(msg),
@@ -1659,6 +1725,8 @@ static void profile_report(void) {
     /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
      * header counts that were here are in the serial line. */
     syms_top(l3, l4, sizeof(l3));
+    if(g_bench_state == 2) memcpy(l4, g_bench_line, sizeof(l4));
+    else {}
 
     if(g_txt) {
         memset(g_txt_buf, 0, sizeof(g_txt_buf));
@@ -1684,6 +1752,11 @@ static void profile_report(void) {
     bp_log(BP_LOG_INFO, msg);
 #endif
 
+    profile_reset();
+}
+
+/** A new window: every per-window counter back to zero. */
+static void profile_reset(void) {
     g_prof_frames = 0;
     g_prof_emu = g_prof_wait = g_prof_upload = g_prof_submit = g_prof_audio = 0;
     g_prof_pace = 0;
