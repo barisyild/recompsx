@@ -693,6 +693,19 @@ class Gte {
 		final x0 = sxyX(sxy0), y0 = sxyY(sxy0);
 		final x1 = sxyX(sxy1), y1 = sxyY(sxy1);
 		final x2 = sxyX(sxy2), y2 = sxyY(sxy2);
+		// With every coordinate within +-2^14 — RTPS clamps its own to +-0x400 — the six products
+		// regroup as (x1-x0)(y2-y0) - (x2-x0)(y1-y0), whose factors stay under 2^15 and whose
+		// result under 2^31: two 32-bit multiplies where the 64-bit form took six, and no flag
+		// can arise. A game that writes wider coordinates into the queue gets the 64-bit form.
+		if ((((x0 + 0x4000) | (y0 + 0x4000) | (x1 + 0x4000) | (y1 + 0x4000) | (x2 + 0x4000)
+				| (y2 + 0x4000)) & -0x8000) == 0) {
+			mac0 = IntMath.mul(x1 - x0, y2 - y0) - IntMath.mul(x2 - x0, y1 - y0);
+		} else {
+			nclipWide(x0, y0, x1, y1, x2, y2);
+		}
+	}
+
+	static function nclipWide(x0:Int, y0:Int, x1:Int, y1:Int, x2:Int, y2:Int):Void {
 		var m = Acc.mac(Acc.zero(), x0, y1);
 		m = Acc.mac(m, x1, y2);
 		m = Acc.mac(m, x2, y0);
@@ -704,6 +717,18 @@ class Gte {
 
 	/** The average depth of three vertices, scaled — what a game sorts its ordering table by. */
 	static function avsz3():Void {
+		// ZSF times the sum of three depths fits in 32 bits for |ZSF3| <= 10922 (3 x 0xFFFF x
+		// 10922 < 2^31); games use a few hundred. Then it is one multiply and no flag can arise.
+		if (zsf3 >= -10922 && zsf3 <= 10922) {
+			final m = IntMath.mul(zsf3, (sz1 & 0xFFFF) + (sz2 & 0xFFFF) + (sz3 & 0xFFFF));
+			mac0 = m;
+			otz = saturateSz3(m >> 12);
+		} else {
+			avsz3Wide();
+		}
+	}
+
+	static function avsz3Wide():Void {
 		// Four separate products, never ZSF times a sum: 32767 x 65535 only just fits in an Int,
 		// and a sum of three depths times ZSF would not.
 		var m = Acc.mac(Acc.zero(), zsf3, sz1 & 0xFFFF);
@@ -714,6 +739,17 @@ class Gte {
 	}
 
 	static function avsz4():Void {
+		// As avsz3, with four depths: |ZSF4| <= 8192 keeps the product under 2^31.
+		if (zsf4 >= -8192 && zsf4 <= 8192) {
+			final m = IntMath.mul(zsf4, (sz0 & 0xFFFF) + (sz1 & 0xFFFF) + (sz2 & 0xFFFF) + (sz3 & 0xFFFF));
+			mac0 = m;
+			otz = saturateSz3(m >> 12);
+		} else {
+			avsz4Wide();
+		}
+	}
+
+	static function avsz4Wide():Void {
 		var m = Acc.mac(Acc.zero(), zsf4, sz0 & 0xFFFF);
 		m = Acc.mac(m, zsf4, sz1 & 0xFFFF);
 		m = Acc.mac(m, zsf4, sz2 & 0xFFFF);
@@ -786,7 +822,35 @@ class Gte {
 		else mvmvaNormal(sf, lm, m11, m12, m13, m21, m22, m23, m31, m32, m33, vx, vy, vz, tx, ty, tz);
 	}
 
+	/**
+		`(T*1000h + M*V) SAR (sf*12)` into MAC1-3, and IR from them — the light matrix, the colour
+		matrix and MVMVA. Every operand of the products is sixteen-bit here (the matrices, V0-2,
+		IR, and the registers MVMVA's garbage matrix borrows), so with every translation within
+		2^30 the rows are exact in 32 bits, as in `project`; otherwise the checked 44-bit path.
+	**/
 	static function mvmvaNormal(sf:Int, lm:Bool, m11:Int, m12:Int, m13:Int, m21:Int, m22:Int,
+			m23:Int, m31:Int, m32:Int, m33:Int, vx:Int, vy:Int, vz:Int, tx:Int, ty:Int, tz:Int):Void {
+		if (tx > -0x40000000 && tx < 0x40000000 && ty > -0x40000000 && ty < 0x40000000
+				&& tz > -0x40000000 && tz < 0x40000000) {
+			final a1 = IntMath.mul(m11, vx), b1 = IntMath.mul(m12, vy), c1 = IntMath.mul(m13, vz);
+			final a2 = IntMath.mul(m21, vx), b2 = IntMath.mul(m22, vy), c2 = IntMath.mul(m23, vz);
+			final a3 = IntMath.mul(m31, vx), b3 = IntMath.mul(m32, vy), c3 = IntMath.mul(m33, vz);
+			if (sf == 0) {
+				mac1 = rowLow(tx, a1, b1, c1);
+				mac2 = rowLow(ty, a2, b2, c2);
+				mac3 = rowLow(tz, a3, b3, c3);
+			} else {
+				mac1 = rowShr12(tx, a1, b1, c1);
+				mac2 = rowShr12(ty, a2, b2, c2);
+				mac3 = rowShr12(tz, a3, b3, c3);
+			}
+			copyMacToIr(lm);
+		} else {
+			mvmvaWide(sf, lm, m11, m12, m13, m21, m22, m23, m31, m32, m33, vx, vy, vz, tx, ty, tz);
+		}
+	}
+
+	static function mvmvaWide(sf:Int, lm:Bool, m11:Int, m12:Int, m13:Int, m21:Int, m22:Int,
 			m23:Int, m31:Int, m32:Int, m33:Int, vx:Int, vy:Int, vz:Int, tx:Int, ty:Int, tz:Int):Void {
 		var m = Acc.shl12(tx);
 		m = step44(Acc.mac(m, m11, vx), F_MAC1_POS, F_MAC1_NEG);
@@ -1038,7 +1102,30 @@ class Gte {
 	**/
 	static function farColorInterpolate(sf:Int, lm:Bool):Void {
 		final base1 = mac1, base2 = mac2, base3 = mac3;
+		// With the far colour within 2^18 and MAC within 2^30 — a colour in 12.4 or 8.16, which
+		// is what reaches here — FC*1000h - MAC and MAC + IR*IR0 (IR and IR0 sixteen-bit) both
+		// stay under 2^31: exact in 32 bits, and no 44-bit flag can arise.
+		if (rfc > -0x40000 && rfc < 0x40000 && gfc > -0x40000 && gfc < 0x40000
+				&& bfc > -0x40000 && bfc < 0x40000
+				&& base1 > -0x40000000 && base1 < 0x40000000 && base2 > -0x40000000
+				&& base2 < 0x40000000 && base3 > -0x40000000 && base3 < 0x40000000) {
+			final d1 = (rfc << 12) - base1, d2 = (gfc << 12) - base2, d3 = (bfc << 12) - base3;
+			ir1 = saturateIr(sf == 0 ? d1 : d1 >> 12, false, F_IR1);
+			ir2 = saturateIr(sf == 0 ? d2 : d2 >> 12, false, F_IR2);
+			ir3 = saturateIr(sf == 0 ? d3 : d3 >> 12, false, F_IR3);
+			final e1 = base1 + IntMath.mul(ir1, ir0);
+			final e2 = base2 + IntMath.mul(ir2, ir0);
+			final e3 = base3 + IntMath.mul(ir3, ir0);
+			mac1 = sf == 0 ? e1 : e1 >> 12;
+			mac2 = sf == 0 ? e2 : e2 >> 12;
+			mac3 = sf == 0 ? e3 : e3 >> 12;
+			finishColor(sf, lm);
+		} else {
+			farColorWide(sf, lm, base1, base2, base3);
+		}
+	}
 
+	static function farColorWide(sf:Int, lm:Bool, base1:Int, base2:Int, base3:Int):Void {
 		ir1 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(rfc), -base1), F_MAC1_POS, F_MAC1_NEG), sf), false, F_IR1);
 		ir2 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(gfc), -base2), F_MAC2_POS, F_MAC2_NEG), sf), false, F_IR2);
 		ir3 = saturateIr(shiftBySf(step44(Acc.add(Acc.shl12(bfc), -base3), F_MAC3_POS, F_MAC3_NEG), sf), false, F_IR3);

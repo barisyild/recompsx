@@ -1147,6 +1147,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Painter 716 ms (gte 207->175, rtps 134->97, build 146->121). Many-character cutscene: gte 225
+(rtps 108, farColorInterpolate 54), up 39. GTE 32-bit fast paths: NCLIP (2 muls, coords within 2^14), AVSZ3/4
+(|ZSF| bounds), mvmvaNormal (light/colour matrices, MVMVA; |T| < 2^30), farColorInterpolate (|FC| < 2^18,
+|MAC| < 2^30). New GteSweep (every command, 16000 rounds) 8c701b20 before and after, both targets. Next: Flycast
+profiling fork (user-approved, local clone ~/Desktop/Project/flycast) + background per-row mirror.
+
 2026-09-26 [claude] Scene build: colours branch-free in one word (host: all 2^24 identical to the per-channel
 forms), vertex offsets/alpha converted once per run (fmac; 66 -> 57 instr a vertex), palette_priority sorts
 the few used slots once instead of 64 scans of 256 (host: 3000 random streams, same pal_bank_cached order;
