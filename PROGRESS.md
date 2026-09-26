@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Boot logos confirmed on Flycast. Ballistix arena: 1098 ms, build 468, pvr_txr_load_ex 160 +
+__udivsi3 136. KOS's pvr_txr_load_ex divides twice per texel (x/min + y/min, zero for square textures)
+and stores texels one uncached halfword at a time; replaced by twid_load4/16: KOS's layout produced in
+video-memory order through store-queue bursts, source texels by table. Host check vs KOS: identical,
+4 and 16 bpp, dim 4..256. Next: why this arena decodes textures every frame.
+
 2026-09-26 [claude] DC boot logos 1-2 black since the start: the backend redraws a frame's kept geometry at
 every present, and Crash Bash draws one 511x511 black rect (present 14) then only uploads logos until
 present 1318 — the rect was painted over them (logo 2's last column showed). bp_gpu_dirty now records

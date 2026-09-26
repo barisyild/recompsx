@@ -79,6 +79,7 @@ KOS_INIT_FLAGS(INIT_DEFAULT);
 static void samp_start(void);
 static void syms_load(void);
 #endif
+static void twid_init(void);   /* the twiddled texture upload's tables, built in bp_init */
 
 /* Whether the profiler can also paint its numbers over the picture. Needed wherever the serial
  * port is out of sight: redream does not surface it, and Flycast only prints it to the terminal
@@ -1066,6 +1067,7 @@ int bp_init(const char* title) {
     g_emu_thread = thd_get_current();        /* bp_init runs on the thread that emulates */
     samp_start();
 #endif
+    twid_init();
 
     if(snd_stream_init() == 0) {
         g_snd_up = 1;
@@ -1770,6 +1772,92 @@ static uint16_t texel_to_argb1555(uint16_t p) {
 	shift disappears into constants, the wrap check happens once per group instead of once per
 	texel, and the window mask stops being spilled to the stack for want of a register.
 **/
+/* ---- twiddled texture upload -----------------------------------------------------------------
+ * KOS's pvr_txr_load_ex, same layout, without its cost. It computes `x / min + y / min` for every
+ * texel — two software divisions on a CPU with no divide instruction, for a term that is zero
+ * whenever the texture is square, which every one here is — and stores each texel into video
+ * memory with an uncached 16-bit write. A 256x256 page was 65,536 of those; in an arena whose
+ * textures change every frame the overlay read pvr_txr_load_ex 160 ms and __udivsi3 136 ms of a
+ * 1098 ms window.
+ *
+ * Here the output is produced in the order video memory holds it, 32 bytes at a time, and written
+ * through the store queues to the same TA texture path pvr_txr_load uses; each burst finds its
+ * source texels by table. The layout is KOS's exactly (twid_check in the host test compares them):
+ * a 16-bit texel (x, y) sits at index TWID(y) | TWID(x) << 1, and a 4-bit texture packs the 2x2
+ * block at (2X, 2Y) into one 16-bit word at TWID(Y) | TWID(X) << 1, nibbles (x,y), (x,y+1),
+ * (x+1,y), (x+1,y+1). So an index's even bits are y and its odd bits x. */
+static uint8_t g_even4[256];              /* bits 0, 2, 4, 6 of a byte, gathered into four */
+
+static void twid_init(void) {
+    for(int b = 0; b < 256; b++) {
+        int v = 0;
+        for(int k = 0; k < 4; k++) v |= ((b >> (2 * k)) & 1) << k;
+        g_even4[b] = (uint8_t)v;
+    }
+}
+
+/* The even bits of a 16-bit index, gathered: y for an index, x for the index shifted right. */
+static inline int twid_even(uint32_t i) {
+    return g_even4[i & 0xFF] | (g_even4[(i >> 8) & 0xFF] << 4);
+}
+
+/* A dim x dim 16-bit texture into `d`, eight words at a time; `sq` flushes each burst out of the
+ * store queue. dim is a power of two from 4 to 256: a burst is 16 texels, and a smaller texture
+ * would be written past its end. (The 4-bit fill below needs dim >= 8 for the same reason.) */
+static void twid16_fill(const uint16_t* src, int dim, uint32_t* d, int sq) {
+    const int n = dim * dim;
+    for(int i = 0; i < n; i += 16) {
+        const int yb = twid_even((uint32_t)i), xb = twid_even((uint32_t)i >> 1);
+        for(int k = 0; k < 8; k++) {
+            const int j0 = 2 * k, j1 = 2 * k + 1;
+            const uint16_t a = src[(yb + g_even4[j0]) * dim + xb + g_even4[j0 >> 1]];
+            const uint16_t b = src[(yb + g_even4[j1]) * dim + xb + g_even4[j1 >> 1]];
+            d[k] = (uint32_t)a | ((uint32_t)b << 16);
+        }
+        if(sq) sq_flush(d);
+        else {}
+        d += 8;
+    }
+}
+
+/* A dim x dim 4-bit texture (two texels a byte, low nibble first) into `d`, the same way. */
+static void twid4_fill(const uint8_t* src, int dim, uint32_t* d, int sq) {
+    const int n = dim * dim / 4;          /* 16-bit words, one 2x2 block each */
+    for(int w = 0; w < n; w += 16) {
+        const int yb = twid_even((uint32_t)w), xb = twid_even((uint32_t)w >> 1);
+        for(int k = 0; k < 8; k++) {
+            uint32_t pair = 0;
+            for(int h = 0; h < 2; h++) {
+                const int j = 2 * k + h;
+                const int x = 2 * (xb + g_even4[j >> 1]), y = 2 * (yb + g_even4[j]);
+                const int b0 = src[(x + y * dim) >> 1], b1 = src[(x + (y + 1) * dim) >> 1];
+                const uint32_t word = (uint32_t)((b0 & 15) | ((b1 & 15) << 4)
+                                               | ((b0 >> 4) << 8) | ((b1 >> 4) << 12));
+                pair |= word << (16 * h);
+            }
+            d[k] = pair;
+        }
+        if(sq) sq_flush(d);
+        else {}
+        d += 8;
+    }
+}
+
+static void twid_load16(const uint16_t* src, pvr_ptr_t dst, int dim) {
+    uint32_t* d = sq_lock((void*)(((uintptr_t)dst & 0xffffff) | PVR_TA_TEX_MEM));
+    twid16_fill(src, dim, d, 1);
+    sq_unlock();
+    sq_wait();
+}
+
+static void twid_load4(const uint8_t* src, pvr_ptr_t dst, int dim) {
+    uint32_t* d = sq_lock((void*)(((uintptr_t)dst & 0xffffff) | PVR_TA_TEX_MEM));
+    twid4_fill(src, dim, d, 1);
+    sq_unlock();
+    sq_wait();
+}
+/* ---- end of twiddled texture upload ---- */
+
 static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
     /* Pages upload as INDICES for the paletted depths, so no CLUT is applied here at all — and
      * with no texture window the 4bpp and 8bpp paths are a straight row copy out of VRAM, since
@@ -1829,9 +1917,9 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
         }
     }
     if(s->depth == 0)
-        pvr_txr_load_ex(page, dst, TEX_DIM, TEX_DIM, PVR_TXRLOAD_4BPP);
+        twid_load4(page, dst, TEX_DIM);
     else
-        pvr_txr_load_ex(page16, dst, TEX_DIM, TEX_DIM, PVR_TXRLOAD_16BPP);
+        twid_load16(page16, dst, TEX_DIM);
 }
 
 /** The palette bank holding these sixteen colours, writing them into palette RAM first if no
@@ -2065,7 +2153,7 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
             d[tx + 3] = clut[(hw >> 12) & 0xF];
         }
     }
-    pvr_txr_load_ex(buf, dst, BAKE_DIM, BAKE_DIM, PVR_TXRLOAD_16BPP);
+    twid_load16(buf, dst, BAKE_DIM);
 }
 
 PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
