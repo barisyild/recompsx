@@ -496,8 +496,14 @@ class Program {
 		final rowEnd:Array<Int> = [];
 		final wordStart:Array<Int> = [];
 		final rowWords:Array<Int> = [];
+		final rowMasks:Array<Int> = [];
 		final rowHandles:Array<Int> = [];
 		final pairs:Array<{key:Int, value:Int}> = [];
+		// Key lengths across stanzas, longest first: the order the runtime tries them in.
+		final lengthSet:Map<Int, Bool> = [];
+		for (r in relocSets) for (n in r.lengthsLongestFirst()) lengthSet.set(n, true);
+		final lengths = [for (n in lengthSet.keys()) n];
+		lengths.sort((a, b) -> b - a);
 		for (r in relocSets) {
 			for (i in 0...r.keys.length) {
 				final v = r.keyValues[i];
@@ -512,6 +518,7 @@ class Program {
 				wordStart.push(rowWords.length);
 				for (row in 0...g.rowWords.length) {
 					for (w in g.rowWords[row]) rowWords.push(w);
+					rowMasks.push(g.rowMasks[row]);
 					rowHandles.push(r.functions[g.rowFuncs[row]].handle);
 				}
 				rowEnd.push(rowHandles.length);
@@ -536,7 +543,8 @@ class Program {
 		buf.add('**/\n');
 		buf.add('class RelocTable {\n');
 		buf.add('\tpublic static inline var HASH_WORDS = $hashWords;\n\n');
-		emitTable(buf, "KEYS", "FNV-1a over the first HASH_WORDS words at an entry, ascending.", keys, a -> hex(a));
+		emitTable(buf, "LENGTHS", "Key lengths in words, longest first.", lengths, a -> Std.string(a));
+		emitTable(buf, "KEYS", "FNV-1a over a function's first words, then their count, ascending.", keys, a -> hex(a));
 		emitTable(buf, "VALUES", "A handle, or -1 - group for a key several functions share.", values, a -> Std.string(a));
 		emitTable(buf, "POS_START", "Each group's first position.", posStart, a -> Std.string(a));
 		emitTable(buf, "POS_END", "One past its last.", posEnd, a -> Std.string(a));
@@ -545,6 +553,7 @@ class Program {
 		emitTable(buf, "ROW_END", "One past its last.", rowEnd, a -> Std.string(a));
 		emitTable(buf, "WORD_START", "Where each group's row words begin in ROW_WORDS.", wordStart, a -> Std.string(a));
 		emitTable(buf, "ROW_WORDS", "Each row's words at its group's positions, row after row.", rowWords, a -> hex(a));
+		emitTable(buf, "ROW_MASKS", "Which of a row's positions count: bit k for position k.", rowMasks, a -> hex(a));
 		emitTable(buf, "ROW_HANDLES", "The function each row names.", rowHandles, a -> Std.string(a));
 		buf.add(RELOC_RUNTIME);
 		buf.add('}\n');
@@ -553,6 +562,8 @@ class Program {
 
 	static final RELOC_RUNTIME = "	static var KEYS_F:shim.RawBuf;
 	static var VALUES_F:shim.RawBuf;
+	/** FNV-1a state after each word at the address being looked up: entry n after n words. */
+	static var STATES_F:shim.RawBuf;
 	static var ready:Bool = false;
 
 	/** Initialize before guest execution; subsequent calls allocate nothing. */
@@ -562,6 +573,7 @@ class Program {
 		final n = KEYS.length;
 		KEYS_F = shim.RawMem.alloc((n + 1) << 2);
 		VALUES_F = shim.RawMem.alloc((n + 1) << 2);
+		STATES_F = shim.RawMem.alloc((HASH_WORDS + 1) << 2);
 		var i = 0;
 		while (i < n) {
 			shim.MemA.set32(KEYS_F, i << 2, KEYS[i]);
@@ -571,28 +583,47 @@ class Program {
 		ready = true;
 	}
 
-	/**
-		FNV-1a over HASH_WORDS words at `addr`, byte by byte in memory order — the same lines as
-		the tool's `RelocSet.keyOf`, which computed the table from the disc.
-	**/
-	static function keyAt(addr:Int):Int {
+	/** One FNV-1a byte — the same lines as the tool's `RelocSet.step`. */
+	static inline function step(h:Int, byte:Int):Int {
+		final x = (h ^ byte) | 0;
+		return (x + ((x << 1) | 0) + ((x << 4) | 0) + ((x << 7) | 0) + ((x << 8) | 0)
+			+ ((x << 24) | 0)) | 0;
+	}
+
+	/** FNV-1a over HASH_WORDS words at `addr`, keeping the state after each word in STATES_F. */
+	static function hashPrefixes(addr:Int):Void {
 		var h = 0x811C9DC5;
 		var i = 0;
 		while (i < HASH_WORDS) {
 			final w = Memory.read32(addr + (i << 2));
-			var b = 0;
-			while (b < 4) {
-				h = (h ^ ((w >>> (b << 3)) & 0xFF)) | 0;
-				h = (h + ((h << 1) | 0) + ((h << 4) | 0) + ((h << 7) | 0) + ((h << 8) | 0)
-					+ ((h << 24) | 0)) | 0;
-				b++;
-			}
+			h = step(h, w & 0xFF);
+			h = step(h, (w >>> 8) & 0xFF);
+			h = step(h, (w >>> 16) & 0xFF);
+			h = step(h, (w >>> 24) & 0xFF);
 			i++;
+			shim.MemA.set32(STATES_F, i << 2, h);
 		}
-		return h;
 	}
 
-	/** Runs relocatable code at `addr`, if what is there is code this program knows. */
+	/** The index of `key` in KEYS, or -1. */
+	static function find(key:Int):Int {
+		var lo = 0;
+		var hi = KEYS.length - 1;
+		while (lo <= hi) {
+			final mid = (lo + hi) >> 1;
+			final at = shim.MemA.get32(KEYS_F, mid << 2);
+			if (at == key) return mid;
+			else if (at < key) { lo = mid + 1; }
+			else { hi = mid - 1; }
+		}
+		return -1;
+	}
+
+	/**
+		Runs relocatable code at `addr`, if what is there is code this program knows. A function
+		is keyed on its own first instructions only, so several lengths are tried, longest first:
+		a longer match is the more specific one.
+	**/
 	public static function call(addr:Int, ctx:CpuState):Bool {
 		if (KEYS.length == 0 || (addr & 3) != 0) return false;
 		else {}
@@ -600,43 +631,46 @@ class Program {
 		else {}
 		if (!ready) init();
 		else {}
-		final key = keyAt(addr);
-		var lo = 0;
-		var hi = KEYS.length - 1;
-		var value = 0;
-		var found = false;
-		while (lo <= hi) {
-			final mid = (lo + hi) >> 1;
-			final at = shim.MemA.get32(KEYS_F, mid << 2);
-			if (at == key) { value = shim.MemA.get32(VALUES_F, mid << 2); found = true; break; }
-			else if (at < key) { lo = mid + 1; }
-			else { hi = mid - 1; }
+		hashPrefixes(addr);
+		var l = 0;
+		while (l < LENGTHS.length) {
+			final n = LENGTHS[l];
+			final at = find(step(shim.MemA.get32(STATES_F, n << 2), n));
+			if (at >= 0) {
+				final value = shim.MemA.get32(VALUES_F, at << 2);
+				final handle = value >= 0 ? value : resolve(-1 - value, addr);
+				if (handle >= 0) {
+					core.Reloc.base = addr;
+					core.Reloc.calls = (core.Reloc.calls + 1) | 0;
+					FnTable.dispatch(handle, 0, ctx);
+					return true;
+				} else {}
+			} else {}
+			l++;
 		}
-		if (!found) return false;
-		else {}
-		final handle = value >= 0 ? value : resolve(-1 - value, addr);
-		if (handle < 0) return false;
-		else {}
-		core.Reloc.base = addr;
-		core.Reloc.calls = (core.Reloc.calls + 1) | 0;
-		FnTable.dispatch(handle, 0, ctx);
-		return true;
+		return false;
 	}
 
-	/** Which of a group's functions is at `addr`, by the words at the group's positions. */
+	/**
+		Which of a group's functions is at `addr`, by the words at the group's positions that each
+		row's function occupies (ROW_MASKS); rows are most specific first.
+	**/
 	static function resolve(group:Int, addr:Int):Int {
 		final p0 = POS_START[group];
 		final n = POS_END[group] - p0;
 		var row = ROW_START[group];
 		final end = ROW_END[group];
 		while (row < end) {
+			final mask = ROW_MASKS[row];
 			var ok = true;
 			var k = 0;
 			while (k < n) {
-				final at = addr + (POSITIONS[p0 + k] << 2);
-				final expected = ROW_WORDS[WORD_START[group] + (row - ROW_START[group]) * n + k];
-				if (!Memory.isPlainMemory(at) || Memory.read32(at) != expected) { ok = false; break; }
-				else {}
+				if (((mask >> k) & 1) != 0) {
+					final at = addr + (POSITIONS[p0 + k] << 2);
+					final expected = ROW_WORDS[WORD_START[group] + (row - ROW_START[group]) * n + k];
+					if (!Memory.isPlainMemory(at) || Memory.read32(at) != expected) { ok = false; break; }
+					else {}
+				} else {}
 				k++;
 			}
 			if (ok) return ROW_HANDLES[row];

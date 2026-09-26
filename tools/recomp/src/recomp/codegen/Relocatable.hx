@@ -18,11 +18,25 @@ class RelocFunc {
 	/** SHA-1 over (offset from the entry, word) for every instruction it covers. */
 	public final signature:String;
 	public var handle:Int = -1;
+	/** Word offsets from the entry that the function's instructions occupy. */
+	public final covered:Map<Int, Bool> = [];
+	/**
+		How many words its key hashes: the instructions it runs from the entry on without a gap,
+		up to `hashWords`. Never a word after them — what follows code in a level file is data,
+		and the game rewrites some of it once the page is loaded (an entry reference becomes a
+		pointer), so a key that reached into it matched the disc and missed in RAM.
+	**/
+	public var keyWords:Int = 0;
 
-	public function new(func:Func, unit:RelocUnit, signature:String) {
+	public function new(func:Func, unit:RelocUnit, signature:String, hashWords:Int) {
 		this.func = func;
 		this.unit = unit;
 		this.signature = signature;
+		for (a in func.blocks.keys()) {
+			final b = func.blocks.get(a);
+			for (i in 0...b.length) covered.set(((a - func.entry) >> 2) + i, true);
+		}
+		while (keyWords < hashWords && covered.exists(keyWords)) keyWords++;
 	}
 }
 
@@ -42,8 +56,14 @@ class RelocUnit {
 class RelocGroup {
 	/** Word offsets from the entry the runtime reads. */
 	public final positions:Array<Int> = [];
-	/** One row per distinct reading: the words at `positions`, then which function. */
+	/**
+		One row per distinct reading: the words at `positions`, which of them count (bit k for
+		position k: only words the row's function occupies — anything else may be data the game
+		rewrites), then which function. Most specific rows first: a row that ignores a position
+		must not shadow one that tells the functions apart there.
+	**/
 	public final rowWords:Array<Array<Int>> = [];
+	public final rowMasks:Array<Int> = [];
 	public final rowFuncs:Array<Int> = [];
 
 	public function new() {}
@@ -74,6 +94,8 @@ class RelocSet {
 	public var rejected(default, null) = 0;
 	public var notPositionIndependent(default, null) = 0;
 	public var tooShortForKey(default, null) = 0;
+	/** Key lengths in use, in words: the runtime tries each, longest first. */
+	public final keyLengths:Map<Int, Bool> = [];
 
 	public var shards:Array<Shards.Shard> = [];
 
@@ -144,13 +166,15 @@ class RelocSet {
 					index = functions.length;
 					bySignature.set(sig, index);
 					fn.name = "r_" + sig.substr(0, 12);
-					functions.push(new RelocFunc(fn, unit, sig));
+					functions.push(new RelocFunc(fn, unit, sig, config.hashWords));
 					used = true;
 				} else {}
-				if (off + config.hashWords * 4 > len) { tooShortForKey++; continue; }
+				final rf = functions[index];
+				if (rf.keyWords == 0 || off + rf.keyWords * 4 > len) { tooShortForKey++; continue; }
 				else {}
-				occurrences.push(new Occurrence(unitBytes, off, index,
-					keyOf(unitBytes, off, config.hashWords)));
+				keyLengths.set(rf.keyWords, true);
+				occurrences.push(new Occurrence(unitBytes, off, index, rf.covered,
+					withLength(keyOf(unitBytes, off, rf.keyWords), rf.keyWords)));
 			}
 			if (used) units.push(unit);
 			else {}
@@ -184,27 +208,34 @@ class RelocSet {
 
 	/**
 		FNV-1a over `n` words from `off`, byte by byte in memory order. The runtime computes the
-		same function over emulated RAM (`RelocTable.keyAt`); the two are the same lines, and the
+		same function over emulated RAM (`RelocTable.call`); the two are the same lines, and the
 		prime is written as its shifts so that no wide multiply can lose bits on either side.
 	**/
 	public static function keyOf(bytes:Bytes, off:Int, n:Int):Int {
 		var h = 0x811C9DC5;
-		for (i in 0...n * 4) {
-			h = (h ^ bytes.get(off + i)) | 0;
-			h = (h + ((h << 1) | 0) + ((h << 4) | 0) + ((h << 7) | 0) + ((h << 8) | 0)
-				+ ((h << 24) | 0)) | 0;
-		}
+		for (i in 0...n * 4) h = step(h, bytes.get(off + i));
 		return h;
+	}
+
+	/** The key for `n` words: their hash with the length folded in, as one more byte. */
+	public static function withLength(h:Int, n:Int):Int return step(h, n);
+
+	static inline function step(h:Int, byte:Int):Int {
+		final x = (h ^ byte) | 0;
+		return (x + ((x << 1) | 0) + ((x << 4) | 0) + ((x << 7) | 0) + ((x << 8) | 0)
+			+ ((x << 24) | 0)) | 0;
 	}
 
 	/**
 		Turns occurrences into the runtime's table: one key per distinct entry reading, and for a
 		key several different functions share, the fewest word positions that tell them apart.
 
-		Positions are chosen greedily among the offsets the candidates cover, pair by pair, until no
-		two occurrences of different functions read the same. Two occurrences of the same function
-		may read differently there (the words around code are bytecode); each distinct reading is a
-		row, so every occurrence on the disc is recognised.
+		Positions are chosen greedily, pair by pair, until every two occurrences of different
+		functions are told apart: first a word both functions occupy and read differently, else a
+		word only one of them occupies — the row that reads it is then tried first. A word a
+		function does not occupy is never compared for it: it may be data the game rewrites.
+		Occurrences of one function may read differently at a position (the words around code are
+		bytecode); each distinct reading is a row, so every occurrence on the disc is recognised.
 	**/
 	public function finish(occurrences:Array<Occurrence>):Void {
 		final byKey:Map<Int, Array<Occurrence>> = [];
@@ -232,25 +263,15 @@ class RelocSet {
 		final g = new RelocGroup();
 		// Candidate offsets: every word any candidate function covers, relative to its entry.
 		final covered:Map<Int, Bool> = [];
-		for (o in list) {
-			final fn = functions[o.func].func;
-			for (a in fn.blocks.keys()) {
-				final b = fn.blocks.get(a);
-				for (i in 0...b.length) covered.set(((a - fn.entry) >> 2) + i, true);
-			}
-		}
+		for (o in list) for (c in o.covered.keys()) covered.set(c, true);
 		final candidates = [for (c in covered.keys()) c];
 		candidates.sort((a, b) -> a - b);
-		var guard = 0;
 		while (true) {
-			if (++guard > 64) throw new AnalysisError('relocatable "${config.id}": could not separate '
-				+ 'functions sharing a key in 64 positions');
-			else {}
 			var a:Occurrence = null;
 			var b:Occurrence = null;
 			for (i in 0...list.length) {
 				for (j in 0...i) {
-					if (list[i].func != list[j].func && sameReading(list[i], list[j], g.positions)) {
+					if (list[i].func != list[j].func && !toldApart(list[i], list[j], g.positions)) {
 						a = list[i];
 						b = list[j];
 						break;
@@ -261,39 +282,97 @@ class RelocSet {
 			}
 			if (a == null) break;
 			else {}
+			// A row's significant positions are one bit each in an Int (`RelocGroup.rowMasks`).
+			if (g.positions.length >= 31) throw new AnalysisError('relocatable "${config.id}": could '
+				+ 'not separate functions sharing a key in 31 positions');
+			else {}
+			// Positions are offsets from the entry, and code before the entry has negative ones:
+			// whether one was found is its own flag.
+			var pick = 0;
 			var picked = false;
 			for (c in candidates) {
 				if (g.positions.indexOf(c) >= 0) continue;
-				final wa = a.wordAt(c);
-				final wb = b.wordAt(c);
-				if (wa != null && wb != null && wa != wb) { g.positions.push(c); picked = true; break; }
+				final wa = a.codeAt(c);
+				final wb = b.codeAt(c);
+				if (wa != null && wb != null && wa != wb) { pick = c; picked = true; break; }
 				else {}
 			}
+			if (!picked) {
+				for (c in candidates) {
+					if (g.positions.indexOf(c) >= 0) continue;
+					if ((a.codeAt(c) == null) != (b.codeAt(c) == null)) { pick = c; picked = true; break; }
+					else {}
+				}
+			} else {}
 			if (!picked) throw new AnalysisError('relocatable "${config.id}": two different functions '
-				+ 'read identically at every word either covers');
+				+ 'read identically at every word either covers: ' + describePair(a, b));
+			else {}
+			g.positions.push(pick);
+		}
+		// Rows, most specific first; within that, in the order the disc has them.
+		final rows:Array<{words:Array<Int>, mask:Int, func:Int, bits:Int, order:Int}> = [];
+		for (o in list) {
+			var mask = 0;
+			var bits = 0;
+			final words = [];
+			for (k in 0...g.positions.length) {
+				final w = o.codeAt(g.positions[k]);
+				if (w != null) { mask |= 1 << k; bits++; words.push(w); }
+				else words.push(0);
+			}
+			var known = false;
+			for (r in rows) {
+				if (r.mask == mask && sameWords(r.words, words)) {
+					if (r.func != o.func) throw new AnalysisError('relocatable "${config.id}": two '
+						+ 'different functions read identically at every word either covers');
+					else {}
+					known = true;
+					break;
+				} else {}
+			}
+			if (!known) rows.push({words: words, mask: mask, func: o.func, bits: bits, order: rows.length});
 			else {}
 		}
-		for (o in list) {
-			final reading = [for (p in g.positions) { final w = o.wordAt(p); w == null ? 0 : w; }];
-			var known = false;
-			for (r in 0...g.rowWords.length) {
-				if (sameWords(g.rowWords[r], reading)) { known = true; break; }
-				else {}
-			}
-			if (!known) { g.rowWords.push(reading); g.rowFuncs.push(o.func); }
-			else {}
+		rows.sort((x, y) -> x.bits != y.bits ? y.bits - x.bits : x.order - y.order);
+		for (r in rows) {
+			g.rowWords.push(r.words);
+			g.rowMasks.push(r.mask);
+			g.rowFuncs.push(r.func);
 		}
 		return g;
 	}
 
-	static function sameReading(a:Occurrence, b:Occurrence, positions:Array<Int>):Bool {
+	/**
+		Whether the positions chosen so far tell two occurrences apart: a word both occupy and read
+		differently, or one only one of them occupies (its row is tried first).
+	**/
+	static function toldApart(a:Occurrence, b:Occurrence, positions:Array<Int>):Bool {
 		for (p in positions) {
-			final wa = a.wordAt(p);
-			final wb = b.wordAt(p);
-			if (wa == null || wb == null || wa != wb) return false;
+			final wa = a.codeAt(p);
+			final wb = b.codeAt(p);
+			if ((wa == null) != (wb == null)) return true;
+			else if (wa != null && wa != wb) return true;
 			else {}
 		}
-		return true;
+		return false;
+	}
+
+	function describePair(a:Occurrence, b:Occurrence):String {
+		inline function one(o:Occurrence):String {
+			final f = functions[o.func];
+			final offs = [for (c in o.covered.keys()) c];
+			offs.sort((x, y) -> x - y);
+			return '${f.func.name} at +${StringTools.hex(o.off)} of ${f.unit.image.name} '
+				+ '(${offs.length} words, offsets ${offs[0]}..${offs[offs.length - 1]})';
+		}
+		final all:Map<Int, Bool> = [];
+		for (c in a.covered.keys()) all.set(c, true);
+		for (c in b.covered.keys()) all.set(c, true);
+		final offs = [for (c in all.keys()) c];
+		offs.sort((x, y) -> x - y);
+		final cells = [for (c in offs) '$c:' + (a.codeAt(c) == null ? '-' : StringTools.hex(a.codeAt(c), 8)) + '/'
+			+ (b.codeAt(c) == null ? '-' : StringTools.hex(b.codeAt(c), 8))];
+		return one(a) + ' / ' + one(b) + ' [' + cells.join(' ') + ']';
 	}
 
 	static function sameWords(a:Array<Int>, b:Array<Int>):Bool {
@@ -301,12 +380,22 @@ class RelocSet {
 		return true;
 	}
 
+	/** Key lengths in use, longest first: the order the runtime tries them in. */
+	public function lengthsLongestFirst():Array<Int> {
+		final out = [for (n in keyLengths.keys()) n];
+		out.sort((a, b) -> b - a);
+		return out;
+	}
+
 	public function describe():String {
+		var shortKeys = 0;
+		for (f in functions) if (f.keyWords < config.hashWords) shortKeys++;
 		return 'relocatable "${config.id}": $files files, $entries entries, '
 			+ '${functions.length} distinct functions, $rejected rejected as data'
 			+ (notPositionIndependent > 0 ? ', $notPositionIndependent not position independent' : '')
 			+ (tooShortForKey > 0 ? ', $tooShortForKey too close to a unit end to key' : '')
-			+ '; ${keys.length} keys, ${groups.length} shared';
+			+ '; ${keys.length} keys, ${groups.length} shared'
+			+ (shortKeys > 0 ? ', $shortKeys functions keyed on fewer than ${config.hashWords} words' : '');
 	}
 }
 
@@ -315,19 +404,22 @@ class Occurrence {
 	public final unitBytes:Bytes;
 	public final off:Int;
 	public final func:Int;
+	/** Word offsets from the entry the function's instructions occupy (`RelocFunc.covered`). */
+	public final covered:Map<Int, Bool>;
 	public final key:Int;
 
-	public function new(unitBytes:Bytes, off:Int, func:Int, key:Int) {
+	public function new(unitBytes:Bytes, off:Int, func:Int, covered:Map<Int, Bool>, key:Int) {
 		this.unitBytes = unitBytes;
 		this.off = off;
 		this.func = func;
+		this.covered = covered;
 		this.key = key;
 	}
 
-	/** The word `p` words from the entry, or null outside the unit. */
-	public function wordAt(p:Int):Null<Int> {
+	/** The instruction `p` words from the entry, or null where the function has none. */
+	public function codeAt(p:Int):Null<Int> {
 		final at = off + p * 4;
-		if (at < 0 || at + 4 > unitBytes.length) return null;
+		if (!covered.exists(p) || at < 0 || at + 4 > unitBytes.length) return null;
 		return unitBytes.getInt32(at);
 	}
 }

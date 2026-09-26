@@ -2,6 +2,20 @@
 
 ## Status snapshot
 
+**2026-09-27: Crash 3's second demo (the diving level) runs; relocatable keys cover code only.**
+The fish's seven-word GOOL native routine was keyed on eight words, the eighth an entry reference
+the game turns into a pointer on load: missed in RAM, the demo froze at ~10150. Keys now hash only
+the instructions from the entry (ADR-0025 revision), separating words are compared only where a
+function has code. Crash 3 JS: 20000 frames through both demos, nothing missing, digest f05fb3ea
+(9000 unchanged, 2c8bc61d). Crash Bash unchanged (2ff36a18 / 30000 288ed8d6). 436 tool checks.
+C++ for Crash 3, first time: reflaxe.CPP 6 min 19 s (74 files, 19 MB); desktop null backend equals
+JS at 9000 2c8bc61d and 20000 f05fb3ea (20000 frames in 10.2 s). Dreamcast `build-dc.sh _c3 --max`:
+loaded image 9,998,279 bytes; out/dc/crash3-reflaxe-max.cdi (334 MB, `--video-hw --dc-overlay
+--audio-hw`). Profiling Flycast, vblanks 4700-5000 (the medieval demo): boots and runs clean, 3280 M
+cycles = 16.4 s for 5 s of game, ~30 % speed; `tex_decode` 36.7 % — 5-19 texture page conflicts a
+frame against 12 big slots. (A background shell once picked the system Haxe 5 and reflaxe.CPP failed
+at Runtime.hx:19 "Cannot assign null"; the pinned 4.3.7 compiles it.)
+
 **2026-09-26: Crash 3 draws boxes, enemies and objects — a helper's return to its caller's caller.**
 Found with DuckStation as the oracle (GDB stub): same draw-list nodes, and Crash/camera identical
 frame for frame through the demo (931 of 931 samples, 114 frames apart from our faster loading).
@@ -1183,6 +1197,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Crash 3 diving demo froze: relocatable key reached into data the game rewrites
+(EID -> pointer). Keys now code-only, variable length, masked separating rows (ADR-0025 rev.,
+TestRelocatable). Crash 3 20000 frames f05fb3ea; Crash Bash unchanged. C++ = JS (9000/20000); DC CDI
+built, runs in Flycast at ~30 % speed, tex_decode 37 %. Next: DC texture cache for Crash 3's pages.
 
 2026-09-26 [claude] Crash 3 boxes/enemies culled: helper's non-local `jr $ra` compiled as a return
 (ADR-0027: checked returns + RETURN unwinding, found via DuckStation GDB). WebGL render-to-texture

@@ -60,6 +60,13 @@ Spyro: Year of the Dragon demo (`DRAGON/SPYRO.EXE`, `WAD.WAD`, `CDEMO.STR`), a f
   The WebGL renderer converts drawn tiles back into its VRAM texture before a primitive samples
   them (ADR-0020 revision).
 
+## Status (2026-09-27)
+
+The attract loop's second demo, in the diving level, runs too: 20000 frames headless through both
+demos with nothing missing (digest `f05fb3ea`; 9000 frames unchanged at `2c8bc61d`). It froze at
+~10150 because the fish's GOOL native routine (FshOC, seven words) was keyed on eight — the eighth
+an entry reference the game resolves to a pointer when the page loads (ADR-0025 revision).
+
 ## Status (2026-09-26, later)
 
 The DEMO draws boxes, the ? box, enemies, animals, butterflies and fruit, with Crash's shadow in

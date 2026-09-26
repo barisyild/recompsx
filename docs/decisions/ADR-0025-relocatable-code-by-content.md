@@ -64,3 +64,20 @@ Two tool rules came with it, both generic: a jump through `$ra` returns whatever
 - The marker is game knowledge and lives in config; the mechanism is generic.
 - `tools/recomp/src/recomp/codegen/Relocatable.hx`, `Program.relocTableSource`,
   `src/runtime/core/Reloc.hx`, `Cooperative.suspendAt/afterCallAt`.
+
+## Revision (2026-09-27): a key covers the function's own instructions
+
+The first key hashed a fixed `hashWords` words at the entry. 204 of the 1,313 functions end, or
+jump away, before that, so their keys reached into what follows code in a level file: bytecode
+and data, some of which the game rewrites once a page is loaded — an entry reference (EID)
+becomes a pointer. The fish's seven-word routine in the diving level (FshOC) is followed by one:
+its key matched the disc and missed in RAM, GOOL's call went nowhere, and the second demo froze
+at frame ~10150. A key now hashes only the instructions the function runs from its entry without
+a gap, up to `hashWords`, with that length folded in as one more byte; the runtime keeps the
+hash state after each word and tries the lengths in use, longest first (`LENGTHS`). The words
+that tell functions sharing a key apart are compared only where the row's function has an
+instruction (`ROW_MASKS`); where two functions differ only in words one of them lacks, the row
+that has them is tried first. Positions can be negative — code a function reaches before its
+entry. Crash 3: 1,173 keys, 83 shared; the attract loop runs 20000 frames through both demos
+with nothing missing. `tools/recomp/test/TestRelocatable.hx`.
+
