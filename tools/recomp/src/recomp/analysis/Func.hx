@@ -48,6 +48,19 @@ class Func {
 	/** `jr` through a register other than ra, whose targets analysis could not recover. Each one
 	    is a switch or a computed call that will fall back to runtime dispatch. */
 	public final unresolvedJumps:Array<Int> = [];
+	/**
+		`jr`s that return through a copy of `$ra`, keyed by address. Hand-written code that makes
+		a call of its own keeps its return address in a scratch register first (`move $at, $ra`)
+		and leaves with `jr $at`; that is a return, and emitted as one.
+	**/
+	public final registerReturns:Map<Int, Bool> = [];
+	/**
+		`jr $ra` returns where `$ra` may hold an address the function was not called with — a
+		load from somewhere other than its own stack slot reached them — keyed by address. The
+		emitter compares `$ra` with the entry value there, and a mismatch returns to whichever
+		caller continues at that address (ADR-0027, `Discovery.markCheckedReturns`).
+	**/
+	public final checkedReturns:Map<Int, Bool> = [];
 
 	/** `j` to an address outside this function: a tail call. */
 	public final tailCalls:Array<CallSite> = [];
@@ -97,6 +110,15 @@ class Func {
 		}
 		if (tailCalls.length > 0) lines.push('  tail calls: ${tailCalls.length}');
 		if (kernelCalls.length > 0) lines.push('  kernel calls: ${kernelCalls.length}');
+		if (registerReturns.keys().hasNext()) {
+			final at = [for (a in registerReturns.keys()) Vaddr.hex(a)].join(", ");
+			lines.push('  returns through a copy of ra at: $at');
+		}
+		if (checkedReturns.keys().hasNext()) {
+			final at = [for (a in checkedReturns.keys()) a];
+			at.sort((x, y) -> x - y);
+			lines.push('  returns checked against the entry ra at: ${at.map(a -> Vaddr.hex(a)).join(", ")}');
+		}
 		if (unresolvedJumps.length > 0) {
 			final at = unresolvedJumps.map(a -> Vaddr.hex(a)).join(", ");
 			lines.push('  unresolved jr at: $at');

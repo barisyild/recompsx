@@ -65,6 +65,7 @@ class Runtime {
 		#if recompsx_cooperative
 		Cooperative.init();
 		#end
+		Reloc.reset();
 		// Region first: every video constant derives from it, and they are computed once.
 		TimeBase.setRegion(false);
 		mem.Memory.init();
@@ -116,22 +117,87 @@ class Runtime {
 			// was told to stop at, and the emulated stack has just been left behind on purpose.
 			if (ctx.unwindToken == kernel.Kernel.UNWIND_HALT) return;
 			else {}
+			// A tail jump left by a resumed frame: run it where the frame would have returned.
+			if (ctx.unwindToken == TAIL) {
+				ctx.unwindToken = 0;
+				call(ctx, ctx.tailTarget);
+				continue;
+			} else {}
 			#if recompsx_cooperative
 			if (ctx.unwindToken == Cooperative.TOKEN) return;
 			else {}
 			Cooperative.discard();
 			#end
+			// A return to an address no frame continues at (ADR-0027) is completed as a longjmp
+			// is: from here, where every frame it passed has been left.
+			final target = ctx.unwindToken == RETURN ? strayReturn(ctx) : ctx.pc;
 			ctx.unwindToken = 0;
 			guard++;
 			// A longjmp loop that never settles would otherwise hang with no explanation.
 			if (guard > 1024) return unwindStuck(ctx);
 			else {}
-			call(ctx, ctx.pc);
+			call(ctx, target);
 		}
+	}
+
+	static function strayReturn(ctx:CpuState):Int {
+		reportOnce(0x5A00FFFE, "a return to " + hex(ctx.returnTarget)
+			+ ", which no caller continues at — run from there, like a longjmp");
+		return ctx.returnTarget;
 	}
 
 	static function unwindStuck(ctx:CpuState):Void {
 		reportOnce(0x5A00FFFF, "1024 unwinds without settling — a longjmp loop");
+	}
+
+	/**
+		A computed jump that does not come back (ADR-0026).
+
+		`jr $t9` to code that ends by returning to *our* caller is a jump on hardware, not a call:
+		the stack does not grow. Emitted as a call it does, one host frame per jump, and threaded
+		code that hops between routines through pointers — Crash Bandicoot: Warped's renderer, one
+		hop per primitive — exhausted the host stack within a frame. So the jump leaves its
+		target here and returns; the nearest caller that continues after it (`call`, or generated
+		code through `unwinding`) runs it, and further tail jumps loop there at a fixed depth.
+	**/
+	public static inline var TAIL = 0x5441494C;   // 'TAIL'
+
+	public static inline function tail(ctx:CpuState, addr:Int):Void {
+		ctx.tailTarget = addr;
+		ctx.unwindToken = TAIL;
+	}
+
+	/**
+		A return to somewhere other than the caller (ADR-0027).
+
+		`jr $ra` is a return when `$ra` holds the address the function was called with, and a
+		jump to wherever it points otherwise. Hand-written code does the second on purpose: a
+		helper loads the return address its caller saved and leaves both at once. The generated
+		return compares `$ra` with the value it was entered with and, when they differ, leaves
+		the target here and returns; every caller's after-call check (`unwinding`) then either
+		continues — its own continuation is the target — or returns in turn. A target no frame
+		continues at is run from the top, as a longjmp is (`settle`).
+	**/
+	public static inline var RETURN = 0x52455455;   // 'RETU'
+
+	public static inline function returnTo(ctx:CpuState, addr:Int):Void {
+		ctx.returnTarget = addr;
+		ctx.unwindToken = RETURN;
+	}
+
+	/**
+		After a call that returns to `cont`: runs the tail jumps the callee left, ends a return
+		to elsewhere whose target is `cont`, then says whether the caller must still leave — a
+		longjmp, a halt, a cooperative suspension or a return aimed further out all return true.
+	**/
+	public static function unwinding(ctx:CpuState, cont:Int):Bool {
+		if (ctx.unwindToken == TAIL) {
+			ctx.unwindToken = 0;
+			call(ctx, ctx.tailTarget);
+		} else {}
+		if (ctx.unwindToken == RETURN && ctx.returnTarget == cont) ctx.unwindToken = 0;
+		else {}
+		return ctx.unwindToken != 0;
 	}
 
 	public static function call(ctx:CpuState, addr:Int):Void {
@@ -139,6 +205,17 @@ class Runtime {
 		// Direct generated callers check their own return boundaries; guard external entry here.
 		if (ctx.unwindToken != 0) return;
 		else {}
+		var target = addr;
+		while (true) {
+			callOnce(ctx, target);
+			if (ctx.unwindToken != TAIL) return;
+			else {}
+			ctx.unwindToken = 0;
+			target = ctx.tailTarget;
+		}
+	}
+
+	static function callOnce(ctx:CpuState, addr:Int):Void {
 		final d = dispatcher;
 		if (d != null && d(addr, ctx)) return;
 		else {}
@@ -181,7 +258,24 @@ class Runtime {
 		// missed, but code the executable never held. `OverlayMgr` knows which of those this is
 		// and answers with the window — which is what a person needs to write the config.
 		else if (kernel.OverlayMgr.reportMiss(addr, ctx.ra)) {}
-		else reportOnce(addr, "no function at " + hex(addr) + " (ra=" + hex(ctx.ra) + ")");
+		else if (!alreadyReported(addr)) reportOnce(addr, "no function at " + hex(addr)
+			+ " (ra=" + hex(ctx.ra) + ")" + registersAtMiss(ctx));
+		else {}
+	}
+
+	/**
+		The argument and saved registers, for a miss.
+
+		A wild jump is usually the end of a longer story, and the caller's state is the first page
+		of it: an interpreter's program counter, an object pointer, the word it decoded. Built only
+		the first time an address is reported, so a game that keeps missing pays nothing.
+	**/
+	static function registersAtMiss(ctx:CpuState):String {
+		return " a0=" + hex(ctx.a0) + " a1=" + hex(ctx.a1) + " a2=" + hex(ctx.a2)
+			+ " a3=" + hex(ctx.a3) + " v0=" + hex(ctx.v0) + " v1=" + hex(ctx.v1)
+			+ " s0=" + hex(ctx.s0) + " s1=" + hex(ctx.s1) + " s2=" + hex(ctx.s2)
+			+ " s3=" + hex(ctx.s3) + " s4=" + hex(ctx.s4) + " s5=" + hex(ctx.s5)
+			+ " s6=" + hex(ctx.s6) + " s7=" + hex(ctx.s7) + " sp=" + hex(ctx.sp);
 	}
 
 	static function kernelStub(ctx:CpuState, index:Int):Void {

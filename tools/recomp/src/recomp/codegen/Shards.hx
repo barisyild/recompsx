@@ -103,6 +103,30 @@ class Shards {
 		}
 	}
 
+	/**
+		Shards for a plain list of functions, in list order: relocatable code (ADR-0025), whose
+		functions have no addresses of their own to sort or look up by. The same size caps.
+		Classes are numbered by position, since there is no first address to name them after.
+	**/
+	public static function ofList(functions:Array<Func>, firstIndex:Int, prefix:String):Array<Shard> {
+		final out:Array<Shard> = [];
+		var current:Shard = null;
+		var instructions = 0;
+		for (fn in functions) {
+			final size = fn.instructionCount();
+			final full = current != null && (current.functions.length >= MAX_FUNCTIONS
+				|| (instructions + size > MAX_INSTRUCTIONS && current.functions.length > 0));
+			if (current == null || full) {
+				current = new Shard(firstIndex + out.length, out.length, prefix);
+				out.push(current);
+				instructions = 0;
+			} else {}
+			current.functions.push(fn);
+			instructions += size;
+		}
+		return out;
+	}
+
 	/** Whether this set has a function starting at an address. */
 	public inline function has(addr:Int):Bool {
 		return shardOfAddr.exists(Vaddr.canonRam(addr));

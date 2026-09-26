@@ -57,6 +57,20 @@ class Discovery {
 	    Mostly BIOS calls; see JumpKind.Constant. */
 	public final constantJumps:Map<Int, {target:Int, fnNumber:Int}> = [];
 
+	/**
+		`jr $ra` sites where $ra holds an address the function set itself: jumps, not returns.
+		Per function (keyed by entry, then by the `jr`), because the same `jr` reached from another
+		entry — or through dead code after a call that never returns — can mean a real return.
+		See `findRaJumps`.
+	**/
+	public final raJumps:Map<Int, Map<Int, Int>> = [];
+
+	/** The address a `jr $ra` in `fn` jumps to, or null where it returns. */
+	public function raJumpOf(fnEntry:Int, jrAddr:Int):Null<Int> {
+		final m = raJumps.get(fnEntry);
+		return m == null ? null : m.get(jrAddr);
+	}
+
 	final pending:Array<Seed> = [];
 	final seen:Map<Int, Bool> = [];
 	/** Every seed ever accepted. A pass that learns something new about a computed jump replays
@@ -92,6 +106,38 @@ class Discovery {
 	public inline function inScope(addr:Int):Bool {
 		final a = Vaddr.canonRam(addr);
 		return a >= scopeLo && a < scopeHi;
+	}
+
+	/**
+		A computed jump the config explains: `jumpTableHints` in game.json.
+
+		Installed before the first closure, so the arms are traced as blocks of the function that
+		jumps to them — exactly what a recovered switch becomes — and the matcher never looks at
+		this `jr` again. The emitter's switch still keeps a dispatch-by-address default, so a
+		target the hint left out reports itself at run time instead of running the wrong arm.
+
+		A hint is a person asserting something, so it is checked hard: the address must hold a
+		`jr` through a register other than `$ra`, and every target must be a word in this image.
+		`tableBase` 0 with explicit `targets` is hand-written arithmetic with no table behind it.
+	**/
+	public function addTableHint(jrAddr:Int, tableBase:Int, count:Int, listed:Array<Int>):Void {
+		final at = Vaddr.canonRam(jrAddr);
+		if (!image.containsWord(at) || !inScope(at)) return;
+		final jr = Decoder.decode(at, image.readWord(at));
+		if (jr.op != Op.JR || jr.rs == 31) {
+			throw new AnalysisError('jumpTableHint at ${Vaddr.hex(at)} names ${Disasm.text(jr)}, '
+				+ 'not a jr through a register');
+		}
+		final targets = listed != null ? [for (t in listed) Vaddr.canonRam(t)]
+			: [for (i in 0...count) Vaddr.canonRam(image.readWord(Vaddr.canonRam(tableBase) + i * 4))];
+		for (t in targets) {
+			if ((t & 3) != 0 || !image.containsWord(t)) {
+				throw new AnalysisError('jumpTableHint at ${Vaddr.hex(at)}: target ${Vaddr.hex(t)} '
+					+ 'is not a code address in ${image.name}');
+			}
+		}
+		final base = listed != null ? 0 : Vaddr.canonRam(tableBase);
+		tables.set(at, new JumpTable(at, base, jr.rs, TableConfidence.Hinted, targets));
 	}
 
 	public function addSeed(addr:Int, name:String, confidence:Confidence):Void {
@@ -130,7 +176,7 @@ class Discovery {
 	**/
 	public function run(?sweepGaps = true, ?recoverTables = true):Void {
 		closure();
-		if (recoverTables) settleJumps();
+		settleJumps(recoverTables);
 
 		if (sweepGaps) {
 			sweepForPrologues();
@@ -138,9 +184,10 @@ class Discovery {
 			// The sweep reaches code the closure could not, and that code contains computed jumps
 			// of its own — so the jump analysis has to run again over what it found. Skipping this
 			// leaves BIOS calls in swept functions looking like unresolved dispatch.
-			if (recoverTables) settleJumps();
+			settleJumps(recoverTables);
 		}
 
+		markCheckedReturns();
 		claimTables();
 		markPadding();
 	}
@@ -153,9 +200,9 @@ class Discovery {
 		round count is capped because the loop is driven by a heuristic and a pathological image
 		should not be able to spin it.
 	**/
-	function settleJumps():Void {
+	function settleJumps(recoverTables:Bool):Void {
 		var rounds = 0;
-		while (rounds < 4 && findTables() > 0) {
+		while (rounds < 4 && (recoverTables ? findTables() : 0) + findRaJumps() > 0) {
 			restart();
 			closure();
 			rounds++;
@@ -212,6 +259,149 @@ class Discovery {
 	}
 
 	/**
+		`jr $ra` that is not a return.
+
+		`jr $ra` returns because $ra holds the caller's address — unless the function put something
+		else there. Hand-written code does: Crash Bandicoot: Warped's run-merge routine saves every
+		register to the scratchpad, loads $ra with its own loop head, and ends each unrolled copy
+		with `jr $ra` back into the loop; only the final `jr $ra`, after reloading $ra, returns.
+		Taken as returns, the first copy left the routine mid-loop with $sp and $gp holding data.
+
+		So $ra is followed through each function: the value it enters with (a return), a constant
+		the function builds explicitly (`lui`/`addiu`/`ori`), or unknown. A load
+		(`lw $ra`) is the epilogue restoring what the prologue saved, and counts as the entry value.
+		Where every path reaches a `jr $ra` with one constant, that `jr` jumps there. Unknown keeps
+		the old reading — a return — so nothing that worked before can change.
+	**/
+	function findRaJumps():Int {
+		var found = 0;
+		for (fn in functions) {
+			final kind:Map<Int, Int> = [fn.entry => RA_ENTRY];
+			final value:Map<Int, Int> = [fn.entry => 0];
+			final work = [fn.entry];
+			var guard = 0;
+			while (work.length > 0 && guard++ < 100000) {
+				final a = work.pop();
+				final b = fn.blocks.get(a);
+				if (b == null) continue;
+				else {}
+				var k = kind.get(a);
+				var v = value.get(a);
+				for (i in 0...b.length) {
+					final at = a + i * 4;
+					final ins = Decoder.decode(at, image.readWord(at));
+					if (ins.op == Op.JR && ins.rs == 31 && k == RA_CONST && raJumpOf(fn.entry, at) == null
+							&& image.containsWord(Vaddr.canonRam(v))) {
+						if (!raJumps.exists(fn.entry)) raJumps.set(fn.entry, []);
+						else {}
+						raJumps.get(fn.entry).set(at, Vaddr.canonRam(v));
+						found++;
+					} else {}
+					// The effect on $ra, in the same order the machine applies it.
+					if (ins.op == Op.LUI && ins.rt == 31) { k = RA_CONST; v = ins.immU << 16; }
+					else if ((ins.op == Op.ADDIU || ins.op == Op.ADDI) && ins.rt == 31) {
+						if (ins.rs == 0) { k = RA_CONST; v = ins.immS; }
+						else if (ins.rs == 31 && k == RA_CONST) v = (v + ins.immS) | 0;
+						else k = RA_TOP;
+					}
+					else if (ins.op == Op.ORI && ins.rt == 31) {
+						if (ins.rs == 0) { k = RA_CONST; v = ins.immU; }
+						else if (ins.rs == 31 && k == RA_CONST) v = v | ins.immU;
+						else k = RA_TOP;
+					}
+					else if (ins.op == Op.LW && ins.rt == 31) { k = RA_ENTRY; v = 0; }
+					// A call's link is deliberately unknown, not a constant: a `jr $ra` after a
+					// call with no restore is either a bug or dead code after a call that never
+					// returns, and the old reading (a return) is the safe one for both.
+					else if (new recomp.ir.FunctionIR.InstructionIR(ins).writes.has(31)
+							|| ins.op == Op.JAL || ins.op == Op.BLTZAL || ins.op == Op.BGEZAL
+							|| (ins.op == Op.JALR && ins.rd == 31)) k = RA_TOP;
+					else {}
+				}
+				for (succ in b.successors) {
+					if (!kind.exists(succ)) {
+						kind.set(succ, k); value.set(succ, v); work.push(succ);
+					} else {
+						final ok = kind.get(succ);
+						final merged = ok == k && (k != RA_CONST || value.get(succ) == v) ? ok : RA_TOP;
+						if (merged != ok) { kind.set(succ, merged); work.push(succ); }
+						else {}
+					}
+				}
+			}
+		}
+		return found;
+	}
+
+	static inline final RA_ENTRY = 0;
+	static inline final RA_CONST = 1;
+	static inline final RA_TOP = 2;
+
+	/**
+		Returns whose `$ra` may not be the address the function was called with (ADR-0027).
+
+		`jr $ra` is emitted as a return — back to the host caller, which is where the address the
+		function was called with points. That is the same thing only while `$ra` still holds that
+		address. A load puts back whatever the memory holds: the prologue's own save, normally, but
+		hand-written code also loads a return address another function saved. Crash Bandicoot:
+		Warped's bounding-box test (0x8003def4) saves its `$ra` in the scratchpad and calls a
+		helper per corner; the helper, on finding a corner on screen, loads that saved address and
+		jumps to it — out of both functions at once, with "visible" in $t8. As a return it went
+		back into the test, which tried the next corner and ended "not visible" every time: every
+		object that uses the test was culled.
+
+		So `$ra` is followed once more, telling a restore of the function's own stack slot
+		(`lw $ra, N($sp)` where it also has `sw $ra, N($sp)`) apart from any other load. A return
+		that such a load can reach is checked at run time against the address the function was
+		entered with. Other writes of `$ra` keep the old reading (`findRaJumps`).
+	**/
+	function markCheckedReturns():Void {
+		for (fn in functions) {
+			fn.checkedReturns.clear();
+			final ownSlots:Map<Int, Bool> = [];
+			for (b in fn.blocks) {
+				for (i in 0...b.length) {
+					final at = b.addr + i * 4;
+					final ins = Decoder.decode(at, image.readWord(at));
+					if (ins.op == Op.SW && ins.rt == 31 && ins.rs == 29) ownSlots.set(ins.immS, true);
+					else {}
+				}
+			}
+			// Per block: whether $ra may hold something a load other than the own restore put there.
+			final foreign:Map<Int, Bool> = [fn.entry => false];
+			final work = [fn.entry];
+			var guard = 0;
+			while (work.length > 0 && guard++ < 100000) {
+				final a = work.pop();
+				final b = fn.blocks.get(a);
+				if (b == null) continue;
+				else {}
+				var f = foreign.get(a);
+				for (i in 0...b.length) {
+					final at = a + i * 4;
+					final ins = Decoder.decode(at, image.readWord(at));
+					if (f && (ins.op == Op.JR || ins.op == Op.JALR) && ins.isRegisterJump && ins.rs == 31
+							&& raJumpOf(fn.entry, at) == null) {
+						fn.checkedReturns.set(at, true);
+					} else {}
+					if (ins.op == Op.LW && ins.rt == 31) f = !(ins.rs == 29 && ownSlots.exists(ins.immS));
+					else if (new recomp.ir.FunctionIR.InstructionIR(ins).writes.has(31)
+							|| ins.op == Op.JAL || ins.op == Op.BLTZAL || ins.op == Op.BGEZAL
+							|| (ins.op == Op.JALR && ins.rd == 31)) f = false;
+					else {}
+				}
+				for (succ in b.successors) {
+					final known = foreign.get(succ);
+					if (known == null || (f && !known)) {
+						foreign.set(succ, f || known == true);
+						work.push(succ);
+					} else {}
+				}
+			}
+		}
+	}
+
+	/**
 		Where a switch arm may plausibly point.
 
 		A PS-EXE holds code and data in one blob, so "inside the image" is far too weak a test —
@@ -231,7 +421,9 @@ class Discovery {
 	/** Marks recovered tables as data, so coverage does not count them as unreached code. */
 	function claimTables():Void {
 		for (t in tables) {
-			image.claimRange(t.base, t.base + t.sizeBytes(), Kind.DataInText, 0);
+			// A hint with explicit targets has no table in memory to claim.
+			if (t.base != 0) image.claimRange(t.base, t.base + t.sizeBytes(), Kind.DataInText, 0);
+			else {}
 		}
 	}
 
@@ -313,7 +505,15 @@ class Discovery {
 				running = false;
 				switch (instr.op) {
 					case JR | JALR if (instr.isRegisterJump):
-						if (instr.rs == 31) {
+						if (instr.rs == 31 && raJumpOf(fn.entry, instr.addr) != null) {
+							// $ra holds an address this function set: a jump (findRaJumps).
+							final t:Int = raJumpOf(fn.entry, instr.addr);
+							if (inScope(t)) follow(leaders, queue, t);
+							else {
+								fn.tailCalls.push(new CallSite(instr.addr, t, false));
+								addSeed(t, defaultName(t), Confidence.Called);
+							}
+						} else if (instr.rs == 31) {
 							// A return: control leaves the function.
 						} else if (tables.exists(instr.addr)) {
 							// A recovered switch. Every arm is ordinary control flow inside this
@@ -334,6 +534,12 @@ class Discovery {
 						} else {
 							fn.unresolvedJumps.push(instr.addr);
 						}
+
+					case JALR if (instr.rs == 31):
+						// A jump through $ra returns, whatever it links. Code handing its caller a
+						// continuation does exactly this — `jalr $s5, $ra` leaves with the address
+						// after it in $s5 (Crash Bandicoot: Warped's native GOOL code). Treated as a
+						// call, the words after it — the next bytecode — were traced as code.
 
 					case JALR:
 						fn.calls.push(new CallSite(instr.addr, 0, true));
@@ -405,7 +611,7 @@ class Discovery {
 						image.claim(addr + 4, Kind.Code, fn.entry);
 					}
 					block.exits = !instr.op.fallsThrough || instr.isRegisterJump;
-					recordSuccessors(block, instr, addr + 8, leaders);
+					recordSuccessors(fn.entry, block, instr, addr + 8, leaders);
 					break;
 				}
 
@@ -419,12 +625,73 @@ class Discovery {
 		}
 
 		fn.endAddr = maxEnd;
+		findRegisterReturns(fn);
 		return fn;
 	}
 
+	/**
+		Returns through a register other than `$ra`.
+
+		A routine that calls something itself must put its return address somewhere a `jal` will
+		not overwrite. Compilers use the stack; hand-written code often uses a scratch register —
+		`addu $at, $ra, $zero` on entry, `jr $at` on the way out (Crash Bandicoot: Warped's GOOL
+		operand helpers). Left as a computed jump, that `jr` dispatched to the caller's return
+		address as a fresh entry into the caller, which then ran on inside a nested call while the
+		original invocation resumed later with state the nested one had already unwound.
+
+		The rule is deliberately narrow, so that it can only ever describe a return: the copy is
+		made in the entry block before any call and before anything writes `$ra`, and no other
+		instruction anywhere in the function writes that register. Then every `jr` through it
+		jumps to the address the function was called from — which is what `jr $ra` does, and is
+		emitted the same way. A callee that clobbered the register would break the original on
+		hardware too.
+	**/
+	function findRegisterReturns(fn:Func):Void {
+		if (fn.unresolvedJumps.length == 0) return;
+		final entry = fn.blocks.get(fn.entry);
+		if (entry == null) return;
+		final copies:Array<Int> = [];
+		for (i in 0...entry.length) {
+			final a = fn.entry + i * 4;
+			final instr = Decoder.decode(a, image.readWord(a));
+			final ir = new recomp.ir.FunctionIR.InstructionIR(instr);
+			if (ir.writes.has(31) || instr.op.hasDelaySlot) break;
+			if ((instr.op == Op.ADDU || instr.op == Op.OR) && instr.rd != 0 && instr.rd != 31
+					&& ((instr.rs == 31 && instr.rt == 0) || (instr.rs == 0 && instr.rt == 31)))
+				copies.push(instr.rd);
+			else {}
+		}
+		if (copies.length == 0) return;
+		for (reg in copies) {
+			var writers = 0;
+			for (b in fn.blocks) {
+				for (i in 0...b.length) {
+					final a = b.addr + i * 4;
+					if (new recomp.ir.FunctionIR.InstructionIR(Decoder.decode(a, image.readWord(a))).writes.has(reg))
+						writers++;
+					else {}
+				}
+			}
+			if (writers != 1) continue;
+			for (jr in fn.unresolvedJumps.copy()) {
+				final instr = Decoder.decode(jr, image.readWord(jr));
+				if (instr.op == Op.JR && instr.rs == reg) {
+					fn.unresolvedJumps.remove(jr);
+					fn.registerReturns.set(jr, true);
+				} else {}
+			}
+		}
+	}
+
 	/** Records where control can go from a block ending in `instr`. */
-	function recordSuccessors(block:Block, instr:Instr, afterSlot:Int, leaders:Map<Int, Bool>):Void {
+	function recordSuccessors(fnEntry:Int, block:Block, instr:Instr, afterSlot:Int,
+			leaders:Map<Int, Bool>):Void {
 		switch (instr.op) {
+			case JR | JALR if (instr.isRegisterJump && instr.rs == 31 && raJumpOf(fnEntry, instr.addr) != null):
+				final t:Int = raJumpOf(fnEntry, instr.addr);
+				if (leaders.exists(t)) block.successors.push(t);
+				else {}
+				block.exits = block.successors.length == 0;
 			case JR | JALR if (instr.isRegisterJump):
 				if (instr.rs != 31 && tables.exists(instr.addr)) {
 					for (t in tables.get(instr.addr).targets) {
@@ -440,6 +707,8 @@ class Discovery {
 			case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ:
 				if (leaders.exists(instr.target)) block.successors.push(instr.target);
 				if (leaders.exists(afterSlot)) block.successors.push(afterSlot);
+			case JALR if (instr.rs == 31):
+				block.exits = true;   // a return that links; see traceFunction
 			case JAL | JALR | BLTZAL | BGEZAL:
 				if (leaders.exists(afterSlot)) block.successors.push(afterSlot);
 			case _:
@@ -617,7 +886,8 @@ class Discovery {
 			// This is the delay slot of a jump that leaves: it decoded, so the function is whole.
 			if (leaving) return true;
 			previousHadSlot = instr.op.hasDelaySlot;
-			leaving = instr.op == Op.JR || instr.op == Op.J;
+			// A jump through $ra leaves too, whatever it links (see traceFunction).
+			leaving = instr.op == Op.JR || instr.op == Op.J || (instr.op == Op.JALR && instr.rs == 31);
 		}
 		return true;
 	}

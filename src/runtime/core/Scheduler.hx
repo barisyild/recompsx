@@ -82,6 +82,12 @@ class Scheduler {
 		recomputeNext(ctx);
 	}
 
+	/** `cancel`, for a device that has no CpuState to hand — the same reason `scheduleAt` exists. */
+	public static function cancelSlot(slot:Int):Void {
+		active[slot] = false;
+		recomputeNext(owner);
+	}
+
 	public static function isActive(slot:Int):Bool {
 		return active[slot];
 	}
@@ -146,6 +152,7 @@ class Scheduler {
 		else if (slot == VBLANK_END) onVblankEnd(ctx);
 		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
 		else if (slot == SPU_BATCH) spu.Spu.onBatch(ctx.cycles);
+		else if (slot >= TIMER0 && slot <= TIMER2) timers.Timers.onEvent(ctx, slot - TIMER0);
 		else unimplemented(ctx, slot);
 	}
 

@@ -15,8 +15,12 @@ import recomp.mips.Disasm;
 import recomp.codegen.Universe;
 import recomp.config.GameConfig;
 import recomp.config.GameConfig.Hint;
+import recomp.config.GameConfig.TableHint;
 import recomp.config.GameConfig.OverlayConfig;
 import recomp.config.GameConfig.OverlaySource;
+import recomp.config.GameConfig.RelocConfig;
+import recomp.codegen.Relocatable.RelocSet;
+import recomp.codegen.Relocatable.Occurrence;
 import recomp.loader.DiscImage;
 import recomp.loader.IsoWalk;
 import recomp.mips.Instr;
@@ -27,9 +31,12 @@ typedef GenInput = {
 	exe:PsxExe,
 	name:String,
 	seeds:Array<Hint>,
+	tableHints:Array<TableHint>,
 	overlays:Array<OverlayConfig>,
 	/** Each overlay's bytes, read while the disc was open, keyed by id. */
 	overlayBytes:Map<String, Bytes>,
+	/** Relocatable code (ADR-0025), found and traced while the disc was open. */
+	relocSets:Array<RelocSet>,
 };
 
 /**
@@ -275,12 +282,14 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
 		// had named them.
 		for (h in input.seeds) discovery.addSeed(h.addr, h.name, Confidence.Entry);
+		for (t in input.tableHints) discovery.addTableHint(t.jrAddr, t.tableBase, t.count, t.targets);
 		discovery.run();
 
 		final universes = [new Universe(null, base, discovery, null)];
 		for (o in input.overlays) universes.push(analyseOverlay(input, exe, o));
 
-		final program = new Program(universes, exe, limit, optimize, structureRegions);
+		final program = new Program(universes, exe, limit, optimize, structureRegions,
+			input.relocSets);
 		program.writeTo(outDir);
 
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
@@ -292,6 +301,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				+ '${Lambda.count(u.discovery.functions)} functions'
 				+ (u.discovery.rejected > 0 ? ', ${u.discovery.rejected} rejected as data' : ''));
 		}
+		for (r in input.relocSets) Sys.println(r.describe());
 		if (program.deduplicated > 0) {
 			Sys.println('${program.deduplicated} function bodies shared between universes');
 		}
@@ -318,6 +328,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		final image = Image.ofExeWithOverlay('${input.name}:${o.id}', exe, bytes, o.loadAddr);
 		final d = new Discovery(image, o.loadAddr, o.endAddr(), true);
+		for (t in input.tableHints) d.addTableHint(t.jrAddr, t.tableBase, t.count, t.targets);
 		for (h in o.entryHints) {
 			// A hint here is a guess recovered from a run, and a window holds artwork as well as
 			// code, so it is read before it is believed.
@@ -338,8 +349,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			final a = parseAddr(sd);
 			hints.push({addr: a, name: 'f_${StringTools.hex(Vaddr.canonRam(a), 8).toLowerCase()}'});
 		}
-		return {exe: loadExe(path), name: nameOf(path), seeds: hints, overlays: [],
-			overlayBytes: new Map()};
+		return {exe: loadExe(path), name: nameOf(path), seeds: hints, tableHints: [], overlays: [],
+			overlayBytes: new Map(), relocSets: []};
 	}
 
 	/**
@@ -356,8 +367,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		if (config.exeFile != null) {
 			// Homebrew: local.json names a loose executable and there is no disc at all.
 			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
-				seeds: config.functionHints, overlays: config.overlays,
-				overlayBytes: memDumpsOnly(config)};
+				seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
+				overlayBytes: memDumpsOnly(config), relocSets: noDiscReloc(config)};
 		}
 		if (config.discPath == null) {
 			throw new LoaderError('${config.dir}/local.json does not say where the disc is. '
@@ -377,11 +388,60 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				+ 'names the wrong file or this is not the right disc.');
 		}
 		final bytes = disc.readExtent(found.lba, 0, found.length);
+		final exe = PsxExe.parse(bytes);
 		final overlayBytes = readOverlays(config, disc);
+		final relocSets = [for (r in config.relocatable) readRelocatable(r, exe, config, disc)];
 		disc.close();
-		return {exe: PsxExe.parse(bytes), name: isoName(config.exePath),
-			seeds: config.functionHints, overlays: config.overlays,
-			overlayBytes: overlayBytes};
+		return {exe: exe, name: isoName(config.exePath),
+			seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
+			overlayBytes: overlayBytes, relocSets: relocSets};
+	}
+
+	static function noDiscReloc(config:GameConfig):Array<RelocSet> {
+		if (config.relocatable.length > 0) {
+			throw new LoaderError('relocatable code is read from the disc, but local.json names a '
+				+ 'bare executable');
+		} else {}
+		return [];
+	}
+
+	/**
+		One relocatable stanza: every file it names, scanned, traced and keyed (ADR-0025).
+
+		The units are analysed at a nominal base at the top of RAM. It must not overlap the
+		executable or any overlay window, or a call from relocatable code into real code there
+		would look like a call into itself.
+	**/
+	static function readRelocatable(r:RelocConfig, exe:PsxExe, config:GameConfig,
+			disc:DiscImage):RelocSet {
+		final base = RelocSet.chooseBase(r.unit);
+		final end = base + r.unit;
+		final exeLo = Vaddr.canonRam(exe.loadAddr);
+		final exeHi = exeLo + exe.fileSize;
+		if (base < exeHi && end > exeLo) {
+			throw new LoaderError('relocatable "${r.id}": its analysis window '
+				+ '${Vaddr.hex(base)}..${Vaddr.hex(end)} overlaps the executable; lower unit');
+		} else {}
+		for (o in config.overlays) {
+			if (base < o.endAddr() && end > o.loadAddr) {
+				throw new LoaderError('relocatable "${r.id}": its analysis window overlaps overlay "${o.id}"');
+			} else {}
+		}
+		final set = new RelocSet(r, base);
+		final iso = new IsoWalk(disc);
+		final occurrences:Array<Occurrence> = [];
+		for (pattern in r.files) {
+			final paths = iso.glob(pattern);
+			if (paths.length == 0) {
+				throw new LoaderError('relocatable "${r.id}": nothing on the disc matches $pattern');
+			} else {}
+			for (p in paths) {
+				final e = iso.find(p);
+				set.addFile(isoName(p), disc.readExtent(e.lba, 0, e.length), occurrences);
+			}
+		}
+		set.finish(occurrences);
+		return set;
 	}
 
 	/**

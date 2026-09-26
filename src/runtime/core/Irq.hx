@@ -237,31 +237,22 @@ class Irq {
 	// A handler is an ordinary recompiled function and will use registers freely. On hardware the
 	// BIOS saves and restores them; here this does. `pc` and `cycles` are deliberately not
 	// restored: time really did pass, and pc is only meaningful at a boundary anyway.
-	static function saveRegisters(ctx:CpuState):Void {
-		saved.at = ctx.at;
-		saved.v0 = ctx.v0; saved.v1 = ctx.v1;
-		saved.a0 = ctx.a0; saved.a1 = ctx.a1; saved.a2 = ctx.a2; saved.a3 = ctx.a3;
-		saved.t0 = ctx.t0; saved.t1 = ctx.t1; saved.t2 = ctx.t2; saved.t3 = ctx.t3;
-		saved.t4 = ctx.t4; saved.t5 = ctx.t5; saved.t6 = ctx.t6; saved.t7 = ctx.t7;
-		saved.s0 = ctx.s0; saved.s1 = ctx.s1; saved.s2 = ctx.s2; saved.s3 = ctx.s3;
-		saved.s4 = ctx.s4; saved.s5 = ctx.s5; saved.s6 = ctx.s6; saved.s7 = ctx.s7;
-		saved.t8 = ctx.t8; saved.t9 = ctx.t9;
-		saved.k0 = ctx.k0; saved.k1 = ctx.k1;
-		saved.gp = ctx.gp; saved.sp = ctx.sp; saved.fp = ctx.fp; saved.ra = ctx.ra;
-		saved.hi = ctx.hi; saved.lo = ctx.lo;
-	}
+	static function saveRegisters(ctx:CpuState):Void copyRegisters(ctx, saved);
 
-	static function restoreRegisters(ctx:CpuState):Void {
-		ctx.at = saved.at;
-		ctx.v0 = saved.v0; ctx.v1 = saved.v1;
-		ctx.a0 = saved.a0; ctx.a1 = saved.a1; ctx.a2 = saved.a2; ctx.a3 = saved.a3;
-		ctx.t0 = saved.t0; ctx.t1 = saved.t1; ctx.t2 = saved.t2; ctx.t3 = saved.t3;
-		ctx.t4 = saved.t4; ctx.t5 = saved.t5; ctx.t6 = saved.t6; ctx.t7 = saved.t7;
-		ctx.s0 = saved.s0; ctx.s1 = saved.s1; ctx.s2 = saved.s2; ctx.s3 = saved.s3;
-		ctx.s4 = saved.s4; ctx.s5 = saved.s5; ctx.s6 = saved.s6; ctx.s7 = saved.s7;
-		ctx.t8 = saved.t8; ctx.t9 = saved.t9;
-		ctx.k0 = saved.k0; ctx.k1 = saved.k1;
-		ctx.gp = saved.gp; ctx.sp = saved.sp; ctx.fp = saved.fp; ctx.ra = saved.ra;
-		ctx.hi = saved.hi; ctx.lo = saved.lo;
+	static function restoreRegisters(ctx:CpuState):Void copyRegisters(saved, ctx);
+
+	/** Every general register plus HI/LO, from one state to another. Not `pc`, not `cycles`. */
+	public static function copyRegisters(from:CpuState, to:CpuState):Void {
+		to.at = from.at;
+		to.v0 = from.v0; to.v1 = from.v1;
+		to.a0 = from.a0; to.a1 = from.a1; to.a2 = from.a2; to.a3 = from.a3;
+		to.t0 = from.t0; to.t1 = from.t1; to.t2 = from.t2; to.t3 = from.t3;
+		to.t4 = from.t4; to.t5 = from.t5; to.t6 = from.t6; to.t7 = from.t7;
+		to.s0 = from.s0; to.s1 = from.s1; to.s2 = from.s2; to.s3 = from.s3;
+		to.s4 = from.s4; to.s5 = from.s5; to.s6 = from.s6; to.s7 = from.s7;
+		to.t8 = from.t8; to.t9 = from.t9;
+		to.k0 = from.k0; to.k1 = from.k1;
+		to.gp = from.gp; to.sp = from.sp; to.fp = from.fp; to.ra = from.ra;
+		to.hi = from.hi; to.lo = from.lo;
 	}
 }

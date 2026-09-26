@@ -51,6 +51,11 @@ class Emitter {
 	/** Program substitutes a pinned handle after body deduplication; fixtures use addresses. */
 	public var continuationToken:Null<String> = null;
 	var continuation:Int;
+	// The guest address a call being emitted returns to: what a return elsewhere is matched
+	// against when it passes this frame (ADR-0027).
+	var callReturnAddr:Int = 0;
+	// The function has returns checked against the `$ra` it was entered with, kept in `entryRa`.
+	var entryRaLocal = false;
 	// A native loop consumes transfers to this block instead of re-entering the dispatcher.
 	var nativeLoop:Null<Int>;
 	var linearNext:Null<Int>;
@@ -103,11 +108,32 @@ class Emitter {
 	**/
 	public static function blockOrder(fn:Func):Array<Int> return FunctionIR.blockOrder(fn);
 
+	/**
+		Relocatable code (ADR-0025): the function is compiled once and runs wherever the game put
+		it. Its entry address arrives in `core.Reloc.base` and is kept in the local `rbase`; the
+		only values the instructions compute from their own address — link registers, and the pc
+		published for a trap or a kernel call — are emitted as `rbase` plus an offset from the
+		entry. Everything else about such code is already position independent: branches are
+		relative, and its calls go to the executable at fixed addresses.
+	**/
+	public var relocatable = false;
+
+	/** An instruction address as the emitted code must compute it. */
+	function pcExpr(a:Int):String {
+		return relocatable ? '((rbase + ${hex((a - functionAddr) | 0)}) | 0)' : hex(a);
+	}
+
+	/** An address for a comment: absolute, or an offset from the entry for relocatable code. */
+	function addrNote(a:Int):String {
+		return relocatable ? 'entry+' + hex((a - functionAddr) | 0) : Vaddr.hex(a);
+	}
+
 	public function emitFunction(fn:Func):String {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
 		ir = new FunctionIR(fn, image);
 		functionAddr = fn.entry;
+		entryRaLocal = fn.checkedReturns.keys().hasNext();
 		registers = optimize ? new RegisterPlan(ir) : null;
 		nativeLoop = null;
 		linearNext = null;
@@ -128,7 +154,8 @@ class Emitter {
 		final pumpAt = loopHeaders(fn, blockAddrs);
 
 		buf.add('\t/**\n');
-		buf.add('\t\t${fn.name} — ${Vaddr.hex(fn.entry)}..${Vaddr.hex(fn.endAddr - 1)}, '
+		buf.add('\t\t${fn.name} — ' + (relocatable ? 'relocatable, ${fn.endAddr - fn.entry} bytes from its entry'
+			: '${Vaddr.hex(fn.entry)}..${Vaddr.hex(fn.endAddr - 1)}') + ', '
 			+ '${blockAddrs.length} block${blockAddrs.length == 1 ? "" : "s"}, '
 			+ '${fn.instructionCount()} instructions.\n');
 		if (fn.confidence == recomp.analysis.Confidence.Swept) {
@@ -137,10 +164,15 @@ class Emitter {
 		}
 		buf.add('\t**/\n');
 		buf.add('\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n');
+		// First, before anything can call out and let another relocatable function set it.
+		if (relocatable) buf.add('\t\tfinal rbase = core.Reloc.base;\n');
+		// The address this call returns to, before anything can overwrite `$ra` (ADR-0027).
+		if (entryRaLocal) buf.add('\t\tvar entryRa = ctx.ra;\n');
 		buf.add('\t\t#if recompsx_cooperative\n');
 		buf.add('\t\tvar entryPump = true;\n');
 		buf.add('\t\tif (core.Cooperative.resumeEntry >= 0) {\n');
 		buf.add('\t\t\tentry = core.Cooperative.resumeEntry; entryPump = core.Cooperative.resumePump;\n');
+		if (entryRaLocal) buf.add('\t\t\tentryRa = core.Cooperative.resumeRa;\n');
 		buf.add('\t\t\tcore.Cooperative.resumeEntry = -1;\n\t\t} else {}\n');
 		buf.add('\t\tif (entryPump) {\n');
 		emitCheckpoint(buf, '\t\t\t', 'entry', true);
@@ -173,8 +205,8 @@ class Emitter {
 			final guarded = linear && i + 1 < blockAddrs.length;
 			final indent = dispatch ? "\t\t\t\t" : (guarded ? "\t\t\t" : "\t\t");
 			linearNext = guarded ? blockAddrs[i + 1] : null;
-			if (dispatch) buf.add('\t\t\tcase $i: // ${Vaddr.hex(addr)}\n');
-			else if (guarded) buf.add('\t\tif (entry <= $i) { // ${Vaddr.hex(addr)}\n');
+			if (dispatch) buf.add('\t\t\tcase $i: // ${addrNote(addr)}\n');
+			else if (guarded) buf.add('\t\tif (entry <= $i) { // ${addrNote(addr)}\n');
 			final loopExit = optimize ? selfLoopExit(fn, addr) : null;
 			if (loopExit != null) {
 				nativeLoop = addr;
@@ -361,11 +393,26 @@ class Emitter {
 		buf.add(ind + 'return;\n');
 	}
 
+	/**
+		A return whose `$ra` may not be the one the function was entered with (ADR-0027): if it is
+		not, control goes to that address, not to the host caller — `Runtime.returnTo` leaves the
+		target, and each caller's after-call check carries it out to the frame that continues
+		there. `target` is the expression holding the address the `jr` jumps to.
+	**/
+	function emitReturnCheck(buf:StringBuf, ind:String, fn:Func, instr:Instr, target:String):Void {
+		if (!fn.checkedReturns.exists(instr.addr)) return;
+		buf.add('${ind}if ($target != entryRa) Runtime.returnTo(ctx, $target);   // a return elsewhere\n');
+		buf.add('${ind}else {}\n');
+	}
+
 	function emitCheckpoint(buf:StringBuf, ind:String, entry:String, entryPump:Bool):Void {
 		buf.add(ind + '#if recompsx_cooperative\n');
 		buf.add(ind + 'if (core.Cooperative.wantsYield(ctx)) {\n');
 		if (!entryPump) publish(buf, ind + '\t');
-		buf.add(ind + '\tcore.Cooperative.suspend(ctx, ${continuationId()}, $entry, $entryPump);\n');
+		final ra = entryRaLocal ? ', entryRa' : '';
+		buf.add(ind + (relocatable
+			? '\tcore.Cooperative.suspendAt(ctx, ${continuationId()}, $entry, $entryPump, rbase$ra);\n'
+			: '\tcore.Cooperative.suspend(ctx, ${continuationId()}, $entry, $entryPump$ra);\n'));
 		buf.add(ind + '\treturn;\n' + ind + '} else {}\n' + ind + '#end\n');
 	}
 
@@ -375,7 +422,7 @@ class Emitter {
 		publish(buf, ind + '\t');
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
 		// A nonlocal jump has already restored CpuState: never publish stale locals over it.
-		buf.add(ind + '\t' + UNWIND_LINE + '\n');
+		buf.add(ind + '\t' + unwindLine(NO_CONTINUATION) + '\n');
 		if (registers != null) registers.reloadBlock(buf, ind + '\t', ir.blocks[entry].addr);
 		buf.add(ind + '} else {}\n');
 	}
@@ -411,7 +458,15 @@ class Emitter {
 
 		A single return needs no `else` workaround for upstream defect 8.
 	**/
-	static inline final UNWIND_LINE = "if (ctx.unwindToken != 0) return;";
+	// `unwinding` runs a tail jump the callee left (ADR-0026) before deciding, and stops a return
+	// to elsewhere at the frame that continues at `cont` (ADR-0027); the common case, no token at
+	// all, is the same single compare as before.
+	static function unwindLine(cont:String):String {
+		return 'if (ctx.unwindToken != 0 && Runtime.unwinding(ctx, $cont)) return;';
+	}
+
+	/** Where no call returns: after a pump or a trap. No return to elsewhere stops there. */
+	static inline final NO_CONTINUATION = "-1";
 
 	/**
 		Blocks that a back-edge returns to — the loop headers.
@@ -625,6 +680,7 @@ class Emitter {
 			indexOf:Map<Int, Int>, ind:String, cycles:Int, insns:Int, tempCounter:Int):Void {
 		final retAddr = instr.addr + 8;
 		continuation = indexOf.exists(retAddr) ? indexOf.get(retAddr) : -1;
+		callReturnAddr = retAddr;
 		inline function emitSlot():Void {
 			if (slot == null) return;
 			emitSimple(buf, ind, slot, true);
@@ -635,7 +691,38 @@ class Emitter {
 		}
 
 		switch (instr.op) {
+			case JR | JALR if (instr.isRegisterJump && instr.rs == 31
+					&& discovery.raJumpOf(fn.entry, instr.addr) != null):
+				// $ra holds an address this function set: a jump (Discovery.findRaJumps).
+				final target:Int = discovery.raJumpOf(fn.entry, instr.addr);
+				emitSlot();
+				bump();
+				if (indexOf.exists(target)) emitGoto(buf, ind, target, indexOf, instr.addr);
+				else {
+					emitCall(buf, ind, target, false);
+					buf.add('${ind}return;\n');
+				}
+
 			case JR | JALR if (instr.isRegisterJump && instr.rs == 31):
+				emitSlot();
+				bump();
+				emitReturnCheck(buf, ind, fn, instr, reg(31));
+				emitReturn(buf, ind);
+
+			case JALR if (instr.rs == 31):
+				// A return that also links: the caller's continuation goes into rd, then control
+				// goes back to the caller (Discovery: a jump through $ra returns).
+				final checked = fn.checkedReturns.exists(instr.addr);
+				final t = 'target_${tempCounter}';
+				if (checked) buf.add('${ind}final $t = ${reg(31)};\n');
+				buf.add('${ind}${reg(instr.rd)} = ${pcExpr(retAddr)};\n');
+				emitSlot();
+				bump();
+				if (checked) emitReturnCheck(buf, ind, fn, instr, t);
+				emitReturn(buf, ind);
+
+			case JR if (fn.registerReturns.exists(instr.addr)):
+				// A return through a copy of $ra (Discovery.findRegisterReturns).
 				emitSlot();
 				bump();
 				emitReturn(buf, ind);
@@ -665,13 +752,13 @@ class Emitter {
 					}
 					buf.add('$ind\tdefault:\n');
 					publish(buf, ind + '\t\t');
-					buf.add('$ind\t\tctx.pc = $t; Runtime.call(ctx, $t); return;\n');
+					buf.add('$ind\t\tctx.pc = $t; Runtime.tail(ctx, $t); return;\n');
 					buf.add('$ind}\n');
 				} else if (constant != null && isKernelVector(constant.target)) {
 					emitSlot();
 					bump();
 					publish(buf, ind);
-					buf.add('${ind}ctx.pc = ${hex(instr.addr)};\n');
+					buf.add('${ind}ctx.pc = ${pcExpr(instr.addr)};\n');
 					buf.add('${ind}Kernel.call(ctx, ${hex(constant.target)}, ctx.t1);'
 						+ '   // BIOS ${vectorName(constant.target)}('
 						+ (constant.fnNumber >= 0 ? hex16(constant.fnNumber) : "?") + ')\n');
@@ -683,13 +770,13 @@ class Emitter {
 					bump();
 					publish(buf, ind);
 					buf.add('${ind}ctx.pc = $t;\n');
-					buf.add('${ind}Runtime.call(ctx, $t);   // computed jump, dispatched by address\n');
+					buf.add('${ind}Runtime.tail(ctx, $t);   // computed jump: the caller runs it (ADR-0026)\n');
 					buf.add('${ind}return;\n');
 				}
 
 			case JAL:
 				// The link is written before the slot runs, which matters when the slot reads $ra.
-				buf.add('${ind}${reg(31)} = ${hex(retAddr)};\n');
+				buf.add('${ind}${reg(31)} = ${pcExpr(retAddr)};\n');
 				emitSlot();
 				bump();
 				emitCall(buf, ind, instr.target);
@@ -699,13 +786,13 @@ class Emitter {
 				final t = 'target_${tempCounter}';
 				// The target is latched before the link is written, so `jalr $ra, $ra` works.
 				buf.add('${ind}final $t = ${reg(instr.rs)};\n');
-				if (instr.rd != 0) buf.add('${ind}${reg(instr.rd)} = ${hex(retAddr)};\n');
+				if (instr.rd != 0) buf.add('${ind}${reg(instr.rd)} = ${pcExpr(retAddr)};\n');
 				emitSlot();
 				bump();
 				publish(buf, ind);
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}Runtime.call(ctx, $t);\n');
-				emitCallUnwind(buf, ind, continuation);
+				emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
 				reloadContinuation(buf, ind, continuation);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
@@ -729,7 +816,7 @@ class Emitter {
 				buf.add('${ind}${captured ? "" : "final "}$cond = ${condition(instr)};\n');
 				if (instr.op == Op.BLTZAL || instr.op == Op.BGEZAL) {
 					// The link happens whether or not the branch is taken.
-					buf.add('${ind}${reg(31)} = ${hex(retAddr)};   // linked even when not taken\n');
+					buf.add('${ind}${reg(31)} = ${pcExpr(retAddr)};   // linked even when not taken\n');
 				}
 				emitSlot();
 				bump();
@@ -779,20 +866,31 @@ class Emitter {
 		publish(buf, ind);
 		if (cls != null) {
 			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
+		} else if (!resumes) {
+			// A tail call by address: a jump, left for the caller to run (ADR-0026).
+			buf.add('${ind}ctx.pc = ${hex(t)};\n');
+			buf.add('${ind}Runtime.tail(ctx, ${hex(t)});\n');
+			return;
 		} else {
 			// The kernel, code this build never found, or a window whose occupant is decided at
 			// run time. All three are the same instruction here: ask by address.
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
 			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
 		}
-		emitCallUnwind(buf, ind, resumes ? continuation : -1);
+		// A tail call's callee returns to our caller: this frame is no one's continuation.
+		emitCallUnwind(buf, ind, resumes ? continuation : -1,
+			resumes ? pcExpr(callReturnAddr) : NO_CONTINUATION);
 		if (resumes) reloadContinuation(buf, ind, continuation);
 	}
 
-	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int):Void {
+	/** After a call: `entry` is the block it resumes at, `cont` the guest address it returns to. */
+	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int, cont:String):Void {
+		final ra = entryRaLocal ? ', entryRa' : '';
 		buf.add(ind + '#if recompsx_cooperative\n');
-		buf.add(ind + 'if (core.Cooperative.afterCall(ctx, ${continuationId()}, $entry)) return;\n');
-		buf.add(ind + '#else\n' + ind + UNWIND_LINE + '\n' + ind + '#end\n');
+		buf.add(ind + (relocatable
+			? 'if (core.Cooperative.afterCallAt(ctx, ${continuationId()}, $entry, rbase, $cont$ra)) return;\n'
+			: 'if (core.Cooperative.afterCall(ctx, ${continuationId()}, $entry, $cont$ra)) return;\n'));
+		buf.add(ind + '#else\n' + ind + unwindLine(cont) + '\n' + ind + '#end\n');
 	}
 
 	function continuationId():String return continuationToken == null ? hex(functionAddr) : continuationToken;
@@ -877,7 +975,7 @@ class Emitter {
 		final line = simple(i, afterBlock, afterIndex);
 		if (line != "") buf.add(ind + line + (slot ? '   // delay slot' : '') + '\n');
 		if (barrier) {
-			buf.add(ind + UNWIND_LINE + '\n');
+			buf.add(ind + unwindLine(NO_CONTINUATION) + '\n');
 			if (registers != null && afterBlock != null)
 				registers.reloadAfter(buf, ind, afterBlock, afterIndex);
 			else reload(buf, ind);
@@ -971,8 +1069,8 @@ class Emitter {
 			case SWL: 'Memory.swl(${busAddr(i)}, ${reg(rt)});';
 			case SWR: 'Memory.swr(${busAddr(i)}, ${reg(rt)});';
 
-			case SYSCALL: 'ctx.pc = ${hex(i.addr)}; Kernel.syscall(ctx, ${i.code});';
-			case BREAK:   'ctx.pc = ${hex(i.addr)}; Kernel.brk(ctx, ${i.code});';
+			case SYSCALL: 'ctx.pc = ${pcExpr(i.addr)}; Kernel.syscall(ctx, ${i.code});';
+			case BREAK:   'ctx.pc = ${pcExpr(i.addr)}; Kernel.brk(ctx, ${i.code});';
 
 			case MFC0: assign(rt, 'Runtime.mfc0(ctx, ${i.rd})', false);
 			case MTC0: 'Runtime.mtc0(ctx, ${i.rd}, ${reg(rt)});';

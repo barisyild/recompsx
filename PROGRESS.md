@@ -2,6 +2,43 @@
 
 ## Status snapshot
 
+**2026-09-26: Crash 3 draws boxes, enemies and objects — a helper's return to its caller's caller.**
+Found with DuckStation as the oracle (GDB stub): same draw-list nodes, and Crash/camera identical
+frame for frame through the demo (931 of 931 samples, 114 frames apart from our faster loading).
+The per-object bounding-box test (0x8003def4) calls a helper per corner that, on a visible corner,
+reloads the test's saved `$ra` from the scratchpad and jumps there; compiled as a plain return, the
+test always ended "not visible". ADR-0027: a return a foreign `lw $ra` can reach is checked against
+the entry `$ra`, and a mismatch unwinds (`Runtime.RETURN`) to the frame whose call continues at the
+target, cooperative frames included. Crash 3: 127 checked returns, JS 9000 frames 2c8bc61d (was
+7f7d8a93: now drawn). Crash Bash: 30, digests unchanged (9000 2ff36a18, 30000 288ed8d6). WebGL:
+pixels drawn into VRAM are converted back into the texture VRAM before a primitive samples them
+(Crash's shadow was a square); the page loads the renderer under its own version. Gate green on JS
+(check.sh clean, 22 conformance tests, 423 tool checks).
+
+**2026-09-26: Crash Bandicoot: Warped runs its whole attract loop on JS — native GOOL code compiled from the disc.**
+Title, intro, DEMO gameplay and back to the title, 9000 frames with no missing code. GOOL runs MIPS
+embedded in bytecode at heap addresses; per the user, no interpreter: ADR-0025 compiles it from the
+NSF files (`relocatable` stanza: marker, unit, hashWords) and recognises it by content at run time
+(1,313 functions, keys with separating positions where shared). ADR-0026: computed tail jumps are run
+by the caller (the renderer's per-primitive hops overflowed the stack). Tool: `jalr rd, $ra` returns,
+`jr $ra` after the function set `$ra` is a jump. Crash Bash codegen/digests unchanged by all of it
+(9000 2ff36a18, 30000 288ed8d6); gate green, 417 tool checks.
+
+**2026-09-26: a third game — Crash Bandicoot: Warped (games/crash3) boots on JS through its intro.**
+Config: the GOOL interpreter's scratchpad-based opcode table and hand-written computed jumps via
+`jumpTableHints` (now implemented: `{jrAddr, tableBase, count}` or `{jrAddr, targets[]}`), 148 entry
+hints, the `warp` overlay (S0/WARPSCUS.BIN). General fixes it forced: block 0 is the function entry
+even with blocks below it; `jr` through a copy of `$ra` is a return (Crash Bash codegen unchanged);
+root-counter interrupts (TIMER0-2 scheduler slots, bit 10, one-shot/repeat, pulse/toggle; RCnt
+events F2000000h+n); the kernel's fallback only takes lines pending when the exception was taken;
+kernel handlers and event callbacks run on an exception stack (OpenBIOS vectors.s); pump-drained
+event callbacks preserve the interrupted registers; rectangles clip to the drawing area; the
+hardware rect colour is 24-bit as the ABI says. Crash Bash: CdRead retries 6 -> 1 (the one left is
+its own SCEx check), digests move to 9000 2ff36a18 / 30000 288ed8d6 (C++ not re-measured; the user
+chose JS-only for now). Crash 3 stops ~frame 2400: GOOL runs native MIPS embedded in bytecode at
+heap addresses (op 0x49, `jalr $s5`), which ADR-0006's fixed-window overlays and the no-interpreter
+rule do not cover — a decision is pending (games/crash3/notes.md).
+
 **2026-09-26: GTE — RTPS/RTPT rows exact in 32 bits; the depth cue's IR0 fixed to the spec.**
 RTPS/RTPT rows are 32-bit (exact while |TR| < 2^30; checked 44-bit path otherwise) and RTPT is one
 body with `project`/`unrDivide` forced inline on C++. New conformance `GteProject` (12000 random
@@ -1146,6 +1183,20 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-26 [claude] Crash 3 boxes/enemies culled: helper's non-local `jr $ra` compiled as a return
+(ADR-0027: checked returns + RETURN unwinding, found via DuckStation GDB). WebGL render-to-texture
+sync (shadow), versioned renderer load. Crash Bash unchanged; JS gate green, 423 tool checks.
+Next: Crash 3 input/gameplay; JS speed with WebGL; C++/Dreamcast when the user resumes that path.
+
+2026-09-26 [claude] Crash 3 attract loop on JS: relocatable GOOL native code (ADR-0025), tail-jump
+trampoline (ADR-0026), $ra-constant jumps, jalr-through-ra returns. Crash Bash unchanged; gate green.
+Next: Crash 3 input/gameplay, measure JS speed and the Dreamcast budget with relocatable code.
+
+2026-09-26 [claude] games/crash3 (Crash Bandicoot: Warped) on JS to ~frame 2400: jumpTableHints, entry-first
+block order, jr-through-ra-copy returns, timer IRQs, IRQ race/exception stack/drain fixes, rect clip +
+colour; Crash Bash 9000 2ff36a18 / 30000 288ed8d6, retries 6->1; gate green (413 tool checks).
+Next: decide how to run GOOL's heap-resident native code (interpreter fallback vs content-hashed blobs).
 
 2026-09-26 [claude] Painter 716 ms (gte 207->175, rtps 134->97, build 146->121). Many-character cutscene: gte 225
 (rtps 108, farColorInterpolate 54), up 39. GTE 32-bit fast paths: NCLIP (2 muls, coords within 2^14), AVSZ3/4

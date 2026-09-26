@@ -8,6 +8,8 @@ import recomp.loader.PsxExe;
 import recomp.codegen.Shards;
 import recomp.codegen.Shards.Shard;
 import recomp.codegen.Universe;
+import recomp.codegen.Relocatable.RelocSet;
+import recomp.codegen.Relocatable.RelocFunc;
 import sys.FileSystem;
 import sys.io.File;
 
@@ -29,6 +31,9 @@ class Program {
 	/** Universe 0 is the executable; the rest are overlays, in config order. */
 	final universes:Array<Universe>;
 
+	/** Relocatable code (ADR-0025), after every universe in shard numbering. */
+	final relocSets:Array<RelocSet>;
+
 	/** Function bodies already emitted, keyed by their text, mapped to the class holding them. */
 	final emitted:Map<String, String> = [];
 
@@ -39,9 +44,10 @@ class Program {
 	public var deduplicated(default, null) = 0;
 
 	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0, optimize:Bool = true,
-			structureRegions:Bool = true) {
+			structureRegions:Bool = true, ?relocSets:Array<RelocSet>) {
 		this.universes = universes;
 		this.exe = exe;
+		this.relocSets = relocSets == null ? [] : relocSets;
 
 		// Shard indices are program-wide: the base takes the first block and each overlay
 		// continues from where the last stopped, so a handle names one shard in the whole program.
@@ -49,6 +55,16 @@ class Program {
 		for (u in universes) {
 			u.shards = new Shards(u.discovery, limit, nextIndex, u.classPrefix());
 			nextIndex += u.shards.shards.length;
+		}
+		for (r in this.relocSets) {
+			r.shards = Shards.ofList([for (f in r.functions) f.func], nextIndex,
+				"Rel_" + Universe.sanitizeId(r.config.id));
+			nextIndex += r.shards.length;
+			// Handles by position: the functions were cut into shards in list order.
+			var at = 0;
+			for (sh in r.shards) {
+				for (slot in 0...sh.functions.length) r.functions[at++].handle = (sh.index << 20) | slot;
+			}
 		}
 		if (nextIndex > MAX_SHARDS) {
 			throw new recomp.analysis.AnalysisError('this program needs $nextIndex shards; a '
@@ -58,6 +74,13 @@ class Program {
 		for (u in universes) {
 			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
+		}
+		for (r in this.relocSets) {
+			for (unit in r.units) {
+				unit.emitter = new Emitter(unit.image, unit.discovery, optimize, structureRegions);
+				unit.emitter.relocatable = true;
+				unit.emitter.staticTargetOf = a -> staticTargetFor(universes[0], a);
+			}
 		}
 		checkFingerprintsDistinct();
 	}
@@ -109,8 +132,12 @@ class Program {
 		for (u in universes) {
 			for (s in u.shards.shards) write('$dir/${s.className}.hx', shardSource(u, s));
 		}
+		for (r in relocSets) {
+			for (sh in r.shards) write('$dir/${sh.className}.hx', relocShardSource(r, sh));
+		}
 		write('$dir/FnTable.hx', fnTableSource());
 		write('$dir/Overlays.hx', overlaysSource());
+		write('$dir/RelocTable.hx', relocTableSource());
 		write('$dir/GameInfo.hx', gameInfoSource());
 	}
 
@@ -309,6 +336,11 @@ class Program {
 				buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, entry, ctx);\n');
 			}
 		}
+		for (r in relocSets) {
+			for (s in r.shards) {
+				buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, entry, ctx);\n');
+			}
+		}
 		buf.add("			default: Runtime.badHandle(ctx, \"table\", handle >>> 20, slot);
 		}
 	}
@@ -333,7 +365,8 @@ class Program {
 			return true;
 		}
 		final row = lookup(addr);
-		if (row < 0) return false;
+		// Nothing at a fixed address: it may be relocatable code the game put there (ADR-0025).
+		if (row < 0) return RelocTable.call(addr, ctx);
 		dispatch(shim.MemA.get32(HANDLES_F, row << 2), shim.MemA.get32(BLOCKS_F, row << 2), ctx);
 		return true;
 	}
@@ -377,6 +410,7 @@ class Program {
 	/** Initialize before guest execution; subsequent calls allocate nothing. */
 	public static function init():Void {
 		if (!flatReady) buildFlat();
+		RelocTable.init();
 	}
 
 	static function buildFlat():Void {
@@ -401,6 +435,217 @@ class Program {
 
 ";
 	}
+
+	// ---- relocatable code (ADR-0025) -------------------------------------------------------------
+
+	function relocShardSource(r:RelocSet, shard:Shard):String {
+		final buf = new StringBuf();
+		buf.add(header());
+		buf.add('/**\n');
+		buf.add('\tRelocatable functions from "${r.config.id}" — ${shard.functions.length} of them. They run\n');
+		buf.add('\twherever the game put them: `core.Reloc.base` holds the entry address (ADR-0025).\n');
+		buf.add('**/\n');
+		buf.add('class ${shard.className} {\n');
+		for (fn in shard.functions) {
+			final rf = relocOf(r, fn);
+			final token = '__RECOMPSX_CONTINUATION_HANDLE__';
+			rf.unit.emitter.continuationToken = token;
+			buf.add(StringTools.replace(rf.unit.emitter.emitFunction(fn), token, Std.string(rf.handle)));
+			buf.add("\n");
+		}
+		buf.add('\tpublic static function dispatch(slot:Int, entry:Int, ctx:CpuState):Void {\n');
+		buf.add('\t\tRuntime.lastSlot = slot;\n');
+		buf.add('\t\tswitch (slot) {\n');
+		for (i in 0...shard.functions.length) {
+			buf.add('\t\t\tcase $i: ${shard.className}.${shard.functions[i].name}(ctx, entry);\n');
+		}
+		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, "${shard.className}", ${shard.index}, slot);\n');
+		buf.add('\t\t}\n');
+		buf.add('\t}\n');
+		buf.add('}\n');
+		return buf.toString();
+	}
+
+	static function relocOf(r:RelocSet, fn:Func):RelocFunc {
+		for (f in r.functions) if (f.func == fn) return f;
+		throw 'relocatable function ${fn.name} not in its set';
+	}
+
+	/**
+		How the runtime recognises relocatable code: by the words at the address it was sent to.
+
+		One program-wide table, however many stanzas: a key is FNV-1a over the first `HASH_WORDS`
+		words at the entry, and its value is a handle — or, where several functions share the key,
+		a group whose rows say which words to read and what each function has there. The tool
+		chose those words so that no two different functions on the disc read the same.
+	**/
+	function relocTableSource():String {
+		final hashWords = relocSets.length == 0 ? 1 : relocSets[0].config.hashWords;
+		for (r in relocSets) {
+			if (r.config.hashWords != hashWords) {
+				throw new recomp.analysis.AnalysisError('relocatable stanzas must share one hashWords');
+			} else {}
+		}
+		// Keys across stanzas, sorted; a key two stanzas share would be ambiguous, and is refused.
+		final keys:Array<Int> = [];
+		final values:Array<Int> = [];
+		final posStart:Array<Int> = [];
+		final posEnd:Array<Int> = [];
+		final positions:Array<Int> = [];
+		final rowStart:Array<Int> = [];
+		final rowEnd:Array<Int> = [];
+		final wordStart:Array<Int> = [];
+		final rowWords:Array<Int> = [];
+		final rowHandles:Array<Int> = [];
+		final pairs:Array<{key:Int, value:Int}> = [];
+		for (r in relocSets) {
+			for (i in 0...r.keys.length) {
+				final v = r.keyValues[i];
+				if (v >= 0) { pairs.push({key: r.keys[i], value: r.functions[v].handle}); continue; }
+				else {}
+				final g = r.groups[-1 - v];
+				final gi = posStart.length;
+				posStart.push(positions.length);
+				for (p in g.positions) positions.push(p);
+				posEnd.push(positions.length);
+				rowStart.push(rowHandles.length);
+				wordStart.push(rowWords.length);
+				for (row in 0...g.rowWords.length) {
+					for (w in g.rowWords[row]) rowWords.push(w);
+					rowHandles.push(r.functions[g.rowFuncs[row]].handle);
+				}
+				rowEnd.push(rowHandles.length);
+				pairs.push({key: r.keys[i], value: -1 - gi});
+			}
+		}
+		pairs.sort((a, b) -> a.key < b.key ? -1 : (a.key > b.key ? 1 : 0));
+		for (i in 0...pairs.length) {
+			if (i > 0 && pairs[i].key == pairs[i - 1].key) {
+				throw new recomp.analysis.AnalysisError('two relocatable stanzas share a key; give '
+					+ 'them different hashWords or merge them');
+			} else {}
+			keys.push(pairs[i].key);
+			values.push(pairs[i].value);
+		}
+
+		final buf = new StringBuf();
+		buf.add(header());
+		buf.add('/**\n');
+		buf.add('\tRelocatable code, recognised by content (ADR-0025): ${keys.length} keys, '
+			+ '${posStart.length} of them shared by several functions.\n');
+		buf.add('**/\n');
+		buf.add('class RelocTable {\n');
+		buf.add('\tpublic static inline var HASH_WORDS = $hashWords;\n\n');
+		emitTable(buf, "KEYS", "FNV-1a over the first HASH_WORDS words at an entry, ascending.", keys, a -> hex(a));
+		emitTable(buf, "VALUES", "A handle, or -1 - group for a key several functions share.", values, a -> Std.string(a));
+		emitTable(buf, "POS_START", "Each group's first position.", posStart, a -> Std.string(a));
+		emitTable(buf, "POS_END", "One past its last.", posEnd, a -> Std.string(a));
+		emitTable(buf, "POSITIONS", "Word offsets from the entry that tell a group's functions apart.", positions, a -> Std.string(a));
+		emitTable(buf, "ROW_START", "Each group's first row.", rowStart, a -> Std.string(a));
+		emitTable(buf, "ROW_END", "One past its last.", rowEnd, a -> Std.string(a));
+		emitTable(buf, "WORD_START", "Where each group's row words begin in ROW_WORDS.", wordStart, a -> Std.string(a));
+		emitTable(buf, "ROW_WORDS", "Each row's words at its group's positions, row after row.", rowWords, a -> hex(a));
+		emitTable(buf, "ROW_HANDLES", "The function each row names.", rowHandles, a -> Std.string(a));
+		buf.add(RELOC_RUNTIME);
+		buf.add('}\n');
+		return buf.toString();
+	}
+
+	static final RELOC_RUNTIME = "	static var KEYS_F:shim.RawBuf;
+	static var VALUES_F:shim.RawBuf;
+	static var ready:Bool = false;
+
+	/** Initialize before guest execution; subsequent calls allocate nothing. */
+	public static function init():Void {
+		if (ready) return;
+		else {}
+		final n = KEYS.length;
+		KEYS_F = shim.RawMem.alloc((n + 1) << 2);
+		VALUES_F = shim.RawMem.alloc((n + 1) << 2);
+		var i = 0;
+		while (i < n) {
+			shim.MemA.set32(KEYS_F, i << 2, KEYS[i]);
+			shim.MemA.set32(VALUES_F, i << 2, VALUES[i]);
+			i++;
+		}
+		ready = true;
+	}
+
+	/**
+		FNV-1a over HASH_WORDS words at `addr`, byte by byte in memory order — the same lines as
+		the tool's `RelocSet.keyOf`, which computed the table from the disc.
+	**/
+	static function keyAt(addr:Int):Int {
+		var h = 0x811C9DC5;
+		var i = 0;
+		while (i < HASH_WORDS) {
+			final w = Memory.read32(addr + (i << 2));
+			var b = 0;
+			while (b < 4) {
+				h = (h ^ ((w >>> (b << 3)) & 0xFF)) | 0;
+				h = (h + ((h << 1) | 0) + ((h << 4) | 0) + ((h << 7) | 0) + ((h << 8) | 0)
+					+ ((h << 24) | 0)) | 0;
+				b++;
+			}
+			i++;
+		}
+		return h;
+	}
+
+	/** Runs relocatable code at `addr`, if what is there is code this program knows. */
+	public static function call(addr:Int, ctx:CpuState):Bool {
+		if (KEYS.length == 0 || (addr & 3) != 0) return false;
+		else {}
+		if (!Memory.isPlainMemory(addr) || !Memory.isPlainMemory(addr + ((HASH_WORDS - 1) << 2))) return false;
+		else {}
+		if (!ready) init();
+		else {}
+		final key = keyAt(addr);
+		var lo = 0;
+		var hi = KEYS.length - 1;
+		var value = 0;
+		var found = false;
+		while (lo <= hi) {
+			final mid = (lo + hi) >> 1;
+			final at = shim.MemA.get32(KEYS_F, mid << 2);
+			if (at == key) { value = shim.MemA.get32(VALUES_F, mid << 2); found = true; break; }
+			else if (at < key) { lo = mid + 1; }
+			else { hi = mid - 1; }
+		}
+		if (!found) return false;
+		else {}
+		final handle = value >= 0 ? value : resolve(-1 - value, addr);
+		if (handle < 0) return false;
+		else {}
+		core.Reloc.base = addr;
+		core.Reloc.calls = (core.Reloc.calls + 1) | 0;
+		FnTable.dispatch(handle, 0, ctx);
+		return true;
+	}
+
+	/** Which of a group's functions is at `addr`, by the words at the group's positions. */
+	static function resolve(group:Int, addr:Int):Int {
+		final p0 = POS_START[group];
+		final n = POS_END[group] - p0;
+		var row = ROW_START[group];
+		final end = ROW_END[group];
+		while (row < end) {
+			var ok = true;
+			var k = 0;
+			while (k < n) {
+				final at = addr + (POSITIONS[p0 + k] << 2);
+				final expected = ROW_WORDS[WORD_START[group] + (row - ROW_START[group]) * n + k];
+				if (!Memory.isPlainMemory(at) || Memory.read32(at) != expected) { ok = false; break; }
+				else {}
+				k++;
+			}
+			if (ok) return ROW_HANDLES[row];
+			else {}
+			row++;
+		}
+		return -1;
+	}
+";
 
 	// ---- the overlays --------------------------------------------------------------------------
 

@@ -109,6 +109,16 @@ class Codegen {
 		final addr = (0x80010000 + (kind << 12)) | 0;
 		if (opt) CodegenOptimized.dispatch(addr, ctx);
 		else CodegenReference.dispatch(addr, ctx);
+		finishTail(ctx);
+	}
+
+	/**
+		A computed tail jump leaves its target for the caller (ADR-0026). The fixtures are entered
+		directly rather than through `Runtime.call`, so the harness is that caller.
+	**/
+	public static function finishTail(ctx:CpuState):Void {
+		if (ctx.unwindToken == Runtime.TAIL) Runtime.unwinding(ctx, -1);
+		else {}
 	}
 
 	static function runFused(ctx:CpuState, sample:Int, opt:Bool):Void {
@@ -165,6 +175,14 @@ class Codegen {
 		ctx.a1 = 32;   // SRLV uses the low five bits: a shift by zero
 		if (opt) CodegenOptimized.shiftByZero(ctx);
 		else CodegenReference.shiftByZero(ctx);
+	}
+
+	/** The return to the caller's caller (ADR-0027): `normal` selects the plain return instead. */
+	static function runNonlocal(ctx:CpuState, opt:Bool, normal:Bool):Void {
+		reset(ctx);
+		ctx.a1 = normal ? 1 : 0;
+		if (opt) CodegenOptimized.nonlocalReturn(ctx);
+		else CodegenReference.nonlocalReturn(ctx);
 	}
 
 	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
@@ -270,6 +288,15 @@ class Codegen {
 		runDeadWrites(b, true);
 		compare(a, b);
 		Conf.expect("dead-write result", b.v0, 5);
+		for (normal in [false, true]) {
+			runNonlocal(a, false, normal);
+			runNonlocal(b, true, normal);
+			compare(a, b);
+			Conf.expect("return elsewhere skips the caller's rest", b.v0, normal ? 13 : 7);
+			Conf.expect("return elsewhere lands in the outer caller", b.v1, normal ? 1100 : 100);
+			Conf.expect("return elsewhere leaves no token", b.unwindToken, 0);
+			Conf.expect("return elsewhere restores the stack", b.sp, 0x801fff00);
+		}
 		for (value in [0x80000000, -1, 0x7fffffff, 0x12345678, 0]) {
 			runShift(a, false, value);
 			runShift(b, true, value);
@@ -310,7 +337,9 @@ class Codegen {
 			kernel.KEvents.post(0x1234, 1);
 			if (mode == 0) CodegenReference.sumLoop(b); else CodegenOptimized.sumLoop(b);
 			Conf.expect("pump sees current locals", publishedAtPump, 0);
-			Conf.expect("reload callback register changes", b.v0, 106);
+			// The callback wrote v0/a0; interrupt-time code cannot change the interrupted
+			// registers (KEvents.drain saves and restores them), so the loop sums 10..1 itself.
+			Conf.expect("callback leaves the interrupted registers", b.v0, 55);
 		}
 		// The idle wait: reached after three vblanks; timed out before the second; satisfied on
 		// entry; and polling ROM, which is not plain memory, so every turn runs in both builds.

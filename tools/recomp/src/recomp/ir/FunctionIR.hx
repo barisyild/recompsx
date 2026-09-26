@@ -50,7 +50,12 @@ class FunctionIR {
 	/** Shared with function/overlay dispatch tables. Structuring never renumbers an entry. */
 	public static function blockOrder(fn:Func):Array<Int> {
 		final order = [for (addr in fn.blocks.keys()) addr];
-		order.sort((a, b) -> a - b);
+		// The entry first, then address order. Index 0 is what an ordinary call enters — the
+		// `entry = 0` default, RegionPlan's entry region — and a function may own blocks below
+		// its entry: hand-written code branches backwards into a shared stub (Crash Bandicoot:
+		// Warped's GOOL interpreter keeps its native-call stub just before its own entry).
+		// Sorting by address alone made that stub block 0, and every call started there.
+		order.sort((a, b) -> a == fn.entry ? -1 : (b == fn.entry ? 1 : a - b));
 		return order;
 	}
 }

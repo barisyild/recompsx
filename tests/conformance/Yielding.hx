@@ -78,7 +78,7 @@ class Yielding {
 			Conf.expect('same pump timing hint', Memory.cycleHint(), hint);
 			Conf.expect('same pump ra hint', Memory.raHint(), ra);
 		}
-		for (kind in [0, 2, 3, 4, 5, 12, 18, 21, 22, 23]) for (frequency in 0...3) {
+		for (kind in [0, 2, 3, 4, 5, 12, 18, 21, 22, 23, 34]) for (frequency in 0...3) {
 			final addr = 0x80010000 + (kind << 12);
 			Memory.write32(0x8001c030, 0x8001c03c);
 			Memory.write32(0x8001c034, 0x8001c048);
@@ -99,7 +99,11 @@ class Yielding {
 				if (frequency > 0) Conf.expect('multiple suspensions', Cooperative.yields > 1 ? 1 : 0, 1);
 				else {}
 			} else if (kind == 23) Conf.expect('longjmp discards pending callers', b.v0, 22);
-			else {}
+			else if (kind == 34) {
+				// a1 = input & 1 = 0: the helper returns to main past outer, from suspended frames.
+				Conf.expect('return elsewhere across suspensions', b.v0, 7);
+				Conf.expect('return elsewhere resumes the right frame', b.v1, 100);
+			} else {}
 		}
 		for (halt in 0...2) {
 			reset(a, 1); event(a, halt != 0); Runtime.callAndResume(a, 0x80102000);

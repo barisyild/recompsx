@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "crash3-scus94244",
+  "title": "Crash Bandicoot: Warped",
+  "region": "NTSC-U",
+  "exePath": "\\SCUS_942.44;1",
+  "exeSha256": "1b93cc563c90966e1d79b750f7d19bc1662859cceeb991775e9e9a22656d71d1",
+  "_overlays": "Native code the game loads from the disc. The runtime names these when it misses: it reports the span the disc was read into and the sector it came from. Addresses decimal, per the schema rule; hex in the _ fields and notes.md.",
+  "overlays": [
+    {
+      "id": "warp",
+      "_note": "S0/WARPSCUS.BIN, read whole at boot (LBA 1505). Holds two of the entry-type handlers in the table at 0x8005bd40.",
+      "_loadAddr": "0x8006ea78",
+      "loadAddr": 2147936888,
+      "length": 14336,
+      "source": {
+        "kind": "discFile",
+        "path": "\\S0\\WARPSCUS.BIN;1",
+        "offset": 0,
+        "length": 14336
+      },
+      "_entryHints": "0x800716a0 (reported missing, called from 0x80016378), 0x8006f64c and 0x8006f780 (the handler table's last record).",
+      "entryHints": [2147948192, 2147939916, 2147940224],
+      "hashWords": 64
+    }
+  ],
+  "_relocatable": "Native MIPS inside GOOL bytecode. GOOL op 49BE0BE0h runs the code after it with jalr $s5 (handler 0x800398e8), and that code returns with jalr $s5, $ra, which also hands the interpreter the next bytecode address. It lives in the NSF files, which are loaded page by page (64 KB) to wherever the heap has room, byte for byte as on the disc; the code is position independent. See ADR-0025 and notes.md.",
+  "relocatable": [
+    {
+      "id": "gool",
+      "files": [
+        "\\S0\\*.NSF;1",
+        "\\S1\\*.NSF;1",
+        "\\S2\\*.NSF;1",
+        "\\S3\\*.NSF;1"
+      ],
+      "_entryMarker": "0x49be0be0",
+      "entryMarker": 1237191648,
+      "unit": 65536,
+      "hashWords": 8
+    }
+  ],
+  "_functionHints": "Entry points nothing calls statically. 0x80019624..0x80030794: the entry-type handler table at 0x8005bd40 (records of a four-character tag and five handler slots). 0x8004dab8..0x8004e2d4: libgpu's jump table at 0x8005f3c0 (ResetGraph prints jtb=8005f3c0). 0x80017ad0 (the VSync callback), 0x8003ae70 (the RCnt2 event callback), 0x8004a898, 0x8004ad48, 0x8004bcbc, 0x8004bee8: callbacks the libraries register by address, reported missing at run time. The rest (0x8003cb24..0x80040c20): the renderer's per-primitive routines, the table at 0x8005c1b8 that f_80040ed8 reaches through jr $t9. Then every address the code builds with lui+addiu/ori that points into the code and names nothing yet: libraries' callbacks, the GOOL interpreter's native routines (0x80035abc, 0x80037cd8), a table of twenty 8-byte stubs at 0x80032f28, and the hand-written renderer's continuation points (0x8003d0fc..0x80044960), which it stores and later reaches through jr.",
+  "functionHints": [2147580624, 2147587620, 2147588780, 2147589312, 2147616312, 2147660236, 2147670332, 2147682176, 2147682196, 2147692328, 2147692336, 2147692344, 2147692352, 2147692360, 2147692368, 2147692376, 2147692384, 2147692392, 2147692400, 2147692408, 2147692416, 2147692424, 2147692432, 2147692440, 2147692448, 2147692456, 2147692464, 2147692472, 2147692480, 2147703484, 2147712216, 2147724912, 2147724940, 2147732260, 2147733104, 2147733416, 2147733500, 2147733552, 2147733588, 2147733624, 2147733660, 2147733696, 2147733732, 2147733756, 2147734316, 2147734380, 2147734444, 2147734640, 2147734820, 2147735368, 2147735432, 2147735564, 2147735800, 2147735892, 2147736108, 2147736220, 2147737652, 2147737664, 2147737720, 2147737852, 2147738480, 2147738524, 2147738540, 2147738912, 2147739260, 2147739344, 2147739476, 2147739848, 2147740316, 2147740640, 2147740724, 2147741764, 2147742460, 2147742572, 2147743000, 2147744256, 2147744384, 2147744412, 2147744792, 2147744832, 2147744848, 2147747868, 2147747904, 2147748232, 2147748276, 2147748296, 2147748324, 2147748508, 2147748536, 2147748796, 2147748896, 2147751248, 2147751332, 2147751448, 2147751496, 2147751784, 2147752132, 2147752140, 2147752508, 2147753060, 2147753200, 2147753256, 2147753432, 2147753500, 2147753560, 2147753608, 2147755592, 2147755876, 2147756240, 2147756436, 2147756516, 2147756764, 2147756868, 2147756876, 2147756964, 2147757816, 2147757936, 2147758084, 2147761124, 2147761188, 2147761516, 2147761568, 2147761628, 2147761688, 2147763828, 2147763888, 2147764344, 2147764412, 2147764488, 2147764576, 2147777172, 2147786728, 2147787460, 2147787488, 2147787840, 2147788952, 2147789272, 2147790096, 2147790152, 2147794108, 2147794664, 2147801784, 2147803804, 2147803840, 2147803860, 2147809660, 2147858964],
+  "_jumpTableHints": "Computed jumps the matcher cannot explain. Two are real tables; the rest are hand-written assembly that computes a jump into an unrolled copy loop or a run of 8-byte branch slots, so the targets are listed outright.",
+  "jumpTableHints": [
+    {
+      "_at": "0x80038ea4 GOOL interpreter: jr through a table whose base it reads from the scratchpad",
+      "jrAddr": 2147716772,
+      "tableBase": 2147864864,
+      "count": 82
+    },
+    {
+      "_at": "0x80033e14 switch indexed from a stack slot; bound sltiu 15",
+      "jrAddr": 2147696148,
+      "tableBase": 2147550732,
+      "count": 15
+    },
+    {
+      "_at": "0x8003a6d4 halfword copier (f_80039e3c), unrolled word loop, count 4",
+      "jrAddr": 2147722964,
+      "targets": [2147722980]
+    },
+    {
+      "_at": "0x8003a748 same, misaligned destination",
+      "jrAddr": 2147723080,
+      "targets": [2147723108]
+    },
+    {
+      "_at": "0x8003a7e4 same, misaligned source",
+      "jrAddr": 2147723236,
+      "targets": [2147723264]
+    },
+    {
+      "_at": "0x8003a85c tail: 0..4 halfwords, 32-byte slots",
+      "jrAddr": 2147723356,
+      "targets": [2147723364, 2147723396, 2147723428, 2147723460, 2147723492]
+    },
+    {
+      "_at": "0x8003a994 halfword copier (f_8003a928): count 4 or 8",
+      "jrAddr": 2147723668,
+      "targets": [2147723700, 2147723684]
+    },
+    {
+      "_at": "0x8003aa18 same, misaligned destination, 10-byte stride",
+      "jrAddr": 2147723800,
+      "targets": [2147723868, 2147723828]
+    },
+    {
+      "_at": "0x8003aadc same, misaligned source",
+      "jrAddr": 2147723996,
+      "targets": [2147724064, 2147724024]
+    },
+    {
+      "_at": "0x8003ab74 tail: 0..4 halfwords, 32-byte slots",
+      "jrAddr": 2147724148,
+      "targets": [2147724156, 2147724188, 2147724220, 2147724252, 2147724284]
+    },
+    {
+      "_at": "0x8003b0f4 f_8003af78: three comparison bits minus one into 8-byte branch slots",
+      "jrAddr": 2147725556,
+      "targets": [2147725564, 2147725572, 2147725580, 2147725588, 2147725596, 2147725604, 2147725612]
+    },
+    {
+      "_at": "0x8003b148 f_8003af78: register-stack depth $fp 0..7 into 8-byte slots",
+      "jrAddr": 2147725640,
+      "targets": [2147725648, 2147725656, 2147725664, 2147725672, 2147725680, 2147725688, 2147725696, 2147725704]
+    },
+    {
+      "_at": "0x8003b198 f_8003af78: opcode byte (ra >> 24) into 26 8-byte branch slots",
+      "jrAddr": 2147725720,
+      "targets": [2147725728, 2147725736, 2147725744, 2147725752, 2147725760, 2147725768, 2147725776, 2147725784, 2147725792, 2147725800, 2147725808, 2147725816, 2147725824, 2147725832, 2147725840, 2147725848, 2147725856, 2147725864, 2147725872, 2147725880, 2147725888, 2147725896, 2147725904, 2147725912, 2147725920, 2147725928]
+    },
+    {
+      "_at": "0x8003b280 f_8003af78: $fp 0..6 into 8-byte slots",
+      "jrAddr": 2147725952,
+      "targets": [2147725960, 2147725968, 2147725976, 2147725984, 2147725992, 2147726000, 2147726008]
+    }
+  ],
+  "nativeReplacements": [],
+  "setjmpFns": [],
+  "longjmpFns": [],
+  "symsFile": null,
+  "mapFile": null
+}

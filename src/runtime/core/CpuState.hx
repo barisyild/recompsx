@@ -115,6 +115,19 @@ class CpuState {
 	public var unwindToken:Int = 0;
 
 	/**
+		Where a computed tail jump is going, while `unwindToken` is `Runtime.TAIL`: the code that
+		jumped has returned, and the nearest caller that continues after it runs this (ADR-0026).
+	**/
+	public var tailTarget:Int = 0;
+
+	/**
+		Where a return to somewhere other than the caller is going, while `unwindToken` is
+		`Runtime.RETURN`: the frames in between return, and the one whose call continues at this
+		address carries on (ADR-0027).
+	**/
+	public var returnTarget:Int = 0;
+
+	/**
 		Kept for the HLE thread functions, which do have a depth. Critical sections do not: the
 		BIOS implements them by clearing and setting SR bits, with no counter anywhere, and
 		delivery is gated on SR alone.

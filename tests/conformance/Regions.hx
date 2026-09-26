@@ -87,7 +87,10 @@ class Regions {
 				} else {}
 			}
 		}
-		// The callback changes registers while execution is in a reduced multi-block loop.
+		// A device event's callback runs at a pump inside a reduced multi-block loop. It sees the
+		// loop's current registers (publication) and, like any interrupt-time code, cannot change
+		// them: the kernel saves and restores the interrupted state around it (KEvents.drain), so
+		// its writes to v0/a0 are gone when the loop resumes and the loop finishes on its own.
 		for (halt in 0...2) {
 			reset(a, 0); event(a, halt != 0); RegionsReference.diamondLoop(a);
 			final published = observed;
@@ -96,7 +99,7 @@ class Regions {
 			Conf.expect('pump publication matches', observed, published);
 			if (halt == 0) {
 				Conf.expect('callback sees current accumulator', observed, 7);
-				Conf.expect('callback reload inside region', b.v0, 203);
+				Conf.expect('callback leaves the region its registers', b.v0, 20);
 			} else {
 				Conf.expect('halt leaves region immediately', b.unwindToken, Kernel.UNWIND_HALT);
 				Conf.expect('halt preserves latest accumulator', b.v0, 7);
@@ -112,8 +115,8 @@ class Regions {
 		unwind = false;
 		// A recovered table remains a checked computed transfer even after surrounding reduction.
 		Memory.write32(0x8001c030, 0x8000f100);
-		reset(a, 0); CodegenReference.table(a);
-		reset(b, 0); CodegenOptimized.table(b);
+		reset(a, 0); CodegenReference.table(a); Codegen.finishTail(a);
+		reset(b, 0); CodegenOptimized.table(b); Codegen.finishTail(b);
 		Codegen.compare(a, b);
 		Conf.expect('modified table uses dynamic fallback', b.v0, 44);
 		Conf.report('Regions');

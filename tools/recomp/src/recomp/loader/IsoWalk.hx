@@ -26,6 +26,7 @@ class IsoWalk {
 	static inline var REC_LENGTH = 0;
 	static inline var REC_EXTENT = 2;
 	static inline var REC_SIZE = 10;
+	static inline var REC_FLAGS = 25;
 	static inline var REC_NAME_LEN = 32;
 	static inline var REC_NAME = 33;
 
@@ -55,6 +56,67 @@ class IsoWalk {
 			if (at == null) return null;
 		}
 		return at;
+	}
+
+	/**
+		The files in one directory, or null if there is no such directory.
+
+		For a config that names many files by pattern — a game with one data file per level — so
+		the list comes from the disc rather than from someone typing forty names. Subdirectories
+		and the `.`/`..` records are left out; names keep their `;1`.
+	**/
+	public function list(dirPath:String):Array<{name:String, lba:Int, length:Int}> {
+		final dir = find(dirPath);
+		if (dir == null) return null;
+		final out = [];
+		final sectors = Math.ceil(dir.length / DiscImage.USER_BYTES);
+		for (s in 0...sectors) {
+			final sector = disc.readSector(dir.lba + s);
+			var off = 0;
+			while (off < DiscImage.USER_BYTES) {
+				final len = sector.get(off + REC_LENGTH);
+				if (len == 0) break;
+				final nameLen = sector.get(off + REC_NAME_LEN);
+				final flags = sector.get(off + REC_FLAGS);
+				final first = sector.get(off + REC_NAME);
+				if ((flags & 2) == 0 && !(nameLen == 1 && (first == 0 || first == 1))) {
+					var name = "";
+					for (i in 0...nameLen) name += String.fromCharCode(sector.get(off + REC_NAME + i));
+					out.push({name: name, lba: le32(sector, off + REC_EXTENT),
+						length: le32(sector, off + REC_SIZE)});
+				}
+				off += len;
+			}
+		}
+		return out;
+	}
+
+	/**
+		Every file a pattern names: `\DIR\*.EXT;1`, with `*` allowed in the last component only.
+		Sorted by name, so a build that walks them is deterministic whatever order the directory
+		holds them in. A path with no `*` is itself, if it exists.
+	**/
+	public function glob(pattern:String):Array<String> {
+		final parts = split(pattern);
+		if (parts.length == 0) return [];
+		final leaf = parts[parts.length - 1];
+		if (leaf.indexOf("*") < 0) return find(pattern) == null ? [] : [pattern];
+		final dirPath = "\\" + parts.slice(0, parts.length - 1).join("\\");
+		final entries = list(dirPath);
+		if (entries == null) return [];
+		final want = stripVersion(leaf);
+		final star = want.indexOf("*");
+		final head = want.substr(0, star);
+		final tail = want.substr(star + 1);
+		final out = [];
+		for (e in entries) {
+			final n = stripVersion(e.name);
+			if (n.length >= head.length + tail.length && StringTools.startsWith(n, head)
+					&& StringTools.endsWith(n, tail)) out.push(dirPath + "\\" + e.name);
+			else {}
+		}
+		out.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
+		return out;
 	}
 
 	static function split(path:String):Array<String> {

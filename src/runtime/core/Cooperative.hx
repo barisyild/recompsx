@@ -36,6 +36,20 @@ class Cooperative {
 	static var nextFunctions:Array<Int>;
 	static var nextEntries:Array<Int>;
 	static var nextPumps:Array<Int>;
+	/** Each frame's relocatable base (ADR-0025); zero for code at a fixed address. */
+	static var bases:Array<Int>;
+	static var nextBases:Array<Int>;
+	/**
+		Each frame's continuation: the guest address the call it was suspended in returns to, so a
+		return to elsewhere can find the frame it lands in (ADR-0027); -1 for the innermost frame.
+	**/
+	static var conts:Array<Int>;
+	static var nextConts:Array<Int>;
+	/** Each frame's `$ra` at entry, for a function with returns checked against it (ADR-0027). */
+	static var ras:Array<Int>;
+	static var nextRas:Array<Int>;
+	/** The resumed frame's `$ra` at entry; read by its prologue with `resumeEntry`. */
+	public static var resumeRa = 0;
 
 	public static function init():Void {
 		resumeDispatch = null;
@@ -45,6 +59,12 @@ class Cooperative {
 		nextFunctions = [for (_ in 0...CAPACITY) 0];
 		nextEntries = [for (_ in 0...CAPACITY) 0];
 		nextPumps = [for (_ in 0...CAPACITY) 0];
+		bases = [for (_ in 0...CAPACITY) 0];
+		nextBases = [for (_ in 0...CAPACITY) 0];
+		conts = [for (_ in 0...CAPACITY) 0];
+		nextConts = [for (_ in 0...CAPACITY) 0];
+		ras = [for (_ in 0...CAPACITY) 0];
+		nextRas = [for (_ in 0...CAPACITY) 0];
 		reset();
 	}
 
@@ -60,7 +80,7 @@ class Cooperative {
 	/** A nonlocal guest jump abandons the suspended callers too. */
 	public static function discard():Void {
 		cursor = 0; count = 0; captured = 0; resumeEntry = -1;
-		resumePump = false;
+		resumePump = false; resumeRa = 0;
 	}
 
 	/**
@@ -86,21 +106,41 @@ class Cooperative {
 		return !hasYielded || ctx.cycles != lastCycles;
 	}
 
-	public static function suspend(ctx:CpuState, fn:Int, entry:Int, entryPump:Bool):Void {
+	/** `entryRa` is the frame's `$ra` at entry, for a function whose returns check it. */
+	public static function suspend(ctx:CpuState, fn:Int, entry:Int, entryPump:Bool, entryRa:Int = 0):Void {
+		suspendAt(ctx, fn, entry, entryPump, 0, entryRa);
+	}
+
+	/** `suspend` for relocatable code, which also needs its base back when it resumes. */
+	public static function suspendAt(ctx:CpuState, fn:Int, entry:Int, entryPump:Bool, base:Int,
+			entryRa:Int = 0):Void {
 		checks = 0; hasYielded = true; lastCycles = ctx.cycles; yields = (yields + 1) | 0;
 		captured = 0;
 		ctx.unwindToken = TOKEN;
-		capture(ctx, fn, entry, entryPump ? 1 : 0);
+		capture(ctx, fn, entry, entryPump ? 1 : 0, base, -1, entryRa);
 	}
 
-	/** Called after a guest call, with the block AFTER that call and its delay slot. */
-	public static function afterCall(ctx:CpuState, fn:Int, entry:Int):Bool {
-		if (ctx.unwindToken == TOKEN && entry >= 0) capture(ctx, fn, entry, 0);
+	/**
+		Called after a guest call, with the block AFTER that call and its delay slot, and `cont`,
+		the guest address that call returns to.
+	**/
+	public static function afterCall(ctx:CpuState, fn:Int, entry:Int, cont:Int, entryRa:Int = 0):Bool {
+		return afterCallAt(ctx, fn, entry, 0, cont, entryRa);
+	}
+
+	/** `afterCall` for relocatable code. */
+	public static function afterCallAt(ctx:CpuState, fn:Int, entry:Int, base:Int, cont:Int,
+			entryRa:Int = 0):Bool {
+		// A tail jump the callee left runs first, as part of the call, and a return to elsewhere
+		// ends here if this is where it goes (Runtime.unwinding).
+		if (ctx.unwindToken == Runtime.TAIL || ctx.unwindToken == Runtime.RETURN) Runtime.unwinding(ctx, cont);
+		else {}
+		if (ctx.unwindToken == TOKEN && entry >= 0) capture(ctx, fn, entry, 0, base, cont, entryRa);
 		else {}
 		return ctx.unwindToken != 0;
 	}
 
-	static function capture(ctx:CpuState, fn:Int, entry:Int, pump:Int):Void {
+	static function capture(ctx:CpuState, fn:Int, entry:Int, pump:Int, base:Int, cont:Int, ra:Int):Void {
 		if (captured >= CAPACITY) {
 			ctx.unwindToken = kernel.Kernel.UNWIND_HALT;
 			shim.Backend.fatal("cooperative continuation capacity exceeded");
@@ -108,6 +148,9 @@ class Cooperative {
 			nextFunctions[captured] = fn;
 			nextEntries[captured] = entry;
 			nextPumps[captured] = pump;
+			nextBases[captured] = base;
+			nextConts[captured] = cont;
+			nextRas[captured] = ra;
 			captured++;
 		}
 	}
@@ -126,10 +169,18 @@ class Cooperative {
 			while (cursor < count) {
 				final fn = functions[cursor];
 				resumeEntry = entries[cursor]; resumePump = pumps[cursor] != 0;
+				resumeRa = ras[cursor];
+				// Relocatable code reads its base in its first statement; fixed code ignores it.
+				Reloc.base = bases[cursor];
 				cursor++;
 				final d = resumeDispatch;
 				if (d != null) {
 					d(fn, resumeEntry, ctx);
+					// A tail jump the frame left runs where the frame would have returned.
+					if (ctx.unwindToken == Runtime.TAIL) Runtime.unwinding(ctx, -1);
+					else {}
+					if (ctx.unwindToken == Runtime.RETURN) returnInto(ctx);
+					else {}
 					Runtime.settle(ctx);
 				} else Runtime.callAndResume(ctx, fn); // standalone fixtures use addresses
 				if (ctx.unwindToken != 0) break;
@@ -139,7 +190,8 @@ class Cooperative {
 		if (ctx.unwindToken != TOKEN) return false;
 		else {}
 		while (cursor < count) {
-			capture(ctx, functions[cursor], entries[cursor], pumps[cursor]);
+			capture(ctx, functions[cursor], entries[cursor], pumps[cursor], bases[cursor], conts[cursor],
+				ras[cursor]);
 			cursor++;
 		}
 		if (ctx.unwindToken != TOKEN) return false;
@@ -147,7 +199,25 @@ class Cooperative {
 		final oldFunctions = functions; functions = nextFunctions; nextFunctions = oldFunctions;
 		final oldEntries = entries; entries = nextEntries; nextEntries = oldEntries;
 		final oldPumps = pumps; pumps = nextPumps; nextPumps = oldPumps;
+		final oldBases = bases; bases = nextBases; nextBases = oldBases;
+		final oldConts = conts; conts = nextConts; nextConts = oldConts;
+		final oldRas = ras; ras = nextRas; nextRas = oldRas;
 		count = captured; captured = 0; cursor = 0;
 		return true;
+	}
+
+	/**
+		A resumed frame returned to somewhere other than its caller (ADR-0027). Its callers are
+		the frames still pending, innermost first: the first whose call returns to the target is
+		where execution continues, and the ones before it are left, as their host frames would
+		have been. With no such frame the token stays for `Runtime.settle`.
+	**/
+	static function returnInto(ctx:CpuState):Void {
+		var k = cursor;
+		while (k < count && conts[k] != ctx.returnTarget) k++;
+		if (k < count) {
+			cursor = k;
+			ctx.unwindToken = 0;
+		} else {}
 	}
 }

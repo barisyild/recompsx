@@ -4,6 +4,7 @@ import recomp.analysis.Confidence;
 import recomp.analysis.Discovery;
 import recomp.analysis.Image;
 import recomp.analysis.Kind;
+import recomp.ir.FunctionIR;
 
 /**
 	Function discovery, on programs small enough to reason about completely.
@@ -295,6 +296,80 @@ class TestDiscovery {
 			]);
 			Assert.equals(Lambda.count(d.tables), 1, "non-linking JALR recovers the table");
 			Assert.equals(d.functions.get(BASE).unresolvedJumps.length, 0, "all switch arms resolved");
+		}
+
+		Assert.group("discovery: jumpTableHints explain a jump the matcher cannot");
+		{
+			// jr $t0 with nothing before it to say where $t0 came from; two arms after it, and a
+			// table of the same two addresses after those.
+			final words = [JR_T0, NOP, ADDU_V0_ZZ, JR_RA, NOP, JR_RA, NOP, BASE + 8, BASE + 20];
+			final plain = new Discovery(img(words));
+			plain.addSeed(BASE, "entry", Confidence.Entry);
+			plain.run(false);
+			Assert.equals(plain.functions.get(BASE).unresolvedJumps.length, 1, "unhinted, the jump is unresolved");
+
+			final listed = new Discovery(img(words));
+			listed.addSeed(BASE, "entry", Confidence.Entry);
+			listed.addTableHint(BASE, 0, 0, [BASE + 8, BASE + 20]);
+			listed.run(false);
+			final fn = listed.functions.get(BASE);
+			Assert.equals(fn.unresolvedJumps.length, 0, "explicit targets resolve it");
+			Assert.isTrue(fn.blocks.exists(BASE + 8) && fn.blocks.exists(BASE + 20), "both arms are blocks of the function");
+
+			final table = new Discovery(img(words));
+			table.addSeed(BASE, "entry", Confidence.Entry);
+			table.addTableHint(BASE, BASE + 28, 2, null);
+			table.run(false);
+			Assert.equals(table.tables.get(BASE).targets.length, 2, "a table in memory is read for its targets");
+			Assert.equals(table.tables.get(BASE).targets[1], BASE + 20, "in order");
+
+			Assert.rejects(() -> new Discovery(img(words)).addTableHint(BASE + 8, 0, 0, [BASE]),
+				"not a jr", "a hint on something other than a jr is refused");
+			Assert.rejects(() -> new Discovery(img(words)).addTableHint(BASE, 0, 0, [BASE + 2]),
+				"not a code address", "a misaligned target is refused");
+		}
+
+		Assert.group("discovery: a jr through a copy of ra is a return");
+		{
+			// addu $at, $ra, $zero; jal BASE+32; nop; jr $at; nop — and the callee at BASE+32.
+			final ADDU_AT_RA = 0x03E00821, JR_AT = 0x00200008;
+			final d = discover([ADDU_AT_RA, jal(BASE + 32), NOP, JR_AT, NOP, NOP, NOP, NOP, JR_RA, NOP]);
+			final fn = d.functions.get(BASE);
+			Assert.equals(fn.unresolvedJumps.length, 0, "not left as a computed jump");
+			Assert.isTrue(fn.registerReturns.exists(BASE + 12), "recorded as a return");
+			// The same, but $at is loaded again after the copy: then it proves nothing.
+			final LW_AT_0_SP = 0x8FA10000;
+			final e = discover([ADDU_AT_RA, jal(BASE + 32), LW_AT_0_SP, JR_AT, NOP, NOP, NOP, NOP, JR_RA, NOP]);
+			Assert.equals(e.functions.get(BASE).unresolvedJumps.length, 1, "a second writer keeps it computed");
+		}
+
+		Assert.group("discovery: jr $ra after the function sets $ra itself is a jump");
+		{
+			// lui/addiu $ra = BASE+24; jr $ra — then at BASE+24: lw $ra, 0($sp); jr $ra (a return).
+			final LUI_RA = 0x3C1F0000 | ((BASE >>> 16) & 0xFFFF), ADDIU_RA_24 = 0x27FF0018;
+			final LW_RA_0_SP = 0x8FBF0000;
+			final d = discover([LUI_RA, ADDIU_RA_24, NOP, JR_RA, NOP, NOP, ADDU_V0_ZZ, LW_RA_0_SP, JR_RA, NOP]);
+			final fn = d.functions.get(BASE);
+			Assert.equals(d.raJumpOf(BASE, BASE + 12), BASE + 24, "the first jr goes where $ra was set");
+			Assert.isTrue(fn.blocks.exists(BASE + 24), "and that code is part of the function");
+			Assert.equals(d.raJumpOf(BASE, BASE + 32), null, "after lw $ra, jr $ra returns");
+			// A call's link is not a constant: jalr then jr $ra stays a return.
+			final e = discover([JALR_T0, NOP, JR_RA, NOP]);
+			Assert.equals(e.raJumpOf(BASE, BASE + 8), null, "jr $ra after a call is still a return");
+		}
+
+		Assert.group("codegen order: the entry is block 0 even with code below it");
+		{
+			// A stub at BASE that the function branches back into, and the entry after it: the
+			// shape of a hand-written interpreter keeping a shared tail before its own entry.
+			final d = new Discovery(img([ADDU_V0_ZZ, JR_RA, NOP, beqz(-4), NOP, JR_RA, NOP]));
+			d.addSeed(BASE + 12, "entry", Confidence.Entry);
+			d.run(false);
+			final fn = d.functions.get(BASE + 12);
+			Assert.isTrue(fn.blocks.exists(BASE), "the stub below the entry belongs to the function");
+			final order = FunctionIR.blockOrder(fn);
+			Assert.equals(order[0], BASE + 12, "block 0 is the entry");
+			Assert.equals(order[1], BASE, "the rest follow in address order");
 		}
 	}
 }

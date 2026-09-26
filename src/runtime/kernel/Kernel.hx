@@ -255,7 +255,8 @@ class Kernel {
 	}
 
 	static function exitGame(ctx:CpuState):Void {
-		Runtime.note("the game called exit(" + ctx.a0 + ")");
+		// The caller, because a game's own error path ends here and the address names which one.
+		Runtime.note("the game called exit(" + ctx.a0 + ") from ra=" + hex8(ctx.ra));
 		Backend.requestQuit();
 	}
 
@@ -529,6 +530,18 @@ class Kernel {
 		Called from `Irq.dispatch`, which has already saved the registers.
 	**/
 	public static function onInterrupt(ctx:CpuState):Void {
+		// The lines this exception was taken for. One raised while the handlers below run (a
+		// device deadline firing at a pump inside them) is not theirs yet: on hardware it stays
+		// in I_STAT and re-enters the vector after the return, where the game's own handler sees
+		// it. Letting the kernel's fallback take it here acknowledged CD sectors nobody had read
+		// — a 1 kHz root counter made that race routine, and libcd answered with "CdRead: retry".
+		final atEntry = Irq.stat & Irq.mask;
+		// The BIOS runs its handler chains on its own stack, never the interrupted code's: the
+		// vector saves every register and loads the exception stack pointer before the first
+		// handler (OpenBIOS kernel/vectors.s, MIT). Code that borrows $sp as a general register —
+		// Crash Bandicoot: Warped's hand-written routines do — is only safe because of that. On the
+		// interrupted $sp, a 1 kHz timer callback wrote its frame wherever that register pointed.
+		ctx.sp = EXCEPTION_STACK_TOP;
 		KHandlers.runChains(ctx);
 
 		// The game's own epilogue runs BEFORE the kernel acknowledges anything.
@@ -542,8 +555,11 @@ class Kernel {
 		if (hookEntryInt != 0) KThreads.enterJmpBuf(ctx, hookEntryInt);
 		else {}
 
-		// Whatever the game did not claim is the kernel's to deliver and clear.
-		deliverPending(ctx);
+		// Whatever the game did not claim is the kernel's to deliver and clear. `Irq.dispatch`
+		// comes straight back for anything raised meanwhile. The kernel's own handlers deliver
+		// these events, so their callbacks run on the kernel's stack too.
+		ctx.sp = EXCEPTION_STACK_TOP;
+		deliverPending(ctx, atEntry);
 	}
 
 	/**
@@ -554,8 +570,8 @@ class Kernel {
 		CDROM *event*, so a controller that raised nineteen interrupts nobody translated reported
 		itself as `NoIntr` — a library waiting on a message the kernel never sent.
 	**/
-	static function deliverPending(ctx:CpuState):Void {
-		final live = Irq.stat & Irq.mask;
+	static function deliverPending(ctx:CpuState, atEntry:Int):Void {
+		final live = Irq.stat & Irq.mask & atEntry;
 		if ((live & (1 << Irq.VBLANK)) != 0) vblank(ctx);
 		else {}
 		if ((live & (1 << Irq.CDROM)) != 0) cdrom(ctx);
@@ -567,6 +583,13 @@ class Kernel {
 		if ((live & (1 << Irq.DMA)) != 0) line(ctx, Irq.DMA, KEvents.CLASS_DMA);
 		else {}
 		if ((live & (1 << Irq.SIO0)) != 0) line(ctx, Irq.SIO0, KEvents.CLASS_CONTROLLER);
+		else {}
+		// Root counters 0-2: the BIOS's timer handlers deliver F2000000h+n, as vblank does 3.
+		if ((live & (1 << Irq.TIMER0)) != 0) line(ctx, Irq.TIMER0, CLASS_RCNT0);
+		else {}
+		if ((live & (1 << Irq.TIMER1)) != 0) line(ctx, Irq.TIMER1, CLASS_RCNT0 + 1);
+		else {}
+		if ((live & (1 << Irq.TIMER2)) != 0) line(ctx, Irq.TIMER2, CLASS_RCNT0 + 2);
 		else {}
 	}
 
@@ -641,6 +664,16 @@ class Kernel {
 
 	/** Vblank doubles as root counter 3, which is what libetc's VSync actually waits on. */
 	public static inline var CLASS_RCNT3 = 0xF2000003;
+
+	/**
+		Top of the kernel's exception stack: 8 KB below it, in kernel RAM above the dispatch
+		tables (which end at 9F4h) and below the executable. OpenBIOS keeps an 8 KB static array
+		for this (kernel/handlers.c); the size is taken from there, the address is ours.
+	**/
+	public static inline var EXCEPTION_STACK_TOP = 0x8000E000;
+
+	/** The hardware root counters, F2000000h + n (psx-spx "BIOS Event Summary"). */
+	public static inline var CLASS_RCNT0 = 0xF2000000;
 
 	/** Frames elapsed. Deterministic, and the first number a bring-up session watches. */
 	public static var vblankCount(default, null) = 0;

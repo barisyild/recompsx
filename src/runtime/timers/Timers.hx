@@ -1,6 +1,9 @@
 package timers;
 
+import core.CpuState;
+import core.Irq;
 import core.Runtime;
+import core.Scheduler;
 import core.TimeBase;
 import shim.IntMath;
 
@@ -15,9 +18,10 @@ import shim.IntMath;
 
 	Implemented: free-running value reads for all three, every source — system clock, system clock
 	over eight, the dot clock and the horizontal blank — reset on mode write, reset-at-target (mode
-	bit 3), and the reached-target/overflow flags. Still missing and still reported: timer IRQs,
-	and the sync modes that gate a counter on the blanking intervals. Register map from psx-spx
-	"Timers", as recorded in docs/specs/runtime.md §10.
+	bit 3), the reached-target/overflow flags, and the interrupts: the next target or 0xFFFF is
+	solved from the counter's position and armed as a scheduler deadline, never stepped towards.
+	Still missing: the sync modes that gate a counter on the blanking intervals. Register map from
+	psx-spx "Timers", as recorded in docs/specs/runtime.md §10.
 **/
 class Timers {
 	static var anchor:Array<Int>;
@@ -25,6 +29,13 @@ class Timers {
 	static var mode:Array<Int>;
 	static var target:Array<Int>;
 	static var reached:Array<Int>;   // bits 11/12, read-then-clear
+	/** Mode bit 10, the interrupt request: 0x400 is "none", and a mode write sets it. */
+	static var request:Array<Int>;
+	/** A one-shot counter that has raised its interrupt stays quiet until the mode is written. */
+	static var spent:Array<Bool>;
+	/** The cycle the armed interrupt is due at, and which condition that is: 1 target, 2 0xFFFF. */
+	static var due:Array<Int>;
+	static var dueKind:Array<Int>;
 
 	public static function init():Void {
 		anchor = [0, 0, 0];
@@ -32,6 +43,10 @@ class Timers {
 		mode = [0, 0, 0];
 		target = [0, 0, 0];
 		reached = [0, 0, 0];
+		request = [0x400, 0x400, 0x400];
+		spent = [false, false, false];
+		due = [0, 0, 0];
+		dueKind = [0, 0, 0];
 	}
 
 	public static function read(addr:Int, cycles:Int):Int {
@@ -48,7 +63,7 @@ class Timers {
 		final reg = addr & 0xF;
 		if (reg == 0x0) writeValue(t, v, cycles);
 		else if (reg == 0x4) writeMode(t, v, cycles);
-		else if (reg == 0x8) target[t] = v & 0xFFFF;
+		else if (reg == 0x8) writeTarget(t, v, cycles);
 		else {}
 	}
 
@@ -111,8 +126,8 @@ class Timers {
 	}
 
 	static inline function markWrapped(t:Int):Void {
-		if ((mode[t] & 0x08) != 0) reached[t] |= 0x800;    // reached target
-		else reached[t] |= 0x1000;                          // overflowed 0xFFFF
+		if ((mode[t] & 0x08) != 0) reached[t] = reached[t] | 0x800;    // reached target
+		else reached[t] = reached[t] | 0x1000;                          // overflowed 0xFFFF
 	}
 
 	/**
@@ -291,25 +306,143 @@ class Timers {
 
 	static inline function readMode(t:Int, cycles:Int):Int {
 		value(t, cycles);   // fold any pending wrap into the flags first
-		final m = (mode[t] & 0x7FF) | reached[t];
+		final m = (mode[t] & 0x3FF) | request[t] | reached[t];
 		// Bits 11 and 12 clear on read, as the hardware's do.
 		reached[t] = 0;
 		return m;
 	}
 
-	static inline function writeValue(t:Int, v:Int, cycles:Int):Void {
+	static function writeValue(t:Int, v:Int, cycles:Int):Void {
 		base[t] = v & 0xFFFF;
 		anchor[t] = cycles;
+		arm(t, cycles);
 	}
 
-	/** A mode write resets the counter to zero — the idiom every driver uses to start timing. */
-	static inline function writeMode(t:Int, v:Int, cycles:Int):Void {
+	static function writeTarget(t:Int, v:Int, cycles:Int):Void {
+		target[t] = v & 0xFFFF;
+		arm(t, cycles);
+	}
+
+	/**
+		A mode write resets the counter to zero — the idiom every driver uses to start timing —
+		sets bit 10 (no request pending), and re-arms a one-shot.
+	**/
+	static function writeMode(t:Int, v:Int, cycles:Int):Void {
 		mode[t] = v & 0x3FF;
 		base[t] = 0;
 		anchor[t] = cycles;
 		reached[t] = 0;
-		if ((v & 0x30) != 0) Runtime.reportOnce(0x69000000 | t,
-			"timer " + t + " asked for IRQs, which are not delivered yet");
+		request[t] = 0x400;
+		spent[t] = false;
+		arm(t, cycles);
+	}
+
+	// ---- interrupts ---------------------------------------------------------------------------
+	//
+	// Mode bit 4 asks for an interrupt when the counter equals its target, bit 5 when it equals
+	// 0xFFFF. Neither is polled for: the number of ticks to the next such value follows from where
+	// the counter is now, and that becomes a deadline in the scheduler's TIMER0+n slot. Bit 6
+	// chooses repeat over one-shot; bit 7 chooses toggle over pulse for bit 10, whose falling edge
+	// is the request — so a pulse interrupts on every condition and a toggle on every second one.
+
+	static inline function sysclkSource(t:Int):Bool {
+		return !isDotClock(t) && !isHblank(t);
+	}
+
+	/** Arms the next interrupt this counter will raise, or disarms it if it will raise none. */
+	static function arm(t:Int, cycles:Int):Void {
+		final slot = Scheduler.TIMER0 + t;
+		if ((mode[t] & 0x30) == 0 || spent[t]) {
+			if (Scheduler.isActive(slot)) Scheduler.cancelSlot(slot);
+			else {}
+			return;
+		} else {}
+		fold(t, cycles);
+		final elapsed = (cycles - anchor[t]) | 0;
+		final ticks = ticksIn(t, elapsed);
+		final wrapAt = wrapPoint(t);
+		final now = unsignedMod((base[t] + ticks) | 0, wrapAt);
+
+		// Ticks until each enabled condition next holds. A condition that holds now is a whole
+		// wrap away: this is called at the moment one fired, and it must not fire twice.
+		var ahead = 0x7FFFFFFF;
+		var kind = 0;
+		if ((mode[t] & 0x10) != 0) {
+			final d = ticksUntil(target[t], now, wrapAt);
+			if (d > 0) { ahead = d; kind = 1; } else {}
+		} else {}
+		if ((mode[t] & 0x20) != 0 && wrapAt == 0x10000) {
+			final d = ticksUntil(0xFFFF, now, wrapAt);
+			if (d > 0 && d < ahead) { ahead = d; kind = 2; }
+			else if (d > 0 && d == ahead) kind |= 2;
+			else {}
+		} else {}
+		if (kind == 0) {
+			// Enabled, but on a value this counter never reaches (0xFFFF under a lower reset).
+			if (Scheduler.isActive(slot)) Scheduler.cancelSlot(slot);
+			else {}
+			return;
+		} else {}
+
+		due[t] = deadline(t, cycles, ticks, ahead);
+		dueKind[t] = kind;
+		Scheduler.scheduleAt(slot, due[t]);
+	}
+
+	/** `(value - now) mod wrapAt`, or the whole wrap when the counter already sits on it. */
+	static inline function ticksUntil(value:Int, now:Int, wrapAt:Int):Int {
+		final d = value - now;
+		return value >= wrapAt ? 0 : (d > 0 ? d : (d + wrapAt));
+	}
+
+	/**
+		The cycle the counter is `ahead` ticks further on.
+
+		Exact for the system clock (a tick boundary is `anchor + ticks << shift`) and for hblank
+		(fold leaves less than one line since the anchor, so the next ticks are whole lines).
+		The dot clock's cycles per tick are not an integer; its deadline rounds up in 1/256ths of
+		a cycle per dot, so the interrupt is at most a cycle or two late and never early.
+	**/
+	static function deadline(t:Int, cycles:Int, ticks:Int, ahead:Int):Int {
+		if (isHblank(t)) return (anchor[t] + IntMath.mul(ahead, TimeBase.cyclesPerLine())) | 0;
+		else if (isDotClock(t)) {
+			// VIDEO_DEN * 10 * 256 is 1.16e9: inside 31 bits for the widest divider.
+			final per = IntMath.div((IntMath.mul(TimeBase.VIDEO_DEN, dotDivider()) << 8)
+				+ TimeBase.videoNumerator() - 1, TimeBase.videoNumerator());
+			return (cycles + (IntMath.mul(ahead, per) >> 8) + 1) | 0;
+		}
+		else return (anchor[t] + ((ticks + ahead) << dividerShift(t))) | 0;
+	}
+
+	/**
+		The scheduler's TIMER0+n slot came due: the counter reached its target or 0xFFFF.
+
+		On the system clock the counter is re-anchored at the exact tick the condition held, so
+		the next deadline counts from there rather than from whenever the pump happened to run —
+		and the anchor never drifts far enough behind for the elapsed count to wrap.
+	**/
+	public static function onEvent(ctx:CpuState, t:Int):Void {
+		final at = due[t];
+		final kind = dueKind[t];
+		if (sysclkSource(t)) {
+			final elapsed = (at - anchor[t]) | 0;
+			base[t] = unsignedMod((base[t] + (elapsed >>> dividerShift(t))) | 0, wrapPoint(t));
+			anchor[t] = at;
+		} else {}
+		if ((kind & 1) != 0) reached[t] = reached[t] | 0x800;
 		else {}
+		if ((kind & 2) != 0) reached[t] = reached[t] | 0x1000;
+		else {}
+
+		var raise = true;
+		if ((mode[t] & 0x80) != 0) {
+			request[t] = request[t] ^ 0x400;
+			raise = request[t] == 0;
+		} else {}
+		if (raise) Irq.raise(ctx, Irq.TIMER0 + t);
+		else {}
+		if ((mode[t] & 0x40) == 0) spent[t] = true;
+		else {}
+		arm(t, sysclkSource(t) ? at : ctx.cycles);
 	}
 }

@@ -61,6 +61,9 @@ class Universe {
 		return overlay == null ? "Fns" : "Ovl_" + sanitize(overlay.id);
 	}
 
+	/** The same, for another kind of stanza (relocatable code) that names classes by its id. */
+	public static function sanitizeId(id:String):String return sanitize(id);
+
 	/** An id is a human's slug; a class name is an identifier. */
 	static function sanitize(id:String):String {
 		var out = "";

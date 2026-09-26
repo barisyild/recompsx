@@ -9,6 +9,17 @@ import sys.io.File;
 /** A function the config asserts exists, with the name it should be given. */
 typedef Hint = {addr:Int, name:String};
 
+/**
+	Where a computed jump the analysis could not explain can go.
+
+	Two shapes. `tableBase` + `count` names a table of addresses in memory — a switch whose base
+	the matcher cannot follow, for instance because it is read from a pointer at run time.
+	`targets` lists the destinations outright, for hand-written code that computes one with
+	arithmetic instead of loading it: a jump into an unrolled loop, or into a run of branch
+	slots. `tableBase` is 0 in that case, since there is no table to mark as data.
+**/
+typedef TableHint = {jrAddr:Int, tableBase:Int, count:Int, targets:Array<Int>};
+
 /** Where an overlay's bytes come from. Exactly one shape is valid per stanza. */
 enum OverlaySource {
 	/** A file inside the disc's own filesystem, plus a byte offset into it. */
@@ -52,6 +63,36 @@ class OverlayConfig {
 }
 
 /**
+	Code the game loads to wherever it has room: relocatable, identified by content (ADR-0025).
+
+	Where an overlay is (these bytes, this window), relocatable code is only *these bytes* — it is
+	position independent and the game decides at run time where to put it. So a stanza names where
+	the bytes are on the disc and how to find the entry points in them, not an address:
+
+	- `files`: disc paths, `*` allowed in the last component.
+	- `entryMarker`: a word that precedes every entry; the entry is the word after it. What the
+	  marker is belongs to the game (Crash Bandicoot: Warped's GOOL puts op `49BE0BE0h` before
+	  each run of native code), which is why it is here and not in the tool.
+	- `unit`: the aligned size the files are loaded in; code never crosses one (NSF pages).
+	- `hashWords`: how many words from the entry the runtime hashes to recognise it.
+**/
+class RelocConfig {
+	public final id:String;
+	public final files:Array<String>;
+	public final unit:Int;
+	public final marker:Int;
+	public final hashWords:Int;
+
+	public function new(id, files, unit, marker, hashWords) {
+		this.id = id;
+		this.files = files;
+		this.unit = unit;
+		this.marker = marker;
+		this.hashWords = hashWords;
+	}
+}
+
+/**
 	A game's committed facts, plus the one gitignored file that says where the dump lives.
 
 	Two files, deliberately. `game.json` is clean-room reverse engineering — addresses, names,
@@ -79,7 +120,9 @@ class GameConfig {
 	public final exePath:String;
 
 	public final functionHints:Array<Hint>;
+	public final tableHints:Array<TableHint>;
 	public final overlays:Array<OverlayConfig>;
+	public final relocatable:Array<RelocConfig>;
 
 	/** From local.json: a CUE or a bare image. Null when the game is a loose executable. */
 	public final discPath:String;
@@ -87,8 +130,8 @@ class GameConfig {
 	/** From local.json: a bare PS-EXE, for homebrew with no disc. Null otherwise. */
 	public final exeFile:String;
 
-	function new(path, dir, id, title, region, exePath, functionHints, overlays, discPath,
-			exeFile) {
+	function new(path, dir, id, title, region, exePath, functionHints, tableHints, overlays,
+			relocatable, discPath, exeFile) {
 		this.path = path;
 		this.dir = dir;
 		this.id = id;
@@ -96,7 +139,9 @@ class GameConfig {
 		this.region = region;
 		this.exePath = exePath;
 		this.functionHints = functionHints;
+		this.tableHints = tableHints;
 		this.overlays = overlays;
+		this.relocatable = relocatable;
 		this.discPath = discPath;
 		this.exeFile = exeFile;
 	}
@@ -121,7 +166,9 @@ class GameConfig {
 			stringField(root, "region", "NTSC-U"),
 			stringField(root, "exePath", null),
 			hintsOf(arrayField(root, "functionHints")),
+			tableHintsOf(arrayField(root, "jumpTableHints")),
 			overlays,
+			[for (r in arrayField(root, "relocatable")) relocOf(r)],
 			local.disc, local.exeFile);
 	}
 
@@ -219,6 +266,47 @@ class GameConfig {
 			} else {
 				final a = Vaddr.canonRam(number(entry, "hint"));
 				out.push({addr: a, name: defaultName(a)});
+			}
+		}
+		return out;
+	}
+
+	static function relocOf(raw:Dynamic):RelocConfig {
+		final id = stringField(raw, "id", null);
+		if (id == null) throw new LoaderError('a relocatable stanza has no id');
+		final files = [for (f in arrayField(raw, "files")) Std.string(f)];
+		if (files.length == 0) throw new LoaderError('relocatable "$id" names no files');
+		final unit = requiredNumber(raw, "unit", 'relocatable "$id"');
+		if (unit <= 0 || (unit & 3) != 0 || unit > 0x100000) {
+			throw new LoaderError('relocatable "$id": unit $unit must be a positive multiple of 4, '
+				+ 'at most 1 MB');
+		}
+		final hashWords = numberOr(raw, "hashWords", 4);
+		if (hashWords < 1 || hashWords > 64) {
+			throw new LoaderError('relocatable "$id": hashWords $hashWords is outside 1..64');
+		}
+		return new RelocConfig(id, files, unit, requiredNumber(raw, "entryMarker", 'relocatable "$id"'),
+			hashWords);
+	}
+
+	static function tableHintsOf(raw:Array<Dynamic>):Array<TableHint> {
+		final out = [];
+		for (i in 0...raw.length) {
+			final entry = raw[i];
+			final jr = Vaddr.canonRam(requiredNumber(entry, "jrAddr", 'jumpTableHints[$i]'));
+			final listed = arrayField(entry, "targets");
+			if (listed.length > 0) {
+				if (Reflect.field(entry, "tableBase") != null) {
+					throw new LoaderError('jumpTableHints[$i] gives both targets and tableBase; '
+						+ 'it is one or the other');
+				}
+				final targets = [for (t in listed) Vaddr.canonRam(number(t, 'jumpTableHints[$i] target'))];
+				out.push({jrAddr: jr, tableBase: 0, count: targets.length, targets: targets});
+			} else {
+				final base = Vaddr.canonRam(requiredNumber(entry, "tableBase", 'jumpTableHints[$i]'));
+				final count = requiredNumber(entry, "count", 'jumpTableHints[$i]');
+				if (count <= 0) throw new LoaderError('jumpTableHints[$i] has count $count');
+				out.push({jrAddr: jr, tableBase: base, count: count, targets: null});
 			}
 		}
 		return out;

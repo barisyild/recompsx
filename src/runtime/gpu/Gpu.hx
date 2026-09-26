@@ -677,7 +677,21 @@ class Gpu {
 		else if (size == 2) { w = 8; h = 8; }
 		else if (size == 3) { w = 16; h = 16; }
 		else {}
-		fillRect(x, y, w, h, colour);
+		// Clipped to the drawing area (GP0 E3h/E4h, both corners inclusive), as a polygon is;
+		// only GP0(02h)'s fill ignores it (psx-spx "GPU Render Rectangle Commands"). Unclipped,
+		// a double-buffered game's sprites reach past the buffer being drawn into the one on
+		// screen: Crash Bandicoot: Warped's stars left of the back buffer lit up in the front
+		// one until its next redraw, and blinked.
+		final ax0 = drawAreaTopLeft & 0x3FF;
+		final ay0 = (drawAreaTopLeft >>> 10) & 0x1FF;
+		final ax1 = (drawAreaBottomRight & 0x3FF) + 1;
+		final ay1 = ((drawAreaBottomRight >>> 10) & 0x1FF) + 1;
+		final left = x < ax0 ? ax0 : x;
+		final top = y < ay0 ? ay0 : y;
+		final right = x + w > ax1 ? ax1 : x + w;
+		final bottom = y + h > ay1 ? ay1 : y + h;
+		if (left < right && top < bottom) fillRect(left, top, right - left, bottom - top, colour);
+		else {}
 		primitives++;
 	}
 
@@ -1141,7 +1155,13 @@ class Gpu {
 		if (hw) {
 			sendState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
 				drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
-			Backend.gpuRect(x, y, w, h, colour, semiTransparent ? 1 : 0, semiMode);
+			// The ABI's colour is 24-bit BGR, as a triangle's is; `colour` is the 15-bit word
+			// VRAM holds. Widened, not taken from the command: a rectangle is not dithered, so
+			// the five bits per channel VRAM keeps are exactly what the hardware shows. Handing
+			// the 15-bit word over as BGR painted Crash Bandicoot: Warped's grey stars orange and
+			// green.
+			Backend.gpuRect(x, y, w, h, ((colour & 0x1F) << 3) | (((colour >> 5) & 0x1F) << 11)
+				| (((colour >> 10) & 0x1F) << 19), semiTransparent ? 1 : 0, semiMode);
 			return;
 		} else {}
 		// Drawing clips at the viewport edge; it does not wrap like a VRAM transfer. Clip once

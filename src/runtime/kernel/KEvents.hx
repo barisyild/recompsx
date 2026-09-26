@@ -72,6 +72,7 @@ class KEvents {
 		evFlags = [for (_ in 0...COUNT) FREE];
 		postedClass = [for (_ in 0...POST_MAX) 0];
 		postedSpec = [for (_ in 0...POST_MAX) 0];
+		drainSaved = new CpuState();
 		postedCount = 0;
 		delivered = 0;
 		callbacks = 0;
@@ -233,16 +234,30 @@ class KEvents {
 		postedCount++;
 	}
 
-	/** Hands the queued device events to the game. Called from the pump, and nowhere else. */
+	/**
+		Hands the queued device events to the game. Called from the pump, and nowhere else.
+
+		On hardware these arrive through an interrupt, so the callback runs as a handler would:
+		every register saved and restored around it, and the kernel's stack under it. The pump is
+		a loop header in the middle of recompiled code, where temporaries are live — a callback
+		run on the game's own registers returned into a loop whose `$t` registers it had used.
+		Inside interrupt dispatch the events wait for the pump after it, as they would wait on
+		hardware behind the handler's disabled interrupts; the exception stack is in use there.
+	**/
 	public static function drain(ctx:CpuState):Void {
-		if (postedCount == 0) return;
+		if (postedCount == 0 || core.Irq.dispatching()) return;
 		else {}
 		final n = postedCount;
 		// Cleared first: a callback that raises another event must queue it, not be consumed by
 		// this loop and lose its place.
 		postedCount = 0;
+		core.Irq.copyRegisters(ctx, drainSaved);
+		ctx.sp = Kernel.EXCEPTION_STACK_TOP;
 		for (i in 0...n) deliver(ctx, postedClass[i], postedSpec[i]);
+		core.Irq.copyRegisters(drainSaved, ctx);
 	}
+
+	static var drainSaved:CpuState;
 
 	static inline var POST_MAX = 16;
 	static var postedClass:Array<Int>;

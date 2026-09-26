@@ -119,6 +119,24 @@ class Coverage {
 		out.add('  BIOS calls (jr through a vector) $kernelCalls\n');
 		out.add('  switch tables recovered        ${Lambda.count(discovery.tables)}'
 			+ '  ($boundedTables with the compiler\'s own bound, $tableArms arms total)\n');
+		var raJumpCount = 0;
+		final raJumpLines = [];
+		for (entry in discovery.raJumps.keys()) {
+			final m = discovery.raJumps.get(entry);
+			for (jr in m.keys()) {
+				raJumpCount++;
+				if (raJumpLines.length < 10) raJumpLines.push('      ${Vaddr.hex(jr)} -> ${Vaddr.hex(m.get(jr))}  in f_${StringTools.hex(entry, 8).toLowerCase()}');
+				else {}
+			}
+		}
+		var registerReturns = 0;
+		for (fn in discovery.functions) for (_ in fn.registerReturns.keys()) registerReturns++;
+		var checkedReturns = 0;
+		for (fn in discovery.functions) for (_ in fn.checkedReturns.keys()) checkedReturns++;
+		out.add('  jr $$ra that jumps ($$ra set by the function) $raJumpCount\n');
+		for (l in raJumpLines) out.add(l + '\n');
+		out.add('  returns through a copy of $$ra   $registerReturns\n');
+		out.add('  returns checked against the entry $$ra (a loaded $$ra; ADR-0027) $checkedReturns\n');
 		out.add('  computed jumps still unresolved  $unresolvedJumps\n');
 		if (jumpSites.length > 0) {
 			out.add('    each is a switch or a call through a register; the runtime dispatches\n');

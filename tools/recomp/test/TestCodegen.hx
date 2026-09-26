@@ -169,6 +169,18 @@ class TestCodegen {
 			imm(4, 4, 2, 3), imm(9, 8, 0, 0), JR, imm(9, 8, 0, 1),
 			imm(4, 4, 3, 3), imm(9, 9, 0, 0), JR, imm(9, 9, 0, 1),
 			JR, imm(9, 10, 0, 7)]);
+		// A return to the caller's caller (ADR-0027): outer saves its $ra at 100($a2) and calls
+		// helper; with a1 == 0 the helper loads that address and jumps to it, leaving both, so
+		// outer's rest (v0 += 10, v1 += 1000) never runs. With a1 != 0 it returns normally.
+		final nl = next;
+		final nonlocal = add("nonlocalReturn", [
+			imm(15, 6, 0, 0x8004), imm(9, 29, 29, -8), imm(0x2b, 31, 29, 0), jal(nl + 0x40),
+			imm(9, 3, 0, 0), imm(9, 3, 3, 100), imm(0x23, 31, 29, 0), JR, imm(9, 29, 29, 8),
+			0, 0, 0, 0, 0, 0, 0,
+			imm(0x2b, 31, 6, 100), jal(nl + 0x80), imm(9, 2, 0, 1), imm(9, 2, 2, 10),
+			imm(0x23, 31, 6, 100), JR, imm(9, 3, 3, 1000), 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			imm(5, 0, 5, 4), 0, imm(0x23, 31, 6, 100), JR, imm(9, 2, 0, 7),
+			JR, imm(9, 2, 0, 3)]);
 		if (check) {
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
@@ -200,6 +212,11 @@ class TestCodegen {
 			Assert.isTrue(carried.indexOf('core.IdleLoop.') < 0, "a register-carried counter is not idle");
 			Assert.isTrue(shift.indexOf('>>> 0') < 0, "a logical shift by zero is the value itself");
 			Assert.isTrue(shift.indexOf('& 31)) | 0;') >= 0, "a logical shift by register is truncated to a word");
+			Assert.isTrue(nonlocal.indexOf('Runtime.unwinding(ctx, 0x${StringTools.hex(nl + 0x14, 8).toLowerCase()})') >= 0,
+				"a call's after-check names the address it returns to");
+			Assert.isTrue(nonlocal.indexOf('entryRa') < 0, "a return from the own stack slot is not checked");
+			Assert.isTrue(bodies.toString().indexOf('Runtime.returnTo(ctx, ') >= 0,
+				"a return through a loaded ra is checked against the entry ra");
 		}
 		return 'import core.CpuState;\nimport core.Runtime;\nimport core.Ops;\nimport mem.Memory;\n'
 			+ 'import kernel.Kernel;\nimport gte.Gte;\nclass $cls {\n' + bodies.toString()

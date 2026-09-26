@@ -135,7 +135,21 @@ variant): backward-slice from `jr rX` to the defining `lw`; constant-resolve the
 lui/addiu/addu folding (gp-relative folds with `initialGp`); bound N from the dominating
 `sltiu`; read N words from the universe view; validate every entry (4-aligned, inside classified
 text) else reject. On success: mark `[base, base+4N)` as data-in-text, attach Switch edges.
-`jumpTableHints[]` force `{jrAddr, tableBase, count}` when hand-written asm defeats the matcher.
+`jumpTableHints[]` force `{jrAddr, tableBase, count}` when hand-written asm defeats the matcher, or
+`{jrAddr, targets[]}` when there is no table at all — a jump computed with arithmetic into an unrolled
+loop or a run of branch slots. Either is installed before the first closure, so the arms trace as
+blocks of the jumping function and emit as a `switch` whose default still dispatches by address.
+
+**Returns and `$ra`** — `jr $ra` returns, except where every path reaches it with an address the
+function built in `$ra` itself (`lui`/`addiu`/`ori`; `lw $ra` counts as the entry value, a call's
+link as unknown): then it is a jump there. `jalr rd, $ra` returns and links. A `jr` through a
+register that the entry block copied from `$ra` and nothing else writes is a return. A computed
+jump that does not come back is left for the caller to run (ADR-0026). A return that a load of
+`$ra` can reach — any load but the restore of the function's own stack slot (`lw $ra, N($sp)`
+with `sw $ra, N($sp)` in the same function) — is checked at run time against the `$ra` the
+function was entered with (`entryRa`); a different value is a return to elsewhere, carried out
+to the frame whose call continues there (ADR-0027). Every after-call check names that address:
+`Runtime.unwinding(ctx, <continuation>)`.
 
 **Call analysis** — `jal T`: **dynamic (`Runtime.call`) if T is inside any configured overlay VA
 window**, static if T is in the calling universe outside every window, kernel vectors
@@ -379,7 +393,9 @@ people reading the output, and it does not require changing how memory is modell
 (in-image), `exeSha256` (filled by `--accept-hashes`; mismatch = hard error naming expected
 redump), `overlays[] {id, name, source {kind: file|sectors|memdump, ...}, loadAddr, length,
 entryHints[]}`, `functionHints[] {addr, name, isFunction, noReturn, loadDelayAccurate}`,
-`jumpTableHints[] {jrAddr, tableBase, count}`, `nativeReplacements[] {addr, haxeFn}` (escape
+`relocatable[] {id, files[], entryMarker, unit, hashWords}` (position-independent code the game
+loads anywhere, compiled from the disc and recognised by content — ADR-0025),
+`jumpTableHints[] {jrAddr, tableBase, count} | {jrAddr, targets[]}`, `nativeReplacements[] {addr, haxeFn}` (escape
 hatch + modding hook — registered in FnTable instead of generated code; original still analyzed
 for coverage), `setjmpFns[]/longjmpFns[]` (→ `Runtime.setjmp/longjmp` per the unwind design),
 `symsFile`, `mapFile`. Addresses are decimal u32 in JSON (no hex in JSON); the tool prints hex
@@ -534,7 +550,7 @@ arithmetic — if it emits plain C++ `int`, force `-fwrapv` in CMake and record 
 | | jal (static) | `ctx.ra = RET; <slot>; Fns_XX.f_<target>(ctx);` (ra always written — cheap, preserves fidelity) |
 | | jal (dynamic) | `ctx.ra = RET; <slot>; ctx.pc = T; Runtime.call(ctx, T);` |
 | | jalr rd,rs | `var tK = RS; ctx.<rd> = RET; <slot>; ctx.pc = tK; Runtime.call(ctx, tK);` (target latched before link — handles `jalr ra, ra`) |
-| | jr ra | `<slot>; return;` (computed-ra tricks out of scope v1; escape = nativeReplacements) |
+| | jr ra | `<slot>; return;` — where a loaded `$ra` reaches it: `if (ra != entryRa) Runtime.returnTo(ctx, ra); return;` (ADR-0027) |
 | | jr rX (table) | `var tK = RX; <slot>; ctx.cycles += n; switch (tK) { case 0x...: bb = i; continue; ... default: ctx.pc = tK; Runtime.call(ctx, tK); return; }` |
 | | jr rX (unrecovered) | `var tK = RX; <slot>; ctx.pc = tK; Runtime.call(ctx, tK); return;` |
 | System | syscall/break | `ctx.pc = ADDR; Kernel.syscall(ctx, CODE20);` then continue in-line (no delay slot; Psy-Q div-zero break guards return) |

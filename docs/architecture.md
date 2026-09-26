@@ -9,7 +9,9 @@ their rationale live in `docs/decisions/`. Golden rules and the session protocol
 recompsx statically recompiles PlayStation 1 games to Haxe. A build-time tool disassembles a
 game's MIPS R3000A machine code and emits Haxe source; that generated source, plus a
 hand-written integer-only runtime and a per-platform backend, compiles to a native executable
-that *is* the game. No CPU interpreter exists at run time.
+that *is* the game. No CPU interpreter exists at run time: code the game loads to a fixed address
+is an overlay (ADR-0006), and code it loads anywhere is compiled from the disc too and recognised
+by content (ADR-0025).
 
 **The goal is every PS1 game**, driven by per-game configuration (`games/<id>/game.json`) and
 nothing game-specific in the tool or runtime. Crash Bash NTSC-U (SCUS-94570) is the bring-up
@@ -132,7 +134,11 @@ capable debugger. It is used two ways, and the boundary between them is a hard r
      HLE has to match, so it settles what psx-spx describes only in prose. It is *not* the retail
      BIOS: where the two could differ, psx-spx and a test fixture decide.
   3. *Observe* DuckStation: reproduce the scenario in its debugger and watch
-     registers/memory/VRAM. No source exposure, and usually faster than reading code.
+     registers/memory/VRAM. No source exposure, and usually faster than reading code. Its GDB
+     stub makes this scriptable — breakpoints, read/write watchpoints, single steps, whole-RAM
+     reads — with `scripts/duckstation-gdb.py` (enabling it edits DuckStation's settings.ini:
+     back it up and restore it). Crash Bandicoot: Warped's culled objects (ADR-0027) were found
+     this way, by comparing draw-list nodes and a single-stepped routine with ours.
   4. *Read* DuckStation source, last resort, under the **prose-intermediary discipline**: read
      to extract the behavioral rule → write that rule as prose in `docs/` with a citation →
      close the source → implement only from the prose note → write a PS1 test fixture proving
