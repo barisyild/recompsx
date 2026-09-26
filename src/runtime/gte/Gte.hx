@@ -409,7 +409,12 @@ class Gte {
 
 		A divisor at most half the dividend cannot be normalised into range, and the hardware
 		answers 0x1FFFF with the overflow flag rather than a wrong number.
+
+		Forced inline on C++: as a call it sat in the middle of every vertex of RTPT, and a call is
+		a point after which the compiler must read the whole matrix again.
 	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
 	static function unrDivide():Int {
 		final divisor = sz3 & 0xFFFF;
 		final dividend = h & 0xFFFF;
@@ -560,20 +565,68 @@ class Gte {
 		perspective divide turns the first two into screen coordinates.
 	**/
 	static function rtps(sf:Int, lm:Bool, v:Int, last:Bool):Void {
-		final vx = vecX(v), vy = vecY(v), vz = vecZ(v);
+		project(sf, lm, vecX(v), vecY(v), vecZ(v), last);
+	}
 
-		var m = row44(trX, rt11, rt12, rt13, vx, vy, vz, F_MAC1_POS, F_MAC1_NEG);
-		mac1 = shiftBySf(m, sf);
+	/**
+		The same transform for all three vertices; only the last one sets the depth-cue outputs.
 
-		m = row44(trY, rt21, rt22, rt23, vx, vy, vz, F_MAC2_POS, F_MAC2_NEG);
-		mac2 = shiftBySf(m, sf);
+		On C++ `project` is forced inline here, which is where the time goes — RTPT is most of a
+		frame's vertices. The three copies then share one read of the matrix and the translation,
+		and the first two vertices' MAC and IR stores, which the third overwrites before anything
+		reads them, are dropped by the compiler.
+	**/
+	static function rtpt(sf:Int, lm:Bool):Void {
+		project(sf, lm, sext16(vxy0), vxy0 >> 16, vz0, false);
+		project(sf, lm, sext16(vxy1), vxy1 >> 16, vz1, false);
+		project(sf, lm, sext16(vxy2), vxy2 >> 16, vz2, true);
+	}
 
-		m = row44(trZ, rt31, rt32, rt33, vx, vy, vz, F_MAC3_POS, F_MAC3_NEG);
-		// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation flag
-		// is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games rely on
-		// it. psx-spx records the same quirk.
-		final mac3Shifted = Acc.shr12(m);
-		mac3 = shiftBySf(m, sf);
+	/**
+		One vertex of RTPS/RTPT: MAC1-3 and IR1-3, SZ3 and SX2/SY2 pushed, MAC0, and with `last`
+		the depth cue.
+
+		The three matrix rows are 32-bit arithmetic when every translation is within 2^30, which is
+		every vertex a game sends. They were 64-bit multiply-accumulates, and on a 32-bit CPU each
+		row was a chain of carries and a double-word shift. But the matrix and the vector are
+		sixteen-bit signed, so each product fits in 32 bits, and the row is exact without the wide
+		accumulator (rowShr12, rowLow). Nothing can overflow 44 bits in that range (see
+		row44Checked), so no flag is lost; outside it, the checked path runs exactly as before.
+	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	static function project(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, last:Bool):Void {
+		final tx = trX, ty = trY, tz = trZ;
+		var mac3Shifted = 0;
+		if (tx > -0x40000000 && tx < 0x40000000 && ty > -0x40000000 && ty < 0x40000000
+				&& tz > -0x40000000 && tz < 0x40000000) {
+			final a1 = IntMath.mul(rt11, vx), b1 = IntMath.mul(rt12, vy), c1 = IntMath.mul(rt13, vz);
+			final a2 = IntMath.mul(rt21, vx), b2 = IntMath.mul(rt22, vy), c2 = IntMath.mul(rt23, vz);
+			final a3 = IntMath.mul(rt31, vx), b3 = IntMath.mul(rt32, vy), c3 = IntMath.mul(rt33, vz);
+			// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation
+			// flag is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games
+			// rely on it. psx-spx records the same quirk.
+			mac3Shifted = rowShr12(tz, a3, b3, c3);
+			if (sf == 0) {
+				mac1 = rowLow(tx, a1, b1, c1);
+				mac2 = rowLow(ty, a2, b2, c2);
+				mac3 = rowLow(tz, a3, b3, c3);
+			} else {
+				mac1 = rowShr12(tx, a1, b1, c1);
+				mac2 = rowShr12(ty, a2, b2, c2);
+				mac3 = mac3Shifted;
+			}
+		} else {
+			// A translation this large can overflow the 44-bit accumulator. Every row takes the
+			// checked path; for a row whose own translation is in range it gives the same answer.
+			var m = row44Checked(tx, rt11, rt12, rt13, vx, vy, vz, F_MAC1_POS, F_MAC1_NEG);
+			mac1 = shiftBySf(m, sf);
+			m = row44Checked(ty, rt21, rt22, rt23, vx, vy, vz, F_MAC2_POS, F_MAC2_NEG);
+			mac2 = shiftBySf(m, sf);
+			m = row44Checked(tz, rt31, rt32, rt33, vx, vy, vz, F_MAC3_POS, F_MAC3_NEG);
+			mac3Shifted = Acc.shr12(m);
+			mac3 = shiftBySf(m, sf);
+		}
 
 		ir1 = saturateIr(mac1, lm, F_IR1);
 		ir2 = saturateIr(mac2, lm, F_IR2);
@@ -583,7 +636,7 @@ class Gte {
 
 		final n = unrDivide();
 
-		m = Acc.mac(Acc.of(ofx), ir1, n);
+		var m = Acc.mac(Acc.of(ofx), ir1, n);
 		mac0 = mac0From32(m);
 		final sx = saturateSxy(Acc.shr16(m), F_SX2);
 
@@ -597,11 +650,21 @@ class Gte {
 		else {}
 	}
 
-	/** The same transform for all three vertices; only the last one sets the depth-cue outputs. */
-	static function rtpt(sf:Int, lm:Bool):Void {
-		rtps(sf, lm, 0, false);
-		rtps(sf, lm, 1, false);
-		rtps(sf, lm, 2, true);
+	/**
+		`((t << 12) + a + b + c) >> 12`, exactly, in 32 bits — a matrix row with sf = 1.
+
+		Shifting `t << 12` out again leaves `t`, so the row is `t` plus the floor of the three
+		products' sum over 4096. Each product splits into a floor part (`a >> 12`, arithmetic) and
+		a remainder (`a & 0xFFF`, 0..4095), and the remainders' sum carries at most 2 into the
+		result. With |t| < 2^30 and each product within 2^30, nothing here can overflow.
+	**/
+	static inline function rowShr12(t:Int, a:Int, b:Int, c:Int):Int {
+		return t + (a >> 12) + (b >> 12) + (c >> 12) + (((a & 0xFFF) + (b & 0xFFF) + (c & 0xFFF)) >> 12);
+	}
+
+	/** The low 32 bits of the same sum: what a row stores with sf = 0. */
+	static inline function rowLow(t:Int, a:Int, b:Int, c:Int):Int {
+		return ((t << 12) + a + b + c) | 0;
 	}
 
 	/** `IR0 = DQB + DQA * n`, the fog factor a game multiplies its colours by. */
@@ -1019,21 +1082,12 @@ class Gte {
 	}
 
 	/**
-		`(tr << 12) + r1*x + r2*y + r3*z`, each partial sum checked against 44 bits.
-
-		The matrix and the vector are sixteen-bit signed, so each product is within 2^30; with
-		|tr| < 2^30 the translation is within 2^42, and no partial sum can reach 2^43. Then no
-		step can flag or wrap, and the checks are skipped — on a 32-bit CPU they are 64-bit
-		compares, three to a row and nine to a vertex. A translation outside that range, which
-		games do not use, takes every step exactly as before.
+		`(tr << 12) + r1*x + r2*y + r3*z`, each partial sum checked against 44 bits and wrapped as
+		the hardware does. Only for a translation of 2^30 or more: the matrix and the vector are
+		sixteen-bit signed, so each product is within 2^30, and with |tr| < 2^30 the translation is
+		within 2^42 and no partial sum can reach 2^43 — nothing to flag or wrap, which is why
+		`project` does those rows in 32 bits.
 	**/
-	static inline function row44(tr:Int, r1:Int, r2:Int, r3:Int, x:Int, y:Int, z:Int,
-			posBit:Int, negBit:Int):Acc {
-		return (tr > -0x40000000 && tr < 0x40000000)
-			? Acc.mac(Acc.mac(Acc.mac(Acc.shl12(tr), r1, x), r2, y), r3, z)
-			: row44Checked(tr, r1, r2, r3, x, y, z, posBit, negBit);
-	}
-
 	static function row44Checked(tr:Int, r1:Int, r2:Int, r3:Int, x:Int, y:Int, z:Int,
 			posBit:Int, negBit:Int):Acc {
 		var m = Acc.shl12(tr);
