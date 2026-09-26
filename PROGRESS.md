@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Ballistix measured in JS (attract loop frames 18800-20300): every frame VRAM-copies two 16x64
+scrolling strips into the 4bpp pages (768,0) and (896,0), which it draws with, plus a 16x32 upload every
+other frame; palettes fit (39 avg, 48 max of 64 banks). Each write re-decoded a whole page twice a scene.
+Mirror pages now keep a dirty rectangle and twid4_patch re-decodes only it (host: 400 random patches
+identical to full decodes). Overlay `dec m/s/b+p` counts the patches.
+
 2026-09-26 [claude] Ballistix after the twiddle uploader: 1098 -> ~860 ms, build 468 -> ~232; tex_decode now ~94.
 Runtime reports a VRAM write to the backend only if a pixel changed (uploads and copies compare as they
 write; up to 72 % of texture-area writes changed nothing), and steps upload col/row instead of two

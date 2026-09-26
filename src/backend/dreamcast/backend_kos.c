@@ -209,7 +209,7 @@ static uint64_t g_prof_build;
 static int      g_bright_prims;
 /* Texture decodes this window, by cache: 4bpp page mirrors, pool slots, baked palette patches.
  * The overlay's `dec m/s/b`: what tells an invalidated texture from a cache that is too small. */
-static int      g_win_mir, g_win_slot, g_win_bake;
+static int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
 
 /* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
  * can tell them apart: inlined, they all read as `present_frame`. A call each is the price. */
@@ -334,7 +334,14 @@ typedef struct {
 static gpal_t g_pal4[PAL_BANKS_4BPP];
 static int    g_pal_next;
 
-typedef struct { pvr_ptr_t mem; uint32_t bound_frame; uint8_t valid, defer; } gpage4_t;
+/* `part`: the page is valid except inside [dx0,dx1) x [dy0,dy1), in VRAM halfwords and rows
+ * relative to the page, which page4_mirror patches in place before the page is next used. */
+typedef struct {
+    pvr_ptr_t mem;
+    uint32_t  bound_frame;
+    uint8_t   valid, defer, part;
+    int16_t   dx0, dy0, dx1, dy1;
+} gpage4_t;
 static gpage4_t  g_page4[PAGE4_N];
 static pvr_ptr_t g_mir_base;
 static int       g_mir_decodes;
@@ -1645,10 +1652,10 @@ static void profile_report(void) {
                  (unsigned long)(spu_us / 1000));
     /* fin and wait (hand-over and the PVR's wait) have read 0 for a long while; they stay in the
      * serial line, and their room goes to the texture decodes. */
-    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d",
+    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d+%d",
              (unsigned long)(gpu_us / 1000),
              (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
-             g_bright_prims, g_win_mir, g_win_slot, g_win_bake);
+             g_bright_prims, g_win_mir, g_win_slot, g_win_bake, g_win_patch);
     /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
      * header counts that were here are in the serial line. */
     syms_top(l3, l4, sizeof(l3));
@@ -1685,7 +1692,7 @@ static void profile_report(void) {
     g_prof_build = 0;
     g_prof_skipped = 0;
     g_bright_prims = 0;
-    g_win_mir = g_win_slot = g_win_bake = 0;
+    g_win_mir = g_win_slot = g_win_bake = g_win_patch = 0;
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) { g_prof_section_us[i] = 0; g_samp_where[i] = 0; }
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
@@ -1791,13 +1798,16 @@ static uint16_t texel_to_argb1555(uint16_t p) {
  * a 16-bit texel (x, y) sits at index TWID(y) | TWID(x) << 1, and a 4-bit texture packs the 2x2
  * block at (2X, 2Y) into one 16-bit word at TWID(Y) | TWID(X) << 1, nibbles (x,y), (x,y+1),
  * (x+1,y), (x+1,y+1). So an index's even bits are y and its odd bits x. */
-static uint8_t g_even4[256];              /* bits 0, 2, 4, 6 of a byte, gathered into four */
+static uint8_t  g_even4[256];             /* bits 0, 2, 4, 6 of a byte, gathered into four */
+static uint16_t g_spread[256];            /* a byte's bits spread to the even positions: TWID */
 
 static void twid_init(void) {
     for(int b = 0; b < 256; b++) {
-        int v = 0;
+        int v = 0, w = 0;
         for(int k = 0; k < 4; k++) v |= ((b >> (2 * k)) & 1) << k;
+        for(int k = 0; k < 8; k++) w |= ((b >> k) & 1) << (2 * k);
         g_even4[b] = (uint8_t)v;
+        g_spread[b] = (uint16_t)w;
     }
 }
 
@@ -1860,6 +1870,26 @@ static void twid_load4(const uint8_t* src, pvr_ptr_t dst, int dim) {
     twid4_fill(src, dim, d, 1);
     sq_unlock();
     sq_wait();
+}
+
+/** Re-decodes only a rectangle of a 4bpp page mirror (page at VRAM px, py; rectangle in halfwords
+ *  and rows relative to it), straight from VRAM into the twiddled texture: the 2x2 blocks it
+ *  touches, one 16-bit store each, in the layout twid4_fill writes (the host test checks the two
+ *  agree). A 16x64 scroll in a 64x256 page is 2,048 blocks where a whole page is 16,384. */
+static void twid4_patch(pvr_ptr_t dst, int px, int py, int hx0, int hy0, int hx1, int hy1) {
+    volatile uint16_t* out = (volatile uint16_t*)dst;
+    const int bx0 = 2 * hx0, bx1 = 2 * hx1;            /* blocks: two per halfword column */
+    const int by0 = hy0 >> 1, by1 = (hy1 + 1) >> 1;    /* and one per pair of rows */
+    for(int by = by0; by < by1; by++) {
+        const uint8_t* r0 = (const uint8_t*)(g_vram + (size_t)((py + 2 * by) & 511) * VRAM_W + px);
+        const uint8_t* r1 = (const uint8_t*)(g_vram + (size_t)((py + 2 * by + 1) & 511) * VRAM_W + px);
+        const uint32_t ty = g_spread[by];
+        for(int bx = bx0; bx < bx1; bx++) {
+            const int b0 = r0[bx], b1 = r1[bx];        /* texels 2bx, 2bx+1 of each row */
+            out[ty | ((uint32_t)g_spread[bx] << 1)] =
+                (uint16_t)((b0 & 15) | ((b1 & 15) << 4) | ((b0 >> 4) << 8) | ((b1 >> 4) << 12));
+        }
+    }
 }
 /* ---- end of twiddled texture upload ---- */
 
@@ -2132,11 +2162,18 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
         } else {
             tex_decode(pg->mem, s);
             pg->valid = 1;
+            pg->part = 0;
             pg->defer = 0;
             g_mir_decodes++;
             g_win_mir++;
         }
-    }
+    } else if(pg->part) {
+        /* Patched now, not deferred: a strip of one frame's scroll on its way out tears less
+         * visibly than the whole strip arriving a frame late. */
+        twid4_patch(pg->mem, s->tex_x & ~63, s->tex_y & 256, pg->dx0, pg->dy0, pg->dx1, pg->dy1);
+        pg->part = 0;
+        g_win_patch++;
+    } else {}
     pg->bound_frame = g_tex_frame;
     return pg->mem;
 }
@@ -2467,11 +2504,35 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
         if(page_hit || clut_hit) g_tex[i].used = 0;
     }
     /* The mirror: a 4bpp page is 64 VRAM halfwords wide and 256 rows tall, and its slot is
-     * permanent, so "evict" here means only "decode it again next time it is asked for". */
+     * permanent, so "evict" here means only "decode it again next time it is asked for" — and
+     * for a write that covers a small part of the page, only that part. Ballistix scrolls two
+     * 16x64 strips through two of the pages it draws with at every frame (VRAM copies), and each
+     * cost a whole page decode, twice a scene: tex_decode ~94 ms of an ~860 ms window. A page's
+     * dirty rectangle grows by union; past a quarter of the page it is decoded whole. */
     for(int i = 0; i < PAGE4_N; i++) {
-        if(!g_page4[i].valid) continue;
+        gpage4_t* pg = &g_page4[i];
+        if(!pg->valid) continue;
         const int px = (i % PAGE4_COLS) * 64, py = (i / PAGE4_COLS) * 256;
-        if(!(px + 64 <= x || x + w <= px || py + 256 <= y || y + h <= py)) g_page4[i].valid = 0;
+        if(px + 64 <= x || x + w <= px || py + 256 <= y || y + h <= py) continue;
+        int x0 = x - px, y0 = y - py, x1 = x + w - px, y1 = y + h - py;
+        if(x0 < 0) x0 = 0;
+        if(y0 < 0) y0 = 0;
+        if(x1 > 64) x1 = 64;
+        if(y1 > 256) y1 = 256;
+        if(pg->part) {
+            if(pg->dx0 < x0) x0 = pg->dx0;
+            if(pg->dy0 < y0) y0 = pg->dy0;
+            if(pg->dx1 > x1) x1 = pg->dx1;
+            if(pg->dy1 > y1) y1 = pg->dy1;
+        } else {}
+        if((x1 - x0) * (y1 - y0) > 64 * 256 / 4) {
+            pg->valid = 0;
+            pg->part = 0;
+        } else {
+            pg->part = 1;
+            pg->dx0 = (int16_t)x0; pg->dy0 = (int16_t)y0;
+            pg->dx1 = (int16_t)x1; pg->dy1 = (int16_t)y1;
+        }
     }
     /* A baked patch has the CLUT inside it, so it goes stale from either direction. */
     for(int i = 0; i < g_bake_n; i++) {
