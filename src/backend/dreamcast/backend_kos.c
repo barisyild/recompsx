@@ -2496,7 +2496,7 @@ void bp_gpu_vram(const uint16_t* vram) {
  *  Both entry points call it, and both must: state is latched before the primitive that uses it,
  *  so resetting in one place only would dedup a new frame's state against a dead table and then
  *  index into the emptied one. */
-static void begin_frame_if_needed(void) {
+static inline void begin_frame_if_needed(void) {
     if(!g_frame_shown) return;
     g_frame_shown = 0;
     g_cmd_count = 0;
@@ -2542,7 +2542,7 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
     s->draw_y = (int16_t)draw_y;
 }
 
-static gcmd_t* cmd_new(void) {
+static inline gcmd_t* cmd_new(void) {
     begin_frame_if_needed();
     g_scene_dirty = 1;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }

@@ -385,8 +385,14 @@ class Gpu {
 		} else {}
 	}
 
-	/** Backend.gpuState, when the state differs from the one last sent (the ABI latches it). */
-	static function sendState(tx:Int, ty:Int, depth:Int, cx:Int, cy:Int, semi:Int, flags:Int,
+	/**
+		Backend.gpuState, when the state differs from the one last sent (the ABI latches it).
+
+		Inline because it runs for every triangle and nearly always finds nothing changed. As a
+		call it was the most expensive part of that nothing: on the Dreamcast ten arguments, six
+		of them through the stack, for a comparison of four words.
+	**/
+	static inline function sendState(tx:Int, ty:Int, depth:Int, cx:Int, cy:Int, semi:Int, flags:Int,
 			window:Int, dx:Int, dy:Int):Void {
 		final a = tx | (ty << 10) | (depth << 20) | (semi << 22) | (flags << 24);
 		final b = cx | (cy << 10);
