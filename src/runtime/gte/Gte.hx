@@ -667,10 +667,19 @@ class Gte {
 		return ((t << 12) + a + b + c) | 0;
 	}
 
-	/** `IR0 = DQB + DQA * n`, the fog factor a game multiplies its colours by. */
+	/**
+		`MAC0 = DQB + DQA * n`, `IR0 = MAC0 >> 12`: the fog factor a game multiplies its colours
+		by, 0..0x1000 for none..all (docs/specs/runtime.md §5, psx-spx).
+
+		The shift was missing, so IR0 saturated wherever MAC0 passed 0x1000. With Crash Bash's
+		DQA/DQB (-4194, 0x1400000) a fifth of its RTPS/RTPT results differed — full far colour
+		where the hardware gives about half — but that game never reads an IR0 the transform
+		produced (it writes its own before every use; counted over 30,000 frames), so its digests
+		did not move. A game that fogs with it would have drawn every distant vertex fully fogged.
+	**/
 	static function depthCueing(n:Int):Void {
 		mac0 = mac0From32(Acc.mac(Acc.of(dqb), dqa, n));
-		ir0 = saturateIr0(mac0);
+		ir0 = saturateIr0(mac0 >> 12);
 	}
 
 	/**

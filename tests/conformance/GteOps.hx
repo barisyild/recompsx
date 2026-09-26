@@ -36,6 +36,7 @@ class GteOps {
 		rtpsIdentity();
 		rtpsSaturation();
 		divisionEdges();
+		depthCueWeight();
 		sfLmMatrix();
 		mvmvaSweep();
 		mvmvaFarColorBug();
@@ -363,6 +364,44 @@ class GteOps {
 		Conf.expect("and to the left edge when IR1 is negative",
 			sxOf(Gte.getData(ctx, 14)), -0x400);
 		Conf.expect("flagged on that side too", (Gte.getCtrl(ctx, 31) >> 14) & 1, 1);
+		feedAll();
+	}
+
+	// ---- the depth cue ---------------------------------------------------------------------------------------
+
+	/** IR0 = (DQB + DQA*n) >> 12, from the spec; n is 0x10000 when H equals the depth. */
+	static function depthCueWeight():Void {
+		identityTransform();
+		setVector(0, 0, 0, 300);
+		Gte.setCtrl(ctx, 26, 300);              // as rtpsIdentity: the divide gives exactly 1.0
+
+		Gte.setCtrl(ctx, 27, 0);
+		Gte.setCtrl(ctx, 28, 0x800000);          // DQB alone: half the far colour
+		exec(0x01);
+		Conf.expect("DQB 0x800000 is MAC0 0x800000", Gte.getData(ctx, 24), 0x800000);
+		Conf.expect("and IR0 one half", Gte.getData(ctx, 8), 0x800);
+		Conf.expect("which is in range, so no flag", (Gte.getCtrl(ctx, 31) >> 12) & 1, 0);
+		feedAll();
+
+		Gte.setCtrl(ctx, 27, 0x100);             // DQA 0x100 times n 0x10000
+		Gte.setCtrl(ctx, 28, 0);
+		exec(0x01);
+		Conf.expect("DQA*n reaches exactly 1.0", Gte.getData(ctx, 8), 0x1000);
+		Conf.expect("the limit itself is not a saturation", (Gte.getCtrl(ctx, 31) >> 12) & 1, 0);
+		feedAll();
+
+		Gte.setCtrl(ctx, 27, 0);
+		Gte.setCtrl(ctx, 28, 0x2000000);         // twice the limit
+		exec(0x01);
+		Conf.expect("past 1.0 IR0 holds at 0x1000", Gte.getData(ctx, 8), 0x1000);
+		Conf.expect("and says so", (Gte.getCtrl(ctx, 31) >> 12) & 1, 1);
+		feedAll();
+
+		Gte.setCtrl(ctx, 27, -0x100);             // below zero
+		Gte.setCtrl(ctx, 28, 0);
+		exec(0x01);
+		Conf.expect("a negative weight holds at zero", Gte.getData(ctx, 8), 0);
+		Conf.expect("flagged as well", (Gte.getCtrl(ctx, 31) >> 12) & 1, 1);
 		feedAll();
 	}
 

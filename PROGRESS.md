@@ -2,6 +2,14 @@
 
 ## Status snapshot
 
+**2026-09-26: GTE — RTPS/RTPT rows exact in 32 bits; the depth cue's IR0 fixed to the spec.**
+RTPS/RTPT rows are 32-bit (exact while |TR| < 2^30; checked 44-bit path otherwise) and RTPT is one
+body with `project`/`unrDivide` forced inline on C++. New conformance `GteProject` (12000 random
+RTPS/RTPT, every edge) proved it bit-identical to the old code before the fix. Then IR0 =
+sat(MAC0 >> 12) as docs/specs/runtime.md §5 says (the shift was missing): GteOps de71ee8a,
+GteProject 43a78d52. Crash Bash never reads an RTPS-produced IR0, so its digests stay
+(9000 ab13c60f, 30000 4b78c2de). Dreamcast: `--dc-bench=FROM:TO` and `--dc-fastmem-test`.
+
 **2026-09-26: the Dreamcast overlay splits the emulated frame: `emu gte spu aica` / `gpu up build fin wait`.**
 `emu` is now only what remains (recompiled code, kernel, memory, timers); GTE commands, GPU DMA
 (list walk + primitive decode + backend recording), SPU, AICA and disc come out of it, so every
@@ -1138,6 +1146,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-26 [claude] GTE rewrite (d19ebe4): 32-bit rows, RTPT one body; GteProject 148c8cbc before and after.
+Found IR0 = sat(MAC0) where the spec says >> 12 — fixed, GteOps/GteProject digests moved (de71ee8a/43a78d52),
+game digests did not: Crash Bash never reads RTPS's IR0 (0 of 28.7M reads). --dc-fastmem-test (ee16117) times
+MMU-off/on loads, a P0-mapped load, today's checked load and a TLB-miss fault at boot. Next: user's fm line + bench.
 
 2026-09-26 [claude] Menu at full speed (490 ms/61 fps); arenas ~740-800. slowWrite32 was one 9.2 KB function (LTO
 inlined DMA2 -> walkList -> polygonHw); its polygon code was a third spills/constant reloads. walkList and
