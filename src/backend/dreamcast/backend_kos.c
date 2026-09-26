@@ -212,9 +212,13 @@ static int      g_bright_prims;
  * The overlay's `dec m/s/b`: what tells an invalidated texture from a cache that is too small. */
 static int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
 
-/* `--dc-bench=FROM:TO`, read at init; the benchmark itself is with profile_report. */
+/* `--dc-bench=FROM:TO`, read at init; the benchmark itself is with profile_report. With
+ * `--dc-rxprof` as well, the range is also announced on the serial port — "@@rxprof start" as it
+ * begins, "@@rxprof stop" and "@@rxprof exit" when it ends — for the profiling Flycast build
+ * (branch recompsx-prof), which records the guest's PCs between the two and then quits. */
 #if RECOMPSX_DC_PROFILE
 static int g_bench_from = -1, g_bench_to = -1;
+static int g_rxprof;
 #endif
 
 /* The scene build's parts, kept out of line in profiling builds so the overlay's function profile
@@ -1209,6 +1213,7 @@ int bp_init(const char* title) {
 #if RECOMPSX_DC_PROFILE
     if(has_arg("--dc-fastmem-test")) fastmem_test();
     else {}
+    g_rxprof = has_arg("--dc-rxprof");
     {
         const char* b = arg_value("--dc-bench=");
         int from, to;
@@ -1746,6 +1751,8 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
     char msg[96];
     snprintf(msg, sizeof(msg), "bench %d..%d: %s (ms a frame)", g_bench_from, g_bench_to, g_bench_line);
     bp_log(BP_LOG_WARN, msg);   /* WARN: the overlay silences INFO, and this line is the point */
+    if(g_rxprof) { printf("@@rxprof stop\n@@rxprof exit\n"); fflush(stdout); }
+    else {}
 }
 
 static void profile_report(void) {
@@ -1753,6 +1760,8 @@ static void profile_report(void) {
     if(g_bench_state == 0 && g_bench_from >= 0 && g_presents == (uint32_t)g_bench_from) {
         profile_reset();        /* the range starts with a window of its own */
         g_bench_state = 1;
+        if(g_rxprof) { printf("@@rxprof start\n"); fflush(stdout); }
+        else {}
         return;
     } else {}
     if(++g_prof_frames < PROFILE_EVERY) return;
