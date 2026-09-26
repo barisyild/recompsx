@@ -32,7 +32,10 @@ for p in sorted(set(inputs)):
     source.update(p.relative_to(root).as_posix().encode() + b'\0' + p.read_bytes())
 git = lambda *args: subprocess.check_output(['git', *args], text=True).strip()
 
-manifest = {'version': digest[:12], 'sha256': digest, 'title': config.get('title', 'recompsx'),
+# The page loads the WebGL renderer under this, so a changed renderer is never served from cache.
+renderer = hashlib.sha256((root / 'web/gpu-webgl.js').read_bytes()).hexdigest()[:12]
+manifest = {'version': digest[:12], 'sha256': digest, 'renderer': renderer,
+            'title': config.get('title', 'recompsx'),
             'cooperative': True, 'regions': True, 'bytes': bundle.stat().st_size,
             'rawBytes': raw_bundle.stat().st_size, 'closure': True,
             'branch': git('branch', '--show-current'), 'revision': git('rev-parse', 'HEAD'),

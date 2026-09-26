@@ -44,6 +44,14 @@
   is set and 0 elsewhere, a primitive drawn with "set" increments the stencil of every pixel it
   writes, and one drawn with "check" passes only where the stencil is zero. Anything a game reads
   back from VRAM after drawing sees what was there before the draw, by the ABI's own terms.
+
+  Drawn pixels become texels when a primitive samples them. Games render into VRAM and then use
+  what they rendered as a texture — Crash Bandicoot: Warped draws Crash's silhouette off screen
+  every frame and lays it on the ground as his shadow, through a 4-bit CLUT. vramTex holds only
+  what the runtime wrote, so such a texture read stale words: the shadow was a square. Every
+  primitive marks the 16x16 tiles it may have drawn into; a textured primitive whose texels or
+  palette lie in a marked tile first has those tiles converted back from fbTex into vramTex as
+  15-bit words (bit 15 from the stencil) — the value the PlayStation would have stored.
 */
 function createHardwareGpu(canvas) {
   const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false,
@@ -222,18 +230,37 @@ function createHardwareGpu(canvas) {
       oColor = vec4(float(byteAt(b, y)), float(byteAt(b + 1, y)), float(byteAt(b + 2, y)), 255.0) / 255.0;
     }`;
 
+  // Rendered colour back to a VRAM halfword, drawn into vramTex over tiles primitives drew into.
+  // The eight-bit channel the primitive left, shifted down to five: the software rasteriser's
+  // truncation, and exact for a halfword a dirty rectangle copied in (round(c * 255 / 31) >> 3
+  // is c for every five-bit c). Bit 15 comes from the stencil, in a second pass.
+  const toWordFs = `#version 300 es
+    precision highp float;
+    precision highp int;
+    uniform sampler2D uFrame;
+    uniform uint uMaskBit;
+    in vec2 vTexel;
+    out uvec4 oWord;
+    void main() {
+      vec3 c = texelFetch(uFrame, ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511), 0).rgb;
+      uvec3 v = uvec3(round(c * 255.0)) >> 3u;
+      oWord = uvec4(v.r | (v.g << 5u) | (v.b << 10u) | uMaskBit, 0u, 0u, 0u);
+    }`;
+
   const primProgram = program(primVs, primFs);
   const copyProgram = program(quadVs, copy15Fs);
   const blitProgram = program(quadVs, blitFs);
   const present24Program = program(quadVs, present24Fs);
+  const toWordProgram = program(quadVs, toWordFs);
   const U = (p, name) => gl.getUniformLocation(p, name);
   const prim = { pass: U(primProgram, 'uPass') };
   const quad = (p) => ({ dst: U(p, 'uDst'), src: U(p, 'uSrc'), srcX: U(p, 'uSrcX'),
-    maskedOnly: U(p, 'uMaskedOnly') });
+    maskedOnly: U(p, 'uMaskedOnly'), maskBit: U(p, 'uMaskBit') });
   const copyU = quad(copyProgram), blitU = quad(blitProgram), present24U = quad(present24Program);
+  const toWordU = quad(toWordProgram);
   // Every sampler reads unit 0, which a program keeps from here on; set once, not per draw.
   for (const [p, name] of [[primProgram, 'uVram'], [copyProgram, 'uVram'], [blitProgram, 'uFrame'],
-      [present24Program, 'uVram']]) {
+      [present24Program, 'uVram'], [toWordProgram, 'uFrame']]) {
     gl.useProgram(p);
     gl.uniform1i(U(p, name), 0);
   }
@@ -266,6 +293,11 @@ function createHardwareGpu(canvas) {
   gl.clearColor(0, 0, 0, 1);
   gl.clearStencil(0);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+  // vramTex as a target, sharing the stencil, for drawn tiles turned back into halfwords.
+  const wordFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, wordFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, vramTex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, stencilRb);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
   const primVao = gl.createVertexArray();
@@ -360,6 +392,92 @@ function createHardwareGpu(canvas) {
     return at;
   }
 
+  // ---- drawn tiles: render to texture (see the header) ------------------------------------------
+  // The 16x16 tiles of VRAM a primitive may have drawn into since vramTex last held them. A row
+  // of 64 tiles is two words: bit n of the first for tile n, of the second for tile 32 + n.
+  const drawnLo = new Uint32Array(H >> 4), drawnHi = new Uint32Array(H >> 4);
+  let syncs = 0;
+
+  function upTo(n) { return n < 0 ? 0 : (n >= 31 ? -1 : (1 << (n + 1)) - 1); }
+  // Tiles tx0..tx1 (0 <= tx0 <= tx1 <= 63) as the two words of a row.
+  function spanLo(tx0, tx1) { return tx0 > 31 ? 0 : upTo(tx1 > 31 ? 31 : tx1) & ~upTo(tx0 - 1); }
+  function spanHi(tx0, tx1) { return tx1 < 32 ? 0 : upTo(tx1 - 32) & ~upTo((tx0 > 32 ? tx0 : 32) - 33); }
+
+  /** Pixels x0..x1, y0..y1 (inclusive) were drawn; what lies outside VRAM was clipped by GL. */
+  function markDrawn(x0, y0, x1, y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > W - 1) x1 = W - 1;
+    if (y1 > H - 1) y1 = H - 1;
+    if (x0 > x1 || y0 > y1) return;
+    const lo = spanLo(x0 >> 4, x1 >> 4), hi = spanHi(x0 >> 4, x1 >> 4);
+    for (let ty = y0 >> 4, end = y1 >> 4; ty <= end; ty++) { drawnLo[ty] |= lo; drawnHi[ty] |= hi; }
+  }
+
+  /** vramTex was written under this rectangle: tiles wholly inside it hold what fbTex does. */
+  function markClean(x, y, w, h) {
+    const tx0 = (x + 15) >> 4, tx1 = ((x + w) >> 4) - 1, ty0 = (y + 15) >> 4, ty1 = ((y + h) >> 4) - 1;
+    if (tx0 > tx1 || ty0 > ty1) return;
+    const lo = ~spanLo(tx0, tx1), hi = ~spanHi(tx0, tx1);
+    for (let ty = ty0; ty <= ty1; ty++) { drawnLo[ty] &= lo; drawnHi[ty] &= hi; }
+  }
+
+  /**
+    A primitive is about to read VRAM words x0..x1, y0..y1 (inclusive, inside VRAM): the tiles
+    among them that primitives drew into are converted from fbTex into vramTex first, after
+    everything queued so far is drawn. The whole tile-aligned rectangle is converted — a tile
+    nothing drew into converts to the halfwords it already holds.
+  **/
+  function syncDrawn(x0, y0, x1, y1) {
+    const tx0 = x0 >> 4, tx1 = x1 >> 4, ty0 = y0 >> 4, ty1 = y1 >> 4;
+    const lo = spanLo(tx0, tx1), hi = spanHi(tx0, tx1);
+    let any = false;
+    for (let ty = ty0; ty <= ty1 && !any; ty++) any = (drawnLo[ty] & lo) !== 0 || (drawnHi[ty] & hi) !== 0;
+    if (!any) return;
+    flush();
+    const px = tx0 << 4, py = ty0 << 4, pw = (tx1 - tx0 + 1) << 4, ph = (ty1 - ty0 + 1) << 4;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, wordFbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    gl.useProgram(toWordProgram);
+    gl.stencilFunc(gl.EQUAL, 0, 0xFF);
+    gl.uniform1ui(toWordU.maskBit, 0);
+    quadDraw(toWordProgram, toWordU, fbTex, px, py, pw, ph, W, H, px, py, pw, ph, false);
+    gl.stencilFunc(gl.NOTEQUAL, 0, 0xFF);
+    gl.uniform1ui(toWordU.maskBit, 0x8000);
+    quadDraw(toWordProgram, toWordU, fbTex, px, py, pw, ph, W, H, px, py, pw, ph, false);
+    gl.disable(gl.STENCIL_TEST);
+    for (let ty = ty0; ty <= ty1; ty++) { drawnLo[ty] &= ~lo; drawnHi[ty] &= ~hi; }
+    syncs++;
+  }
+
+  // syncDrawn over a run of words that may pass the right edge of VRAM, where reads wrap.
+  function syncRow(x0, x1, y0, y1) {
+    if (x1 <= W - 1) { syncDrawn(x0, y0, x1, y1); return; }
+    syncDrawn(x0, y0, W - 1, y1);
+    syncDrawn(0, y0, (x1 & (W - 1)) < x0 ? x1 & (W - 1) : x0 - 1, y1);
+  }
+
+  /** A textured primitive with these texture coordinates reads its texels and palette from here. */
+  function sampled(u0, v0, u1, v1, u2, v2) {
+    let umin = 0, umax = 255, vmin = 0, vmax = 255;
+    if (windowWord === 0xFF00FF) {   // no texture window: the coordinates are the texels
+      umin = Math.min(u0, u1, u2) & 255; umax = Math.max(u0, u1, u2) & 255;
+      vmin = Math.min(v0, v1, v2) & 255; vmax = Math.max(v0, v1, v2) & 255;
+    }
+    const shift = sDepth === 0 ? 2 : (sDepth === 1 ? 1 : 0);
+    const y0 = (sTy + vmin) & (H - 1), y1 = (sTy + vmax) & (H - 1);
+    if (y0 <= y1) syncRow(sTx + (umin >> shift), sTx + (umax >> shift), y0, y1);
+    else {
+      syncRow(sTx + (umin >> shift), sTx + (umax >> shift), y0, H - 1);
+      syncRow(sTx + (umin >> shift), sTx + (umax >> shift), 0, y1);
+    }
+    if (sDepth < 2) syncRow(sCx, sCx + (sDepth === 0 ? 15 : 255), sCy, sCy);
+  }
+
   function vertex(i, x, y, bgr, u, v) {
     const w = i * VERTEX_WORDS;
     posView[w] = x;
@@ -372,11 +490,17 @@ function createHardwareGpu(canvas) {
   }
 
   function tri(x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2) {
+    // Before it is queued: what it samples must already hold what was drawn there.
+    if ((sFlags & TEXTURED) !== 0) sampled(u0, v0, u1, v1, u2, v2);
     const at = batchFor(3, true);
     vertex(at, x0 + 0.5, y0 + 0.5, c0, u0, v0);
     vertex(at + 1, x1 + 0.5, y1 + 0.5, c1, u1, v1);
     vertex(at + 2, x2 + 0.5, y2 + 0.5, c2, u2, v2);
     primitives++;
+    // Its bounding box, inside the drawing area it is scissored to.
+    const bx0 = Math.max(Math.min(x0, x1, x2), clipX0), bx1 = Math.min(Math.max(x0, x1, x2), clipX1);
+    const by0 = Math.max(Math.min(y0, y1, y2), clipY0), by1 = Math.min(Math.max(y0, y1, y2), clipY1);
+    markDrawn(bx0, by0, bx1, by1);
   }
 
   function rect(x, y, w, h, bgr) {
@@ -385,6 +509,7 @@ function createHardwareGpu(canvas) {
     vertex(at, x, y, bgr, 0, 0); vertex(at + 1, x1, y, bgr, 0, 0); vertex(at + 2, x, y1, bgr, 0, 0);
     vertex(at + 3, x, y1, bgr, 0, 0); vertex(at + 4, x1, y, bgr, 0, 0); vertex(at + 5, x1, y1, bgr, 0, 0);
     primitives++;
+    markDrawn(x, y, x1 - 1, y1 - 1);
   }
 
   // GL state as last set inside flush(), so a run of batches that agree issues nothing between
@@ -512,6 +637,7 @@ function createHardwareGpu(canvas) {
     gl.stencilFunc(gl.ALWAYS, 1, 0xFF);
     quadDraw(copyProgram, copyU, vramTex, x, y, w, h, W, H, x, y, w, h, false);
     gl.disable(gl.STENCIL_TEST);
+    markClean(x, y, w, h);
   }
 
   /** Emulated VRAM changed under this rectangle, which may wrap at either edge. */
@@ -569,5 +695,6 @@ function createHardwareGpu(canvas) {
     primitives = 0;
   }
 
-  return { vram, state, tri, rect, dirty, clip, mask, present, get primitives() { return primitives; } };
+  return { vram, state, tri, rect, dirty, clip, mask, present, get primitives() { return primitives; },
+    get syncs() { return syncs; } };
 }

@@ -90,3 +90,19 @@ in software), pixels off by 6/31 or more at frames 2450, 2600, 5250 and 5400 wer
 3e-3 gave the same counts, and a bias down gave ten times more. The lines are gone from the
 difference image; what remains is scattered pixels at the edges of moving objects.
 
+## Revision (2026-09-26): drawn pixels become texels
+
+The integer texture held VRAM only as the runtime wrote it, and textures were read from it, so a
+game that renders into VRAM and then samples what it rendered read stale words. Crash Bandicoot:
+Warped does it every frame: Crash's silhouette, drawn off screen, is his shadow through a 4-bit
+CLUT, and it showed as a square. Every primitive now marks the 16x16 tiles it may have drawn into
+(its bounding box inside the drawing area); a textured primitive whose texels or palette lie in a
+marked tile first has those tiles converted from the framebuffer texture back into the integer
+texture — the eight-bit channel shifted down to five, which is the software rasteriser's
+truncation and exact for a copied-in halfword, and bit 15 from the stencil in a second pass —
+after everything queued before it is drawn. An upload that covers a tile clears its mark. Still
+presentation only: the runtime's VRAM, and so any read back, is unchanged. Crash 3's demo converts
+about once every two frames. The page now loads `gpu-webgl.js` under the renderer's own hash from
+`build.json` (`renderer`, written by scripts/build-web.sh), since a static tag let a browser pair a
+cached old renderer with a new build.
+

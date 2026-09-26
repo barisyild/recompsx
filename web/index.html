@@ -40,7 +40,6 @@
       console tool). Do not add a log element back.
     -->
   </main>
-  <script src="gpu-webgl.js"></script>
   <script>
     const start = document.querySelector('#start');
     const status = document.querySelector('#status');
@@ -57,8 +56,24 @@
     // The WebGL2 renderer draws the PlayStation's primitives itself (gpu-webgl.js). Offered only
     // where WebGL2 exists; the software rasteriser and the 2D canvas remain the fallback.
     let renderer = null;
-    if (!(typeof createHardwareGpu === 'function') || !glCanvas.getContext('webgl2')) {
-      hwBox.checked = false; hwBox.disabled = true; hwBox.parentElement.title = 'No WebGL2';
+    // Loaded under the renderer's own version from build.json: it changes without game.js
+    // changing, and a static tag let a browser pair a cached old renderer with a new build.
+    // A build.json without one gets a fresh copy every time.
+    let rendererLoaded = null;
+    function loadRenderer(version) {
+      if (rendererLoaded) return rendererLoaded;
+      rendererLoaded = new Promise(resolve => {
+        const script = document.createElement('script');
+        script.src = `gpu-webgl.js?v=${encodeURIComponent(version || Date.now())}`;
+        script.onload = script.onerror = () => {
+          if (!(typeof createHardwareGpu === 'function') || !glCanvas.getContext('webgl2')) {
+            hwBox.checked = false; hwBox.disabled = true; hwBox.parentElement.title = 'No WebGL2';
+          }
+          resolve();
+        };
+        document.head.appendChild(script);
+      });
+      return rendererLoaded;
     }
     const ctx = canvas.getContext('2d', { alpha: false });
     const frame = document.createElement('canvas');
@@ -79,7 +94,8 @@
         : ' · not a secure context: WebKit runs this page without its JIT — open it over https (scripts/serve-https.py)');
       document.querySelector('h1').textContent = `${info.title} · recompsx JS`;
       document.title = `recompsx — ${info.title}`;
-    }).catch(error => { status.textContent = error.message; });
+      loadRenderer(info.renderer);
+    }).catch(error => { status.textContent = error.message; loadRenderer(); });
 
     // Logs go to the browser console only — see the note in the markup. Writing them into the
     // page re-rendered it on every line, and the runtime writes hundreds a second at boot.
@@ -203,6 +219,7 @@
         const disc = await fetchBytes('disc.bin', 'disc image');
         status.textContent = 'Starting the game…';
 
+        await loadRenderer(buildInfo.renderer);
         hwBox.disabled = true;
         if (hwBox.checked) {
           try { renderer = createHardwareGpu(glCanvas); }
