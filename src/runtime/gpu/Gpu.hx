@@ -102,6 +102,14 @@ class Gpu {
 	static var xferChanged = false;
 	static var copyChanged = false;
 
+	// The texture and blend state last handed to a hardware backend, packed. The ABI latches that
+	// state until the next call, so it is sent only when it differs — a quad's second triangle
+	// never needs it, and runs of primitives from one page and palette do not either.
+	static var sentA = -1;
+	static var sentB = -1;
+	static var sentWindow = -1;
+	static var sentArea = -1;
+
 	/** Pixels delivered by upload rather than by rasterisation. */
 	public static var uploaded(default, null) = 0;
 
@@ -262,10 +270,134 @@ class Gpu {
 		commandsReceived++;
 		if (opCount != null) opCount[op]++;
 		else {}
-		for (k in 0...n + 1) packet[k] = MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC);
 		packetLen = n + 1;
+		if (hw && op < 0x60) polygonHw(ram, at, op);
+		else wholeToPacket(ram, at, op, n);
+	}
+
+	static function wholeToPacket(ram:RawBuf, at:Int, op:Int, n:Int):Void {
+		for (k in 0...n + 1) packet[k] = MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC);
 		if (op >= 0x60) drawRect(op);
 		else drawPolygon(op);
+	}
+
+	/**
+		A polygon packet on the hardware path, read straight from RAM into locals.
+
+		drawPolygon and triangle serve the software rasteriser, whose arrays, winding and giant
+		span loops a backend never needs: on the Dreamcast every hardware triangle paid the whole
+		rasteriser's prologue and a packet copy on the way to two backend calls, ~535 cycles a
+		triangle in Ballistix. This reads the same words in the same order and leaves the same
+		state behind — palette, page, flags and the primitive count — and hands the same
+		triangles over, with the texture state only when it changed (sendState). `packet` is not
+		filled: nothing reads it before the next command overwrites it. An untextured vertex
+		passes u = v = 0 where the software arrays held whatever the last textured one left;
+		backends do not read them for an untextured primitive.
+	**/
+	static function polygonHw(ram:RawBuf, at:Int, op:Int):Void {
+		final gouraud = (op & 0x10) != 0;
+		final textured = (op & 0x04) != 0;
+		final w0 = MemA.get32(ram, at & 0x1FFFFC);
+		final flat = w0 & 0xFFFFFF;
+		var i = 1;
+		// vertex 0
+		final p0 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+		i++;
+		var t0 = 0;
+		if (textured) {
+			t0 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+			i++;
+		} else {}
+		// vertex 1
+		var c1 = flat;
+		if (gouraud) {
+			c1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
+			i++;
+		} else {}
+		final p1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+		i++;
+		var t1 = 0;
+		if (textured) {
+			t1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+			i++;
+		} else {}
+		// vertex 2
+		var c2 = flat;
+		if (gouraud) {
+			c2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
+			i++;
+		} else {}
+		final p2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+		i++;
+		var t2 = 0;
+		if (textured) {
+			t2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+			i++;
+		} else {}
+		if (textured) {
+			setClut(t0 >>> 16);
+			setTexPage(t1 >>> 16);
+		} else {}
+		texEnabled = textured;
+		texRaw = (op & 0x01) != 0;
+		semiTransparent = (op & 0x02) != 0;
+		final x0 = sx(p0), y0 = sy(p0), x1 = sx(p1), y1 = sy(p1), x2 = sx(p2), y2 = sy(p2);
+		triHw(x0, y0, flat, t0 & 0xFF, (t0 >>> 8) & 0xFF,
+			x1, y1, c1, t1 & 0xFF, (t1 >>> 8) & 0xFF,
+			x2, y2, c2, t2 & 0xFF, (t2 >>> 8) & 0xFF);
+		if ((op & 0x08) != 0) quadHw(ram, at, i, gouraud, textured, flat, x1, y1, c1, t1, x2, y2, c2, t2);
+		else {}
+	}
+
+	/** A quad's fourth vertex and its second triangle, (1, 2, 3) as drawPolygon draws it. */
+	static function quadHw(ram:RawBuf, at:Int, i0:Int, gouraud:Bool, textured:Bool, flat:Int,
+			x1:Int, y1:Int, c1:Int, t1:Int, x2:Int, y2:Int, c2:Int, t2:Int):Void {
+		var i = i0;
+		var c3 = flat;
+		if (gouraud) {
+			c3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
+			i++;
+		} else {}
+		final p3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+		i++;
+		var t3 = 0;
+		if (textured) t3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
+		else {}
+		triHw(x1, y1, c1, t1 & 0xFF, (t1 >>> 8) & 0xFF,
+			x2, y2, c2, t2 & 0xFF, (t2 >>> 8) & 0xFF,
+			sx(p3), sy(p3), c3, t3 & 0xFF, (t3 >>> 8) & 0xFF);
+	}
+
+	/** triangle's hardware branch on explicit vertices: the same two rejects, count and calls. */
+	static inline function triHw(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
+			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
+			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {
+		final loX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+		final hiX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+		final loY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+		final hiY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+		if (hiX - loX <= 1023 && hiY - loY <= 511 && edge(x0, y0, x1, y1, x2, y2) != 0) {
+			primitives++;
+			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
+				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
+				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
+			Backend.gpuTri(x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
+		} else {}
+	}
+
+	/** Backend.gpuState, when the state differs from the one last sent (the ABI latches it). */
+	static function sendState(tx:Int, ty:Int, depth:Int, cx:Int, cy:Int, semi:Int, flags:Int,
+			window:Int, dx:Int, dy:Int):Void {
+		final a = tx | (ty << 10) | (depth << 20) | (semi << 22) | (flags << 24);
+		final b = cx | (cy << 10);
+		final area = dx | (dy << 10);
+		if (a != sentA || b != sentB || window != sentWindow || area != sentArea) {
+			sentA = a;
+			sentB = b;
+			sentWindow = window;
+			sentArea = area;
+			Backend.gpuState(tx, ty, depth, cx, cy, semi, flags, window, dx, dy);
+		} else {}
 	}
 
 	static function consumeParameter(v:Int):Void {
@@ -574,7 +706,7 @@ class Gpu {
 			if (edge(hx0, hy0, hx1, hy1, hx2, hy2) == 0) return;
 			else {}
 			primitives++;
-			Backend.gpuState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
+			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
 				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
 				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
 			Backend.gpuTri(hx0, hy0, vc[ia], vu[ia], vv[ia],
@@ -994,7 +1126,7 @@ class Gpu {
 	static function fillRect(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
 		// No `primitives++` here in either mode: both callers count for themselves.
 		if (hw) {
-			Backend.gpuState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
+			sendState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
 				drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
 			Backend.gpuRect(x, y, w, h, colour, semiTransparent ? 1 : 0, semiMode);
 			return;

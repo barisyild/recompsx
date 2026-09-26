@@ -2341,7 +2341,13 @@ static void begin_frame_if_needed(void) {
     if(!g_frame_shown) return;
     g_frame_shown = 0;
     g_cmd_count = 0;
-    g_state_count = 0;
+    /* The latched state carries over as the new frame's first entry: the ABI latches it until
+     * the next bp_gpu_state, and the runtime now sends one only when it changes, so the first
+     * primitive of a frame may well arrive under the last frame's state. */
+    if(g_state_count > 0) {
+        g_states[0] = g_states[g_state_count - 1];
+        g_state_count = 1;
+    } else {}
 }
 
 void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,

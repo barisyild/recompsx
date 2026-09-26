@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] Ballistix after page patching: 776 ms / 38.6 fps, build 139, tex_decode gone. GPU path was ~535
+cycles a triangle: polygonHw reads a polygon packet from RAM into locals on the hardware path (no packet
+copy, no software arrays, not the rasteriser-sized triangle()), and sendState skips gpuState when the
+latched state is unchanged (ABI already latches; DC now carries it across frames). Desktop GPU-stream
+hash over 21000 presents identical (2129f8ed72ec8158); state calls 10.53M -> 4.26M. Digests unchanged.
+
 2026-09-26 [claude] Ballistix measured in JS (attract loop frames 18800-20300): every frame VRAM-copies two 16x64
 scrolling strips into the 4bpp pages (768,0) and (896,0), which it draws with, plus a 16x32 upload every
 other frame; palettes fit (39 avg, 48 max of 64 banks). Each write re-decoded a whole page twice a scene.
