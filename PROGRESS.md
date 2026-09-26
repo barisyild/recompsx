@@ -1139,6 +1139,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-26 [claude] New-texture cost: pages went VRAM -> buffer -> per-texel gather (~1.6 ms a 4bpp page on SH-4).
+Now VRAM -> twiddled store-queue bursts directly, one 8x8 (4bpp) or 4x4 (16-bit) tile per burst, rearranged
+with word-wide masks (8 texels an op): twid4_tiles (whole page and dirty-rect patch), twid8_page, twid15_page,
+twid_bake. Host check: 200 random trials of each identical to the old paths; 3 injected bugs all caught.
+Window path unchanged. Not yet measured on Flycast; next: user's Ballistix + scene-change numbers.
+
 2026-09-26 [claude] Ballistix after page patching: 776 ms / 38.6 fps, build 139, tex_decode gone. GPU path was ~535
 cycles a triangle: polygonHw reads a polygon packet from RAM into locals on the hardware path (no packet
 copy, no software arrays, not the rasteriser-sized triangle()), and sendState skips gpuState when the

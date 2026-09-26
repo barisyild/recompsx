@@ -1872,35 +1872,200 @@ static void twid_load4(const uint8_t* src, pvr_ptr_t dst, int dim) {
     sq_wait();
 }
 
-/** Re-decodes only a rectangle of a 4bpp page mirror (page at VRAM px, py; rectangle in halfwords
- *  and rows relative to it), straight from VRAM into the twiddled texture: the 2x2 blocks it
- *  touches, one 16-bit store each, in the layout twid4_fill writes (the host test checks the two
- *  agree). A 16x64 scroll in a 64x256 page is 2,048 blocks where a whole page is 16,384. */
-static void twid4_patch(pvr_ptr_t dst, int px, int py, int hx0, int hy0, int hx1, int hy1) {
-    volatile uint16_t* out = (volatile uint16_t*)dst;
-    const int bx0 = 2 * hx0, bx1 = 2 * hx1;            /* blocks: two per halfword column */
-    const int by0 = hy0 >> 1, by1 = (hy1 + 1) >> 1;    /* and one per pair of rows */
-    for(int by = by0; by < by1; by++) {
-        const uint8_t* r0 = (const uint8_t*)(g_vram + (size_t)((py + 2 * by) & 511) * VRAM_W + px);
-        const uint8_t* r1 = (const uint8_t*)(g_vram + (size_t)((py + 2 * by + 1) & 511) * VRAM_W + px);
-        const uint32_t ty = g_spread[by];
-        for(int bx = bx0; bx < bx1; bx++) {
-            const int b0 = r0[bx], b1 = r1[bx];        /* texels 2bx, 2bx+1 of each row */
-            out[ty | ((uint32_t)g_spread[bx] << 1)] =
-                (uint16_t)((b0 & 15) | ((b1 & 15) << 4) | ((b0 >> 4) << 8) | ((b1 >> 4) << 12));
+/* ---- direct decode: emulated VRAM straight into a twiddled texture ----------------------------
+ * The fills above take a linear source, so every page used to be copied out of VRAM into a buffer
+ * first and then gathered out of it one texel at a time: a 4bpp page is 32 KB copied, then 16,384
+ * words each assembled from two byte loads at computed addresses — about 1.6 ms of SH-4 time, and
+ * a page that arrives new pays it in full. There is no hardware for this step: the PVR samples
+ * palettes itself (which is why a 4bpp page uploads as indices) and the store queues are already
+ * the fastest way in, but the reordering into the twiddled layout is the CPU's.
+ *
+ * So the reordering here works on whole words. One burst of the output is a TILE — 8x8 texels at
+ * 4bpp, 4x4 at 16 bits — and the tile's rows are read from VRAM as 32-bit words and rearranged
+ * with masks and shifts, eight texels per operation instead of one, into the burst's eight words,
+ * which go straight to the store queue. No intermediate buffer, no per-texel address. Tiles are
+ * visited row by row, so the VRAM a tile row reads (8 rows x 128 bytes for a 4bpp page) sits in
+ * the direct-mapped operand cache once: a second tile row of a 4bpp page would be 16 KB away and
+ * evict the first, so 4bpp takes one tile row at a time, and the 16-bit paths two, which lets
+ * consecutive bursts alternate between the two store queues (address bit 5 is the tile row's
+ * parity).
+ *
+ * Each routine takes `d`, the store-queue address of the texture's first byte (twid_open), and
+ * writes only whole bursts. The host test checks every one against the fills above. */
+
+/* A burst of a 4-bit texture from one 8x8 tile: `s` is the tile's first row, four bytes (eight
+ * texels) a row, rows VRAM_W / 2 words apart. The burst holds the tile's 4x4 blocks of 2x2
+ * texels in the order twid4_fill writes them: word k is blocks (x, y) and (x, y + 1), with
+ * x = (k & 1) | (k >> 2 & 1) << 1 and y = (k & 2). A block's 16-bit word is nibbles (x,y),
+ * (x,y+1), (x+1,y), (x+1,y+1): per row pair, the low nibbles of both rows make its low byte (lo)
+ * and the high nibbles its high byte (hi), for all four blocks of the pair at once; a byte
+ * transpose of two row pairs' lo and hi then gives the four words holding them. */
+static inline void tile4(uint32_t* d, const uint32_t* s) {
+    uint32_t lo[4], hi[4];
+    for(int p = 0; p < 4; p++) {
+        const uint32_t a = s[(2 * p) * (VRAM_W / 2)], b = s[(2 * p + 1) * (VRAM_W / 2)];
+        lo[p] = (a & 0x0F0F0F0Fu) | ((b & 0x0F0F0F0Fu) << 4);
+        hi[p] = ((a >> 4) & 0x0F0F0F0Fu) | (b & 0xF0F0F0F0u);
+    }
+    for(int q = 0; q < 2; q++) {
+        /* Halfword h of `even` is block (2h, 2q) and of `odd` block (2h + 1, 2q); the same for
+         * the row pair below with 2q + 1. */
+        const uint32_t e0 = (lo[2 * q] & 0x00FF00FFu) | ((hi[2 * q] & 0x00FF00FFu) << 8);
+        const uint32_t o0 = ((lo[2 * q] >> 8) & 0x00FF00FFu) | (hi[2 * q] & 0xFF00FF00u);
+        const uint32_t e1 = (lo[2 * q + 1] & 0x00FF00FFu) | ((hi[2 * q + 1] & 0x00FF00FFu) << 8);
+        const uint32_t o1 = ((lo[2 * q + 1] >> 8) & 0x00FF00FFu) | (hi[2 * q + 1] & 0xFF00FF00u);
+        d[2 * q    ] = (e0 & 0xFFFFu) | (e1 << 16);
+        d[2 * q + 1] = (o0 & 0xFFFFu) | (o1 << 16);
+        d[2 * q + 4] = (e0 >> 16) | (e1 & 0xFFFF0000u);
+        d[2 * q + 5] = (o0 >> 16) | (o1 & 0xFFFF0000u);
+    }
+}
+
+/* A burst of a 16-bit texture from one 4x4 tile, given as two words a row: p[2y] is texels
+ * (0, y) and (1, y), p[2y + 1] texels (2, y) and (3, y). Word k of the burst is texels (x, y) and
+ * (x, y + 1), with x and y as in tile4. */
+static inline void tile16(uint32_t* d, const uint32_t* p) {
+    for(int q = 0; q < 2; q++) {
+        const uint32_t a0 = p[4 * q], b0 = p[4 * q + 1], a1 = p[4 * q + 2], b1 = p[4 * q + 3];
+        d[2 * q    ] = (a0 & 0xFFFFu) | (a1 << 16);
+        d[2 * q + 1] = (a0 >> 16) | (a1 & 0xFFFF0000u);
+        d[2 * q + 4] = (b0 & 0xFFFFu) | (b1 << 16);
+        d[2 * q + 5] = (b0 >> 16) | (b1 & 0xFFFF0000u);
+    }
+}
+
+/* Two BGR555 texels to ARGB1555 at once, each exactly as texel_to_argb1555: red and blue swap,
+ * and alpha is set unless the texel is zero. The alpha test is an add that carries into bit 15
+ * of each half when its low fifteen bits are not zero — it cannot carry further — with the
+ * texel's own bit 15 ORed in, since 0x8000 is not zero either. */
+static inline uint32_t argb2(uint32_t v) {
+    const uint32_t c = (v & 0x03E003E0u) | ((v & 0x001F001Fu) << 10) | ((v >> 10) & 0x001F001Fu);
+    return c | ((((v & 0x7FFF7FFFu) + 0x7FFF7FFFu) | v) & 0x80008000u);
+}
+
+/** Tiles [tx0,tx1) x [ty0,ty1) of the 4bpp page at VRAM (px, py) — a 32x32-tile page, px a
+ *  multiple of 64 halfwords and py of 256 rows — into its twiddled texture: the whole page, or
+ *  the tiles a write touched (a rectangle is re-read whole from VRAM, which holds the truth). */
+static void twid4_tiles(uint32_t* d, int px, int py, int tx0, int ty0, int tx1, int ty1) {
+    for(int ty = ty0; ty < ty1; ty++) {
+        const uint32_t* row = (const uint32_t*)(g_vram + (size_t)((py + 8 * ty) & 511) * VRAM_W + px);
+        const uint32_t ybits = g_spread[4 * ty];
+        for(int tx = tx0; tx < tx1; tx++) {
+            const uint32_t* s = row + tx;
+            /* A cache line is eight tiles of a row; ask for the next eight while these run. */
+            if((tx & 7) == 0 && tx + 8 < tx1)
+                for(int r = 0; r < 8; r++) __builtin_prefetch(s + 8 + r * (VRAM_W / 2));
+            uint32_t* o = d + ((ybits | ((uint32_t)g_spread[4 * tx] << 1)) >> 1);
+            tile4(o, s);
+            sq_flush(o);
         }
     }
+}
+
+/** A 256x256 8bpp page at VRAM (px, py) through a CLUT given as two tables — lo[i] the colour,
+ *  hi[i] the colour shifted up 16 — so a pair of texels is one OR. The page is 128 halfwords
+ *  wide and wraps at the right edge of VRAM like the PlayStation's U; a tile never straddles
+ *  the wrap. */
+static void twid8_page(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
+    for(int ty = 0; ty < 64; ty += 2) {
+        const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        for(int tx = 0; tx < 64; tx++) {
+            const uint32_t* s = (const uint32_t*)(r0 + ((px + 2 * tx) & 1023));
+            const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
+            for(int h = 0; h < 2; h++) {
+                uint32_t p[8];
+                for(int y = 0; y < 4; y++) {
+                    const uint32_t v = s[(4 * h + y) * (VRAM_W / 2)];
+                    p[2 * y]     = lo[v & 0xFF] | hi[(v >> 8) & 0xFF];
+                    p[2 * y + 1] = lo[(v >> 16) & 0xFF] | hi[v >> 24];
+                }
+                uint32_t* o = d + ((g_spread[4 * (ty + h)] | xbits) >> 1);
+                tile16(o, p);
+                sq_flush(o);
+            }
+        }
+    }
+}
+
+/** A 256x256 15bpp page at VRAM (px, py), 256 halfwords wide, wrapping like twid8_page. */
+static void twid15_page(uint32_t* d, int px, int py) {
+    for(int ty = 0; ty < 64; ty += 2) {
+        const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        for(int tx = 0; tx < 64; tx++) {
+            const uint32_t* s = (const uint32_t*)(r0 + ((px + 4 * tx) & 1023));
+            const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
+            for(int h = 0; h < 2; h++) {
+                uint32_t p[8];
+                for(int y = 0; y < 4; y++) {
+                    const uint32_t* t = s + (4 * h + y) * (VRAM_W / 2);
+                    p[2 * y]     = argb2(t[0]);
+                    p[2 * y + 1] = argb2(t[1]);
+                }
+                uint32_t* o = d + ((g_spread[4 * (ty + h)] | xbits) >> 1);
+                tile16(o, p);
+                sq_flush(o);
+            }
+        }
+    }
+}
+
+/** A 64x64 patch of a 4bpp page with its CLUT applied (tables as twid8_page, sixteen entries):
+ *  VRAM halfword column px, row py, one halfword per tile row. */
+static void twid_bake(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
+    for(int ty = 0; ty < 16; ty += 2) {
+        const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        for(int tx = 0; tx < 16; tx++) {
+            const uint16_t* s = r0 + ((px + tx) & 1023);
+            const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
+            for(int h = 0; h < 2; h++) {
+                uint32_t p[8];
+                for(int y = 0; y < 4; y++) {
+                    const uint32_t v = s[(4 * h + y) * VRAM_W];
+                    p[2 * y]     = lo[v & 15] | hi[(v >> 4) & 15];
+                    p[2 * y + 1] = lo[(v >> 8) & 15] | hi[v >> 12];
+                }
+                uint32_t* o = d + ((g_spread[4 * (ty + h)] | xbits) >> 1);
+                tile16(o, p);
+                sq_flush(o);
+            }
+        }
+    }
+}
+
+/* The store-queue address of a texture, for the routines above, and the end of a batch of them. */
+static uint32_t* twid_open(pvr_ptr_t dst) {
+    return sq_lock((void*)(((uintptr_t)dst & 0xffffff) | PVR_TA_TEX_MEM));
+}
+static void twid_close(void) {
+    sq_unlock();
+    sq_wait();
 }
 /* ---- end of twiddled texture upload ---- */
 
 static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
-    /* Pages upload as INDICES for the paletted depths, so no CLUT is applied here at all — and
-     * with no texture window the 4bpp and 8bpp paths are a straight row copy out of VRAM, since
-     * the PlayStation's nibble order is already the PVR's. The window path gathers per texel;
-     * it is the rare case. 15bpp still converts colours as before. */
+    /* 4bpp pages upload as INDICES, so no CLUT is applied here at all; 8bpp goes through its
+     * CLUT to ARGB, 15bpp converts. With no texture window — nearly every texture — the page
+     * goes straight from VRAM into the texture (twid4_tiles and friends). The window path below
+     * gathers per texel into a buffer; it is the rare case. */
     static uint8_t page[TEX_DIM * TEX_DIM] __attribute__((aligned(32)));
     static uint16_t page16[TEX_DIM * TEX_DIM] __attribute__((aligned(32)));
     static uint16_t clut8[256];
+    static uint32_t clut_lo[256], clut_hi[256];
+
+    if((s->window & 0x3FF) == 0 && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0) {
+        if(s->depth == 1)
+            for(int i = 0; i < 256; i++) {
+                clut_lo[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
+                clut_hi[i] = clut_lo[i] << 16;
+            }
+        else {}
+        uint32_t* d = twid_open(dst);
+        if(s->depth == 0)      twid4_tiles(d, s->tex_x, s->tex_y, 0, 0, TEX_DIM / 8, TEX_DIM / 8);
+        else if(s->depth == 1) twid8_page(d, s->tex_x, s->tex_y, clut_lo, clut_hi);
+        else                   twid15_page(d, s->tex_x, s->tex_y);
+        twid_close();
+        return;
+    }
 
     if(s->depth == 1)
         for(int i = 0; i < 256; i++)
@@ -2170,7 +2335,10 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
     } else if(pg->part) {
         /* Patched now, not deferred: a strip of one frame's scroll on its way out tears less
          * visibly than the whole strip arriving a frame late. */
-        twid4_patch(pg->mem, s->tex_x & ~63, s->tex_y & 256, pg->dx0, pg->dy0, pg->dx1, pg->dy1);
+        uint32_t* d = twid_open(pg->mem);
+        twid4_tiles(d, s->tex_x & ~63, s->tex_y & 256,
+                    pg->dx0 >> 1, pg->dy0 >> 3, (pg->dx1 + 1) >> 1, (pg->dy1 + 7) >> 3);
+        twid_close();
         pg->part = 0;
         g_win_patch++;
     } else {}
@@ -2180,24 +2348,15 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
 
 /** One 64x64 patch of a page with a CLUT already applied, for palettes that got no bank. */
 static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
-    static uint16_t buf[BAKE_DIM * BAKE_DIM] __attribute__((aligned(32)));
-    uint16_t clut[16];
-    for(int i = 0; i < 16; i++)
-        clut[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
-    for(int ty = 0; ty < BAKE_DIM; ty++) {
-        const uint16_t* src = g_vram + (size_t)((s->tex_y + tv * BAKE_DIM + ty) & 511) * VRAM_W;
-        uint16_t* d = buf + (size_t)ty * BAKE_DIM;
-        /* Four texels a halfword, and the patch origin is a multiple of four, so the nibble
-         * order never has to be recomputed inside the row. */
-        for(int tx = 0; tx < BAKE_DIM; tx += 4) {
-            const uint16_t hw = src[(s->tex_x + ((tu * BAKE_DIM + tx) >> 2)) & 1023];
-            d[tx    ] = clut[hw & 0xF];
-            d[tx + 1] = clut[(hw >> 4) & 0xF];
-            d[tx + 2] = clut[(hw >> 8) & 0xF];
-            d[tx + 3] = clut[(hw >> 12) & 0xF];
-        }
+    uint32_t lo[16], hi[16];
+    for(int i = 0; i < 16; i++) {
+        lo[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
+        hi[i] = lo[i] << 16;
     }
-    twid_load16(buf, dst, BAKE_DIM);
+    /* The patch origin is a multiple of four texels, so each tile row is one VRAM halfword. */
+    uint32_t* d = twid_open(dst);
+    twid_bake(d, s->tex_x + tu * (BAKE_DIM / 4), s->tex_y + tv * BAKE_DIM, lo, hi);
+    twid_close();
 }
 
 PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
