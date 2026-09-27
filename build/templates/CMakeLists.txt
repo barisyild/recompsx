@@ -95,6 +95,14 @@ if(RECOMPSX_BACKEND STREQUAL "null")
 elseif(RECOMPSX_BACKEND STREQUAL "dreamcast")
   set(BACKEND_SRC
     "${RECOMPSX_ROOT}/src/backend/dreamcast/backend_kos.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_audio.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_fastmem.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_files.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_input.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_prof.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_scene.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_textures.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_video.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/main_dc.cpp")
 else()
   set(BACKEND_SRC

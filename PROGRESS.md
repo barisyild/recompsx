@@ -2,6 +2,22 @@
 
 ## Status snapshot
 
+**2026-09-27: The Dreamcast backend is split by subsystem — no behaviour change.**
+backend_kos.c (4,744 lines) is now nine files: backend_kos.c (lifecycle, launch parameters, time,
+logs), dc_video.c, dc_scene.c, dc_textures.c, dc_audio.c, dc_input.c, dc_files.c, dc_prof.c and
+dc_fastmem.c. They share only what dc_internal.h declares: build switches, the types more than one
+file needs, and the 99 variables and functions one file defines and another uses, grouped by the
+file that owns them; everything else stays `static`. Split by a line-accounting script (every
+original line lands in exactly one file); the code changes are `static` dropped from the shared
+definitions, g_diag given a named type, three declarations divided so their unshared names stay
+`static`, and `ow`/`oh` in build_scene initialised (the new unit exposed a -Wmaybe-uninitialized;
+they are never read when the state is not placed). check.sh's ABI check reads all of a backend
+directory's C files together. Flycast, LTO build: Crash 3 1501.4 -> **1501.5** M, Crash Bash
+5982.7 -> **5984.6** M. That is placement, not code: the profile is exact for a given binary (the
+same build measures the same count every run), but any relink moves code and data, and functions
+whose code did not change moved by up to 0.5 % here; the hot backend functions compile to the
+same instructions apart from data addresses.
+
 **2026-09-27: DMA list walk follows empty nodes in a loop of its own — Crash Bash -0.8 %.**
 Most of an ordering table is empty nodes that only link on: 2.93 M of the 4.14 M nodes Crash Bash
 walks in vblanks 18800-20300 (10.5 M words in the rest). walkList followed each through the full
@@ -1339,6 +1355,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Split the Dreamcast backend into nine files + dc_internal.h, no behaviour change
+(Flycast Crash 3 1501.5 M, Crash Bash 5984.6 M); check.sh checks ABI coverage per backend directory.
+Next: compiler-flag experiments on the DC build (scheduling, LRA, ipa-pta), PGO feasibility.
 
 2026-09-27 [claude] GTE registers as one array (shim.GteFile), DMA list walk following empty nodes in
 its own loop: Crash 3 1537.7 -> 1501.4 M (~66.6 %), Crash Bash 6174.2 -> 5982.7. Register locals per

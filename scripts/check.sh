@@ -208,18 +208,22 @@ fi
 #
 # Definitions are recognised by starting at column 0, which is how every backend in this tree is
 # written; calls are indented. A forward declaration would satisfy the check, which is acceptable:
-# the linker catches that case immediately and this one it does not.
+# the linker catches that case immediately and this one it does not. A backend is a directory:
+# one may split its implementation over several C files (the Dreamcast's does), so the check reads
+# them together.
 if [ -f src/backend/api/backend_c_api.h ]; then
   abi_names="$(grep -oE 'bp_[a-z_]+\(' src/backend/api/backend_c_api.h | tr -d '(' | sort -u)"
   abi_gaps=""
-  for impl in src/backend/*/*.c; do
-    [ -f "$impl" ] || continue
+  for dir in src/backend/*/; do
+    impls="$(find "$dir" -maxdepth 1 -name '*.c' | sort)"
+    [ -n "$impls" ] || continue
     gap=""
     for n in $abi_names; do
-      grep -qE "^[A-Za-z_][A-Za-z0-9_ *]*${n}\(" "$impl" || gap="$gap $n"
+      # shellcheck disable=SC2086 # the file list is meant to split
+      grep -qhE "^[A-Za-z_][A-Za-z0-9_ *]*${n}\(" $impls || gap="$gap $n"
     done
     if [ -n "$gap" ]; then abi_gaps="$abi_gaps
-  $impl does not define:$gap"; fi
+  ${dir%/} does not define:$gap"; fi
   done
   if [ -n "$abi_gaps" ]; then
     fail "a backend is missing part of backend_c_api.h:$abi_gaps"

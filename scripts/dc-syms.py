@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/dc-syms.py <nm> <elf> <out> — the function table the Dreamcast overlay names hot code with.
 
-The backend's 1 kHz sampler (backend_kos.c, samp_tick) knows only program counters. With this file
+The backend's 1 kHz sampler (dc_prof.c, samp_tick) knows only program counters. With this file
 on the disc it can say which function each sample landed in, and the overlay prints the top few by
 name — a profile read off a screenshot, on a console that has no other way to show one.
 
