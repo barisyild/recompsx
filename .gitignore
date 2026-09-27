@@ -46,3 +46,6 @@ vram.bin
 *.wav
 *.png
 node_modules/
+
+# Local agent tooling (launch configs with machine paths and session scratch): never part of the repository.
+.claude/
