@@ -6,6 +6,9 @@ import shim.I64;
 import shim.IntMath;
 import shim.Acc;
 import shim.Backend;
+import shim.MemA;
+import shim.RawBuf;
+import shim.RawMem;
 
 /**
 	The Geometry Transformation Engine — coprocessor 2, and the reason PlayStation games have
@@ -381,7 +384,7 @@ class Gte {
 		257 entries, built once at init from the formula in the spec. Allocation at init is allowed
 		and this is the only place the GTE does any; every other value it touches is a static Int.
 	**/
-	static var unrTable:Array<Int>;
+	static var unrTable:RawBuf;
 
 	static function buildUnrTable():Void {
 		// Built unconditionally, not behind `if (unrTable != null)`.
@@ -392,10 +395,13 @@ class Gte {
 		// division to dereference nothing. It cost a segmentation fault that JavaScript could not
 		// reproduce, which is exactly the divergence the two-target gate exists to catch. `init`
 		// runs once, so there is nothing to guard against anyway.
-		unrTable = [for (_ in 0...257) 0];
+		//
+		// A flat buffer, not an `Array<Int>`: on C++ that is a `shared_ptr` to a `vector`, three
+		// dependent loads for an entry on every perspective divide where this is two.
+		unrTable = RawMem.alloc(257 << 2);
 		for (i in 0...257) {
 			final v = shim.IntMath.div(shim.IntMath.div(0x40000, i + 0x100) + 1, 2) - 0x101;
-			unrTable[i] = v < 0 ? 0 : v;
+			MemA.set32(unrTable, i << 2, v < 0 ? 0 : v);
 		}
 	}
 
@@ -424,7 +430,7 @@ class Gte {
 		final shift = countLeadingZeros16(divisor);
 		var n = (dividend << shift) | 0;
 		var d = (divisor << shift) & 0xFFFF;
-		final u = unrTable[((d - 0x7FC0) >> 7)] + 0x101;
+		final u = MemA.get32(unrTable, ((d - 0x7FC0) >> 7) << 2) + 0x101;
 		d = (0x2000080 - shim.IntMath.mul(d, u)) >> 8;
 		d = (0x0000080 + shim.IntMath.mul(d, u)) >> 8;
 		final q = I64.mulShr16Round(n, d);
@@ -436,11 +442,12 @@ class Gte {
 		return 0x1FFFF;
 	}
 
-	/** Leading zeros of a byte, 8 for zero: the table countLeadingZeros16 reads. */
-	static var clz8:Array<Int>;
+	/** Leading zeros of a byte, 8 for zero: the table countLeadingZeros16 reads. Flat, as
+	    `unrTable` is. */
+	static var clz8:RawBuf;
 
 	static function buildClzTable():Void {
-		clz8 = [for (_ in 0...256) 0];
+		clz8 = RawMem.alloc(256 << 2);
 		for (i in 0...256) {
 			var n = 8;
 			var v = i;
@@ -448,7 +455,7 @@ class Gte {
 				n--;
 				v = v >> 1;
 			}
-			clz8[i] = n;
+			MemA.set32(clz8, i << 2, n);
 		}
 	}
 
@@ -464,7 +471,7 @@ class Gte {
 	static inline function countLeadingZeros16(v:Int):Int {
 		final x = v & 0xFFFF;
 		final hi = x >>> 8;
-		return hi != 0 ? clz8[hi] : 8 + clz8[x];
+		return hi != 0 ? MemA.get32(clz8, hi << 2) : 8 + MemA.get32(clz8, x << 2);
 	}
 
 	// ---- executing ------------------------------------------------------------------------------------
@@ -564,6 +571,8 @@ class Gte {
 		matrix rows produce a camera-space point, the third component becomes a depth value, and the
 		perspective divide turns the first two into screen coordinates.
 	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
 	static function rtps(sf:Int, lm:Bool, v:Int, last:Bool):Void {
 		project(sf, lm, vecX(v), vecY(v), vecZ(v), last);
 	}
@@ -576,6 +585,8 @@ class Gte {
 		and the first two vertices' MAC and IR stores, which the third overwrites before anything
 		reads them, are dropped by the compiler.
 	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
 	static function rtpt(sf:Int, lm:Bool):Void {
 		project(sf, lm, sext16(vxy0), vxy0 >> 16, vz0, false);
 		project(sf, lm, sext16(vxy1), vxy1 >> 16, vz1, false);
@@ -586,16 +597,84 @@ class Gte {
 		One vertex of RTPS/RTPT: MAC1-3 and IR1-3, SZ3 and SX2/SY2 pushed, MAC0, and with `last`
 		the depth cue.
 
-		The three matrix rows are 32-bit arithmetic when every translation is within 2^30, which is
-		every vertex a game sends. They were 64-bit multiply-accumulates, and on a 32-bit CPU each
-		row was a chain of carries and a double-word shift. But the matrix and the vector are
-		sixteen-bit signed, so each product fits in 32 bits, and the row is exact without the wide
-		accumulator (rowShr12, rowLow). Nothing can overflow 44 bits in that range (see
-		row44Checked), so no flag is lost; outside it, the checked path runs exactly as before.
+		Two exact 32-bit forms carry nearly every vertex a game sends; where the premise of one
+		fails, the general form runs instead, out of line (`rowsWide`, `screenWide`).
+
+		- **A matrix row is one sum.** The matrix and the vector are sixteen-bit signed, so each
+		  product fits in 32 bits. With every vector component within +-2^14 a product is within
+		  2^29 and a row's three within 2^31, so their plain sum is exact; with the translation
+		  within +-2^30 no partial sum can reach 44 bits (see row44Checked), so no flag is lost.
+		  MAC is then TR + (sum >> 12) at sf = 1 — TR << 12 is a multiple of 4096 — and the low
+		  word of (TR << 12) + sum at sf = 0. Crash Bandicoot: Warped sends 2,044 of 687,068
+		  vertices wider than that (vblanks 4700-5000), Crash Bash none of 2.5 million.
+		- **SX2, SY2 and MAC0 are one multiply-add.** A quotient within 16 bits times a saturated IR
+		  is within 2^31, and a sum that does not overflow 32 bits *is* MAC0, with no flag to
+		  raise. The quotient is wider for 1.3 % (Crash 3) and 3.3 % (Crash Bash) of vertices.
+
+		On the SH-4 the general forms were most of the transform: a row was a shift, a mask and a
+		carry per product, a screen coordinate a 64-bit multiply, a carry chain, a five-way range
+		check and a double-word shift.
 	**/
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	static function project(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, last:Bool):Void {
+		final tx = trX, ty = trY, tz = trZ;
+		var mac3Shifted = 0;
+		// Each `v + 0x4000` is within 0..0x7FFF exactly when v is within -0x4000..0x3FFF, each
+		// `t + 0x40000000` is non-negative exactly when t is within -2^30..2^30-1: one test each.
+		if ((((vx + 0x4000) | (vy + 0x4000) | (vz + 0x4000)) >>> 15) == 0
+				&& (((tx + 0x40000000) | (ty + 0x40000000) | (tz + 0x40000000)) >= 0)) {
+			final r1 = (IntMath.mul(rt11, vx) + IntMath.mul(rt12, vy) + IntMath.mul(rt13, vz)) | 0;
+			final r2 = (IntMath.mul(rt21, vx) + IntMath.mul(rt22, vy) + IntMath.mul(rt23, vz)) | 0;
+			final r3 = (IntMath.mul(rt31, vx) + IntMath.mul(rt32, vy) + IntMath.mul(rt33, vz)) | 0;
+			// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation
+			// flag is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games
+			// rely on it. psx-spx records the same quirk.
+			mac3Shifted = tz + (r3 >> 12);
+			if (sf == 0) {
+				mac1 = ((tx << 12) + r1) | 0;
+				mac2 = ((ty << 12) + r2) | 0;
+				mac3 = ((tz << 12) + r3) | 0;
+			} else {
+				mac1 = tx + (r1 >> 12);
+				mac2 = ty + (r2 >> 12);
+				mac3 = mac3Shifted;
+			}
+		} else {
+			mac3Shifted = rowsWide(sf, vx, vy, vz);
+		}
+
+		ir1 = saturateIr(mac1, lm, F_IR1);
+		ir2 = saturateIr(mac2, lm, F_IR2);
+		ir3 = saturateIr3(mac3, mac3Shifted, lm);
+
+		pushSz(saturateSz3(mac3Shifted));
+
+		final n = unrDivide();
+		final px = IntMath.mul(ir1, n);
+		final py = IntMath.mul(ir2, n);
+		final sx = (ofx + px) | 0;
+		final sy = (ofy + py) | 0;
+		// A sum overflowed exactly when both addends share a sign the result does not.
+		if (n <= 0xFFFF && (((ofx ^ sx) & (px ^ sx)) | ((ofy ^ sy) & (py ^ sy))) >= 0) {
+			mac0 = sy;
+			pushSxy(pack(saturateSxy(sx >> 16, F_SX2), saturateSxy(sy >> 16, F_SY2)));
+		} else {
+			screenWide(n);
+		}
+
+		if (last) depthCueing(n);
+		else {}
+	}
+
+	/**
+		MAC1-3 for a vertex outside project's premise, answering the >>12 form of MAC3: in 32 bits
+		by rowShr12 while every translation is within 2^30, which holds any vector, and otherwise
+		through the 44-bit accumulator with its flags. Out of line on C++: it is rare, and inlined
+		it made each of RTPT's three vertices carry both forms.
+	**/
+	@:specifier("__attribute__((noinline))")
+	static function rowsWide(sf:Int, vx:Int, vy:Int, vz:Int):Int {
 		final tx = trX, ty = trY, tz = trZ;
 		var mac3Shifted = 0;
 		if (tx > -0x40000000 && tx < 0x40000000 && ty > -0x40000000 && ty < 0x40000000
@@ -603,9 +682,6 @@ class Gte {
 			final a1 = IntMath.mul(rt11, vx), b1 = IntMath.mul(rt12, vy), c1 = IntMath.mul(rt13, vz);
 			final a2 = IntMath.mul(rt21, vx), b2 = IntMath.mul(rt22, vy), c2 = IntMath.mul(rt23, vz);
 			final a3 = IntMath.mul(rt31, vx), b3 = IntMath.mul(rt32, vy), c3 = IntMath.mul(rt33, vz);
-			// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation
-			// flag is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games
-			// rely on it. psx-spx records the same quirk.
 			mac3Shifted = rowShr12(tz, a3, b3, c3);
 			if (sf == 0) {
 				mac1 = rowLow(tx, a1, b1, c1);
@@ -627,27 +703,19 @@ class Gte {
 			mac3Shifted = Acc.shr12(m);
 			mac3 = shiftBySf(m, sf);
 		}
+		return mac3Shifted;
+	}
 
-		ir1 = saturateIr(mac1, lm, F_IR1);
-		ir2 = saturateIr(mac2, lm, F_IR2);
-		ir3 = saturateIr3(mac3, mac3Shifted, lm);
-
-		pushSz(saturateSz3(mac3Shifted));
-
-		final n = unrDivide();
-
+	/** SX2/SY2 and MAC0 through the 64-bit accumulator, for what project's 32-bit form cannot hold. */
+	@:specifier("__attribute__((noinline))")
+	static function screenWide(n:Int):Void {
 		var m = Acc.mac(Acc.of(ofx), ir1, n);
 		mac0 = mac0From32(m);
 		final sx = saturateSxy(Acc.shr16(m), F_SX2);
-
 		m = Acc.mac(Acc.of(ofy), ir2, n);
 		mac0 = mac0From32(m);
 		final sy = saturateSxy(Acc.shr16(m), F_SY2);
-
 		pushSxy(pack(sx, sy));
-
-		if (last) depthCueing(n);
-		else {}
 	}
 
 	/**
@@ -677,7 +745,24 @@ class Gte {
 		produced (it writes its own before every use; counted over 30,000 frames), so its digests
 		did not move. A game that fogs with it would have drawn every distant vertex fully fogged.
 	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
 	static function depthCueing(n:Int):Void {
+		// In 32 bits under project's premise for SX/SY: DQA is sixteen-bit signed. Inline on C++,
+		// with the 64-bit form out of line: as one function it was too big to inline, and the
+		// call cost more than the arithmetic.
+		final p = IntMath.mul(dqa, n);
+		final m = (dqb + p) | 0;
+		if (n <= 0xFFFF && ((dqb ^ m) & (p ^ m)) >= 0) {
+			mac0 = m;
+			ir0 = saturateIr0(m >> 12);
+		} else {
+			depthCueWide(n);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	static function depthCueWide(n:Int):Void {
 		mac0 = mac0From32(Acc.mac(Acc.of(dqb), dqa, n));
 		ir0 = saturateIr0(mac0 >> 12);
 	}

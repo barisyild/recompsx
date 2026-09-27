@@ -2,6 +2,25 @@
 
 ## Status snapshot
 
+**2026-09-27: GTE projection in 32 bits where that is exact — Crash 3 on Dreamcast ~53 % -> ~55 %.**
+RTPS/RTPT cost ~450 / ~1160 SH-4 cycles a command (Flycast's model): each matrix row was rowShr12
+(a shift, a mask and a carry per product), each screen coordinate a 64-bit multiply-add with a
+five-way range check and a double-word shift. Measured on JS over both benchmark ranges: sf=1 and
+lm=0 always, no row product reaches 2^28, vertices beyond +-2^14 are 2,044 of Crash 3's 687,068 and
+none of Crash Bash's 2.5 M, quotients beyond 0xFFFF 1.3 % / 3.3 %. `project` now takes a row as one
+32-bit sum (MAC = TR + (sum >> 12)) when every component is within +-2^14 and every translation
+within +-2^30, and SX/SY/MAC0 and the depth cue as one 32-bit multiply-add when the quotient is
+within 16 bits and the sum does not overflow; otherwise the general forms run, out of line
+(rowsWide, screenWide, depthCueWide). The divide's tables are flat buffers. New conformance test
+GteEdge (20,000 rounds on every edge of those premises): b7218499 with the old code and the new,
+both targets; GteOps/GteProject/GteSweep unchanged (de71ee8a/43a78d52/8c701b20). Flycast, Crash 3
+4700-5000: 1872.8 -> 1823.0 (32-bit forms) -> **1811.4** M (depth cue and command entries inline)
+= 9.06 s per 5 s of game; RTPT+RTPS 1450 -> 1150 ms. Crash Bash 18800-20300: 6400.9 -> 6160.4 M
+(RTPS 5303 -> 4211 ms). Digests unchanged, JS = desktop C++: Crash 3 2c8bc61d / f05fb3ea, Crash
+Bash 2ff36a18 / 288ed8d6; 23 JS conformance tests. (A range test folded into one comparison per group was
+tried for farColorInterpolate too and dropped: one boundary value, base 0x40000000 with IR0
+-0x8000, overflows 32 bits there.)
+
 **2026-09-27: Dynamic calls stay in the program (ADR-0028) — Crash 3 on Dreamcast ~48 % -> ~53 %.**
 Crash 3 dispatches 730,308 times in vblanks 4700-5000 (450,513 calls through registers, 279,795
 tail hops); on the SH-4 each passed `Runtime.call`, its out-of-line body, a `std::function` and
@@ -1228,6 +1247,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] GTE on DC: RTPS/RTPT rows and screen coordinates in exact 32-bit forms, general
+paths out of line; GteEdge conformance test (same digest before and after). Crash 3 Flycast 1872.8
+-> 1811.4 M (~55 % speed), Crash Bash 6400.9 -> 6160.4 M; digests unchanged. Next: GPU hardware path
+(present_frame/build_scene/polygonHw 17 %), Memory accessors (8 %).
 
 2026-09-27 [claude] Dispatch cost on DC: generated code calls FnTable.run (cache + tail loop,
 ADR-0028), Runtime.call hands over via bindRun, window changes are a callback. Crash 3 Flycast
