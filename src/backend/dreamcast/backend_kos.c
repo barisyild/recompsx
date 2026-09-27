@@ -173,6 +173,7 @@ typedef struct {
     uint16_t clut_x, clut_y;
     uint32_t window;            /* GP0(E2h) raw: the tile-repeat mask and offset */
     int16_t  draw_x, draw_y;    /* the buffer being drawn into — NOT the one being displayed */
+    int16_t  clip_x0, clip_y0, clip_x1, clip_y1;   /* the drawing area, GP0(E3h)/(E4h), inclusive */
     uint8_t  depth;             /* 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct */
     uint8_t  semi_mode;
     uint8_t  flags;             /* BP_GPU_TEXTURED | BP_GPU_SEMI | BP_GPU_RAW */
@@ -247,15 +248,21 @@ static int g_rxprof;
 typedef struct {
     pvr_ptr_t mem;
     int       fmt, dim;
-    uint8_t   flags, semi_mode, used, over;
+    uint8_t   flags, semi_mode, used, over, kind;
     float     alpha;
     pvr_poly_hdr_t hdr;
 } ghdr_t;
 static ghdr_t g_hdrc[HDRC_N];
 static int    g_hdr_hits, g_hdr_compiles;
 
-static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over) {
-    uint32_t h = (uint32_t)(uintptr_t)mem + (uint32_t)over * 0x9E3779B9u;
+/* What one pass of a primitive does to the picture — see build_scene's semi-transparency.
+ * HK_NORMAL blends as the state says; HK_OPAQUE draws a semi-transparent state's solid texels
+ * as an opaque primitive would; HK_ADD adds the source (B + F, reading no alpha); HK_INVERT is
+ * untextured white turning each pixel under it into its complement (1 - B). */
+enum { HK_NORMAL = 0, HK_OPAQUE = 1, HK_ADD = 2, HK_INVERT = 3 };
+
+static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind) {
+    uint32_t h = (uint32_t)(uintptr_t)mem + (uint32_t)over * 0x9E3779B9u + (uint32_t)kind * 0x85EBCA6Bu;
     h = h * 2654435761u + (uint32_t)fmt;
     h = h * 2654435761u + (uint32_t)dim;
     h = h * 2654435761u + ((uint32_t)s->flags << 8) + (uint32_t)s->semi_mode;
@@ -318,6 +325,7 @@ typedef struct {
     uint32_t  bound_frame;      /* the last frame a primitive bound this slot */
     uint8_t   depth;
     uint8_t   used;             /* holds a decoded page */
+    uint8_t   amode;            /* which texels it shows (AM_*); always AM_VIS at 4bpp */
 } gtex_t;
 
 /* The palettes, separated from the pages at last. The diagnosis disc measured a fight scene's
@@ -361,6 +369,7 @@ typedef struct {
     uint16_t  tex_x, tex_y, clut_x, clut_y;
     uint8_t   tu, tv, used;
     uint8_t   depth;            /* 0: a 4bpp page's patch, 1: an 8bpp page's — see bake_slot */
+    uint8_t   amode;            /* which texels it shows (AM_*) */
     uint32_t  bound_frame;
 } gbake_t;
 static gbake_t g_bake[BAKE_MAX];
@@ -389,11 +398,26 @@ static int      g_pal_live, g_pal_stale, g_pal_conflicts;
  * corruption that heals itself as entries acquire honest numbers. */
 static uint32_t g_tex_frame = 1;
 
-/* Whether emulated VRAM has changed since the background was last uploaded. In hardware mode the
- * only things that write VRAM are uploads and blits, and both announce themselves through
- * bp_gpu_dirty — so when nothing has, the 1 MB texture behind the geometry is still the picture
- * it was, and converting and pushing it again costs 11 ms to arrive at the same bytes. */
-static int    g_bg_stale = 1;
+/* The background: the displayed rectangle of emulated VRAM, as a texture behind the geometry.
+ *
+ * Kept per rectangle, in slots carved out of the one megabyte g_txr: a slot is a whole texture at
+ * the declared size (512x256 at 16 bpp is 256 KB, so four), and it holds the picture of one VRAM
+ * rectangle until something writes that rectangle. In hardware mode the only things that write
+ * VRAM are uploads and blits, and both announce themselves through bp_gpu_dirty. A single slot
+ * was stale at every buffer flip — the rectangle moves — so a double-buffered game paid the whole
+ * upload, 512x240 converted through the store queues (~3.3 ms), every other frame for two
+ * pictures that had not changed: Crash Bandicoot: Warped's demo, 93 % of present_frame. With a
+ * slot per buffer it uploads each once. */
+#define BG_SLOTS 4
+typedef struct {
+    int x, y, w, h;    /* the displayed rectangle */
+    int d24;           /* uploaded as 24bpp (MDEC video): three bytes a pixel read from VRAM */
+    int valid;
+    uint32_t used;     /* g_tex_frame of its last use: the least recently used goes first */
+} gbg_t;
+static gbg_t          g_bgs[BG_SLOTS];
+static pvr_poly_hdr_t g_bg_hdr[BG_SLOTS];
+static int            g_bg_slots = 1;     /* how many fit at the declared size */
 
 /* ---- audio state ----------------------------------------------------------------------------
  * The ABI is push-shaped and the AICA's stream driver is pull-shaped, so a ring sits between
@@ -1307,10 +1331,19 @@ static int pot(int v, int max) {
     return p;
 }
 
+/* Slot k's texture: the k-th whole texture of the declared size inside g_txr. */
+static pvr_ptr_t bg_mem(int k) {
+    return (pvr_ptr_t)((uint8_t*)g_txr + (size_t)k * (size_t)g_txw * (size_t)g_txh * 2);
+}
+
 static void declare_texture(int w, int h) {
     if(w == g_txw && h == g_txh) return;
     g_txw = w;
     g_txh = h;
+    g_bg_slots = (TXR_MAX_W * TXR_MAX_H) / (w * h);
+    if(g_bg_slots > BG_SLOTS) g_bg_slots = BG_SLOTS;
+    else {}
+    for(int k = 0; k < BG_SLOTS; k++) g_bgs[k].valid = 0;
 
     pvr_poly_cxt_t cxt;
     /* The scene has exactly one hardware list — translucent, submission-ordered — so this header
@@ -1320,7 +1353,7 @@ static void declare_texture(int w, int h) {
      * because the boot screens are exactly the zero-primitive path that leads with this header. */
     pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY,
                      PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
-                     w, h, g_txr, RECOMPSX_DC_FILTER);
+                     w, h, bg_mem(0), RECOMPSX_DC_FILTER);
     cxt.blend.src = PVR_BLEND_ONE;
     cxt.blend.dst = PVR_BLEND_ZERO;
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
@@ -1333,7 +1366,32 @@ static void declare_texture(int w, int h) {
     cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
     /* The texture is the picture; there is no vertex colour to modulate it with. */
     cxt.txr.env = PVR_TXRENV_REPLACE;
-    pvr_poly_compile(&g_hdr, &cxt);
+    /* One header per slot, the same but for where its texture starts. */
+    for(int k = 0; k < g_bg_slots; k++) {
+        cxt.txr.base = bg_mem(k);
+        pvr_poly_compile(&g_bg_hdr[k], &cxt);
+    }
+    g_hdr = g_bg_hdr[0];
+}
+
+/* The slot holding this rectangle as it is now, or the one to upload it into: an empty slot
+ * first, else the least recently used. Any may be overwritten — present_frame has waited for the
+ * PVR to finish the previous scene before it asks. */
+static int bg_slot(int x, int y, int w, int h, int d24) {
+    int empty = -1, lru = -1;
+    for(int k = 0; k < g_bg_slots; k++) {
+        const gbg_t* b = &g_bgs[k];
+        if(!b->valid) {
+            if(empty < 0) empty = k;
+            else {}
+            continue;
+        } else {}
+        if(b->x == x && b->y == y && b->w == w && b->h == h && b->d24 == d24) return k;
+        else {}
+        if(lru < 0 || b->used < g_bgs[lru].used) lru = k;
+        else {}
+    }
+    return empty >= 0 ? empty : lru;
 }
 
 /* BGR555 to ARGB1555 is red and blue exchanged, green in place and bit 15 dropped (the quad
@@ -1345,11 +1403,11 @@ static inline uint32_t bgr555x2_to_argb1555x2(uint32_t p) {
     return (p & 0x03E003E0u) | ((p & 0x001F001Fu) << 10) | ((p >> 10) & 0x001F001Fu);
 }
 
-static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh) {
+static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, pvr_ptr_t base) {
     const int row_bytes = (sw * 2 + 31) & ~31;
     const int row_words = row_bytes >> 2;
-    uint8_t* dst = (uint8_t*)g_txr;
-    const uintptr_t tex = ((uintptr_t)g_txr & 0xffffff) | PVR_TA_TEX_MEM;
+    uint8_t* dst = (uint8_t*)base;
+    const uintptr_t tex = ((uintptr_t)base & 0xffffff) | PVR_TA_TEX_MEM;
     /* The fast path reads whole words up to the store-queue boundary, so the row must start on a
      * word and the words it reads must still be inside this row of VRAM. */
     const int fast = (sx & 1) == 0 && sx + row_words * 2 <= VRAM_W;
@@ -1386,9 +1444,9 @@ static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh) {
 /* 24bpp is how the PS1 shows MDEC video: the row is packed RGB888 starting at byte offset sx*2,
  * and the display hardware simply reinterprets the same memory. Nine bits per pixel are dropped
  * on the way to 15bpp, which is what the console's own output did to them too. */
-static void upload_24bpp(const uint16_t* vram, int sx, int sy, int sw, int sh) {
+static void upload_24bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, pvr_ptr_t base) {
     const int row_bytes = (sw * 2 + 31) & ~31;
-    uint8_t* dst = (uint8_t*)g_txr;
+    uint8_t* dst = (uint8_t*)base;
 
     for(int y = 0; y < sh; y++) {
         const uint8_t* src = (const uint8_t*)(vram + (size_t)((sy + y) & (VRAM_H - 1)) * VRAM_W)
@@ -1960,6 +2018,24 @@ static uint16_t texel_to_argb1555(uint16_t p) {
     return (uint16_t)(0x8000u | (p & 0x03E0u) | ((p & 0x001Fu) << 10) | ((p >> 10) & 0x001Fu));
 }
 
+/* Which texels a decoded texture shows, for semi-transparency — which on the PlayStation is per
+ * texel: in a semi-transparent textured primitive only the texels with STP (bit 15) blend, the
+ * others are drawn opaque, and 0x0000 is a hole either way (psx-spx, "Semi-Transparency").
+ * AM_VIS shows every texel but 0x0000: opaque primitives, and semi-transparent ones whose CLUT
+ * holds one kind only. AM_SOLID shows the texels without STP, AM_STP those with it; for AM_STP
+ * the others are black as well as transparent, so that an additive blend, which reads no alpha,
+ * adds nothing for them. Crash Bandicoot: Warped's fruit is 645 solid texels to 42 STP ones, and
+ * drawn with every texel blended it was see-through. */
+enum { AM_VIS = 0, AM_SOLID = 1, AM_STP = 2, AM_N = 3 };
+
+static inline uint16_t texel_argb(uint16_t p, int amode) {
+    if(amode == AM_SOLID && (p & 0x8000u)) return 0;
+    else {}
+    if(amode == AM_STP && !(p & 0x8000u)) return 0;
+    else {}
+    return texel_to_argb1555(p);
+}
+
 /**
 	Decodes a whole 256x256 texel page out of emulated VRAM into a cache slot.
 
@@ -2177,8 +2253,14 @@ static void twid8_page(uint32_t* d, int px, int py, const uint32_t* lo, const ui
     }
 }
 
+static inline uint32_t argb2_am(uint32_t v, int amode) {
+    if(amode == AM_VIS) return argb2(v);
+    else {}
+    return (uint32_t)texel_argb((uint16_t)v, amode) | ((uint32_t)texel_argb((uint16_t)(v >> 16), amode) << 16);
+}
+
 /** A 256x256 15bpp page at VRAM (px, py), 256 halfwords wide, wrapping like twid8_page. */
-static void twid15_page(uint32_t* d, int px, int py) {
+static void twid15_page(uint32_t* d, int px, int py, int amode) {
     for(int ty = 0; ty < 64; ty += 2) {
         const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
         for(int tx = 0; tx < 64; tx++) {
@@ -2188,8 +2270,8 @@ static void twid15_page(uint32_t* d, int px, int py) {
                 uint32_t p[8];
                 for(int y = 0; y < 4; y++) {
                     const uint32_t* t = s + (4 * h + y) * (VRAM_W / 2);
-                    p[2 * y]     = argb2(t[0]);
-                    p[2 * y + 1] = argb2(t[1]);
+                    p[2 * y]     = argb2_am(t[0], amode);
+                    p[2 * y + 1] = argb2_am(t[1], amode);
                 }
                 uint32_t* o = d + ((g_spread[4 * (ty + h)] | xbits) >> 1);
                 tile16(o, p);
@@ -2255,7 +2337,7 @@ static void twid_close(void) {
 }
 /* ---- end of twiddled texture upload ---- */
 
-static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
+static void tex_decode(pvr_ptr_t dst, const gstate_t* s, int amode) {
     /* 4bpp pages upload as INDICES, so no CLUT is applied here at all; 8bpp goes through its
      * CLUT to ARGB, 15bpp converts. With no texture window — nearly every texture — the page
      * goes straight from VRAM into the texture (twid4_tiles and friends). The window path below
@@ -2268,21 +2350,21 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
     if((s->window & 0x3FF) == 0 && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0) {
         if(s->depth == 1)
             for(int i = 0; i < 256; i++) {
-                clut_lo[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
+                clut_lo[i] = texel_argb(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)], amode);
                 clut_hi[i] = clut_lo[i] << 16;
             }
         else {}
         uint32_t* d = twid_open(dst);
         if(s->depth == 0)      twid4_tiles(d, s->tex_x, s->tex_y, 0, 0, TEX_DIM / 8, TEX_DIM / 8);
         else if(s->depth == 1) twid8_page(d, s->tex_x, s->tex_y, clut_lo, clut_hi);
-        else                   twid15_page(d, s->tex_x, s->tex_y);
+        else                   twid15_page(d, s->tex_x, s->tex_y, amode);
         twid_close();
         return;
     }
 
     if(s->depth == 1)
         for(int i = 0; i < 256; i++)
-            clut8[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
+            clut8[i] = texel_argb(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)], amode);
 
     const int mx = (int)(s->window & 0x1F), my = (int)((s->window >> 5) & 0x1F);
     const int ox = (int)((s->window >> 10) & 0x1F) & mx, oy = (int)((s->window >> 15) & 0x1F) & my;
@@ -2325,7 +2407,7 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
             uint16_t* dst = page16 + (size_t)ty * TEX_DIM;
             for(int tx = 0; tx < TEX_DIM; tx++) {
                 const int su = plain ? tx : (((tx & ~(mx << 3)) | (ox << 3)) & 0xFF);
-                dst[tx] = texel_to_argb1555(src[(s->tex_x + su) & 1023]);
+                dst[tx] = texel_argb(src[(s->tex_x + su) & 1023], amode);
             }
         }
     }
@@ -2345,11 +2427,11 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s) {
  *  PlayStation did. Staleness cannot exist: content cannot drift from itself, which is why
  *  bp_gpu_dirty has no palette work at all. */
 static uint32_t g_pal_memo_gen = 1;
-PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
+PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, int amode) {
     uint16_t want[16];
     uint32_t h = 2166136261u;
     for(int i = 0; i < 16; i++) {
-        want[i] = texel_to_argb1555(g_vram[(clut_y & 511) * VRAM_W + ((clut_x + i) & 1023)]);
+        want[i] = texel_argb(g_vram[(clut_y & 511) * VRAM_W + ((clut_x + i) & 1023)], amode);
         h = (h ^ want[i]) * 16777619u;
     }
     for(int i = 0; i < PAL_BANKS_4BPP; i++) {
@@ -2446,29 +2528,35 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx) {
  *  when no bank is in use at all, bumps the generation. Keyed by position and by whether an
  *  approximation was allowed, since the two can answer differently. */
 #define PAL_MEMO 512
-static struct { uint32_t gen; uint16_t cx, cy; int16_t bank; uint8_t approx; } g_pal_memo[PAL_MEMO];
+static struct { uint32_t gen; uint16_t cx, cy; int16_t bank; uint8_t approx, amode; } g_pal_memo[PAL_MEMO];
 
-PROF_NOINLINE static int pal_bank_cached(int clut_x, int clut_y, int allow_approx) {
+PROF_NOINLINE static int pal_bank_cached(int clut_x, int clut_y, int allow_approx, int amode) {
     const uint32_t k = (((uint32_t)clut_x >> 4) ^ ((uint32_t)clut_y * 0x9E5u)
-                        ^ ((uint32_t)allow_approx << 8)) & (PAL_MEMO - 1);
+                        ^ ((uint32_t)allow_approx << 8) ^ ((uint32_t)amode << 6)) & (PAL_MEMO - 1);
     if(g_pal_memo[k].gen == g_pal_memo_gen && g_pal_memo[k].cx == clut_x
-       && g_pal_memo[k].cy == clut_y && g_pal_memo[k].approx == allow_approx)
+       && g_pal_memo[k].cy == clut_y && g_pal_memo[k].approx == allow_approx
+       && g_pal_memo[k].amode == amode)
         return g_pal_memo[k].bank;
-    const int bank = pal_bank_at(clut_x, clut_y, allow_approx);
+    const int bank = pal_bank_at(clut_x, clut_y, allow_approx, amode);
     g_pal_memo[k].gen = g_pal_memo_gen;
     g_pal_memo[k].cx = (uint16_t)clut_x;
     g_pal_memo[k].cy = (uint16_t)clut_y;
     g_pal_memo[k].approx = (uint8_t)allow_approx;
+    g_pal_memo[k].amode = (uint8_t)amode;
     g_pal_memo[k].bank = (int16_t)bank;
     return bank;
 }
 
 /** The slot holding this page, decoding it first if nobody has. Round-robin eviction: a scene
  *  using more than sixteen pages will thrash, and the profiler is what would say so. */
-PROF_NOINLINE static int tex_slot(const gstate_t* s) {
+PROF_NOINLINE static int tex_slot(const gstate_t* s, int amode) {
+    /* A 4bpp slot holds indices: its variant is in the palette bank, not here. */
+    if(s->depth == 0) amode = AM_VIS;
+    else {}
     for(int i = 0; i < g_tex_big_n + g_tex_small_n; i++) {
         if(g_tex[i].used && g_tex[i].tex_x == s->tex_x && g_tex[i].tex_y == s->tex_y
            && g_tex[i].depth == s->depth && g_tex[i].window == s->window
+           && g_tex[i].amode == amode
            && (s->depth != 1 || (g_tex[i].clut_x == s->clut_x && g_tex[i].clut_y == s->clut_y))) {
             g_tex_hits++;
             return i;
@@ -2516,9 +2604,10 @@ PROF_NOINLINE static int tex_slot(const gstate_t* s) {
     g_tex[slot].clut_y = s->clut_y;
     g_tex[slot].depth = s->depth;
     g_tex[slot].window = s->window;
+    g_tex[slot].amode = (uint8_t)amode;
     g_tex_decodes++;
     g_win_slot++;
-    tex_decode(g_tex[slot].mem, s);
+    tex_decode(g_tex[slot].mem, s, amode);
     return slot;
 }
 
@@ -2538,7 +2627,7 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
         if(pg->bound_frame != 0 && pg->bound_frame + 1 >= g_tex_frame && pg->defer == 0) {
             pg->defer = 1;
         } else {
-            tex_decode(pg->mem, s);
+            tex_decode(pg->mem, s, AM_VIS);   /* indices: the variant is the palette's */
             pg->valid = 1;
             pg->part = 0;
             pg->defer = 0;
@@ -2561,11 +2650,11 @@ PROF_NOINLINE static pvr_ptr_t page4_mirror(const gstate_t* s) {
 
 /** One 64x64 patch of a page with its CLUT already applied: a 4bpp page's, for palettes that
  *  got no bank, or an 8bpp page's (bake_slot). */
-static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
+static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv, int amode) {
     static uint32_t lo[256], hi[256];
     const int n = s->depth == 1 ? 256 : 16;
     for(int i = 0; i < n; i++) {
-        lo[i] = texel_to_argb1555(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)]);
+        lo[i] = texel_argb(g_vram[(s->clut_y & 511) * VRAM_W + ((s->clut_x + i) & 1023)], amode);
         hi[i] = lo[i] << 16;
     }
     /* The patch origin is a multiple of four texels, so each tile row is one VRAM halfword at
@@ -2584,15 +2673,41 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv) {
  *  128 KB ARGB slot, and Crash Bandicoot: Warped binds seventeen such pairs a frame — every one
  *  of them sampling a single 64x64 corner — against twelve slots: five whole-page decodes a
  *  frame and slots evicted while the PVR still read them. As patches it is ~26 x 8 KB. */
-PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
-    for(int i = 0; i < g_bake_n; i++) {
-        if(g_bake[i].used && g_bake[i].tex_x == s->tex_x && g_bake[i].tex_y == s->tex_y
-           && g_bake[i].clut_x == s->clut_x && g_bake[i].clut_y == s->clut_y
-           && g_bake[i].tu == tu && g_bake[i].tv == tv && g_bake[i].depth == s->depth) {
-            if(g_bake[i].bound_frame != g_tex_frame) g_bake_live++;
-            g_bake[i].bound_frame = g_tex_frame;
-            return i;
+/* Where each key was last found, direct-mapped: a hit is one compare where the walk over the
+ * pool was sixty-four, and the walk was four fifths of bake_slot — before the semi-transparency
+ * variants doubled the lookups. An entry is a hint, checked against the slot it names. */
+#define BAKE_INDEX 256
+static int16_t g_bake_index[BAKE_INDEX];   /* slot + 1; 0 for none */
+
+static inline int bake_hash(const gstate_t* s, int tu, int tv, int amode) {
+    uint32_t h = (uint32_t)s->tex_x * 0x9E3779B1u ^ (uint32_t)s->tex_y * 0x85EBCA77u;
+    h ^= (((uint32_t)s->clut_x << 16) | (uint32_t)s->clut_y) * 0xC2B2AE3Du;
+    h ^= ((uint32_t)tu | ((uint32_t)tv << 8) | ((uint32_t)s->depth << 16)
+          | ((uint32_t)amode << 18)) * 0x27D4EB2Fu;
+    return (int)(h >> 24) & (BAKE_INDEX - 1);
+}
+
+static inline int bake_is(int i, const gstate_t* s, int tu, int tv, int amode) {
+    return g_bake[i].used && g_bake[i].tex_x == s->tex_x && g_bake[i].tex_y == s->tex_y
+        && g_bake[i].clut_x == s->clut_x && g_bake[i].clut_y == s->clut_y
+        && g_bake[i].tu == tu && g_bake[i].tv == tv && g_bake[i].depth == s->depth
+        && g_bake[i].amode == amode;
+}
+
+PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
+    const int h = bake_hash(s, tu, tv, amode);
+    int found = g_bake_index[h] - 1;
+    if(found < 0 || !bake_is(found, s, tu, tv, amode)) {
+        found = -1;
+        for(int i = 0; i < g_bake_n; i++) {
+            if(bake_is(i, s, tu, tv, amode)) { found = i; break; }
         }
+        if(found >= 0) g_bake_index[h] = (int16_t)(found + 1);
+    }
+    if(found >= 0) {
+        if(g_bake[found].bound_frame != g_tex_frame) g_bake_live++;
+        g_bake[found].bound_frame = g_tex_frame;
+        return found;
     }
     /* Same in-flight rule as everywhere else: the PVR is still reading the previous scene. */
     int slot = -1;
@@ -2619,11 +2734,13 @@ PROF_NOINLINE static int bake_slot(const gstate_t* s, int tu, int tv) {
     g_bake[slot].tu = (uint8_t)tu;
     g_bake[slot].tv = (uint8_t)tv;
     g_bake[slot].depth = (uint8_t)s->depth;
+    g_bake[slot].amode = (uint8_t)amode;
     g_bake[slot].bound_frame = g_tex_frame;
+    g_bake_index[h] = (int16_t)(slot + 1);
     g_bake_live++;
     g_bake_decodes++;
     g_win_bake++;
-    bake_decode(g_bake[slot].mem, s, tu, tv);
+    bake_decode(g_bake[slot].mem, s, tu, tv, amode);
     return slot;
 }
 
@@ -2688,7 +2805,7 @@ PROF_NOINLINE static void palette_priority(void) {
     /* A refusal means no bank is free for THIS palette; a later one may still be resident and
      * want its lease refreshed, so the pass continues rather than abandoning the list. */
     for(int k = 0; k < n_used && k < PAL_BANKS_4BPP; k++)
-        pal_bank_cached(g_prio[used[k]].cx, g_prio[used[k]].cy, 0);
+        pal_bank_cached(g_prio[used[k]].cx, g_prio[used[k]].cy, 0, AM_VIS);
 }
 
 void bp_gpu_vram(const uint16_t* vram) {
@@ -2746,6 +2863,8 @@ void bp_gpu_vram(const uint16_t* vram) {
  *  Both entry points call it, and both must: state is latched before the primitive that uses it,
  *  so resetting in one place only would dedup a new frame's state against a dead table and then
  *  index into the emptied one. */
+static int g_clip_x0, g_clip_y0, g_clip_x1 = 1023, g_clip_y1 = 511;
+
 static inline void begin_frame_if_needed(void) {
     if(!g_frame_shown) return;
     g_frame_shown = 0;
@@ -2770,7 +2889,9 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
         if(p->tex_x == tex_base_x && p->tex_y == tex_base_y && p->depth == tex_depth
            && p->clut_x == clut_x && p->clut_y == clut_y && p->semi_mode == semi_mode
            && p->flags == flags && p->window == (uint32_t)tex_window
-           && p->draw_x == draw_x && p->draw_y == draw_y)
+           && p->draw_x == draw_x && p->draw_y == draw_y
+           && p->clip_x0 == g_clip_x0 && p->clip_y0 == g_clip_y0
+           && p->clip_x1 == g_clip_x1 && p->clip_y1 == g_clip_y1)
             return;
     }
     if(g_state_count >= GPU_MAX_STATES) {
@@ -2790,6 +2911,8 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
     s->window = (uint32_t)tex_window;
     s->draw_x = (int16_t)draw_x;
     s->draw_y = (int16_t)draw_y;
+    s->clip_x0 = (int16_t)g_clip_x0; s->clip_y0 = (int16_t)g_clip_y0;
+    s->clip_x1 = (int16_t)g_clip_x1; s->clip_y1 = (int16_t)g_clip_y1;
 }
 
 static inline gcmd_t* cmd_new(void) {
@@ -2830,18 +2953,40 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     c->argb[0] = (uint32_t)bgr & 0x00FFFFFFu;   /* BGR, converted at build time */
 }
 
-/* The rectangle of VRAM the background was last built from, so a write that lands somewhere else
- * does not cost a rebuild. Games blit into their back buffer every frame while displaying the
- * front one, and treating any write anywhere as "the picture changed" made that 5.5 ms a frame
- * for a picture that had not. */
-static int g_bg_x, g_bg_y, g_bg_w, g_bg_h;
-
 /* The last two display rectangles presented: a double-buffered game shows one and writes the
  * other, and a write into either is a write into a picture this backend draws. */
 static int g_disp[2][4];
 
 static int meets(const int* r, int x, int y, int w, int h) {
     return r[2] > 0 && !(r[0] + r[2] <= x || x + w <= r[0] || r[1] + r[3] <= y || y + h <= r[1]);
+}
+
+/* Where the buffer a state draws into sits in VRAM, as the top-left corner of the picture: the
+ * displayed rectangle holding its drawing area's corner — the one on screen now, or the one before
+ * it, which is where a double-buffered game draws. A primitive's place on screen is its VRAM
+ * position less this. It used to be less the drawing area's own corner, which is the same only
+ * when the area is the whole buffer: Crash Bandicoot: Warped draws into y 12..227 of a 240-line
+ * buffer, and its picture sat twelve lines high. In neither rectangle, the drawing is either a
+ * buffer not shown yet — as large as the picture, placed at its own corner as before — or VRAM
+ * that a later primitive samples (Crash 3 draws its shadow into 64x64 at 0,320), which the
+ * PlayStation never shows, so neither is it drawn here: returns 0. */
+static int screen_origin(const gstate_t* s, int* ox, int* oy, int* ow, int* oh) {
+    for(int k = 0; k < 2; k++) {
+        const int* d = g_disp[k];
+        if(d[2] > 0 && d[3] > 0 && s->draw_x >= d[0] && s->draw_x < d[0] + d[2]
+           && s->draw_y >= d[1] && s->draw_y < d[1] + d[3]) {
+            *ox = d[0]; *oy = d[1];
+            *ow = d[2]; *oh = d[3];
+            return 1;
+        }
+    }
+    const int w = s->clip_x1 - s->clip_x0 + 1, h = s->clip_y1 - s->clip_y0 + 1;
+    if(w * 4 >= g_disp[0][2] * 3 && h * 4 >= g_disp[0][3] * 3) {
+        *ox = s->draw_x; *oy = s->draw_y;
+        *ow = g_disp[0][2]; *oh = g_disp[0][3];
+        return 1;
+    }
+    return 0;
 }
 
 /* True when rectangle a lies inside rectangle b (corner, size). */
@@ -2887,11 +3032,19 @@ static void mark_vram(int x, int y, int w, int h) {
     c->x[1] = (int16_t)w; c->y[1] = (int16_t)h;
 }
 
-/* Recorded, not yet applied: the PVR's user clip rectangle is the obvious home for it, and the
- * spill it would remove is the one the double-buffered menus show at the top of the screen. */
-static int g_clip_x0, g_clip_y0, g_clip_x1 = 1023, g_clip_y1 = 511;
+/* The drawing area a primitive is clipped to: latched like the rest of the state, and entered in
+ * the state table when it changes on its own — the runtime sends bp_gpu_state only when its own
+ * fields change, and a new bottom-right corner leaves them all as they were. */
 void bp_gpu_clip(int x0, int y0, int x1, int y1) {
     g_clip_x0 = x0; g_clip_y0 = y0; g_clip_x1 = x1; g_clip_y1 = y1;
+    begin_frame_if_needed();
+    if(g_state_count <= 0 || g_state_count >= GPU_MAX_STATES) return;
+    const gstate_t* p = &g_states[g_state_count - 1];
+    if(p->clip_x0 == x0 && p->clip_y0 == y0 && p->clip_x1 == x1 && p->clip_y1 == y1) return;
+    gstate_t* n = &g_states[g_state_count++];
+    *n = *p;
+    n->clip_x0 = (int16_t)x0; n->clip_y0 = (int16_t)y0;
+    n->clip_x1 = (int16_t)x1; n->clip_y1 = (int16_t)y1;
 }
 
 /* Recorded, not yet applied. The PVR has no stencil; the browser backend models these with one. */
@@ -2902,9 +3055,17 @@ void bp_gpu_mask(int set_bit, int check_bit) {
 
 void bp_gpu_dirty(int x, int y, int w, int h) {
     g_scene_dirty = 1;
-    if(!(g_bg_x + g_bg_w <= x || x + w <= g_bg_x
-      || g_bg_y + g_bg_h <= y || y + h <= g_bg_y)) g_bg_stale = 1;
-    else {}
+    /* Only the background slots whose rectangle the write meets: games blit into their back
+     * buffer every frame while displaying the front one, and treating any write anywhere as "the
+     * picture changed" made that 5.5 ms a frame for a picture that had not. A 24bpp slot read
+     * three bytes a pixel, half as many halfwords again as it shows. */
+    for(int k = 0; k < g_bg_slots; k++) {
+        gbg_t* b = &g_bgs[k];
+        const int bw = b->d24 ? (b->w * 3 + 1) / 2 : b->w;
+        if(b->valid && !(b->x + bw <= x || x + w <= b->x || b->y + b->h <= y || y + h <= b->y))
+            b->valid = 0;
+        else {}
+    }
     mark_vram(x, y, w, h);
     /* Anything decoded out of this rectangle is now a copy of what used to be there. Evict by
      * page and by palette: a CLUT is sixteen or two hundred and fifty-six halfwords on one line,
@@ -2980,11 +3141,11 @@ static float blend_setup(pvr_poly_cxt_t* cxt, const gstate_t* s) {
             cxt->blend.src = PVR_BLEND_SRCALPHA;
             cxt->blend.dst = PVR_BLEND_ONE;
             return 0.25f;
-        case 2:   /* B - F. The PVR has no inverse-source-colour factor, so this cannot be had;
-                   * half-and-half is the nearest thing that still darkens rather than glows. */
+        case 2:   /* B - F: build_scene draws it as three passes (subtract_passes), and never
+                   * asks here. Half-and-half remains only as the nearest single blend. */
             if(!g_warned_sub) {
                 g_warned_sub = 1;
-                bp_log(BP_LOG_WARN, "gpu: subtractive blending approximated as half-and-half");
+                bp_log(BP_LOG_WARN, "gpu: a subtractive blend reached the single-pass path");
             }
             /* fall through */
         default:  /* 0: B/2 + F/2 */
@@ -3014,7 +3175,9 @@ static int last_cover(int sw, int sh) {
         if(c->is_rect != GCMD_RECT) continue;
         const gstate_t* s = &g_states[c->state];
         if(s->flags & BP_GPU_SEMI) continue;
-        const int x0 = c->x[0] - s->draw_x, y0 = c->y[0] - s->draw_y;
+        int ox, oy, ow, oh;
+        if(!screen_origin(s, &ox, &oy, &ow, &oh)) continue;
+        const int x0 = c->x[0] - ox, y0 = c->y[0] - oy;
         if(x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh) return i;
     }
     return -1;
@@ -3063,12 +3226,13 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
  *  texture and source factor, but added to what is there (dst ONE) instead of replacing it. */
 /* `keep`, when given, receives a copy of the header emitted, for build_scene to restate without
  * asking the cache again (the slot itself may be taken by the next header that hashes there). */
-static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over,
+static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind,
                          pvr_poly_hdr_t* keep) {
-    const int hs = hdr_slot(mem, fmt, dim, s, over);
+    const int hs = hdr_slot(mem, fmt, dim, s, over, kind);
     if(g_hdrc[hs].used && g_hdrc[hs].mem == mem && g_hdrc[hs].fmt == fmt
        && g_hdrc[hs].dim == dim && g_hdrc[hs].flags == s->flags
-       && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over) {
+       && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over
+       && g_hdrc[hs].kind == kind) {
         g_hdr_hits++;
         pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
         if(keep) *keep = g_hdrc[hs].hdr;
@@ -3077,14 +3241,14 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     }
     float alpha;
     pvr_poly_cxt_t cxt;
-    if(mem) {
+    const int blends = (s->flags & BP_GPU_SEMI) && kind == HK_NORMAL;
+    if(mem && kind != HK_INVERT) {
         pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim, dim, mem, PVR_FILTER_NONE);
         /* MODULATE keeps the texel's own alpha: a transparent texel reaches the blender with
          * alpha 0 and the blend below keeps the destination, which is what the PlayStation's
          * "texel zero draws nothing" means. */
         cxt.txr.env = (s->flags & BP_GPU_RAW) ? PVR_TXRENV_REPLACE
-                    : ((s->flags & BP_GPU_SEMI) ? PVR_TXRENV_MODULATEALPHA
-                                                : PVR_TXRENV_MODULATE);
+                    : (blends ? PVR_TXRENV_MODULATEALPHA : PVR_TXRENV_MODULATE);
         cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
     } else {
         pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
@@ -3093,7 +3257,16 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     /* No depth. The list renders in submission order; nothing may re-decide it. */
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     cxt.depth.write = false;
-    if(s->flags & BP_GPU_SEMI) {
+    if(kind == HK_INVERT) {
+        /* White times one minus the destination, and nothing of the destination kept. */
+        cxt.blend.src = PVR_BLEND_INVDESTCOLOR;
+        cxt.blend.dst = PVR_BLEND_ZERO;
+        alpha = 1.0f;
+    } else if(kind == HK_ADD) {
+        cxt.blend.src = PVR_BLEND_ONE;
+        cxt.blend.dst = PVR_BLEND_ONE;
+        alpha = 1.0f;
+    } else if(blends) {
         alpha = blend_setup(&cxt, s);
     } else if(mem) {
         /* Opaque textured: solid texels replace, transparent texels keep what is there. */
@@ -3114,6 +3287,7 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     g_hdrc[hs].flags = s->flags;
     g_hdrc[hs].semi_mode = s->semi_mode;
     g_hdrc[hs].over = (uint8_t)over;
+    g_hdrc[hs].kind = (uint8_t)kind;
     g_hdrc[hs].alpha = alpha;
     g_hdr_compiles++;
     pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
@@ -3149,6 +3323,446 @@ static inline void put_tri(const gcmd_t* c, const uint32_t* col, float scale_x, 
 static pvr_poly_hdr_t g_run_hdr __attribute__((aligned(32)));
 static pvr_poly_hdr_t g_run_over __attribute__((aligned(32)));
 
+/* The scene's binding as build_scene last emitted it, and what put_tri adds after scaling. */
+typedef struct {
+    float     scale_x, scale_y;
+    int       state, fmt, dim, ou, ov, kind;
+    pvr_ptr_t mem;
+    /* The reciprocal of the bound texture's size, so the vertex loop multiplies where it used to
+     * divide. The divisor is constant for a whole run of primitives and SH-4's FDIV is expensive
+     * and poorly pipelined; at three vertices and two coordinates each, a busy scene was asking
+     * for nine thousand divisions a frame to compute a number that changes a few dozen times. */
+    float     rdim, xo, yo, uo, vo;
+    uint32_t  a;              /* the vertex alpha the header's blend wants, in place */
+    /* The current state's buffer corner in VRAM (screen_origin) and its drawing area, both in
+     * VRAM units: the area as integers for the inside test, and as the edges the clipper cuts
+     * at — the right and bottom one past the last pixel, since pixel x covers [x, x + 1). */
+    int       ox, oy, clx0, cly0, clx1, cly1;
+    int       cut_x, cut_y;   /* whether an edge of that axis lies inside the picture at all */
+    /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
+     * and the run's next primitive must say its own again. That used to be a full lookup — the
+     * state compared, the cache hashed and searched — twice per brightened primitive, and a busy
+     * arena brightens a quarter of them. Now the run's header is kept when first emitted and
+     * copied back (`restate`), and the brightening header is looked up once per run. */
+    int       restate, over_ready;
+} gscene_t;
+
+/* A texture, bound: where it is, its format and size, and the patch origin in texels. */
+typedef struct { pvr_ptr_t mem; int fmt, dim, ou, ov; } gbind_t;
+
+/* Which kinds of texel a state's CLUT holds: bit 0 solid, bit 1 STP, none when only holes. A
+ * 15bpp page has no CLUT to ask and answers both, which is always right and costs one more
+ * pass. Conservative: a primitive may sample only one kind of a mixed CLUT. */
+enum { CLS_NONE = 0, CLS_SOLID = 1, CLS_STP = 2, CLS_MIXED = 3 };
+
+#define CLS_MEMO 256
+static struct { uint32_t gen; uint16_t cx, cy; uint8_t depth, cls; } g_cls_memo[CLS_MEMO];
+
+/* Remembered for one scene build, as pal_bank_cached's answers are: VRAM is still while the scene
+ * is built, and a semi-transparent state's CLUT was scanned again at every run that used it — an
+ * 8bpp one is 256 reads. */
+static int clut_class_scan(const gstate_t* s);
+static int clut_class(const gstate_t* s) {
+    if(s->depth == 2) return CLS_MIXED;
+    const uint32_t k = (((uint32_t)s->clut_x >> 4) ^ ((uint32_t)s->clut_y * 0x9E5u)
+                        ^ ((uint32_t)s->depth << 7)) & (CLS_MEMO - 1);
+    if(g_cls_memo[k].gen == g_pal_memo_gen && g_cls_memo[k].cx == s->clut_x
+       && g_cls_memo[k].cy == s->clut_y && g_cls_memo[k].depth == s->depth)
+        return g_cls_memo[k].cls;
+    const int cls = clut_class_scan(s);
+    g_cls_memo[k].gen = g_pal_memo_gen;
+    g_cls_memo[k].cx = s->clut_x;
+    g_cls_memo[k].cy = s->clut_y;
+    g_cls_memo[k].depth = s->depth;
+    g_cls_memo[k].cls = (uint8_t)cls;
+    return cls;
+}
+
+static int clut_class_scan(const gstate_t* s) {
+    const int n = s->depth == 1 ? 256 : 16;
+    const uint16_t* row = g_vram + (size_t)(s->clut_y & 511) * VRAM_W;
+    int cls = CLS_NONE;
+    for(int i = 0; i < n && cls != CLS_MIXED; i++) {
+        const uint16_t p = row[(s->clut_x + i) & 1023];
+        if(p != 0) cls |= (p & 0x8000u) ? CLS_STP : CLS_SOLID;
+    }
+    return cls;
+}
+
+/* The texture answers for a run of primitives sharing a state — which is how they arrive — per
+ * variant (AM_*), each asked for on first use: most runs only ever want one. */
+typedef struct {
+    int       state;
+    int       bank[AM_N], slot[AM_N];   /* -2: not asked yet */
+    int       patch8, cls;
+    pvr_ptr_t mir;
+} grun_t;
+
+static void run_begin(grun_t* r, const gstate_t* s, int state) {
+    r->state = state;
+    for(int k = 0; k < AM_N; k++) { r->bank[k] = -2; r->slot[k] = -2; }
+    /* The page grid is the mirror's index, so a page origin that is not on the grid would
+     * silently read a neighbour. The texpage encoding cannot produce one; the guard costs a
+     * compare and removes the assumption. */
+    const int plain = (s->window & 0x3FF) == 0 && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
+    r->mir = (s->depth == 0 && plain) ? page4_mirror(s) : NULL;
+    /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT (bake_slot); the
+     * whole page is decoded only for a primitive sampling across patches. */
+    r->patch8 = s->depth == 1 && plain;
+    r->cls = (s->flags & BP_GPU_SEMI) ? clut_class(s) : CLS_SOLID;
+}
+
+/* The 64x64 patch a primitive samples within, if it samples within one. */
+static int one_patch(const gcmd_t* c, int* tu, int* tv) {
+    int umin = c->u[0], umax = c->u[0], vmin = c->v[0], vmax = c->v[0];
+    for(int k = 1; k < 3; k++) {
+        if(c->u[k] < umin) umin = c->u[k];
+        if(c->u[k] > umax) umax = c->u[k];
+        if(c->v[k] < vmin) vmin = c->v[k];
+        if(c->v[k] > vmax) vmax = c->v[k];
+    }
+    *tu = umin / BAKE_DIM;
+    *tv = vmin / BAKE_DIM;
+    return umax / BAKE_DIM == *tu && vmax / BAKE_DIM == *tv;
+}
+
+/** Where primitive c's texels come from in variant `am`, into b; 0 when nowhere, and then the
+ *  primitive is skipped — drawing it untextured would be worse. */
+__attribute__((noinline))
+static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t* r, gbind_t* b) {
+    int tu, tv;
+    b->ou = 0; b->ov = 0; b->dim = TEX_DIM;
+    if(r->mir) {
+        if(r->bank[am] == -2) r->bank[am] = pal_bank_cached(s->clut_x, s->clut_y, 0, am);
+        if(r->bank[am] >= 0) {
+            b->mem = r->mir;
+            b->fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am]) | PVR_TXRFMT_TWIDDLED;
+            return 1;
+        }
+        /* No bank was left for this palette, so draw it from texels that already have the CLUT
+         * in them — exact, and only as large as this primitive samples. */
+        const int k = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, am) : -1;
+        if(k >= 0) {
+            b->mem = g_bake[k].mem;
+            b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+            b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+            return 1;
+        }
+        /* Sampling wider than one patch, or the patch pool is all in flight: the nearest banked
+         * palette, which is the only lossy path left in the scene. */
+        g_bake_miss++;
+        const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1, am);
+        b->mem = r->mir;
+        b->fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb) | PVR_TXRFMT_TWIDDLED;
+        return 1;
+    }
+    if(r->patch8) {
+        const int k = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, am) : -1;
+        if(k >= 0) {
+            b->mem = g_bake[k].mem;
+            b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+            b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+            return 1;
+        }
+        /* Sampling wider than one patch, or every patch in flight: the page. */
+        if(r->slot[am] == -2) r->slot[am] = tex_slot(s, am);
+        if(r->slot[am] < 0) return 0;
+        g_tex[r->slot[am]].bound_frame = g_tex_frame;
+        b->mem = g_tex[r->slot[am]].mem;
+        b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+        return 1;
+    }
+    if(r->slot[am] == -2) {
+        r->slot[am] = tex_slot(s, am);
+        if(r->slot[am] >= 0 && s->depth == 0)
+            r->bank[am] = pal_bank_cached(s->clut_x, s->clut_y, 1, am);
+    }
+    if(r->slot[am] < 0) return 0;
+    g_tex[r->slot[am]].bound_frame = g_tex_frame;
+    b->mem = g_tex[r->slot[am]].mem;
+    b->fmt = s->depth == 0
+        ? (PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am] < 0 ? 0 : r->bank[am])
+           | PVR_TXRFMT_TWIDDLED)
+        : (PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED);
+    return 1;
+}
+
+/* A vertex of a clipped polygon, in VRAM units, with what is interpolated along an edge. */
+typedef struct { float x, y, u, v, r, g, b; } cvert_t;
+
+/* One Sutherland-Hodgman step: keeps the part of polygon v (n vertices) on the inner side of an
+ * edge — coordinate `axis` (0 x, 1 y) at least `lim` when `lower`, at most it otherwise. */
+static int clip_step(const cvert_t* v, int n, cvert_t* out, int axis, float lim, int lower) {
+    int m = 0;
+    for(int i = 0; i < n; i++) {
+        const cvert_t* a = &v[i];
+        const cvert_t* b = &v[i + 1 == n ? 0 : i + 1];
+        const float ca = axis ? a->y : a->x, cb = axis ? b->y : b->x;
+        const float da = lower ? ca - lim : lim - ca, db = lower ? cb - lim : lim - cb;
+        if(da >= 0.0f) out[m++] = *a;
+        if((da >= 0.0f) != (db >= 0.0f)) {
+            const float t = da / (da - db);
+            cvert_t* o = &out[m++];
+            o->x = a->x + (b->x - a->x) * t;
+            o->y = a->y + (b->y - a->y) * t;
+            o->u = a->u + (b->u - a->u) * t;
+            o->v = a->v + (b->v - a->v) * t;
+            o->r = a->r + (b->r - a->r) * t;
+            o->g = a->g + (b->g - a->g) * t;
+            o->b = a->b + (b->b - a->b) * t;
+        }
+    }
+    return m;
+}
+
+/** A triangle cut to its state's drawing area and sent as one strip: texture coordinates and
+ *  colour interpolated along the cut edges, alpha the state's. At most seven vertices — three,
+ *  and one more per edge of the area. */
+static void put_clipped(const gcmd_t* c, const uint32_t* col, const gscene_t* g) {
+    cvert_t buf[2][8];
+    cvert_t* v = buf[0];
+    cvert_t* w = buf[1];
+    for(int k = 0; k < 3; k++) {
+        v[k].x = (float)c->x[k]; v[k].y = (float)c->y[k];
+        v[k].u = (float)c->u[k]; v[k].v = (float)c->v[k];
+        v[k].r = (float)((col[k] >> 16) & 0xFF);
+        v[k].g = (float)((col[k] >> 8) & 0xFF);
+        v[k].b = (float)(col[k] & 0xFF);
+    }
+    /* Only the edges that lie inside the picture, each step writing the other buffer. */
+    int n = 3;
+    cvert_t* t;
+    if(g->cut_x) {
+        n = clip_step(v, n, w, 0, (float)g->clx0, 1);          t = v; v = w; w = t;
+        if(n) { n = clip_step(v, n, w, 0, (float)(g->clx1 + 1), 0); t = v; v = w; w = t; }
+    }
+    if(g->cut_y && n) {
+        n = clip_step(v, n, w, 1, (float)g->cly0, 1);          t = v; v = w; w = t;
+        if(n) { n = clip_step(v, n, w, 1, (float)(g->cly1 + 1), 0); t = v; v = w; w = t; }
+    }
+    if(n < 3) return;
+    /* A convex polygon as a strip: v0, v1, v(n-1), v2, v(n-2), ... */
+    int order[8], m = 0, lo = 1, hi = n - 1;
+    order[m++] = 0;
+    while(lo <= hi) {
+        order[m++] = lo++;
+        if(lo <= hi) order[m++] = hi--;
+    }
+    const uint32_t a = col[0] & 0xFF000000u;
+    for(int i = 0; i < n; i++) {
+        const cvert_t* q = &v[order[i]];
+        pvr_vertex_t* d = (pvr_vertex_t*)pvr_dr_target();
+        d->flags = (i == n - 1) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        d->x = q->x * g->scale_x + g->xo;
+        d->y = q->y * g->scale_y + g->yo;
+        d->z = 1.0f;
+        d->u = q->u * g->rdim + g->uo;
+        d->v = q->v * g->rdim + g->vo;
+        d->argb = a | ((uint32_t)(q->r + 0.5f) << 16) | ((uint32_t)(q->g + 0.5f) << 8)
+                | (uint32_t)(q->b + 0.5f);
+        d->oargb = 0;
+        pvr_dr_commit(d);
+    }
+}
+
+/** A triangle within its state's drawing area as it is, one reaching past it cut to it, and one
+ *  wholly outside not at all — what the PlayStation's rasteriser draws of it (GP0 E3h/E4h).
+ *  Nearly every triangle is inside, and pays four compares. */
+/* Inside means every coordinate at or past the low edge and at or before the high one: all six
+ * differences non-negative, one OR and one sign test an axis — and nothing at all for an axis
+ * whose edges are the picture's own. The clipper sorts out the rest, including a triangle wholly
+ * outside (nothing survives it). */
+static inline int tri_inside(const gcmd_t* c, const gscene_t* g) {
+    if(g->cut_y) {
+        const int lo = g->cly0, hi = g->cly1 + 1;
+        const int y0 = c->y[0], y1 = c->y[1], y2 = c->y[2];
+        if(((y0 - lo) | (y1 - lo) | (y2 - lo) | (hi - y0) | (hi - y1) | (hi - y2)) < 0) return 0;
+    }
+    if(g->cut_x) {
+        const int lo = g->clx0, hi = g->clx1 + 1;
+        const int x0 = c->x[0], x1 = c->x[1], x2 = c->x[2];
+        if(((x0 - lo) | (x1 - lo) | (x2 - lo) | (hi - x0) | (hi - x1) | (hi - x2)) < 0) return 0;
+    }
+    return 1;
+}
+
+static inline void emit_tri(const gcmd_t* c, const uint32_t* col, const gscene_t* g) {
+    if(tri_inside(c, g))
+        put_tri(c, col, g->scale_x, g->scale_y, g->xo, g->yo, g->rdim, g->uo, g->vo);
+    else
+        put_clipped(c, col, g);
+}
+
+/* The passes of a semi-transparent primitive (semi_prim), and their parts. Opaque primitives —
+ * nearly all of them — keep build_scene's own loop, which is where this machinery first lived:
+ * spread over calls, it cost Crash Bash a second of its 32 s window and Crash 3 a fifth of its
+ * scene build. */
+
+/** A new binding: its header, and the offsets put_tri adds under it. */
+__attribute__((noinline))
+static void scene_header(gscene_t* g, int state, const gstate_t* s, const gbind_t* b, int kind) {
+    g->state = state; g->mem = b->mem; g->fmt = b->fmt; g->dim = b->dim;
+    g->ou = b->ou; g->ov = b->ov; g->kind = kind;
+    g->rdim = 1.0f / (float)b->dim;
+    const float alpha = emit_header(b->mem, b->fmt, b->dim, s, 0, kind, &g_run_hdr);
+    g->restate = 0;
+    g->over_ready = 0;
+    /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture the
+     * texel centre less the patch origin. rdim is a power of two, so the texture terms are exact
+     * either way round. */
+    g->xo = -(float)g->ox * g->scale_x;
+    g->yo = -(float)g->oy * g->scale_y;
+    g->uo = (0.5f - (float)b->ou) * g->rdim;
+    g->vo = (0.5f - (float)b->ov) * g->rdim;
+    g->a = (uint32_t)(alpha * 255.0f) << 24;
+}
+
+/** A rectangle: four vertices, untextured (the runtime clipped it already). */
+__attribute__((noinline))
+static void scene_rect(const gscene_t* g, const gcmd_t* c, int kind) {
+    const float x0 = (float)c->x[0] * g->scale_x + g->xo;
+    const float y0 = (float)c->y[0] * g->scale_y + g->yo;
+    const float x1 = (float)(c->x[0] + c->x[1]) * g->scale_x + g->xo;
+    const float y1 = (float)(c->y[0] + c->y[1]) * g->scale_y + g->yo;
+    const uint32_t argb = kind == HK_INVERT ? 0xFFFFFFFFu
+                        : ((bgr_to_argb(c->argb[0]) & 0x00FFFFFFu) | g->a);
+    for(int k = 0; k < 4; k++) {
+        pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
+        v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        v->x = (k & 1) ? x1 : x0;
+        v->y = (k & 2) ? y1 : y0;
+        v->z = 1.0f;
+        v->u = 0.0f; v->v = 0.0f;
+        v->argb = argb;
+        v->oargb = 0;
+        pvr_dr_commit(v);
+    }
+}
+
+/** A textured primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to nearly
+ *  2.0 — which the PVR's modulate cannot, so a menu's text drawn in a bright gradient over a grey
+ *  font came out at half its brightness, dull and olive. The part above 1.0 is drawn as a
+ *  second, additive pass of the same triangle (emit_header's `over`); only primitives that
+ *  brighten pay for it. */
+__attribute__((noinline))
+static void scene_bright(gscene_t* g, const gcmd_t* c, const gstate_t* s, const gbind_t* b,
+                         int kind) {
+    if(g->over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
+    else {
+        emit_header(b->mem, b->fmt, b->dim, s, 1, kind, &g_run_over);
+        g->over_ready = 1;
+    }
+    uint32_t col[3];
+    for(int k = 0; k < 3; k++)
+        col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | g->a;
+    emit_tri(c, col, g);
+    g->restate = 1;      /* the next primitive of the run restates its header */
+#if RECOMPSX_DC_PROFILE
+    g_bright_prims++;
+#endif
+}
+
+/** Where primitive c's texels come from, the common cases inline in the scene loop: a page
+ *  mirror whose palette already has its bank, and a page slot already bound this run. The
+ *  rest — a first ask, a baked patch, a fallback — goes the full way. */
+static inline int bind_texture(const gcmd_t* c, const gstate_t* s, int am, grun_t* r, gbind_t* b) {
+    if(r->mir) {
+        if(r->bank[am] >= 0) {
+            b->mem = r->mir;
+            b->fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am]) | PVR_TXRFMT_TWIDDLED;
+            b->dim = TEX_DIM; b->ou = 0; b->ov = 0;
+            return 1;
+        }
+    } else if(!r->patch8 && r->slot[am] >= 0) {
+        g_tex[r->slot[am]].bound_frame = g_tex_frame;
+        b->mem = g_tex[r->slot[am]].mem;
+        b->fmt = s->depth == 0
+            ? (PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am] < 0 ? 0 : r->bank[am])
+               | PVR_TXRFMT_TWIDDLED)
+            : (PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED);
+        b->dim = TEX_DIM; b->ou = 0; b->ov = 0;
+        return 1;
+    }
+    return bind_texture_slow(c, s, am, r, b);
+}
+
+/** One pass of one primitive: its header when the binding changed, then its vertices by KOS
+ *  direct rendering (put_tri), where pvr_prim built each one on the stack and copied it through
+ *  a call. */
+static void scene_pass(gscene_t* g, const gcmd_t* c, int state, const gstate_t* s,
+                       const gbind_t* b, int kind) {
+    if(state != g->state || b->mem != g->mem || b->fmt != g->fmt || b->dim != g->dim
+       || b->ou != g->ou || b->ov != g->ov || kind != g->kind) {
+        scene_header(g, state, s, b, kind);
+    } else if(g->restate) {
+        pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
+        g->restate = 0;
+    }
+    if(c->is_rect) {
+        scene_rect(g, c, kind);
+        return;
+    }
+    uint32_t col[3];
+    int bright = 0;
+    if(kind == HK_INVERT) {
+        col[0] = col[1] = col[2] = 0xFFFFFFFFu;     /* an inverting pass is white */
+    } else {
+        const uint32_t a = g->a;
+        for(int k = 0; k < 3; k++) {
+            col[k] = ((b->mem ? bgr_to_argb_mod(c->argb[k]) : bgr_to_argb(c->argb[k]))
+                      & 0x00FFFFFFu) | a;
+            if(b->mem && bgr_brightens(c->argb[k])) bright = 1;
+        }
+    }
+    emit_tri(c, col, g);
+    if(bright && kind != HK_ADD && !(s->flags & BP_GPU_RAW)) scene_bright(g, c, s, b, kind);
+}
+
+/** B - F, which the PVR's blender cannot subtract, as 1 - ((1 - B) + F) in three passes of the
+ *  same primitive: invert what is under it, add F — clamping at white is the PlayStation's
+ *  clamp at zero, seen inverted — and invert back. The tile buffer blends at eight bits a
+ *  channel, so each pass is exact. Where F is a texture the STP variant is black wherever a
+ *  texel must not subtract, so the whole primitive can be inverted twice. Crash Bandicoot:
+ *  Warped fades every transition with a full-screen quad in this mode, its colour stepping from
+ *  FFFFFF (black) to 121212; drawn half-and-half, the screen went a flat grey instead. */
+static void subtract_passes(gscene_t* g, const gcmd_t* c, int state, const gstate_t* s,
+                            const gbind_t* b) {
+    const gbind_t none = { NULL, 0, TEX_DIM, 0, 0 };
+    scene_pass(g, c, state, s, &none, HK_INVERT);
+    scene_pass(g, c, state, s, b, HK_ADD);
+    scene_pass(g, c, state, s, &none, HK_INVERT);
+}
+
+/** A semi-transparent primitive, as the PlayStation draws it: per texel for a textured one —
+ *  where the CLUT holds both kinds, the solid texels first as an opaque primitive draws them, then
+ *  the STP ones in the state's blend, at 8bpp and 15bpp (a 4bpp CLUT holding both is drawn whole,
+ *  every visible texel blended: its variants would be two more palette banks per CLUT, and Crash
+ *  Bandicoot: Warped already binds sixty-odd CLUTs a frame against the hardware's sixty-four;
+ *  split, the banks ran out and the frame went 10 % slower) — and B - F in three passes. */
+__attribute__((noinline))
+static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const gstate_t* s) {
+    static const gbind_t none = { NULL, 0, TEX_DIM, 0, 0 };
+    const int sub = s->semi_mode == 2;
+    if(!(s->flags & BP_GPU_TEXTURED) || c->is_rect) {
+        if(sub) subtract_passes(g, c, state, s, &none);
+        else scene_pass(g, c, state, s, &none, HK_NORMAL);
+        return;
+    }
+    if(state != r->state) run_begin(r, s, state);
+    if(r->cls == CLS_NONE) return;                /* holes only */
+    gbind_t b;
+    if(r->cls == CLS_SOLID) {
+        /* No texel blends: drawn as the opaque primitive it is. */
+        if(bind_texture(c, s, AM_VIS, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);
+        return;
+    }
+    const int split = r->cls == CLS_MIXED && s->depth != 0;
+    if(split && bind_texture(c, s, AM_SOLID, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);
+    if(!bind_texture(c, s, split ? AM_STP : AM_VIS, r, &b)) return;
+    if(sub) subtract_passes(g, c, state, s, &b);
+    else scene_pass(g, c, state, s, &b, HK_NORMAL);
+}
+
 PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
@@ -3163,6 +3777,23 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
 
     g_pal_memo_gen++;         /* VRAM may have changed since the last build */
     palette_priority();
+
+    /* The semi-transparent path's own binding and texture answers (semi_prim), and what both
+     * paths share: the scale, and the current state's buffer corner and drawing area. */
+    gscene_t g;
+    g.scale_x = scale_x; g.scale_y = scale_y;
+    g.state = -1; g.fmt = -1; g.dim = 0; g.ou = 0; g.ov = 0; g.kind = -1;
+    g.mem = NULL;
+    g.rdim = 1.0f / (float)TEX_DIM;
+    g.xo = 0.0f; g.yo = 0.0f; g.uo = 0.0f; g.vo = 0.0f;
+    g.a = 0xFF000000u;
+    g.restate = 0; g.over_ready = 0;
+    g.ox = 0; g.oy = 0; g.clx0 = 0; g.cly0 = 0; g.clx1 = 1023; g.cly1 = 511;
+    g.cut_x = 0; g.cut_y = 0;
+    grun_t semi_run;
+    semi_run.state = -1;
+    int placed_state = -1, placed = 0;
+    int area[6] = { -1, -1, -1, -1, -1, -1 };
 
     int cur_state = -1, cur_fmt = -1, cur_dim = 0, cur_ou = 0, cur_ov = 0;
     /* The reciprocal of the bound texture's size, so the vertex loop multiplies where it used to
@@ -3186,11 +3817,41 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
         if(c->is_rect == GCMD_VRAM) {
-            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) restate = 1;
+            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) { restate = 1; g.state = -1; }
             else {}
             continue;
         } else {}
         const gstate_t* s = &g_states[c->state];
+        /* Where the state's buffer is on screen, and which edges of its drawing area to cut at:
+         * a function of the drawing area alone, which changes a few times a frame, where the
+         * state changes at nearly every primitive. A new origin reaches the header's offsets
+         * because a new state always re-emits the header. */
+        if((int)c->state != placed_state) {
+            placed_state = (int)c->state;
+            if(s->draw_x != area[0] || s->draw_y != area[1] || s->clip_x0 != area[2]
+               || s->clip_y0 != area[3] || s->clip_x1 != area[4] || s->clip_y1 != area[5]) {
+                area[0] = s->draw_x; area[1] = s->draw_y; area[2] = s->clip_x0;
+                area[3] = s->clip_y0; area[4] = s->clip_x1; area[5] = s->clip_y1;
+                int ow, oh;
+                placed = screen_origin(s, &g.ox, &g.oy, &ow, &oh);
+                /* Only the edges of the drawing area that lie inside the picture are cut here;
+                 * one at or past the picture's own edge is where the screen ends anyway. Crash
+                 * 3's area is its buffer's whole width, and cutting every triangle that crossed
+                 * the side of the screen cost 200 ms of the window for nothing. */
+                g.clx0 = s->clip_x0 > g.ox ? s->clip_x0 : -32768;
+                g.clx1 = s->clip_x1 + 1 < g.ox + ow ? s->clip_x1 : 32766;
+                g.cly0 = s->clip_y0 > g.oy ? s->clip_y0 : -32768;
+                g.cly1 = s->clip_y1 + 1 < g.oy + oh ? s->clip_y1 : 32766;
+                g.cut_x = g.clx0 != -32768 || g.clx1 != 32766;
+                g.cut_y = g.cly0 != -32768 || g.cly1 != 32766;
+            }
+        }
+        if(!placed) continue;       /* drawn into VRAM off screen: not a picture */
+        if(s->flags & BP_GPU_SEMI) {
+            semi_prim(&g, &semi_run, c, (int)c->state, s);
+            cur_state = -1;         /* its headers went out after this loop's */
+            continue;
+        }
 
         const int textured = (s->flags & BP_GPU_TEXTURED) && !c->is_rect;
         pvr_ptr_t mem = NULL;
@@ -3213,60 +3874,36 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                 run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
                           && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
                 if(run_mir) {
-                    run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0);
+                    run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
                 } else if(!run_patch8) {
-                    run_slot = tex_slot(s);
+                    run_slot = tex_slot(s, AM_VIS);
                     if(run_slot >= 0 && s->depth == 0)
-                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1);
+                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
                 } else {}
             }
             if(run_mir && run_bank >= 0) {
                 mem = run_mir;
                 fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank) | PVR_TXRFMT_TWIDDLED;
-            } else if(run_mir) {
-                /* No bank was left for this palette, so draw it from texels that already have
-                 * the CLUT in them — exact, and only as large as this primitive samples. */
-                int umin = c->u[0], umax = c->u[0], vmin = c->v[0], vmax = c->v[0];
-                for(int k = 1; k < 3; k++) {
-                    if(c->u[k] < umin) umin = c->u[k];
-                    if(c->u[k] > umax) umax = c->u[k];
-                    if(c->v[k] < vmin) vmin = c->v[k];
-                    if(c->v[k] > vmax) vmax = c->v[k];
-                }
-                const int tu = umin / BAKE_DIM, tv = vmin / BAKE_DIM;
-                const int b = (umax / BAKE_DIM == tu && vmax / BAKE_DIM == tv)
-                            ? bake_slot(s, tu, tv) : -1;
+            } else if(run_mir || run_patch8) {
+                /* No bank was left for this palette, or an 8bpp page: texels with the CLUT
+                 * already in them — exact, and only as large as this primitive samples. */
+                int tu, tv;
+                const int b = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, AM_VIS) : -1;
                 if(b >= 0) {
                     mem = g_bake[b].mem;
                     fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
                     dim = BAKE_DIM; ou = tu * BAKE_DIM; ov = tv * BAKE_DIM;
-                } else {
+                } else if(run_mir) {
                     /* Sampling wider than one patch, or the patch pool is all in flight: the
                      * nearest banked palette, which is the only lossy path left in the scene. */
                     g_bake_miss++;
-                    const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1);
+                    const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
                     mem = run_mir;
                     fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb)
                         | PVR_TXRFMT_TWIDDLED;
-                }
-            } else if(run_patch8) {
-                int umin = c->u[0], umax = c->u[0], vmin = c->v[0], vmax = c->v[0];
-                for(int k = 1; k < 3; k++) {
-                    if(c->u[k] < umin) umin = c->u[k];
-                    if(c->u[k] > umax) umax = c->u[k];
-                    if(c->v[k] < vmin) vmin = c->v[k];
-                    if(c->v[k] > vmax) vmax = c->v[k];
-                }
-                const int tu = umin / BAKE_DIM, tv = vmin / BAKE_DIM;
-                const int b = (umax / BAKE_DIM == tu && vmax / BAKE_DIM == tv)
-                            ? bake_slot(s, tu, tv) : -1;
-                if(b >= 0) {
-                    mem = g_bake[b].mem;
-                    fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-                    dim = BAKE_DIM; ou = tu * BAKE_DIM; ov = tv * BAKE_DIM;
                 } else {
                     /* Sampling wider than one patch, or every patch in flight: the page. */
-                    if(run_slot < 0) run_slot = tex_slot(s);
+                    if(run_slot < 0) run_slot = tex_slot(s, AM_VIS);
                     else {}
                     if(run_slot < 0) continue;
                     else {}
@@ -3291,17 +3928,18 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
             cur_state = (int)c->state;
             cur_mem = mem; cur_fmt = fmt; cur_dim = dim; cur_ou = ou; cur_ov = ov;
             cur_rdim = 1.0f / (float)dim;
-            alpha = emit_header(mem, fmt, dim, s, 0, &g_run_hdr);
+            alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &g_run_hdr);
             restate = 0;
             over_ready = 0;
-            /* What put_tri adds after scaling: the drawing area's origin, and in the texture the
-             * texel centre less the patch origin. rdim is a power of two, so the texture terms
-             * are exact either way round. */
-            cur_xo = -(float)s->draw_x * scale_x;
-            cur_yo = -(float)s->draw_y * scale_y;
+            /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture
+             * the texel centre less the patch origin. rdim is a power of two, so the texture
+             * terms are exact either way round. */
+            cur_xo = -(float)g.ox * scale_x;
+            cur_yo = -(float)g.oy * scale_y;
             cur_uo = (0.5f - (float)ou) * cur_rdim;
             cur_vo = (0.5f - (float)ov) * cur_rdim;
             cur_a = (uint32_t)(alpha * 255.0f) << 24;
+            g.state = -1;           /* the semi-transparent path's header is not the last one now */
         } else if(restate) {
             pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
             restate = 0;
@@ -3340,16 +3978,23 @@ PROF_NOINLINE static void build_scene(int sx, int sy, int sw, int sh, int with_b
                           & 0x00FFFFFFu) | a;
                 if(mem && bgr_brightens(c->argb[k])) bright = 1;
             }
-            put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
+            /* Cut to the drawing area where it reaches past an edge inside the picture. */
+            const int inside = tri_inside(c, &g);
+            if(!inside) {
+                g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.uo = cur_uo; g.vo = cur_vo;
+            } else {}
+            if(inside) put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
+            else put_clipped(c, col, &g);
             if(bright && !(s->flags & BP_GPU_RAW)) {
                 if(over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
                 else {
-                    emit_header(mem, fmt, dim, s, 1, &g_run_over);
+                    emit_header(mem, fmt, dim, s, 1, HK_NORMAL, &g_run_over);
                     over_ready = 1;
                 }
                 for(int k = 0; k < 3; k++)
                     col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
-                put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
+                if(inside) put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
+                else put_clipped(c, col, &g);
                 restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
                 g_bright_prims++;
@@ -3449,27 +4094,29 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
     g_prof_wait += t1 - t0;
 #endif
 
-    /* The window itself moving counts as a change: the same VRAM seen through a different
-     * rectangle is a different picture. */
-    static int last_x = -1, last_y = -1, last_w = -1, last_h = -1;
-    if(sx != last_x || sy != last_y || sw != last_w || sh != last_h) g_bg_stale = 1;
-    last_x = sx; last_y = sy; last_w = sw; last_h = sh;
-
     if(!blank && (sx != g_disp[0][0] || sy != g_disp[0][1] || sw != g_disp[0][2] || sh != g_disp[0][3])) {
         memcpy(g_disp[1], g_disp[0], sizeof(g_disp[0]));
         g_disp[0][0] = sx; g_disp[0][1] = sy; g_disp[0][2] = sw; g_disp[0][3] = sh;
     } else {}
 
-    /* Covered: no upload, and the background stays marked stale for the next picture that
-     * does show it — unless a VRAM mark after the cover needs the texture. */
+    /* Covered: no upload, and no slot touched — the next picture that does show the background
+     * finds its slot as it left it — unless a VRAM mark after the cover needs the texture. */
     const int cover = (!blank && g_cmd_count > 0) ? last_cover(sw, sh) : -1;
     const int need_bg = cover < 0 || marks_from(cover, sx, sy, sw, sh);
-    if(!blank && need_bg && (g_bg_stale || g_vram == NULL)) {
+    if(!blank && need_bg) {
         declare_texture(pot(sw, TXR_MAX_W), pot(sh, TXR_MAX_H));
-        if(flags & BP_PRESENT_24BPP) upload_24bpp(vram, sx, sy, sw, sh);
-        else                         upload_15bpp(vram, sx, sy, sw, sh);
-        g_bg_stale = 0;
-        g_bg_x = sx; g_bg_y = sy; g_bg_w = sw; g_bg_h = sh;
+        const int d24 = (flags & BP_PRESENT_24BPP) != 0;
+        const int k = bg_slot(sx, sy, sw, sh, d24);
+        /* Without VRAM armed nothing reports writes (software drawing): every picture is new. */
+        if(!g_bgs[k].valid || g_vram == NULL) {
+            if(d24) upload_24bpp(vram, sx, sy, sw, sh, bg_mem(k));
+            else    upload_15bpp(vram, sx, sy, sw, sh, bg_mem(k));
+            g_bgs[k].x = sx; g_bgs[k].y = sy; g_bgs[k].w = sw; g_bgs[k].h = sh;
+            g_bgs[k].d24 = d24;
+            g_bgs[k].valid = 1;
+        } else {}
+        g_bgs[k].used = g_tex_frame;
+        g_hdr = g_bg_hdr[k];
     }
 #if RECOMPSX_DC_PROFILE
     const uint64_t t2 = bp_time_us();

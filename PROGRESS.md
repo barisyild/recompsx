@@ -2,6 +2,42 @@
 
 ## Status snapshot
 
+**2026-09-27: Dreamcast renders Crash 3's fades, fruit and letterbox as the PlayStation does.**
+Reported on the Dreamcast image, the browser right: every transition a flat grey veil, the Wumpa
+fruit see-through, the picture twelve lines high with geometry across the black bars. Measured on
+JS: a transition is a full-screen GP0 2Ah quad in mode 2 (B-F), FFFFFF..121212; the fruit are 2Eh
+8bpp mode 0, 645 solid texels to 42 STP (only STP texels blend); the drawing area is (0,12)-(511,227)
+of a 240-line buffer, and the shadow is drawn into 64x64 at (0,320). Backend: B-F in three passes
+(invert, add, invert: exact at the tile buffer's 8 bits); per-texel semi-transparency from texture
+variants by STP (AM_VIS/SOLID/STP in palette banks, bake patches and page slots) — solid texels
+opaque, STP ones in the state's blend — at 8bpp/15bpp; a 4bpp CLUT holding both stays whole-blended
+(Crash 3 binds ~62 CLUTs a frame against 64 banks: split, the banks ran out, +10 %). Primitives are
+placed from the displayed buffer that holds their drawing area (they were placed from the area's
+own corner), drawing into off-screen VRAM is not shown, and triangles are clipped on the CPU to
+the drawing area's edges that lie inside the picture (the PVR's user clip is 32-pixel tiles).
+Semi-transparent primitives take an out-of-line path (semi_prim); the opaque loop is as it was.
+Bake lookups through a hash index (bake_slot 99 -> 49 ms). Flycast: Crash 3 4700-5000 1696.4 ->
+1741.8 M (+2.7 %), Crash Bash 18800-20300 6052.8 -> 6233.1 M (+3.0 %): the new passes and the
+clip. Crash 3's display range is the full NTSC 240 lines (V 16..256), so its 12-line bars are the
+PlayStation's own (a CRT's overscan hid them): kept, by the user's choice. Known: the shadow reads
+VRAM the Dreamcast never draws into (render-to-texture), and is wrong there.
+
+**2026-09-27: Dreamcast background kept per displayed rectangle — Crash 3 ~55 % -> ~59 % speed.**
+present_frame was 537 ms of the 9.06 s window, 93 % of it one loop: the displayed VRAM (512x240)
+converted into the background texture. Crash 3 double-buffers (x=0 and x=512, switching every
+other vblank) and clears with a 512x216 fill that leaves the letterbox strips, so the background
+is always needed; a moved rectangle marked it stale, so both pictures were uploaded again at every
+flip (~3.3 ms), though nothing wrote them — no VRAM transfer or copy reaches the display area in
+vblanks 4700-5000 (counted on JS). The 1 MB background texture now holds up to four slots at the
+declared size (512x256 at 16 bpp is 256 KB), one per rectangle, each uploaded again only when
+bp_gpu_dirty meets its rectangle; per slot the layout, UVs and clamping are as before, and no PVR
+memory is added. In hardware mode VRAM changes only by transfers and copies, both of which report
+(triangles, rectangles and fills go to the backend without touching VRAM). Flycast, Crash 3
+4700-5000: 1811.4 -> **1696.4** M cycles = 8.48 s per 5 s of game; present_frame 537 -> 11 ms.
+Crash Bash 18800-20300: 6160.4 -> 6052.8 M, present_frame 709 -> 92 ms (part of the saving is
+waiting now: thd_idle +141 ms). What is left on the GPU side is polygonHw (~420 cycles a triangle) and build_scene
+(~415, three vertices converted to floats and colours), 12 % together: micro-optimisation only.
+
 **2026-09-27: GTE projection in 32 bits where that is exact — Crash 3 on Dreamcast ~53 % -> ~55 %.**
 RTPS/RTPT cost ~450 / ~1160 SH-4 cycles a command (Flycast's model): each matrix row was rowShr12
 (a shift, a mask and a carry per product), each screen coordinate a 64-bit multiply-add with a
@@ -1247,6 +1283,15 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] DC render fixes (user report): subtractive fades in three passes, per-texel STP
+at 8/15bpp, primitives placed from their displayed buffer and clipped to the drawing area, off-screen
+drawing not shown; opaque loop kept as it was. Crash 3 1741.8 M, Crash Bash 6233.1 M (+~3 %).
+Letterbox bars kept (the PS1's own). Next: Memory accessors inline on C++, shadow render-to-texture.
+
+2026-09-27 [claude] DC GPU: background texture slots per displayed rectangle (Crash 3 uploaded both
+buffers again at every flip); Crash 3 1811.4 -> 1696.4 M (~59 %), Crash Bash 6160.4 -> 6052.8. polygonHw and
+build_scene (~12 %) left as micro-optimisation. Next: Crash 3 render bugs (the user's next ask).
 
 2026-09-27 [claude] GTE on DC: RTPS/RTPT rows and screen coordinates in exact 32-bit forms, general
 paths out of line; GteEdge conformance test (same digest before and after). Crash 3 Flycast 1872.8
