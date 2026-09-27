@@ -10,7 +10,7 @@
 pvr_ptr_t      g_txt;
 pvr_poly_hdr_t g_txt_hdr;
 static uint16_t g_txt_buf[TXT_W * TXT_H] __attribute__((aligned(32)));
-_Static_assert(sizeof(g_txt_buf) % 8 == 0, "g_txt_buf is cleared with shz_memset8");
+_Static_assert(sizeof(g_txt_buf) % 32 == 0, "g_txt_buf is cleared by shz_memset8 and sent by txr_put");
 static int      g_txt_ready;
 #endif
 
@@ -510,7 +510,8 @@ void profile_report(void) {
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 2, TXT_W, 0xFFFF, 0, 16, true, l2);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 3, TXT_W, 0xFFFF, 0, 16, true, l3);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 4, TXT_W, 0xFFFF, 0, 16, true, l4);
-        pvr_txr_load(g_txt_buf, g_txt, sizeof(g_txt_buf));
+        txr_put(g_txt_buf, g_txt, sizeof(g_txt_buf));
+        sq_wait();
         g_txt_ready = 1;
     }
 #endif
@@ -556,7 +557,7 @@ static void profile_reset(void) {
 void draw_profile_overlay(void) {
     if(!g_txt_ready) return;
 
-    pvr_prim(&g_txt_hdr, sizeof(g_txt_hdr));
+    put_hdr(&g_txt_hdr);
 
     pvr_vertex_t v;
     v.flags = PVR_CMD_VERTEX;
@@ -565,11 +566,11 @@ void draw_profile_overlay(void) {
     v.z = 2.0f;
 
     const float vmax = (float)TXT_USED / (float)TXT_H;
-    v.x = 0.0f;   v.y = 480.0f - TXT_USED; v.u = 0.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
-    v.x = 512.0f; v.y = 480.0f - TXT_USED; v.u = 1.0f; v.v = 0.0f; pvr_prim(&v, sizeof(v));
-    v.x = 0.0f;   v.y = 480.0f; v.u = 0.0f; v.v = vmax; pvr_prim(&v, sizeof(v));
+    v.x = 0.0f;   v.y = 480.0f - TXT_USED; v.u = 0.0f; v.v = 0.0f; put_vtx(&v);
+    v.x = 512.0f; v.y = 480.0f - TXT_USED; v.u = 1.0f; v.v = 0.0f; put_vtx(&v);
+    v.x = 0.0f;   v.y = 480.0f; v.u = 0.0f; v.v = vmax; put_vtx(&v);
     v.flags = PVR_CMD_VERTEX_EOL;
-    v.x = 512.0f; v.y = 480.0f; v.u = 1.0f; v.v = vmax; pvr_prim(&v, sizeof(v));
+    v.x = 512.0f; v.y = 480.0f; v.u = 1.0f; v.v = vmax; put_vtx(&v);
 }
 #endif
 #endif

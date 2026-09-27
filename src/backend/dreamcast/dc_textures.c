@@ -262,11 +262,27 @@ static void twid4_tiles(uint32_t* d, int px, int py, int tx0, int ty0, int tx1, 
             const uint32_t* s = row + tx;
             /* A cache line is eight tiles of a row; ask for the next eight while these run. */
             if((tx & 7) == 0 && tx + 8 < tx1)
-                for(int r = 0; r < 8; r++) __builtin_prefetch(s + 8 + r * (VRAM_W / 2));
+                for(int r = 0; r < 8; r++) SHZ_PREFETCH(s + 8 + r * (VRAM_W / 2));
             uint32_t* o = d + ((ybits | ((uint32_t)g_spread[4 * tx] << 1)) >> 1);
             tile4(o, s);
             sq_flush(o);
         }
+    }
+}
+
+/* Prefetching emulated VRAM for the decoders below. Flycast counts none of this; a console
+ * misses the operand cache on nearly every new line of a page, which is the point. The rows of
+ * a tile row are VRAM_W halfwords apart, so each is its own line. */
+static inline void prefetch_rows(int y, int px) {
+    for(int r = 0; r < 8; r++)
+        SHZ_PREFETCH(g_vram + (size_t)((y + r) & 511) * VRAM_W + (px & 1023));
+}
+/* The next tile row of a bake patch: eight rows of `hw` halfwords from column px, every line. */
+static inline void prefetch_patch(int y, int px, int hw) {
+    for(int r = 0; r < 8; r++) {
+        const uint16_t* row = g_vram + (size_t)((y + r) & 511) * VRAM_W;
+        for(int x = 0; x < hw; x += 16) SHZ_PREFETCH(row + ((px + x) & 1023));
+        SHZ_PREFETCH(row + ((px + hw - 1) & 1023));
     }
 }
 
@@ -277,8 +293,13 @@ static void twid4_tiles(uint32_t* d, int px, int py, int tx0, int ty0, int tx1, 
 static void twid8_page(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
     for(int ty = 0; ty < 64; ty += 2) {
         const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        prefetch_rows(py + 4 * (ty + 2), px);
         for(int tx = 0; tx < 64; tx++) {
             const uint32_t* s = (const uint32_t*)(r0 + ((px + 2 * tx) & 1023));
+            /* A line is eight columns of a row here: the next eight, all eight rows. */
+            if((tx & 7) == 0 && tx + 8 < 64 && ((px + 2 * tx) & 1023) + 32 <= VRAM_W)
+                for(int r = 0; r < 8; r++) SHZ_PREFETCH(s + 8 + r * (VRAM_W / 2));
+            else {}
             const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
             for(int h = 0; h < 2; h++) {
                 uint32_t p[8];
@@ -305,8 +326,13 @@ static inline uint32_t argb2_am(uint32_t v, int amode) {
 static void twid15_page(uint32_t* d, int px, int py, int amode) {
     for(int ty = 0; ty < 64; ty += 2) {
         const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        prefetch_rows(py + 4 * (ty + 2), px);
         for(int tx = 0; tx < 64; tx++) {
             const uint32_t* s = (const uint32_t*)(r0 + ((px + 4 * tx) & 1023));
+            /* A line is four columns of a row here: the next four, all eight rows. */
+            if((tx & 3) == 0 && tx + 4 < 64 && ((px + 4 * tx) & 1023) + 32 <= VRAM_W)
+                for(int r = 0; r < 8; r++) SHZ_PREFETCH(s + 8 + r * (VRAM_W / 2));
+            else {}
             const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
             for(int h = 0; h < 2; h++) {
                 uint32_t p[8];
@@ -328,6 +354,8 @@ static void twid15_page(uint32_t* d, int px, int py, int amode) {
 static void twid_bake(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
     for(int ty = 0; ty < 16; ty += 2) {
         const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        if(ty + 2 < 16) prefetch_patch(py + 4 * (ty + 2), px, 16);
+        else {}
         for(int tx = 0; tx < 16; tx++) {
             const uint16_t* s = r0 + ((px + tx) & 1023);
             const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;
@@ -351,6 +379,8 @@ static void twid_bake(uint32_t* d, int px, int py, const uint32_t* lo, const uin
 static void twid_bake8(uint32_t* d, int px, int py, const uint32_t* lo, const uint32_t* hi) {
     for(int ty = 0; ty < 16; ty += 2) {
         const uint16_t* r0 = g_vram + (size_t)((py + 4 * ty) & 511) * VRAM_W;
+        if(ty + 2 < 16) prefetch_patch(py + 4 * (ty + 2), px, 32);
+        else {}
         for(int tx = 0; tx < 16; tx++) {
             const uint32_t* s = (const uint32_t*)(r0 + ((px + 2 * tx) & 1023));
             const uint32_t xbits = (uint32_t)g_spread[4 * tx] << 1;

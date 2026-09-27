@@ -45,6 +45,25 @@
  * this directory. The memory group is what the backend needs; include others where used. */
 #include <sh4zam/shz_mem.h>
 
+/* 32 bytes to the TA through the store queue KOS direct rendering is writing — sh4zam's one-burst
+ * copy: four paired 64-bit moves and the `pref` that sends them. Both types are 32-byte aligned
+ * (KOS declares them so), which the paired moves need. Every header and every vertex that is not
+ * written straight into the queue goes this way, never through pvr_prim. */
+static inline void put_hdr(const pvr_poly_hdr_t* h) {
+    shz_sq_memcpy32_1(pvr_dr_target(), h);
+}
+static inline void put_vtx(const pvr_vertex_t* v) {
+    shz_sq_memcpy32_1(pvr_dr_target(), v);
+}
+
+/* `bytes` (a multiple of 32) from an 8-byte-aligned buffer into texture memory through the store
+ * queues: sh4zam's run copy under KOS's queue lock, where pvr_txr_load was a library call. */
+static inline void txr_put(const void* src, pvr_ptr_t dst, size_t bytes) {
+    void* q = sq_lock((void*)(((uintptr_t)dst & 0xffffff) | PVR_TA_TEX_MEM));
+    shz_sq_memcpy32(q, src, bytes);
+    sq_unlock();
+}
+
 /* PS1 VRAM geometry. Fixed by the hardware, not a preference. */
 #define VRAM_W 1024
 #define VRAM_H 512
@@ -136,7 +155,9 @@ _Static_assert(sizeof(gcmd_t) == 32, "a command record is one cache line");
 _Static_assert(GPU_MAX_STATES <= (1 << 14), "a state index fits the record's 14 bits");
 
 /* Texture and blend state, recorded once per run of primitives that share it. */
-typedef struct {
+/* One cache line too, for the same reasons as gcmd_t: appended into a line allocated without a
+ * read, and prefetched ahead of the command walk that reads it. 27 bytes of fields, padded. */
+typedef struct __attribute__((aligned(32))) {
     uint16_t tex_x, tex_y;      /* texture page origin, in VRAM halfwords */
     uint16_t clut_x, clut_y;
     uint32_t window;            /* GP0(E2h) raw: the tile-repeat mask and offset */
@@ -146,6 +167,7 @@ typedef struct {
     uint8_t  semi_mode;
     uint8_t  flags;             /* BP_GPU_TEXTURED | BP_GPU_SEMI | BP_GPU_RAW */
 } gstate_t;
+_Static_assert(sizeof(gstate_t) == 32, "a state record is one cache line");
 
 /* One scene's worth of GPU diagnostics, held until it can be printed without being counted. */
 typedef struct {

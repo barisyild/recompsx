@@ -128,10 +128,13 @@ static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, p
 
     for(int y = 0; y < sh; y++) {
         const uint16_t* src = vram + (size_t)((sy + y) & (VRAM_H - 1)) * VRAM_W;
+        /* The next row's first line while this one converts (Flycast counts none of this). */
+        SHZ_PREFETCH(vram + (size_t)((sy + y + 1) & (VRAM_H - 1)) * VRAM_W + (sx & (VRAM_W - 1)));
         if(fast) {
             const uint32_t* s32 = (const uint32_t*)(const void*)(src + sx);
             uint32_t* d = sq_lock((void*)(tex + (size_t)y * g_txw * 2));
             for(int w = 0; w < row_words; w += 8) {
+                SHZ_PREFETCH(s32 + w + 16);     /* two lines ahead; past the row is harmless */
                 d[0] = bgr555x2_to_argb1555x2(s32[w]);
                 d[1] = bgr555x2_to_argb1555x2(s32[w + 1]);
                 d[2] = bgr555x2_to_argb1555x2(s32[w + 2]);
@@ -149,10 +152,10 @@ static void upload_15bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, p
                 const uint16_t p = src[(sx + x) & (VRAM_W - 1)];
                 g_line[x] = (uint16_t)((p & 0x03E0u) | ((p & 0x001Fu) << 10) | ((p >> 10) & 0x001Fu));
             }
-            pvr_txr_load(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
+            txr_put(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
         }
     }
-    if(fast) sq_wait();
+    sq_wait();
 }
 
 /* 24bpp is how the PS1 shows MDEC video: the row is packed RGB888 starting at byte offset sx*2,
@@ -166,11 +169,15 @@ static void upload_24bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, p
         const uint8_t* src = (const uint8_t*)(vram + (size_t)((sy + y) & (VRAM_H - 1)) * VRAM_W)
                            + (size_t)sx * 2;
         for(int x = 0; x < sw; x++) {
+            /* Every eight pixels, 24 bytes: a line about three lines ahead of the reads. */
+            if((x & 7) == 0) SHZ_PREFETCH(src + 96);
+            else {}
             g_line[x] = (uint16_t)(((src[0] >> 3) << 10) | ((src[1] >> 3) << 5) | (src[2] >> 3));
             src += 3;
         }
-        pvr_txr_load(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
+        txr_put(g_line, (pvr_ptr_t)(dst + (size_t)y * g_txw * 2), row_bytes);
     }
+    sq_wait();
 }
 
 void draw_quad(int sw, int sh) {
@@ -185,11 +192,11 @@ void draw_quad(int sw, int sh) {
     vert.oargb = 0;
     vert.z     = 1.0f;
 
-    vert.x = x1; vert.y = y1; vert.u = u1; vert.v = v1; pvr_prim(&vert, sizeof(vert));
-    vert.x = x2; vert.y = y1; vert.u = u2; vert.v = v1; pvr_prim(&vert, sizeof(vert));
-    vert.x = x1; vert.y = y2; vert.u = u1; vert.v = v2; pvr_prim(&vert, sizeof(vert));
+    vert.x = x1; vert.y = y1; vert.u = u1; vert.v = v1; put_vtx(&vert);
+    vert.x = x2; vert.y = y1; vert.u = u2; vert.v = v1; put_vtx(&vert);
+    vert.x = x1; vert.y = y2; vert.u = u1; vert.v = v2; put_vtx(&vert);
     vert.flags = PVR_CMD_VERTEX_EOL;
-    vert.x = x2; vert.y = y2; vert.u = u2; vert.v = v2; pvr_prim(&vert, sizeof(vert));
+    vert.x = x2; vert.y = y2; vert.u = u2; vert.v = v2; put_vtx(&vert);
 }
 
 /* ---- presenting a frame: the scene (dc_scene.c) or the software picture, paced -------------- */
@@ -285,7 +292,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
          * which is the point: the display being off is a picture in its own right, and leaving
          * the last frame up instead would be a lie. */
         if(!blank) {
-            pvr_prim(&g_hdr, sizeof(g_hdr));
+            put_hdr(&g_hdr);
             draw_quad(sw, sh);
         }
 #if RECOMPSX_DC_PROFILE_OVERLAY

@@ -2,6 +2,21 @@
 
 ## Status snapshot
 
+**2026-09-28: sh4zam, second round on the Dreamcast — no pvr_prim or pvr_txr_load left, every VRAM
+walk prefetched, state records one line each.** `put_hdr`/`put_vtx`/`txr_put` (sh4zam store-queue
+copies) moved to `dc_internal.h` and used by every file: the full-screen quad, the no-primitive
+present, the profiling overlay and the background uploads (`upload_15bpp`'s row path and
+`upload_24bpp`, rows via `txr_put`) no longer call `pvr_prim`/`pvr_txr_load`. `SHZ_PREFETCH`
+replaces `__builtin_prefetch` in `twid4_tiles` and is added where VRAM was read cold: `twid8_page`
+and `twid15_page` (a line ahead along the row, the next tile row's first lines), both bake
+decoders (the next tile row whole), the background uploads (ahead along the row, the next row).
+`gstate_t` is a 32-byte aligned record appended with `movca.l` and prefetched with the command
+walk. KOS holds `sq_lock(PVR_TA_INPUT)` for a whole list and texture memory shares its QACR region,
+so these writes are safe mid-list. Flycast, which counts none of the misses the prefetches exist
+for: Crash 3 1504.2 -> 1498.3 M, Crash Bash 5800.1 -> 5775.1 M; pictures checked (logos, the title,
+a loading screen, Crash 3's demo, a Crash Bash arena). CDIs rebuilt, the previous round kept as
+`out/dc/*.prev.cdi` for a side-by-side on the console.
+
 **2026-09-28: sh4zam first on the Dreamcast; per-backend agent notes; the RAM access path laid out
 straight.** The user's rule, now in `src/backend/dreamcast/AGENTS.md` and ADR-0031: on the
 Dreamcast a std function with an sh4zam counterpart uses sh4zam (vendored, pinned MIT submodule
@@ -815,6 +830,23 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
+**Dreamcast, sh4zam candidates (surveyed 2026-09-28; judged on hardware, not Flycast).** sh4zam is
+float maths and memory/cache/store-queue routines; nothing in the runtime or the generated code is
+float, and the backend has no libm call, so its maths has nothing to replace — the ground is
+memory. In order of value for effort:
+1-4. Done 2026-09-28 (see the snapshot): the backend's `__builtin_prefetch`, `pvr_prim` and
+   `pvr_txr_load` replaced by sh4zam; source prefetch in every texture decoder; `gstate_t` as a
+   movca'd, prefetched 32-byte line; background uploads through `txr_put` with prefetch.
+5. Runtime, through the shim so every target keeps its semantics: `MemA.prefetch` and bulk
+   `RawMem` copy/fill with an sh4zam implementation on the Dreamcast — `fill16Index` is a byte
+   loop on C++ today; VRAM-to-VRAM copies and CPU-to-VRAM uploads without mask bits by rows; DMA3
+   sectors, DMA4 wave data and the DMA6 ordering table in bulk. Mostly loading, menus and FMV.
+6. Codegen, patterns to hardware paths: prefetch for loads that stream with a constant stride —
+   found by a JS profiling pass per load site, kept per game in game.json, emitted as
+   `MemA.prefetch` (the hot Crash 3 functions are loop-free callees; the loops are their callers);
+   then Psy-Q memcpy/memset/bzero in game code recognised by content and routed to (5).
+Not candidates: the GTE and all game logic (bit-exact integer), the SPU/AICA path (integer).
+
 Measured order, 2026-09-25 (`node --cpu-prof`, 9000 frames, per-class buckets in the snapshot):
 1) rasterizer span specialisation per texture depth and semi-transparency with the texel
 constants hoisted out of the pixel loop, or the WebGL presentation fork behind the ADR-0008
@@ -1461,6 +1493,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] sh4zam round 2 (Next up 1-4): TA/texture writes via put_hdr/put_vtx/txr_put everywhere,
+prefetch in every VRAM walk, gstate_t as a movca'd 32-byte line; Flycast C3 1498.3 M, CB 5775.1 M; CDIs
+rebuilt with *.prev.cdi kept. Next: the user's console A/B; then Next up 5 (runtime bulk ops via the shim).
 
 2026-09-28 [claude] sh4zam first on the Dreamcast (ADR-0031, vendor/sh4zam): std calls replaced, header
 SQ submission, 32-byte movca'd command records + prefetch; per-backend AGENTS.md notes; MemA.likely on

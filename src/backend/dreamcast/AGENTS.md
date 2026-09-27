@@ -56,9 +56,17 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
 
 ## How the backend draws (hardware mode, ADR-0011)
 
-- Primitives are recorded as they arrive (`bp_gpu_*` → `g_cmds`, `g_states`) and built into one
-  PVR scene per present (`build_scene`): one translucent list, autosort off, submission order,
-  no depth — never re-derive order with Z (ADR-0011, the amended section).
+- Primitives are recorded as they arrive (`bp_gpu_*` → `g_cmds`, `g_states`, both 32-byte
+  records, one cache line each, allocated with `movca.l` and prefetched while walked) and built
+  into one PVR scene per present (`build_scene`): one translucent list, autosort off, submission
+  order, no depth — never re-derive order with Z (ADR-0011, the amended section).
+- Everything bound for the TA or texture memory goes through the store queues: vertices written
+  straight into `pvr_dr_target()`, whole headers and vertices with `put_hdr`/`put_vtx`, runs of
+  texture data with `txr_put` (`dc_internal.h`, sh4zam copies). `pvr_prim` and `pvr_txr_load`
+  are not used. `pvr_list_begin` holds `sq_lock(PVR_TA_INPUT)` for the whole list, and texture
+  memory shares the TA's QACR region, so a texture written mid-list does not disturb it.
+- Code that walks emulated VRAM (the texture decoders, background uploads) prefetches the lines
+  it will read next with `SHZ_PREFETCH` — a console misses the cache on nearly every new line.
 - Textures are decoded out of emulated VRAM into twiddled PVR textures through the store queues:
   4bpp pages are mirrored (`page4_mirror`) with palettes in 64 banks of 16, addressed by content;
   what does not fit is baked (`bake_slot`, 64x64 patches on `BAKE_STEP` boundaries). Anything

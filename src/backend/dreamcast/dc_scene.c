@@ -120,7 +120,8 @@ static inline void begin_frame_if_needed(void) {
      * the next bp_gpu_state, and the runtime now sends one only when it changes, so the first
      * primitive of a frame may well arrive under the last frame's state. */
     if(g_state_count > 0) {
-        g_states[0] = g_states[g_state_count - 1];
+        if(g_state_count > 1) shz_memcpy32_1(&g_states[0], &g_states[g_state_count - 1]);
+        else {}
         g_state_count = 1;
     } else {}
 }
@@ -148,6 +149,7 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
         return;
     }
     gstate_t* s = &g_states[g_state_count++];
+    shz_dcache_alloc_line(s);       /* every field is written below */
     s->tex_x = (uint16_t)tex_base_x;
     s->tex_y = (uint16_t)tex_base_y;
     s->depth = (uint8_t)tex_depth;
@@ -455,17 +457,6 @@ int marks_from(int first, int sx, int sy, int sw, int sh) {
         if(c->is_rect == GCMD_VRAM && meets(disp, c->x[0], c->y[0], c->x[1], c->y[1])) return 1;
     }
     return 0;
-}
-
-/* 32 bytes to the TA through the store queue KOS direct rendering is writing — sh4zam's one-burst
- * copy: four paired 64-bit moves and the `pref` that sends them. A header went through pvr_prim,
- * a library call per header, and this list sends one at nearly every change of binding. Both
- * types are 32-byte aligned (KOS declares them so), which the paired moves need. */
-static inline void put_hdr(const pvr_poly_hdr_t* h) {
-    shz_sq_memcpy32_1(pvr_dr_target(), h);
-}
-static inline void put_vtx(const pvr_vertex_t* v) {
-    shz_sq_memcpy32_1(pvr_dr_target(), v);
 }
 
 /** The part of the background texture a VRAM mark covers, drawn where the mark sits in the order.
@@ -1136,6 +1127,9 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             continue;
         } else {}
         const gstate_t* s = &g_states[c->state];
+        /* States are recorded in the order primitives use them, so the next one is where the
+         * walk is going; past the last one this touches the array's own tail, harmlessly. */
+        SHZ_PREFETCH(s + 1);
         /* Where the state's buffer is on screen, and which edges of its drawing area to cut at:
          * a function of the drawing area alone, which changes a few times a frame, where the
          * state changes at nearly every primitive. A new origin reaches the header's offsets
