@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string>
 #include "recompsx_arena.h"
+#include "recompsx_bulk.h"
 #include "backend_c_api.h"
 
 namespace shim {
@@ -65,10 +66,24 @@ struct RawMem {
 
 /* Aligned access on a little-endian host: callers guarantee alignment (see the C++ twin). */
 struct MemA {
+    static inline bool likely(bool c) { return __builtin_expect(!!c, 1) != 0; }
     static inline int get16(const unsigned char* m, int a) { return (int)(*((const unsigned short*)(m + a))); }
     static inline int get32(const unsigned char* m, int a) { return *((const int*)(m + a)); }
     static inline void set16(unsigned char* m, int a, int v) { *((unsigned short*)(m + a)) = (unsigned short)v; }
     static inline void set32(unsigned char* m, int a, int v) { *((int*)(m + a)) = v; }
+};
+
+/* Whole runs of memory: the reflaxe.CPP shim's own native header, so both C++ targets move the
+ * same bytes the same way (sh4zam on the Dreamcast, the C library elsewhere). */
+struct Bulk {
+    static inline void copy(unsigned char* dst, int dstOff, const unsigned char* src, int srcOff, int bytes) {
+        recompsx_bulk_copy(dst, dstOff, src, srcOff, bytes);
+    }
+    static inline bool equal(const unsigned char* a, int aOff, const unsigned char* b, int bOff, int bytes) {
+        return recompsx_bulk_equal(a, aOff, b, bOff, bytes) != 0;
+    }
+    static inline void fill16(unsigned char* m, int off, int count, int v) { recompsx_bulk_fill16(m, off, count, v); }
+    static inline void prefetch(const unsigned char* m, int off) { recompsx_bulk_prefetch(m, off); }
 };
 
 struct Arena {

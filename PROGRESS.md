@@ -2,6 +2,24 @@
 
 ## Status snapshot
 
+**2026-09-28: the runtime moves memory in runs (`shim.Bulk`, ADR-0032), and the ordering-table
+walk takes untouched lines whole.** `shim.Bulk` — copy, equal, fill16, prefetch; sh4zam on the
+Dreamcast through `native/recompsx_bulk.h`, the C library elsewhere, `copyWithin` and typed-array
+loops on JavaScript — sits under VRAM-to-VRAM copies by rows (mask bits, right-edge wraps and a
+row copied onto itself further right stay per pixel), uploads from RAM by row segments
+(`Gpu.uploadRun`, for DMA2 blocks and list nodes), DMA3 sectors (`Cdrom.dmaCopy`), DMA4 wave data
+(`Spu.dmaCopy`), DMA6 tables stored directly, and every VRAM fill (`fill16Index` was a loop of
+byte stores on C++). The DMA2 list walk checks an untouched stretch a cache line at a time —
+eight loads compared against their addresses, none waiting on another, and a prefetch two lines
+ahead — in both directions: Crash Bash's tables link downwards (ClearOTagR), Crash 3's upwards
+(ClearOTag); 70 % and 86 % of their empty-node steps go this way on JavaScript. A prefetch test
+alone in the node-at-a-time loop was tried first and made that loop 16 % slower on Flycast (the
+ADR keeps the numbers). New conformance tests BulkPaths (6e54771e) and OtWalk (e0887e11): both
+digests taken from the per-element code, both reproduced on both targets. Game digests unchanged
+on JavaScript — Crash 3 9000 ee91f215 / 20000 8888c37f, Crash Bash 3000 654669df / 9000 fda4764f
+/ 30000 2d1ca4b6. The Hatchet shim gained `Bulk` and the `MemA.likely` it lacked. The Flycast
+profile and CDIs of this version follow in the next entry.
+
 **2026-09-28: sh4zam, second round on the Dreamcast — no pvr_prim or pvr_txr_load left, every VRAM
 walk prefetched, state records one line each.** `put_hdr`/`put_vtx`/`txr_put` (sh4zam store-queue
 copies) moved to `dc_internal.h` and used by every file: the full-screen quad, the no-primitive
@@ -834,17 +852,14 @@ found by asking the machine what it actually did, one register write at a time.
 float maths and memory/cache/store-queue routines; nothing in the runtime or the generated code is
 float, and the backend has no libm call, so its maths has nothing to replace — the ground is
 memory. In order of value for effort:
-1-4. Done 2026-09-28 (see the snapshot): the backend's `__builtin_prefetch`, `pvr_prim` and
+1-5. Done 2026-09-28 (see the snapshot): the backend's `__builtin_prefetch`, `pvr_prim` and
    `pvr_txr_load` replaced by sh4zam; source prefetch in every texture decoder; `gstate_t` as a
-   movca'd, prefetched 32-byte line; background uploads through `txr_put` with prefetch.
-5. Runtime, through the shim so every target keeps its semantics: `MemA.prefetch` and bulk
-   `RawMem` copy/fill with an sh4zam implementation on the Dreamcast — `fill16Index` is a byte
-   loop on C++ today; VRAM-to-VRAM copies and CPU-to-VRAM uploads without mask bits by rows; DMA3
-   sectors, DMA4 wave data and the DMA6 ordering table in bulk. Mostly loading, menus and FMV.
+   movca'd, prefetched 32-byte line; background uploads through `txr_put` with prefetch; the
+   runtime's VRAM copies, uploads, fills and DMA3/4/6 in runs through `shim.Bulk` (ADR-0032).
 6. Codegen, patterns to hardware paths: prefetch for loads that stream with a constant stride —
    found by a JS profiling pass per load site, kept per game in game.json, emitted as
-   `MemA.prefetch` (the hot Crash 3 functions are loop-free callees; the loops are their callers);
-   then Psy-Q memcpy/memset/bzero in game code recognised by content and routed to (5).
+   `Bulk.prefetch` (the hot Crash 3 functions are loop-free callees; the loops are their callers);
+   then Psy-Q memcpy/memset/bzero in game code recognised by content and routed to `Bulk`.
 Not candidates: the GTE and all game logic (bit-exact integer), the SPU/AICA path (integer).
 
 Measured order, 2026-09-25 (`node --cpu-prof`, 9000 frames, per-class buckets in the snapshot):
@@ -1493,6 +1508,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Next up 5: runtime bulk ops via shim.Bulk (ADR-0032; sh4zam on the Dreamcast) —
+VRAM copies by rows, uploads by row segments, DMA3/4/6 in runs, fills; the OT walk a cache line at a
+time in both directions, with prefetch. BulkPaths/OtWalk digests = the per-element code's on both
+targets; game digests unchanged on JS. Next: Flycast numbers and CDIs of this version; Next up 6.
 
 2026-09-28 [claude] sh4zam round 2 (Next up 1-4): TA/texture writes via put_hdr/put_vtx/txr_put everywhere,
 prefetch in every VRAM walk, gstate_t as a movca'd 32-byte line; Flycast C3 1498.3 M, CB 5775.1 M; CDIs

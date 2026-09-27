@@ -7,6 +7,7 @@ package shim;
 **/
 @:include("<recompsx_hatchet.h>")
 extern class MemA {
+	public static function likely(c:Bool):Bool;
 	public static function get16(m:RawBuf, a:Int):Int;
 	public static function get32(m:RawBuf, a:Int):Int;
 	public static function set16(m:RawBuf, a:Int, v:Int):Void;

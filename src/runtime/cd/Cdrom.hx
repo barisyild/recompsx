@@ -312,6 +312,28 @@ class Cdrom {
 		return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 	}
 
+	/**
+		`words` words of the held sector into `ram` at byte offset `off`, as that many dmaWord
+		calls would store them there: what the FIFO still holds, in order, then zeroes — and the
+		FIFO advanced past what was taken. One copy for a whole sector where the channel used to
+		pop it a byte at a time; the caller keeps the run inside RAM.
+	**/
+	public static function dmaCopy(ram:RawBuf, off:Int, words:Int):Void {
+		final bytes = words << 2;
+		var held = (!sectorReady || !fifoOpen) ? 0 : sectorLen - sectorPos;
+		if (held < 0) held = 0;
+		else {}
+		final n = held < bytes ? held : bytes;
+		if (n > 0) shim.Bulk.copy(ram, off, sector, sectorPos, n);
+		else {}
+		sectorPos += n;
+		var i = n;
+		while (i < bytes) {
+			RawMem.set8(ram, off + i, 0);
+			i++;
+		}
+	}
+
 	/** 1F801803 reads the interrupt enable on index 0 and the pending flags on index 1. */
 	static function read1803():Int {
 		final v = (index & 1) == 0 ? irqEnable | 0xE0 : currentInt | 0xE0;

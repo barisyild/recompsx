@@ -372,7 +372,10 @@ class Gpu {
 		state commands, transfers, a packet split across nodes — takes the word path.
 	**/
 	public static function writeGp0Words(ram:RawBuf, addr:Int, count:Int):Void {
-		var i = 0;
+		// The words of an upload go to VRAM a row at a time (uploadRun): one under way when the
+		// node starts, and one a word of this node starts. Nothing else starts one, so the packet
+		// path does not ask.
+		var i = xferLeft > 0 ? uploadRun(ram, addr, count) : 0;
 		while (i < count) {
 			final v = MemA.get32(ram, (addr + (i << 2)) & 0x1FFFFC);
 			final n = (xferLeft == 0 && pending == 0) ? wholeParameters(v >>> 24) : -1;
@@ -382,6 +385,8 @@ class Gpu {
 			} else {
 				writeGp0(v);
 				i++;
+				if (xferLeft > 0 && i < count) i += uploadRun(ram, addr + (i << 2), count - i);
+				else {}
 			}
 		}
 	}
@@ -567,6 +572,74 @@ class Gpu {
 		else {}
 	}
 
+	/** Whether a CPU-to-VRAM upload is waiting for its words. */
+	public static inline function uploading():Bool return xferLeft > 0;
+
+	/**
+		Words of the upload in progress, straight from RAM at `addr`: as many of the `count` as it
+		still wants, returned. What `writeGp0` does to each — the word counted, both halfwords
+		through `putTexel`, the backend told when the last one lands — done a row segment at a
+		time. The words carry pixels in order, low halfword first, which is RAM's byte order and
+		VRAM's, so a segment that does not wrap at the right edge is one copy. Mask bits make every
+		pixel a question: they are left to the per-word path (0 returned). A run stops at the end
+		of RAM; the channel's next address wraps to its first word, where the next run starts.
+	**/
+	public static function uploadRun(ram:RawBuf, addr:Int, count:Int):Int {
+		final start = addr & 0x1FFFFC;
+		var words = count < xferLeft ? count : xferLeft;
+		if (start + (words << 2) > 0x200000) words = (0x200000 - start) >> 2;
+		else {}
+		if (maskSet || maskCheck || words <= 0) return 0;
+		else {}
+		var p = words << 1;
+		final left = xferW * xferH - xferI;       // pixels still owed; the rest of a word pads
+		if (p > left) p = left;
+		else {}
+		var s = start;
+		while (p > 0) {
+			final rowLeft = xferW - xferCol;
+			final n = p < rowLeft ? p : rowLeft;
+			final x = (xferX + xferCol) & 1023;
+			final y = (xferY + xferRow) & 511;
+			if (x + n <= Vram.WIDTH) uploadSegment(ram, s, x, y, n);
+			else uploadWrapping(ram, s, x, y, n);
+			xferI += n;
+			uploaded = (uploaded + n) | 0;
+			xferCol += n;
+			if (xferCol == xferW) {
+				xferCol = 0;
+				xferRow++;
+			} else {}
+			s += n << 1;
+			p -= n;
+		}
+		xferLeft -= words;
+		wordsReceived = (wordsReceived + words) | 0;
+		if (xferLeft == 0 && hw && xferChanged) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		else {}
+		return words;
+	}
+
+	static function uploadSegment(ram:RawBuf, s:Int, x:Int, y:Int, n:Int):Void {
+		final d = (y * Vram.WIDTH + x) << 1;
+		if (hw && !xferChanged && !shim.Bulk.equal(Vram.data, d, ram, s, n << 1)) xferChanged = true;
+		else {}
+		shim.Bulk.copy(Vram.data, d, ram, s, n << 1);
+	}
+
+	/** A segment that crosses the right edge of VRAM: pixel by pixel, wrapping as putTexel does. */
+	static function uploadWrapping(ram:RawBuf, s:Int, x:Int, y:Int, n:Int):Void {
+		var i = 0;
+		while (i < n) {
+			final v = shim.RawMem.get16(ram, s + (i << 1));
+			final xx = (x + i) & 1023;
+			if (hw && Vram.get(xx, y) != v) xferChanged = true;
+			else {}
+			Vram.set(xx, y, v);
+			i++;
+		}
+	}
+
 	/**
 		One pixel of a CPU-to-VRAM upload, obeying the mask settings.
 
@@ -673,10 +746,21 @@ class Gpu {
 		final w = ((packet[3] - 1) & 0x3FF) + 1;
 		final h = (((packet[3] >>> 16) - 1) & 0x1FF) + 1;
 		copyChanged = false;
+		// Whole rows when the mask bits ask nothing of a pixel and neither run wraps at the right
+		// edge. The hardware copies in increasing order, so a row copied onto itself further
+		// right repeats its first pixels — memmove would not; that one case stays per pixel.
+		// Rows still go top to bottom, so an overlap across rows reads what earlier rows wrote,
+		// exactly as before. (BulkPaths holds this to the per-pixel code's digest.)
+		final rows = !maskSet && !maskCheck && sx0 + w <= 1024 && dx0 + w <= 1024;
 		for (y in 0...h) {
-			for (x in 0...w) {
-				final src = Vram.get((sx0 + x) & 0x3FF, (sy0 + y) & 0x1FF);
-				blend(dx0, dy0, x, y, src);
+			final sy = (sy0 + y) & 0x1FF;
+			final dy = (dy0 + y) & 0x1FF;
+			if (rows && (sy != dy || dx0 <= sx0 || dx0 >= sx0 + w)) copyRow(sx0, sy, dx0, dy, w);
+			else {
+				for (x in 0...w) {
+					final src = Vram.get((sx0 + x) & 0x3FF, sy);
+					blend(dx0, dy0, x, y, src);
+				}
 			}
 		}
 		copies++;
@@ -686,6 +770,17 @@ class Gpu {
 		// told the Dreamcast backend the picture had changed ~500 times per 1000 vblanks.
 		if (hw && copyChanged) Backend.gpuDirty(dx0, dy0, w, h);
 		else {}
+	}
+
+	/** One row of a copy, whole: what `blend` does to each pixel with no mask bits in play. */
+	static function copyRow(sx:Int, sy:Int, dx:Int, dy:Int, w:Int):Void {
+		final s = (sy * Vram.WIDTH + sx) << 1;
+		final d = (dy * Vram.WIDTH + dx) << 1;
+		final n = w << 1;
+		if (hw && !copyChanged && !shim.Bulk.equal(Vram.data, d, Vram.data, s, n)) copyChanged = true;
+		else {}
+		shim.Bulk.copy(Vram.data, d, Vram.data, s, n);
+		pixels = (pixels + w) | 0;
 	}
 
 	/** One copied pixel, honouring the mask bits exactly as a drawn one does. */

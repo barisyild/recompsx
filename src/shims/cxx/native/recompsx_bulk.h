@@ -1,0 +1,77 @@
+/* recompsx_bulk.h — whole runs of emulated memory at once, for shim.Bulk (the C++ half).
+ *
+ * The runtime moves memory in bulk in a few places — a VRAM-to-VRAM copy by rows, an upload
+ * straight from RAM, a sector or a block of wave data by DMA, a fill — where it used to go a
+ * halfword or a word at a time through the same accessors the CPU uses. These are the host
+ * operations under them. Every one is exact: the bytes that land are the bytes the per-element
+ * code stored, on any byte order, which the BulkPaths conformance test holds both targets to.
+ *
+ * On the Dreamcast they are sh4zam's (src/backend/dreamcast/AGENTS.md: a std function with an
+ * sh4zam counterpart uses sh4zam) — shz_memmove, shz_memset8, SHZ_PREFETCH. Everywhere else,
+ * the C library and the compiler's builtin. The choice is the shim's, made here, so the runtime
+ * never learns which machine it is on. */
+#ifndef RECOMPSX_BULK_H
+#define RECOMPSX_BULK_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#if defined(_arch_dreamcast)
+#include <sh4zam/shz_mem.h>
+#endif
+
+/* `bytes` from src + src_off to dst + dst_off, as memmove: the buffers may be one and may
+ * overlap. The callers only overlap where that and an in-order copy agree. */
+static inline void recompsx_bulk_copy(unsigned char* dst, int dst_off, const unsigned char* src,
+                                      int src_off, int bytes) {
+#if defined(_arch_dreamcast)
+    shz_memmove(dst + dst_off, src + src_off, (size_t)bytes);
+#else
+    memmove(dst + dst_off, src + src_off, (size_t)bytes);
+#endif
+}
+
+/* Whether two runs hold the same bytes. No sh4zam counterpart: the C library's. */
+static inline int recompsx_bulk_equal(const unsigned char* a, int a_off, const unsigned char* b,
+                                      int b_off, int bytes) {
+    return memcmp(a + a_off, b + b_off, (size_t)bytes) == 0;
+}
+
+/* `count` halfwords of `v`, little-endian, from the even byte offset `off`. */
+static inline void recompsx_bulk_fill16(unsigned char* m, int off, int count, int v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint16_t* p = (uint16_t*)(void*)(m + off);
+    const uint16_t h = (uint16_t)v;
+#if defined(_arch_dreamcast)
+    /* Halfwords up to an 8-byte boundary, then shz_memset8's paired 64-bit stores, then the
+     * last few halfwords. */
+    while(count > 0 && ((uintptr_t)p & 7) != 0) { *p++ = h; count--; }
+    if(count >= 4) {
+        const int quads = count >> 2;
+        shz_memset8(p, (uint64_t)h * 0x0001000100010001ull, (size_t)quads * 8);
+        p += quads * 4;
+        count &= 3;
+    }
+    while(count > 0) { *p++ = h; count--; }
+#else
+    for(int i = 0; i < count; i++) p[i] = h;
+#endif
+#else
+    for(int i = 0; i < count; i++) {
+        m[off + 2 * i] = (unsigned char)(v & 0xFF);
+        m[off + 2 * i + 1] = (unsigned char)((v >> 8) & 0xFF);
+    }
+#endif
+}
+
+/* The line holding m + off is wanted soon. A hint: nothing observable changes. */
+static inline void recompsx_bulk_prefetch(const unsigned char* m, int off) {
+#if defined(_arch_dreamcast)
+    SHZ_PREFETCH(m + off);
+#else
+    __builtin_prefetch(m + off);
+#endif
+}
+
+#endif

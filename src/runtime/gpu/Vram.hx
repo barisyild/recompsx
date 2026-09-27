@@ -41,9 +41,10 @@ class Vram {
 
 	public static inline function rowStart(y:Int):Int return y * WIDTH;
 
-	/** `count` halfwords from a linear index, one value: a row of a fill or of an opaque span. */
+	/** `count` halfwords from a linear index, one value: a row of a fill or of an opaque span.
+	    The shim's bulk fill: on C++ it was a loop of byte stores the SH-4 cannot widen. */
 	public static inline function fillLinear(start:Int, count:Int, v:Int):Void
-		RawMem.fill16Index(data, start, count, v);
+		shim.Bulk.fill16(data, start << 1, count, v);
 
 	/** Packs 5-bit components into BGR555. */
 	public static inline function rgb(r:Int, g:Int, b:Int):Int

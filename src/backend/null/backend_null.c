@@ -1,7 +1,7 @@
 /* backend_null.c — the smallest honest implementation of backend_c_api.h.
  *
- * No window, no audio, no input, no disc. Logging works; everything else reports its absence
- * rather than pretending. Two uses:
+ * No window, no audio, no input; files are read with stdio, so a game runs headless. Logging
+ * works; everything else reports its absence rather than pretending. Two uses:
  *
  *   - Conformance tests and CI, where the digest is the output and a window would be noise.
  *   - The first hour of a new platform port: build against this, confirm the emulator runs

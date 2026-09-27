@@ -5,7 +5,9 @@ import core.Runtime;
 import gpu.Gpu;
 import mem.Memory;
 import shim.Backend;
+import shim.Bulk;
 import shim.MemA;
+import shim.RawBuf;
 
 /**
 	The DMA controller — and, for a PlayStation game, the thing that actually draws.
@@ -195,6 +197,24 @@ class Dma {
 					runaway();
 					return;
 				} else {}
+				// An untouched stretch links each entry to its neighbour: the word below in a table
+				// ClearOTagR or DMA6 built, the word above in one ClearOTag built. Entering a cache
+				// line at its first word in that direction, the walk takes whole lines while they
+				// are untouched (runDown, runUp) and lands where the single steps would have: on the
+				// last node taken, its header the link to the word beyond.
+				if (((addr + 4) & 24) == 0) {
+					if ((addr & 4) != 0 && header == addr - 4) {
+						final n = runDown(ram, addr, 0x10000 - guard);
+						addr -= n << 2;
+						header = addr - 4;
+						guard += n;
+					} else if ((addr & 4) == 0 && header == addr + 4) {
+						final n = runUp(ram, addr, 0x10000 - guard);
+						addr += n << 2;
+						header = addr + 4;
+						guard += n;
+					} else {}
+				} else {}
 			}
 			final count = (header >>> 24) & 0xFF;
 			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
@@ -222,6 +242,72 @@ class Dma {
 		madr[CH_GPU] = 0xFFFFFF;
 	}
 
+	/**
+		How many nodes past `top` — a line's top word, which links to the word below it — the walk
+		takes while each links to the word below: whole lines, and at most `budget` nodes (the
+		guard's room). Each line is checked with eight loads that do not wait on one another,
+		where following the links waits on each, and the line two below is asked for ahead: a
+		hint, and on a console the difference between waiting on RAM once a line and not at all.
+	**/
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	static function runDown(ram:RawBuf, top:Int, budget:Int):Int {
+		var n = -1;                           // the node at `top` is already taken
+		var t = top;
+		while (n + 8 <= budget && t >= 0 && lineDown(ram, t)) {
+			n += 8;
+			t -= 32;
+		}
+		return n < 0 ? 0 : n;
+	}
+
+	/** `runDown` for a table linked upwards, from `bottom`, a line's bottom word. */
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	static function runUp(ram:RawBuf, bottom:Int, budget:Int):Int {
+		var n = -1;
+		var b = bottom;
+		while (n + 8 <= budget && b <= 0x1FFFE0 && lineUp(ram, b)) {
+			n += 8;
+			b += 32;
+		}
+		return n < 0 ? 0 : n;
+	}
+
+	/** Whether the line whose top word is at `t` holds eight entries, each linking to the word
+	    below it. */
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	static function lineDown(ram:RawBuf, t:Int):Bool {
+		Bulk.prefetch(ram, (t - 64) & 0x1FFFFC);
+		final e = t - 4;
+		return ((MemA.get32(ram, t) ^ e)
+			| (MemA.get32(ram, t - 4) ^ (e - 4))
+			| (MemA.get32(ram, t - 8) ^ (e - 8))
+			| (MemA.get32(ram, t - 12) ^ (e - 12))
+			| (MemA.get32(ram, t - 16) ^ (e - 16))
+			| (MemA.get32(ram, t - 20) ^ (e - 20))
+			| (MemA.get32(ram, t - 24) ^ (e - 24))
+			| (MemA.get32(ram, t - 28) ^ (e - 28))) == 0;
+	}
+
+	/** Whether the line whose bottom word is at `b` holds eight entries, each linking to the word
+	    above it. */
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	static function lineUp(ram:RawBuf, b:Int):Bool {
+		Bulk.prefetch(ram, (b + 64) & 0x1FFFFC);
+		final e = b + 4;
+		return ((MemA.get32(ram, b) ^ e)
+			| (MemA.get32(ram, b + 4) ^ (e + 4))
+			| (MemA.get32(ram, b + 8) ^ (e + 8))
+			| (MemA.get32(ram, b + 12) ^ (e + 12))
+			| (MemA.get32(ram, b + 16) ^ (e + 16))
+			| (MemA.get32(ram, b + 20) ^ (e + 20))
+			| (MemA.get32(ram, b + 24) ^ (e + 24))
+			| (MemA.get32(ram, b + 28) ^ (e + 28))) == 0;
+	}
+
 	static function runaway():Void {
 		Runtime.reportOnce(0x6B000000, "DMA list walked 65536 nodes without ending");
 	}
@@ -236,9 +322,18 @@ class Dma {
 		if ((chcr[CH_GPU] & 1) == 0) return notReadable();
 		else {}
 		final ram = Memory.ram();
-		for (i in 0...total) {
-			inline Gpu.writeGp0(MemA.get32(ram, addr & 0x1FFFFC));   // as walkList
-			addr += 4;
+		var i = 0;
+		while (i < total) {
+			// An upload's words go to VRAM a row at a time (Gpu.uploadRun); the rest, commands.
+			final used = Gpu.uploading() ? Gpu.uploadRun(ram, addr, total - i) : 0;
+			if (used > 0) {
+				addr += used << 2;
+				i += used;
+			} else {
+				inline Gpu.writeGp0(MemA.get32(ram, addr & 0x1FFFFC));   // as walkList
+				addr += 4;
+				i++;
+			}
 		}
 		wordsToGpu += total;
 		madr[CH_GPU] = addr & 0xFFFFFF;
@@ -269,9 +364,16 @@ class Dma {
 			: size * (blocks == 0 ? 1 : blocks);
 		final step = (chcr[CH_CDROM] & 2) != 0 ? -4 : 4;
 		var addr = madr[CH_CDROM] & 0x1FFFFC;
-		for (i in 0...total) {
-			Memory.write32(addr, cd.Cdrom.dmaWord());
-			addr += step;
+		// Forwards and inside RAM, which is every read a game makes: the sector in one copy
+		// (Cdrom.dmaCopy stores what that many dmaWord calls would). Otherwise word by word.
+		if (step == 4 && addr + (total << 2) <= 0x200000) {
+			cd.Cdrom.dmaCopy(Memory.ram(), addr, total);
+			addr += total << 2;
+		} else {
+			for (i in 0...total) {
+				Memory.write32(addr, cd.Cdrom.dmaWord());
+				addr += step;
+			}
 		}
 		wordsFromCd += total;
 		// Whatever was compiled for these addresses is no longer what is there. The disc is how a
@@ -314,9 +416,16 @@ class Dma {
 		if ((chcr[CH_SPU] & 1) == 0) return spuNotReadable();
 		else {}
 		var addr = madr[CH_SPU] & 0x1FFFFC;
-		for (i in 0...total) {
-			spu.Spu.dmaWord(Memory.read32(addr));
-			addr += 4;
+		// Inside RAM, the block in runs (Spu.dmaCopy, wrapping at the end of sound RAM as
+		// pushHalfword does); a block reaching past RAM's end, word by word.
+		if (addr + (total << 2) <= 0x200000) {
+			spu.Spu.dmaCopy(Memory.ram(), addr, total);
+			addr += total << 2;
+		} else {
+			for (i in 0...total) {
+				spu.Spu.dmaWord(Memory.read32(addr));
+				addr += 4;
+			}
 		}
 		wordsToSpu += total;
 		madr[CH_SPU] = addr & 0xFFFFFF;
@@ -357,10 +466,21 @@ class Dma {
 		final count = bcr[CH_OTC] & 0xFFFF;
 		final n = count == 0 ? 0x10000 : count;
 		var addr = madr[CH_OTC] & 0x1FFFFC;
-		for (i in 0...n) {
-			// Every entry points at the one below it; the last one ends the list.
-			Memory.write32(addr, i == n - 1 ? 0x00FFFFFF : ((addr - 4) & 0xFFFFFF));
-			addr -= 4;
+		// A table that stays inside RAM is stored directly — what Memory.write32 would do there,
+		// without asking which region each word is in. One running below RAM's first word goes
+		// through the memory map, as it always did.
+		if (addr - ((n - 1) << 2) >= 0) {
+			final ram = Memory.ram();
+			for (i in 0...n) {
+				MemA.set32(ram, addr, i == n - 1 ? 0x00FFFFFF : ((addr - 4) & 0xFFFFFF));
+				addr -= 4;
+			}
+		} else {
+			for (i in 0...n) {
+				// Every entry points at the one below it; the last one ends the list.
+				Memory.write32(addr, i == n - 1 ? 0x00FFFFFF : ((addr - 4) & 0xFFFFFF));
+				addr -= 4;
+			}
 		}
 		tablesCleared++;
 		madr[CH_OTC] = addr & 0xFFFFFF;

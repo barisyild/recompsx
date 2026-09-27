@@ -1355,6 +1355,35 @@ class Spu {
 		pushHalfword((v >>> 16) & 0xFFFF);
 	}
 
+	/**
+		`words` words from `src` at byte offset `off`, as that many dmaWord calls would push them:
+		halfwords in RAM's order from the transfer address on, wrapping at the end of sound RAM,
+		counted and marked dirty the same. A run at a time instead of a halfword.
+	**/
+	public static function dmaCopy(src:RawBuf, off:Int, words:Int):Void {
+		var bytes = words << 2;
+		var s = off;
+		while (bytes > 0) {
+			final a = transferAddr & (RAM_BYTES - 2);
+			final room = RAM_BYTES - a;
+			final n = bytes < room ? bytes : room;
+			shim.Bulk.copy(ram, a, src, s, n);
+			written = (written + (n >> 1)) | 0;
+			if (voicesToBackend) markDirty(a, a + n);
+			else {}
+			transferAddr = (a + n) & (RAM_BYTES - 1);
+			s += n;
+			bytes -= n;
+		}
+	}
+
+	static inline function markDirty(lo:Int, hi:Int):Void {
+		if (lo < dirtyLo) dirtyLo = lo;
+		else {}
+		if (hi > dirtyHi) dirtyHi = hi;
+		else {}
+	}
+
 	static function store16(addr:Int, v:Int):Void {
 		final a = addr & (RAM_BYTES - 2);
 		RawMem.set8(ram, a, v & 0xFF);

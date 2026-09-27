@@ -6,9 +6,9 @@ console target matrix.
 The runtime is platform-agnostic. Everything platform-specific lives behind two seams:
 
 1. **`backend_c_api.h`** — a flat C ABI implemented once per platform, outside Haxe.
-2. **`src/shims/<target>/`** — `RawMem` (raw memory + byte order), `I64`, and the externs that
-   bind the C ABI. This is where target-specific Haxe lives; the runtime never has `#if` for a
-   platform.
+2. **`src/shims/<target>/`** — `RawMem` (raw memory + byte order), `Bulk` (whole runs of it),
+   `I64`, and the externs that bind the C ABI. This is where target-specific Haxe lives; the
+   runtime never has `#if` for a platform.
 
 ## 0. Target matrix
 
@@ -250,6 +250,13 @@ class RawMem {
 
 On big-endian targets, `u16Ptr` returns a pointer into a swizzled staging copy maintained by the
 shim — the documented byteswap seam. Backends never see it.
+
+`shim.Bulk` moves whole runs (ADR-0032): `copy` (memmove, offsets in bytes), `equal`, `fill16` and
+`prefetch`, with the same static API on every target. The C++ half is a header-only class over
+`native/recompsx_bulk.h`, which picks the machine's best routine — sh4zam on the Dreamcast
+(ADR-0031), the C library or a compiler builtin elsewhere. JavaScript uses `copyWithin` within a
+buffer and typed-array loops between two, never a view per call. The runtime calls it only where
+a run is provably what the per-element code would do, and keeps that code for the rest.
 
 ## 5. Portable-subset rules ("core discipline")
 
