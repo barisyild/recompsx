@@ -3,10 +3,10 @@ package core;
 /**
 	The R3000A's register file, as ordinary fields.
 
-	This is the shared register state at guest calls, returns and scheduler safe points. The
-	optimized emitter keeps a function's working registers in Haxe locals and synchronises them
-	here at those boundaries (ADR-0007). Named fields avoid runtime register indexing; locals
-	also let the host compiler propagate values without aliasing through this shared object.
+	Generated code reads and writes these fields in place (ADR-0029), so what a call or a trap
+	sees is always the machine's state; only a looping leaf — a function that calls nothing and
+	traps nowhere — keeps copies in locals, which it publishes at its exits and due pumps. Named
+	fields avoid runtime register indexing.
 
 	`$zero` has no field. It reads as the literal 0 and writes to it are dropped, both decided at
 	build time by the emitter, so the most-used register in the instruction set costs nothing at

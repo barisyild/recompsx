@@ -4,6 +4,7 @@ import recomp.Vaddr;
 import recomp.analysis.Discovery;
 import recomp.analysis.Func;
 import recomp.analysis.Image;
+import recomp.ir.Effect;
 import recomp.ir.FunctionIR;
 import recomp.codegen.RegionPlan.Region;
 import recomp.mips.Disasm;
@@ -15,8 +16,11 @@ import recomp.codegen.IdleLoopPlan;
 /**
 	Turns analysed MIPS into Haxe.
 
-	Registers become scalar Haxe locals, giving the Haxe analyzer ordinary values to propagate
-	and eliminate. CpuState is synchronised at calls, returns and scheduler safe points. Linear
+	Guest registers are CpuState's fields, read and written in place, so the state a call, a
+	return, a pump or a trap sees is always the machine's own, and nothing is copied at those
+	boundaries (ADR-0029, which replaced ADR-0007's scalar locals). A looping leaf — no guest
+	call, trap or unknown instruction — keeps them in locals instead, where no copy can go stale.
+	Linear
 	CFGs become sequences, natural loops with one exit become native `while` loops, and
 	single-entry regions inside other CFGs become sequences and choices. Remaining control flow
 	uses a region/block dispatcher. Every guest block stays addressable without duplicating its
@@ -37,15 +41,14 @@ import recomp.codegen.IdleLoopPlan;
 	transfer — which preserves the semantics even when the slot writes a register the condition
 	read. For a `jal` the same ordering applies to the link register.
 
-	`optimize=false` keeps context fields and the block dispatcher as a differential reference.
-	`structureRegions=false` isolates the scalar-register/simple-loop baseline.
+	`optimize=false` keeps the block dispatcher, and no fusion, forwarding or idle skip, as a
+	differential reference. `structureRegions=false` isolates the simple-loop baseline.
 **/
 class Emitter {
 	final image:Image;
 	final discovery:Discovery;
 	final optimize:Bool;
 	final structureRegions:Bool;
-	var registers:Null<RegisterPlan>;
 	var ir:FunctionIR;
 	var functionAddr:Int;
 	/** Program substitutes a pinned handle after body deduplication; fixtures use addresses. */
@@ -74,6 +77,10 @@ class Emitter {
 	var inRegions:Bool = false;
 	// Loops proved idle (IdleLoopPlan), by header address: the header emits the skip prologue.
 	var idlePlans:Map<Int, IdleLoopPlan> = [];
+	// A leaf's registers, held in locals (null: every register is a CpuState field), and which of
+	// them it writes, which is what it publishes.
+	var leafUsed:Null<Array<Int>> = null;
+	var leafWritten:Array<Int> = [];
 	// While the idle prologue evaluates a dry turn, the registers it writes are these locals.
 	var shadow:Null<Map<Int, String>> = null;
 
@@ -139,9 +146,9 @@ class Emitter {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
 		ir = new FunctionIR(fn, image);
+		leafUsed = optimize ? leafRegisters(ir) : null;
 		functionAddr = fn.entry;
 		entryRaLocal = fn.checkedReturns.keys().hasNext();
-		registers = optimize ? new RegisterPlan(ir) : null;
 		nativeLoop = null;
 		linearNext = null;
 		capturedBranch = null;
@@ -187,7 +194,7 @@ class Emitter {
 		buf.add('\t\t} else {}\n\t\t#else\n');
 		buf.add(PUMP_ENTRY);
 		buf.add('\t\t#end\n');
-		if (registers != null) registers.declare(buf, '\t\t');
+		if (leafUsed != null) for (r in leafUsed) buf.add('\t\tvar ${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
 
 		// Even a one-block CFG needs a loop if it has an edge to itself.
 		final flat = blockAddrs.length == 1 && fn.blocks.get(blockAddrs[0]).successors.length == 0;
@@ -382,17 +389,55 @@ class Emitter {
 	/** A conditional single-block loop, with one distinct exit. Other CFGs keep the dispatcher. */
 	function selfLoopExit(fn:Func, addr:Int):Null<Int> return ir.byAddress.get(addr).selfLoopExit();
 
+	/**
+		Which registers a leaf keeps in locals, or null when the function is not one.
+
+		A leaf makes no guest call, no trap and nothing unknown, so the only things that run while
+		its locals are live are the runtime's helpers, which touch no general register, and due
+		pumps, whose callbacks give the interrupted registers back as they found them: its copies
+		cannot go stale, which is what made locals unsound elsewhere (ADR-0029). They are declared
+		at entry (every entry, interior ones too), published at every way out — return, tail
+		transfer, due pump, suspension — and read again after a due pump. On the SH-4 a leaf's
+		loop keeps its values in machine registers across the stores and helper calls that make a
+		CpuState field a load again.
+	**/
+	function leafRegisters(ir:FunctionIR):Null<Array<Int>> {
+		var used:recomp.ir.RegisterMask = 0;
+		var written:recomp.ir.RegisterMask = 0;
+		var loops = false;
+		for (block in ir.blocks) {
+			for (i in block.instructions) {
+				if (i.effects.has(Effect.CALL) || i.effects.has(Effect.TRAP) || i.effects.has(Effect.UNKNOWN))
+					return null;
+				used |= i.reads | i.writes;
+				written |= i.writes;
+			}
+			for (s in block.successors) if (s <= block.addr) loops = true;
+		}
+		final regs = [for (r in 1...32) if (used.has(r)) r];
+		if (!loops || regs.length > LEAF_LOCALS_MAX) return null;
+		leafWritten = [for (r in 1...32) if (written.has(r)) r];
+		return regs;
+	}
+
+	/**
+		Locals only pay in a loop, and only while they fit. Measured on the Dreamcast, leaf by
+		leaf, fields against locals: the loops of Crash Bash's two hottest leaves (16 and 17
+		registers, GTE commands in the loop) ran 11 % and 13 % faster with locals, one of 22
+		registers the same; Crash Bandicoot: Warped's loopless leaves (17 and 20 registers) and a
+		29-register loop 5-35 % slower — a loopless leaf copies its registers in and out on every
+		call, and past the host's registers the locals spill to the stack anyway.
+	**/
+	static inline final LEAF_LOCALS_MAX = 20;
+
+	/** A leaf's written registers back to CpuState, before anything outside it can look. */
 	function publish(buf:StringBuf, ind:String):Void {
-		if (registers != null) registers.publish(buf, ind);
+		if (leafUsed != null) for (r in leafWritten) buf.add('${ind}ctx.${Instr.regName(r)} = ${Instr.regName(r)};\n');
 	}
 
-	function reload(buf:StringBuf, ind:String):Void {
-		if (registers != null) registers.reload(buf, ind);
-	}
-
-	function reloadContinuation(buf:StringBuf, ind:String, entry:Int):Void {
-		if (registers != null && entry >= 0 && entry < ir.blocks.length)
-			registers.reloadContinuation(buf, ind, ir.blocks[entry].addr);
+	/** A leaf's locals read again, after a due pump. */
+	function reloadLeaf(buf:StringBuf, ind:String):Void {
+		if (leafUsed != null) for (r in leafUsed) buf.add('${ind}${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
 	}
 
 	function emitReturn(buf:StringBuf, ind:String):Void {
@@ -428,14 +473,14 @@ class Emitter {
 		buf.add('${ind}if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n');
 		publish(buf, ind + '\t');
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
-		// A nonlocal jump has already restored CpuState: never publish stale locals over it.
+		// A nonlocal jump has already restored CpuState: never publish a leaf's locals over it.
 		buf.add(ind + '\t' + unwindLine(NO_CONTINUATION) + '\n');
-		if (registers != null) registers.reloadBlock(buf, ind + '\t', ir.blocks[entry].addr);
+		reloadLeaf(buf, ind + '\t');
 		buf.add(ind + '} else {}\n');
 	}
 
 	/**
-		The function-entry pump check, before register locals have been loaded.
+		The function-entry pump check.
 
 		`| 0` is not decoration. The comparison is a subtraction so that it stays correct when the
 		cycle counter passes 2^31, and that only works if the subtraction wraps — which C++ does
@@ -796,11 +841,9 @@ class Emitter {
 				if (instr.rd != 0) buf.add('${ind}${reg(instr.rd)} = ${pcExpr(retAddr)};\n');
 				emitSlot();
 				bump();
-				publish(buf, ind);
 				buf.add('${ind}ctx.pc = $t;\n');
 				buf.add('${ind}$dynamicCall(ctx, $t);\n');
 				emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
-				reloadContinuation(buf, ind, continuation);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case J:
@@ -870,6 +913,7 @@ class Emitter {
 	function emitCall(buf:StringBuf, ind:String, target:Int, resumes:Bool = true):Void {
 		final t = Vaddr.canonRam(target);
 		final cls = staticTargetOf(t);
+		// Only a tail call reaches here from a leaf, and it leaves: publish, never reload.
 		publish(buf, ind);
 		if (cls != null) {
 			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
@@ -887,7 +931,6 @@ class Emitter {
 		// A tail call's callee returns to our caller: this frame is no one's continuation.
 		emitCallUnwind(buf, ind, resumes ? continuation : -1,
 			resumes ? pcExpr(callReturnAddr) : NO_CONTINUATION);
-		if (resumes) reloadContinuation(buf, ind, continuation);
 	}
 
 	/** After a call: `entry` is the block it resumes at, `cont` the guest address it returns to. */
@@ -978,15 +1021,9 @@ class Emitter {
 	function emitSimple(buf:StringBuf, ind:String, i:Instr, slot:Bool = false,
 			afterBlock:Null<Int> = null, afterIndex:Int = -1):Void {
 		final barrier = i.op == Op.SYSCALL || i.op == Op.BREAK;
-		if (barrier) publish(buf, ind);
 		final line = simple(i, afterBlock, afterIndex);
 		if (line != "") buf.add(ind + line + (slot ? '   // delay slot' : '') + '\n');
-		if (barrier) {
-			buf.add(ind + unwindLine(NO_CONTINUATION) + '\n');
-			if (registers != null && afterBlock != null)
-				registers.reloadAfter(buf, ind, afterBlock, afterIndex);
-			else reload(buf, ind);
-		}
+		if (barrier) buf.add(ind + unwindLine(NO_CONTINUATION) + '\n');
 	}
 
 	/** The Haxe statement for one non-branching instruction, or "" for a nop. */
@@ -1161,10 +1198,9 @@ class Emitter {
 		return '${reg(dest)} = ' + (wraps ? '($expr) | 0;' : '$expr;');
 	}
 
-	/** Drop a pure GPR write when CFG liveness proves no later guest observation. */
+	/** A pure GPR write. Every one is emitted: a register is machine state, and the next frame,
+	    pump or trap may read it (ADR-0029). */
 	function pureAssign(dest:Int, expr:String, wraps:Bool, block:Null<Int>, index:Int):String {
-		if (dest != 0 && registers != null && block != null && registers.canDropPureWrite(block)
-			&& !registers.liveAfter(block, index, dest)) return "";
 		return assign(dest, expr, wraps);
 	}
 
@@ -1192,7 +1228,7 @@ class Emitter {
 	    register the idle prologue shadows is its shadow local while the dry turn is emitted. */
 	inline function reg(n:Int):String
 		return n == 0 ? "0" : (shadow != null && shadow.exists(n) ? shadow.get(n)
-			: (registers != null && registers.used.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n));
+			: (leafUsed != null && leafUsed.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n));
 
 	static function hex(v:Int):String {
 		final digits = "0123456789abcdef";

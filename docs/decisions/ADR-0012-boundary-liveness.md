@@ -1,5 +1,5 @@
 # ADR-0012: Boundary-aware register liveness
-Status: accepted   Date: 2026-09-21
+Status: superseded-by-0029   Date: 2026-09-21
 
 ## Context
 

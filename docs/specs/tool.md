@@ -234,18 +234,16 @@ and keep the one that identifies the most functions consistently.
   `div rs,0 → hi=rs, lo=(rs>=0?-1:1)`; `div 0x80000000,-1 → hi=0, lo=0x80000000` (C++ UB —
   special-cased); `divu rs,0 → hi=rs, lo=0xFFFFFFFF`);
   `Gte.execute/getData/setData/getCtrl/setCtrl`.
-- **Register lowering**: `RegisterPlan` identifies used/written GPRs. Used registers become
-  Haxe locals, written registers are published before calls, returns and due pumps; all used
-  locals are reloaded after a returning call/pump. A backwards CFG liveness pass narrows those
-  reloads to values needed by the continuation, while function exits keep every written
-  architectural register observable for callbacks and cooperative suspension. An unwind returns
-  before any stale local can overwrite restored state. Memory, HI/LO and coprocessor helpers
-  retain their existing ABI. `RegisterMask` and `Effect` are allocation-free `Int` abstractions
-  in the build-time tool; the generated runtime remains scalar fields and plain `Int`s.
-  CFG liveness also removes dead pure GPR writes outside the reverse slice that reaches a pump,
-  call, trap or external transfer (ADR-0017). The Haxe analyzer can then propagate remaining
-  constants/copies without being forced to preserve overwritten locals; publication paths retain
-  their full architectural visibility.
+- **Registers**: generated code reads and writes guest GPRs as `CpuState` fields (`ctx.v0`), in
+  place (ADR-0029), so nothing is copied at calls, returns, traps, cooperative suspension or
+  unwinds and every boundary sees the machine's own state. A looping leaf — no guest call, trap or
+  unknown instruction, a loop, at most 20 registers — keeps them in locals, declared at every
+  entry, published at every way out and read again after a due pump; nothing can change them
+  under it. Every register write is made. (The locals of ADR-0007, with ADR-0012's boundary liveness and
+  ADR-0017's dead-write elimination, were replaced: publishing a copy that a callee had since
+  changed ran Crash Bandicoot: Warped differently from vblank 9898, and on the SH-4 the copying
+  cost more than it saved.) `RegisterMask` and `Effect` remain allocation-free `Int`
+  abstractions in the build-time tool.
 - **Pattern fusion**: `PatternMatcher` runs on adjacent instructions in a basic-block body before
   emission. It currently folds `lui → ori/addiu` into one constant assignment and routes
   `mult/multu/div/divu → mflo/mfhi` through fused `Ops` result helpers. HI:LO side effects remain
@@ -288,17 +286,16 @@ and keep the one that identifies the most functions consistently.
   or enter an arm, while ordinary internal transfers fall through. A fully reduced returning
   function needs no dispatcher. Irreducible edges and checked computed targets retain their
   fallback; no block body is duplicated. `--no-regions` disables only these reductions, while
-  `--no-opt` also disables scalar registers and simple-loop/linear structuring.
+  `--no-opt` also disables simple-loop/linear structuring, fusion, forwarding and idle skips.
 - **Cycles & pump**: loads (`lb/lbu/lh/lhu/lw/lwl/lwr/lwc2`) cost 7 cycles; other
   instructions cost 1, restoring the committed bus-cost model in `Op.cost`. This remains a
   coarse model: address-specific wait states and instruction-cache timing are not simulated.
   `ctx.cycles = (ctx.cycles + N) | 0` is emitted immediately
   before every control transfer. Instructions removed from host code still count. Function
   entry and every target of an address-backward CFG edge carry a wrap-safe pump check, including
-  recovered switch edges. Register publish/reload is on the due-event path, outside the common
-  loop path. Halt/unwind tokens return immediately after the pump (ADR-0007).
+  recovered switch edges. Halt/unwind tokens return immediately after the pump (ADR-0007).
 - **Optional cooperative execution** (`-D recompsx_cooperative`, ADR-0010): check suspension
-  before each existing safe-point pump. Publish registers and capture the compiled body handle,
+  before each existing safe-point pump. Capture the compiled body handle,
   stable block entry and pending-entry-pump flag. After calls, retain the continuation after
   the call/slot, with no instruction replay. The generated launcher binds `FnTable.dispatch`
   for handle-based resumption, preserving active code identity across overlay changes. The
@@ -345,10 +342,10 @@ array, could analysis recover *variables* — infer that a given address holds a
 field and emit a real Haxe variable for it? That is decompilation rather than recompilation, and
 the distinction decides what this project can promise.
 
-**Most accesses already avoid memory.** GPRs are Haxe locals while a generated function runs,
-with named `CpuState` fields holding shared state at synchronization boundaries (ADR-0007).
-Compiled MIPS keeps locals, parameters and loop counters in registers, so the bulk
-of a function's data traffic is plain variable access with no array indexing at all. The flat
+**Most accesses already avoid memory.** GPRs are named `CpuState` fields (ADR-0029), which the
+host compiler addresses directly and keeps in machine registers where it can. Compiled MIPS keeps
+locals, parameters and loop counters in registers, so the bulk of a function's data traffic is
+plain field access with no array indexing and no address decoding at all. The flat
 array carries what genuinely lives in memory: the stack, globals, heap, and anything the hardware
 touches.
 

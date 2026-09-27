@@ -57,8 +57,9 @@ RUN TIME (portable subset: reflaxe.CPP C++17 now, JVM later)
 - **No instruction fetch.** Each MIPS function becomes a static Haxe function
   `(ctx:CpuState)->Void`. `jal` to a known target is a direct static call;
   `jr $ra` is a return; indirect calls go through a generated address→function table.
-- **Scalar registers and structured regions** (ADR-0007): registers are Haxe locals, published
-  to `CpuState` before guest/kernel calls and due scheduler pumps, and reloaded afterwards.
+- **Registers in CpuState, structured regions** (ADR-0029, ADR-0007): registers are `CpuState`
+  fields, read and written in place, so no call or trap copies anything; a looping leaf (no guest
+  call or trap) keeps them in locals, published at its exits and due pumps.
   Linear chains use Haxe fallthrough and single-block loops use native `while`; remaining CFGs
   use `while (true) switch (bb)`. Every block retains its stable resume index, with one body.
 - **Branch delay slots** are resolved at build time: latch the condition/target, write any link,

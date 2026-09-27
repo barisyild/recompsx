@@ -1,5 +1,5 @@
 # ADR-0007: Scalar registers and structured code generation
-Status: accepted   Date: 2026-09-08
+Status: accepted; its register lowering superseded-by-0029   Date: 2026-09-08
 
 ## Context
 

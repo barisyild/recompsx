@@ -185,6 +185,12 @@ class Codegen {
 		else CodegenReference.nonlocalReturn(ctx);
 	}
 
+	static function runStaleAcrossCalls(ctx:CpuState, opt:Bool):Void {
+		reset(ctx);
+		if (opt) CodegenOptimized.staleAcrossCalls(ctx);
+		else CodegenReference.staleAcrossCalls(ctx);
+	}
+
 	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
 		reset(ctx);
 		if (opt) CodegenOptimized.deadWrites(ctx);
@@ -284,6 +290,11 @@ class Codegen {
 		Conf.expect("stack forwarded load", b.t2, 22);
 		Conf.expect("stack load after sp change", b.t3, 22);
 		Conf.expect("stack reload after sp restore", b.t4, 22);
+		runStaleAcrossCalls(a, false);
+		runStaleAcrossCalls(b, true);
+		compare(a, b);
+		Conf.expect("a callee sees the register the previous callee left", b.v0, 7);
+		Conf.expect("the caller's own later write", b.v1, 9);
 		runDeadWrites(a, false);
 		runDeadWrites(b, true);
 		compare(a, b);

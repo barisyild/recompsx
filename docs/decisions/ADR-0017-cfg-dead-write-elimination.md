@@ -1,5 +1,5 @@
 # ADR-0017: Eliminate dead pure register writes with CFG liveness
-Status: accepted  Date: 2026-09-22
+Status: superseded-by-0029  Date: 2026-09-22
 
 ## Context
 

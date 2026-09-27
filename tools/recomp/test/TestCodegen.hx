@@ -181,8 +181,17 @@ class TestCodegen {
 			imm(0x23, 31, 6, 100), JR, imm(9, 3, 3, 1000), 0, 0, 0, 0, 0, 0, 0, 0, 0,
 			imm(5, 0, 5, 4), 0, imm(0x23, 31, 6, 100), JR, imm(9, 2, 0, 7),
 			JR, imm(9, 2, 0, 3)]);
+		// A register the caller wrote, a callee changed and the caller never reads again reaches
+		// the next callee as that callee left it: g1 sets v1 = 7 and g2 copies v1 into v0. The
+		// caller redefines v1 after both calls, so its own copy is dead after the first one.
+		final sc = next;
+		final stale = add("staleAcrossCalls", [imm(9, 3, 0, 5), jal(sc + 32), 0, jal(sc + 40), 0,
+			imm(9, 3, 0, 9), JR, 0,
+			JR, imm(9, 3, 0, 7),
+			JR, alu(0x21, 2, 3, 0)]);
 		if (check) {
-			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0 =') >= 0, "register representation");
+			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0') >= 0, "a leaf keeps its registers in locals when optimizing");
+			Assert.isTrue(stale.indexOf('var v1') < 0 && stale.indexOf('ctx.v1 = 5;') >= 0, "a function that calls keeps them in CpuState");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
 			Assert.isTrue(loop.indexOf('ctx.cycles = (ctx.cycles +') >= 0, "cycles wrap on both targets");
 			Assert.equals(fused.indexOf('Ops.multLo(ctx') >= 0, opt, "fused signed multiply low");
@@ -194,10 +203,10 @@ class TestCodegen {
 			Assert.equals(fused.indexOf('Ops.divuLo(ctx') >= 0, opt, "fused unsigned divide low");
 			Assert.equals(fused.indexOf('Ops.divuHi(ctx') >= 0, opt, "fused unsigned divide high");
 			Assert.equals(fused.indexOf('t6 = 0x12345678;') >= 0, opt, "fused constant formation");
-			Assert.equals(stack.indexOf('t2 = t1;') >= 0, opt, "stack load forwarding");
+			Assert.equals(stack.indexOf('ctx.t2 = ctx.t1;') >= 0 || stack.indexOf('\tt2 = t1;') >= 0, opt, "stack load forwarding");
 			Assert.equals(stack.indexOf('Memory.write32(ctx.sp & 0x1FFFFFFF, ctx.t0);') >= 0, !opt,
 				"superseded stack store shape");
-			Assert.equals(dead.indexOf('t0 = 1;') >= 0, !opt, "dead pure write elimination");
+			Assert.isTrue(dead.indexOf('t0 = 1;') >= 0, "a dead write is still made: a register is machine state");
 			Assert.equals(multi.indexOf('while (true) {') >= 0, opt, "multi-block loop is a native loop");
 			Assert.equals(multi.indexOf('switch (bb)') < 0, opt, "multi-block loop needs no dispatcher");
 			Assert.equals(multi.indexOf('; break;') >= 0, opt, "loop exit records its target and breaks");

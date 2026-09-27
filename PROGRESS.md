@@ -2,6 +2,24 @@
 
 ## Status snapshot
 
+**2026-09-27: Guest registers live in CpuState (ADR-0029) — a stale-register bug fixed, Crash 3 ~65 %.**
+Generated code kept each function's registers in locals, published every register it wrote before
+a call and reloaded only those the continuation read (ADR-0007/0012). A register written, then
+changed by a callee and never read again, was published stale before the next call: Crash 3's
+f_80049774 returns a pointer in $v1, its caller at 0x800495c8 reloads only $sp and publishes its
+old $v1 before the jalr to f_8004aa94, and from vblank 9898 the game ran differently (RAM hash
+differs there). JS and C++ agreed, running the same code. Found by generating the program with
+registers as `ctx` fields (to cut the copies the SH-4 paid at every boundary: 31 M register moves
+per 300 vblanks) and bisecting the digest to the first differing call. Now registers are CpuState
+fields, read and written in place; a looping leaf (no guest call or trap, a loop, <= 20 registers)
+keeps locals, which cannot go stale there. RegisterPlan and dead-write elimination are gone.
+Flycast M cycles, before / fields everywhere / locals in every leaf / now: Crash 3 1645.0 /
+1535.3 / 1564.8 / **1537.7**, Crash Bash 6227.7 / 6282.8 / 6193.0 / **6174.2**. DC images Crash 3
+11.60 -> 10.60 MB, Crash Bash 9.46 -> 9.53 MB; JS bundles 15.5 -> 11.8 and 11.4 -> 9.6 MB at the
+same speed. New reference digest: Crash 3 20,000 frames `a3419ae4` (9,000 `2c8bc61d`, Crash Bash
+`2ff36a18` / `288ed8d6` unchanged), JS = desktop C++. Codegen conformance gains staleAcrossCalls
+(v0 = 5 before, 7 now): `c6ccf6ad`, Regions/Yielding unchanged, both targets; 438 tool checks.
+
 **2026-09-27: Guest RAM and scratchpad accesses inline on C++ — Crash 3 on Dreamcast ~57 % -> ~61 %.**
 `Memory.read32`/`write32` were 11.5 % of Crash 3's window as calls. `mem.Access` (header-only,
 `@:cppInline`, `always_inline`) is now the RAM and scratchpad paths at every call site on C++;
@@ -1300,6 +1318,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Registers as CpuState fields (ADR-0029), locals only in looping leaves: fixes a
+stale-register publish (Crash 3 diverged from vblank 9898; digest 20,000 now a3419ae4); Crash 3
+1645.0 -> 1537.7 M, Crash Bash 6227.7 -> 6174.2. History cleaned of .claude and LAN IPs, force
+pushed. Next: GTE register file as one array (measuring), GPU path.
 
 2026-09-27 [claude] Guest memory: RAM + scratchpad inline on C++ via mem.Access, ports noinline;
 Crash 3 1741.8 -> 1645.0 M (~61 %), Crash Bash neutral (6227.7), DC images +1.5 / +1.0 MB. Web page

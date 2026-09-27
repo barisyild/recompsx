@@ -101,8 +101,8 @@ usage:
       Emit a recompiled program. Given a config, the executable is read from the disc
       that game's gitignored local.json names, and its hints are used as seeds. Given a
       bare executable, seeds come from --seed.
-      --no-opt keeps context registers and block dispatch for differential testing.
-      --no-regions keeps scalar registers and simple loops but disables region reductions.
+      --no-opt keeps block dispatch, without fusion or forwarding, for differential testing.
+      --no-regions keeps simple loops but disables region reductions.
 
 exit codes: 0 ok · 2 usage · 3 could not load the input");
 	}
