@@ -2,6 +2,23 @@
 
 ## Status snapshot
 
+**2026-09-27: Guest RAM and scratchpad accesses inline on C++ — Crash 3 on Dreamcast ~57 % -> ~61 %.**
+`Memory.read32`/`write32` were 11.5 % of Crash 3's window as calls. `mem.Access` (header-only,
+`@:cppInline`, `always_inline`) is now the RAM and scratchpad paths at every call site on C++;
+`Memory`'s accessors forward to it, the ports stay out of line in `slowRead*`/`slowWrite*`
+(noinline), and JavaScript keeps one call per access (ADR-0013 revision). Counted on JS: Crash 3
+makes 7.1 M of 17.1 M accesses in vblanks 4700-5000 to the scratchpad (through a base register
+holding 1F800000h), Crash Bash 13.3 M of 64 M in 18800-20300 (its stack). Flycast, Crash 3, M
+cycles: 1741.8 -> 1811.5 (RAM inline only; GCC had inlined the port handlers into the out-of-line
+half, so every scratchpad access ran their prologue) -> 1749.9 (slow paths noinline) -> **1645.0**
+(scratchpad inline too) = 8.23 s per 5 s of game. Crash Bash 6233.1 -> 6227.7 (neutral: its
+memory time left is I/O polling). DC images 10.10 -> 11.60 MB and 8.44 -> 9.46 MB, ~30 bytes a
+site. Digests unchanged, JS = desktop C++: Crash 3 2c8bc61d / f05fb3ea, Crash Bash 2ff36a18 /
+288ed8d6; 23 JS conformance tests unchanged, C++ Mem/Codegen/Regions agree. Measured for what is
+next: the hottest generated functions are 13-20 SH-4 instructions per MIPS instruction, ~14 % of
+them arithmetic and ~40 % spills and CpuState traffic; 1.5 M guest calls per 300 vblanks move 31 M
+register values through CpuState (16.1 M flushes, 15.1 M reloads).
+
 **2026-09-27: Dreamcast renders Crash 3's fades, fruit and letterbox as the PlayStation does.**
 Reported on the Dreamcast image, the browser right: every transition a flat grey veil, the Wumpa
 fruit see-through, the picture twelve lines high with geometry across the black bars. Measured on
@@ -1283,6 +1300,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Guest memory: RAM + scratchpad inline on C++ via mem.Access, ports noinline;
+Crash 3 1741.8 -> 1645.0 M (~61 %), Crash Bash neutral (6227.7), DC images +1.5 / +1.0 MB. Web page
+runs silent without AudioContext; preview on 0.0.0.0. Next: guest registers in a memory register
+file on the SH-4 (ADR), and a JVM build, which needs function splitting (backend.md §6).
 
 2026-09-27 [claude] DC render fixes (user report): subtractive fades in three passes, per-texel STP
 at 8/15bpp, primitives placed from their displayed buffer and clipped to the drawing area, off-screen

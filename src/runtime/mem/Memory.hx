@@ -34,13 +34,13 @@ class Memory {
 	public static inline var RAM_SIZE = 0x200000;      // 2 MB
 	public static inline var RAM_MASK = 0x1FFFFF;
 	public static inline var SCRATCH_SIZE = 0x400;     // 1 KB of fast memory in the CPU
-	static inline var SCRATCH_BASE = 0x1F800000;
+	public static inline var SCRATCH_BASE = 0x1F800000;
 
 	// Keep RAM/non-RAM tag bits, remove only the two RAM-mirror bits.
 	// A decoded value is a RAM byte offset ONLY after the RAM_SIZE check.
 	// Keep p (not r) for every non-RAM path.
-	static inline var RAM_DECODE_MASK = 0x1F9FFFFF;
-	static inline var SCRATCH_MATCH_MASK = 0x1FFFFC00;
+	public static inline var RAM_DECODE_MASK = 0x1F9FFFFF;
+	public static inline var SCRATCH_MATCH_MASK = 0x1FFFFC00;
 
 	/** The hardware register page. 0x1F801000..0x1F803FFF, 12 KB of I/O plus expansion 2. */
 	static inline var IO_BASE = 0x1F801000;
@@ -87,80 +87,33 @@ class Memory {
 
 	// ---- reads ---------------------------------------------------------------------------------
 
-	public static function read8u(a:Int):Int {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		return r < RAM_SIZE ? RawMem.get8(ram(), r) : slowRead8(p);
-	}
+	/*
+		The accessors are `Access`, which C++ inlines at the call site: RAM and the scratchpad
+		there, the ports out of line in the `slow` functions below. These forward to it and cost
+		nothing on either target: Haxe inlines the one-liners, so a call site names `Access`.
 
-	public static function read8s(a:Int):Int {
-		return (read8u(a) << 24) >> 24;
-	}
+		The 16/32-bit paths go through MemA — the aligned accessors — not RawMem. Everything
+		arriving here is aligned by architecture: MIPS traps a misaligned lw/lh on real hardware,
+		and the kernel HLE's own structures are word-aligned by construction. Byte-offset walkers
+		(Iso9660 records) never come through Memory and keep RawMem's tolerant byte composition.
+	*/
+	public static inline function read8u(a:Int):Int return Access.read8u(a);
 
-	// The 16/32-bit fast paths go through MemA — the aligned accessors — not RawMem. Everything
-	// arriving here is aligned by architecture: MIPS traps a misaligned lw/lh on real hardware,
-	// and the kernel HLE's own structures are word-aligned by construction. Byte-offset walkers
-	// (Iso9660 records) never come through Memory and keep RawMem's tolerant byte composition.
-	public static function read16u(a:Int):Int {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		if (r < RAM_SIZE) return shim.MemA.get16(ram(), r);
-		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
-			return shim.MemA.get16(scratch(), p & (SCRATCH_SIZE - 1));
-		else return slowRead16(p);
-	}
+	public static inline function read8s(a:Int):Int return (Access.read8u(a) << 24) >> 24;
 
-	public static function read16s(a:Int):Int {
-		return (read16u(a) << 16) >> 16;
-	}
+	public static inline function read16u(a:Int):Int return Access.read16u(a);
 
-	/**
-		The scratchpad is on the fast path too, and it had to be measured to earn the branch.
+	public static inline function read16s(a:Int):Int return (Access.read16u(a) << 16) >> 16;
 
-		It is a kilobyte of memory inside the CPU and games keep their hottest structures there —
-		so every one of those accesses was paying a call into `slowRead32` and then a
-		byte-composed read on top. Per-frame sampling on a Dreamcast put 3.6 ms in `slowRead32`
-		and 1.6 in `slowWrite32` out of a 50 ms frame. The test costs one compare on the RAM path
-		(it is the else arm) and removes a call from every scratchpad access.
-
-		Alignment holds for the same reason it holds for RAM: MIPS traps a misaligned `lw`, so
-		anything reaching a 32-bit accessor is word-aligned by architecture.
-	**/
-	public static function read32(a:Int):Int {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		if (r < RAM_SIZE) return shim.MemA.get32(ram(), r);
-		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
-			return shim.MemA.get32(scratch(), p & (SCRATCH_SIZE - 1));
-		else return slowRead32(p);
-	}
+	public static inline function read32(a:Int):Int return Access.read32(a);
 
 	// ---- writes --------------------------------------------------------------------------------
 
-	public static function write8(a:Int, v:Int):Void {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		if (r < RAM_SIZE) RawMem.set8(ram(), r, v);
-		else slowWrite8(p, v);
-	}
+	public static inline function write8(a:Int, v:Int):Void Access.write8(a, v);
 
-	public static function write16(a:Int, v:Int):Void {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		if (r < RAM_SIZE) shim.MemA.set16(ram(), r, v);
-		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
-			shim.MemA.set16(scratch(), p & (SCRATCH_SIZE - 1), v);
-		else slowWrite16(p, v);
-	}
+	public static inline function write16(a:Int, v:Int):Void Access.write16(a, v);
 
-	public static function write32(a:Int, v:Int):Void {
-		final p = phys(a);
-		final r = p & RAM_DECODE_MASK;
-		if (r < RAM_SIZE) shim.MemA.set32(ram(), r, v);
-		else if ((p & SCRATCH_MATCH_MASK) == SCRATCH_BASE)
-			shim.MemA.set32(scratch(), p & (SCRATCH_SIZE - 1), v);
-		else slowWrite32(p, v);
-	}
+	public static inline function write32(a:Int, v:Int):Void Access.write32(a, v);
 
 	// ---- unaligned access ------------------------------------------------------------------------
 
@@ -406,7 +359,8 @@ class Memory {
 		return "0x" + out;
 	}
 
-	static function slowRead8(p:Int):Int {
+	@:specifier("__attribute__((noinline))")
+	public static function slowRead8(p:Int):Int {
 		if (isScratch(p)) return RawMem.get8(scratch(), p - SCRATCH_BASE);
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
 		// a 32-bit word would read three neighbours that mean something else entirely.
@@ -469,7 +423,8 @@ class Memory {
 		return 0;
 	}
 
-	static function slowRead16(p:Int):Int {
+	@:specifier("__attribute__((noinline))")
+	public static function slowRead16(p:Int):Int {
 		if (isScratch(p)) return RawMem.get16(scratch(), p - SCRATCH_BASE);
 		else if (isCdrom(p)) return (inline cd.Cdrom.read8(p)) | ((inline cd.Cdrom.read8(p + 1)) << 8);
 		else if (isSio(p)) return inline sio.Sio0.read16(p);
@@ -492,7 +447,8 @@ class Memory {
 		this one function, and grows the bundle by five kilobytes. Haxe can only do it for a body
 		whose every `return` is final, which is why `romRead8` is one if/else chain.
 	**/
-	static function slowRead32(p:Int):Int {
+	@:specifier("__attribute__((noinline))")
+	public static function slowRead32(p:Int):Int {
 		if (isScratch(p)) return RawMem.get32(scratch(), p - SCRATCH_BASE);
 		else if (isSio(p)) return inline sio.Sio0.read32(p);
 		else if (isTimer(p)) return inline timers.Timers.read(p, cycleHint());
@@ -527,7 +483,8 @@ class Memory {
 		spu.Spu.write16(p + 2, (v >>> 16) & 0xFFFF);
 	}
 
-	static function slowWrite8(p:Int, v:Int):Void {
+	@:specifier("__attribute__((noinline))")
+	public static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch(), p - SCRATCH_BASE, v);
 		else if (isCdrom(p)) inline cd.Cdrom.write8(p, v, cycleHint());
 		else if (isSio(p)) inline sio.Sio0.write8(p, v);
@@ -548,7 +505,8 @@ class Memory {
 		inline ioWrite32(reg, (old & ~(valueMask << shift)) | ((v & valueMask) << shift));
 	}
 
-	static function slowWrite16(p:Int, v:Int):Void {
+	@:specifier("__attribute__((noinline))")
+	public static function slowWrite16(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set16(scratch(), p - SCRATCH_BASE, v);
 		else if (isSio(p)) inline sio.Sio0.write16(p, v);
 		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());
@@ -558,7 +516,8 @@ class Memory {
 		else unmappedAccesses++;
 	}
 
-	static function slowWrite32(p:Int, v:Int):Void {
+	@:specifier("__attribute__((noinline))")
+	public static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch(), p - SCRATCH_BASE, v);
 		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());
 		else if (isCdrom(p)) inline cdWordWrite(p, v);

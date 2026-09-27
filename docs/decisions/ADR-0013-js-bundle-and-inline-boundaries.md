@@ -36,3 +36,22 @@ digest=0e180c28`; the Raster conformance fixture agrees on JavaScript and C++ (`
 unoptimized raw bundle measured 6.91 seconds for that bounded Node run, while the Closure bundle
 measured 7.14 seconds, so Closure is currently a size/parse optimization rather than a guaranteed
 steady-state emulator speedup.
+
+## Revision 2026-09-27: on C++, RAM and the scratchpad inline at the call site (`mem.Access`)
+
+The decision stands for JavaScript: the accessors are still ordinary functions there, one call per
+guest access, and the bundle does not grow — call sites name `Access` instead of `Memory`, whose
+public accessors are now inline one-liners forwarding to it. On reflaxe.CPP the hot half of every
+access runs inline: `mem.Access` is a header-only class (`@:headerOnly`, which is where
+reflaxe.CPP puts a function body another translation unit can inline) with `@:cppInline` and
+`always_inline`, holding the RAM path and the scratchpad path. The ports stay out of line in
+`Memory.slowRead*`/`slowWrite*`, now `noinline`.
+
+Measured on the Dreamcast (Flycast, M cycles, Crash 3 vblanks 4700-5000): 1741.8 as calls; 1811.5
+with only RAM inline, because GCC inlined the port handlers into the out-of-line half and every
+scratchpad access paid their prologue; 1749.9 with the slow paths `noinline`; **1645.0** with the
+scratchpad inline too. Counted on JS, Crash 3 makes 7.1 M of its 17.1 M accesses in that window
+to the scratchpad (a base register holding 1F800000h), Crash Bash 13.3 M of 64 M in 18800-20300
+(its stack), so the scratchpad is not one game's habit. Crash Bash itself is neutral (6233.1 ->
+6227.7): what memory time it has left is I/O polling. The cost is size, about 30 bytes a site:
+the Dreamcast images grow from 10.10 to 11.60 MB (Crash 3) and 8.44 to 9.46 MB (Crash Bash).
