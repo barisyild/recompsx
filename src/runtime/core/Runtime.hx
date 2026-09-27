@@ -98,6 +98,7 @@ class Runtime {
 		spu.Spu.init();
 		cd.Iso9660.init();
 		cd.Cdrom.init();
+		sio.Pads.init();
 		sio.Sio0.init();
 		timers.Timers.init();
 		dma.Dma.init();

@@ -152,11 +152,14 @@ class Scheduler {
 		else if (slot == VBLANK_END) onVblankEnd(ctx);
 		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
 		else if (slot == SPU_BATCH) spu.Spu.onBatch(ctx.cycles);
+		else if (slot == SIO_BYTE) sio.Sio0.onEvent(ctx);
 		else if (slot >= TIMER0 && slot <= TIMER2) timers.Timers.onEvent(ctx, slot - TIMER0);
 		else unimplemented(ctx, slot);
 	}
 
 	static function onVblankStart(ctx:CpuState):Void {
+		// The controllers first: a game reads them from its vblank handler, which this wakes.
+		sio.Pads.sample();
 		Irq.raise(ctx, Irq.VBLANK);
 		// The frame counter belongs here, at the event, not where the kernel delivers it.
 		//

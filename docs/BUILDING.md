@@ -70,8 +70,9 @@ Headless, for verification rather than watching:
     node out/_gen/game.js web/boot.exe web/disc.bin --headless-hash 3000
 
 It runs three thousand emulated frames, hashes the machine's observable state and prints one line.
-**The current bounded bring-up digest is `0e180c28`.** If it differs, something changed emulated behaviour —
-which is the entire point of the number.
+**The current bounded bring-up digest is `654669df`** (`0e180c28` before SIO0 took real time per
+byte). If it differs, something changed emulated behaviour — which is the entire point of the
+number.
 
 ### A trap that has already cost an hour
 
@@ -104,7 +105,7 @@ Browser builds preserve the Haxe ES6 output in `out/_web/game.raw.js` and serve 
 Closure-compiled ES6 bundle from `out/_web/game.js`. Install the pinned compiler once with
 `npm install`; `scripts/build-web.sh` refuses to download a different compiler implicitly.
 
-Known-good digests: game `0e180c28` (3000 frames), demo `329de455` (300 frames), and among the
+Known-good digests: game `654669df` (3000 frames), demo `329de455` (300 frames), and among the
 conformance tests `Mem 27f9aa59`, `GteOps 1cf89aa2`, `Acc64 0deeafe0`, `Raster b66077e7`.
 
 ## 4. Running natively on the desktop, with a window

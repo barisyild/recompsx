@@ -191,10 +191,11 @@ class Backend {
 		else return js.Syntax.code("({0}.audioBuffered ? ({0}.audioBuffered() | 0) : 0)", host());
 	}
 
-	public static function inputPoll():Void {}
-	public static function padConnected(pad:Int):Bool return pad == 0;
-	public static function padType(pad:Int):Int return pad == 0 ? 1 : 0;
-	public static function padButtons(pad:Int):Int return 0;
+	/** The keyboard and gamepads in a page (shim.Input); under Node, no pad at all. */
+	public static function inputPoll():Void Input.poll();
+	public static function padConnected(pad:Int):Bool return Input.connected(pad);
+	public static function padType(pad:Int):Int return Input.connected(pad) ? 1 : 0;
+	public static function padButtons(pad:Int):Int return Input.buttons(pad);
 	public static function padAxis(pad:Int, axis:Int):Int return 0x80;
 	public static function requestQuit():Void {
 		quit = true;

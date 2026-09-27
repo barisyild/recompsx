@@ -528,6 +528,14 @@ C0:0A) maps onto the same registers (spec F2000000+n events).
 
 ## 11. SIO0 — pads & memory cards
 
+**Implemented (2026-09-27)**: the byte model below with the transfer time taken from JOY_BAUD and
+JOY_MODE, /ACK 170 cycles after a byte and low for 100, IRQ7 on its edge when bit 12 enables it;
+a digital pad (ID 5A41h) on each port `sio.Pads` reports, answering every command as 42h; the
+memory card address and empty ports answer FFh with no /ACK; and the kernel pad path, B0:12h-16h
+(`kernel.KPads`, adapted from OpenBIOS sio0/pad.c and driver.c, MIT). Headless runs keep both
+ports empty. Not yet: analog pads and config mode, the multitap, memory cards. Conformance:
+`PadSio`, `PadBios`.
+
 **Registers**: 0x1F801040 JOY_DATA (R FIFO / W TX), 0x1044 JOY_STAT (0 TX-ready1, 1 RX-not-empty,
 2 TX-ready2, 7 /ACK level, 9 IRQ), 0x1048 JOY_MODE, 0x104A JOY_CTRL (0 TX en, 1 /JOYn select,
 4 ack, 6 reset, 10–12 IRQ enables, 13 slot), 0x104E JOY_BAUD (0x88). Byte model: write with select

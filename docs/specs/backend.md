@@ -126,6 +126,15 @@ Console implementations follow the same shape against their SDK: present = frame
 textured quad, audio = the platform's streaming API, input = the platform's pad API, storage =
 memory card / SD / HDD, file = the platform's disc or mass-storage read. Nothing else changes.
 
+Input reaches the machine in one place: at each vblank the runtime (`sio.Pads`) calls
+`bp_input_poll` and reads `bp_pad_connected`/`bp_pad_buttons` for ports 1 and 2, and the emulated
+controllers (SIO0, and the BIOS pad driver under HLE) answer from that snapshot. A headless run
+(`--headless-hash`) never polls: every port is empty, so a digest never depends on the host. The
+JavaScript target reads the page's keyboard, with the desktop key map above matched by physical
+key (`KeyboardEvent.code`), and the Gamepad API in the W3C standard mapping, through Haxe's
+browser externs (`shim.Input`); under Node no pad is connected. The Dreamcast backend reads maple
+controllers (`dc_input.c`); the null backend has none.
+
 ## 2.1 Dreamcast and optional hardware drawing
 
 The KallistiOS backend in `src/backend/dreamcast/`, its launcher and `scripts/build-dc.sh` are

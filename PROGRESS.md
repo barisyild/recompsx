@@ -2,6 +2,24 @@
 
 ## Status snapshot
 
+**2026-09-27: Controllers — a digital pad on SIO0, the BIOS pad driver, keyboard and gamepads on JS.**
+No game had input on any platform: the SDL2 and Dreamcast backends read pads and the ABI carried
+them, but SIO0 was an empty port and nothing sampled the backend. Now `sio.Pads` samples it once
+per vblank and SIO0 has a digital pad (ID 5A41h) on each connected port, per psx-spx: transfer
+time from JOY_BAUD/JOY_MODE (1088 cycles at the BIOS's 0088h), /ACK 170 cycles after a byte (the
+kernel ignores one within ~100 and clears IRQ7 in between) and low for 100, IRQ7 on its edge, no
+/ACK after the last byte, SR.9 not clearable while /ACK is low. The memory card address and empty
+ports answer FFh unacknowledged, as before. B0:12h-16h (InitPAD, StartPAD, StopPAD, PAD_init,
+PAD_dr) are `kernel.KPads`, adapted from OpenBIOS sio0/pad.c and driver.c (MIT), buffers written
+at vblank before the game's chains. JavaScript reads the keyboard (the SDL2 key map, by physical
+key) and the Gamepad API through Haxe's browser externs (`shim.Input`). Headless runs keep every
+port empty, so digests never depend on the host; they still moved, because the empty port now
+answers a byte in 1088 cycles instead of 0 and its events count in the scheduler. New references,
+JS = desktop C++: Crash 3 9,000 `ee91f215`, 20,000 `8888c37f`; Crash Bash 3,000 `654669df`,
+9,000 `fda4764f`, 30,000 `2d1ca4b6`; demo `329de455` unchanged. Conformance `PadSio`, `PadBios` agree on both
+targets. Played by the user on the JS build. Not yet: analog pads and config mode, the multitap
+(Crash Bash's four players), memory cards.
+
 **2026-09-27: A game's facts are keyed by its disc's product code, and a disc finds its own.**
 games/crashbash is now **games/SCUS94570** and games/crash3 **games/SCUS94244** (the code upper
 case with its punctuation dropped; `id` repeats it); the Spyro 3 demo's config is gone. `recompsx
@@ -1379,6 +1397,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Input: digital pad on SIO0 (psx-spx timing), BIOS pad driver B0:12h-16h from
+OpenBIOS, keyboard/Gamepad API via JS externs; headless ports empty; new digests C3 ee91f215 /
+8888c37f, CB fda4764f / 2d1ca4b6 (JS = C++). Next: analog + config mode, multitap, memory cards.
 
 2026-09-27 [claude] games/ keyed by product code (SCUS94570, SCUS94244), Spyro 3 demo config
 removed; `gen <disc>` finds games/<SERIAL>/ through SYSTEM.CNF, `gen <SERIAL>` through local.json;

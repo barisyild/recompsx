@@ -32,6 +32,7 @@ class Kernel {
 		KThreads.init();
 		KTables.init();
 		KTimers.init();
+		KPads.init();
 		// Every table is built here rather than at its declaration: reflaxe emits a statement
 		// block at namespace scope for a static initialised with a comprehension, which is not
 		// valid C++ — and nothing may allocate after boot anyway.
@@ -96,8 +97,8 @@ class Kernel {
 		never delivering anything leaves a game waiting forever for something it was told to
 		expect.
 
-		Our port is empty by construction (`sio.Sio0` models a machine with nothing plugged in), so
-		the answer is a timeout — the same one a real machine gives for a slot with no card in it.
+		There are no memory cards (`sio.Sio0` answers nothing at their address), so the answer is
+		a timeout — the same one a real machine gives for a slot with no card in it.
 		Both classes get it, because a game may listen on either and Crash Bash opened all four
 		specs on both.
 	**/
@@ -127,6 +128,11 @@ class Kernel {
 		else if (fn == 0x19) ctx.v0 = hookEntry(ctx);
 		else if (fn == 0x4A || fn == 0x4B) ctx.v0 = cardInit(fn);
 		else if (fn == 0x5B) ctx.v0 = changeClearPad(ctx);
+		else if (fn == 0x12) ctx.v0 = KPads.initPad(ctx.a0, ctx.a1, ctx.a2, ctx.a3);
+		else if (fn == 0x13) ctx.v0 = KPads.startPad();
+		else if (fn == 0x14) ctx.v0 = KPads.stopPad();
+		else if (fn == 0x15) ctx.v0 = padInit(ctx);
+		else if (fn == 0x16) ctx.v0 = KPads.padDr();
 		else if (fn == 0x00) ctx.v0 = KHeap.malloc(ctx.a0);         // alloc_kernel_memory
 		else if (fn == 0x01) ctx.v0 = freeKernelMemory(ctx);
 		else if (fn >= 0x02 && fn <= 0x06) ctx.v0 = KTimers.call(ctx, fn);
@@ -511,6 +517,19 @@ class Kernel {
 	**/
 	static var clearPad = true;
 
+	/**
+		`PAD_init(type, buttonDest, unused, unused)`. The BIOS writes its last three arguments back
+		into the caller's argument slots on the stack, [SP+04h..0Ch] (psx-spx "BIOS Joypad
+		Functions"; OpenBIOS sio0/pad.c, MIT), so a caller must have allocated all four — kept, as
+		a game built against it may have come to rely on those slots.
+	**/
+	static function padInit(ctx:CpuState):Int {
+		Memory.write32(ctx.sp + 4, ctx.a1);
+		Memory.write32(ctx.sp + 8, ctx.a2);
+		Memory.write32(ctx.sp + 12, ctx.a3);
+		return KPads.padInit(ctx.a0, ctx.a1);
+	}
+
 	static function changeClearPad(ctx:CpuState):Int {
 		clearPad = ctx.a0 != 0;
 		noteOnce(0xB005B, "B0(5Bh) ChangeClearPAD");
@@ -536,6 +555,8 @@ class Kernel {
 		// it. Letting the kernel's fallback take it here acknowledged CD sectors nobody had read
 		// — a 1 kHz root counter made that race routine, and libcd answered with "CdRead: retry".
 		final atEntry = Irq.stat & Irq.mask;
+		// The BIOS's controller driver, if StartPAD installed it (KPads says where it sits).
+		KPads.onInterrupt(atEntry);
 		// The BIOS runs its handler chains on its own stack, never the interrupted code's: the
 		// vector saves every register and loads the exception stack pointer before the first
 		// handler (OpenBIOS kernel/vectors.s, MIT). Code that borrows $sp as a general register —
