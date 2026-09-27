@@ -22,6 +22,12 @@ import shim.RawMem;
 
 	On JavaScript these are plain functions, one call per access as before: the bundle's size is
 	what ADR-0013 keeps accessors out of generated bodies for.
+
+	The RAM test carries `MemA.likely`, GCC's `__builtin_expect`. Without it GCC made the port
+	call the fall-through of every inlined access and put the RAM load out of line: a branch
+	away, the load, a branch back — two taken branches for the commonest thing guest code does.
+	Crash 3's hottest function showed it at every `lw`; a 4-load block compiles 16 % smaller with
+	the hint. The scratchpad keeps its place as the second test.
 **/
 @:headerOnly
 @:headerCode("#include \"recompsx_arena.h\"")
@@ -30,7 +36,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function read8u(a:Int):Int {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) return RawMem.get8(Memory.ram(), r);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return RawMem.get8(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			return RawMem.get8(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
 		else return Memory.slowRead8(Memory.phys(a));
@@ -40,7 +46,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function read16u(a:Int):Int {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) return shim.MemA.get16(Memory.ram(), r);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get16(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			return shim.MemA.get16(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
 		else return Memory.slowRead16(Memory.phys(a));
@@ -50,7 +56,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function read32(a:Int):Int {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) return shim.MemA.get32(Memory.ram(), r);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get32(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			return shim.MemA.get32(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
 		else return Memory.slowRead32(Memory.phys(a));
@@ -60,7 +66,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function write8(a:Int, v:Int):Void {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) RawMem.set8(Memory.ram(), r, v);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) RawMem.set8(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			RawMem.set8(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
 		else Memory.slowWrite8(Memory.phys(a), v);
@@ -70,7 +76,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function write16(a:Int, v:Int):Void {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) shim.MemA.set16(Memory.ram(), r, v);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set16(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			shim.MemA.set16(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
 		else Memory.slowWrite16(Memory.phys(a), v);
@@ -80,7 +86,7 @@ class Access {
 	@:specifier("__attribute__((always_inline))")
 	public static function write32(a:Int, v:Int):Void {
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
-		if (r < Memory.RAM_SIZE) shim.MemA.set32(Memory.ram(), r, v);
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set32(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
 			shim.MemA.set32(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
 		else Memory.slowWrite32(Memory.phys(a), v);

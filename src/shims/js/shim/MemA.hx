@@ -12,6 +12,8 @@ import shim.RawBuf;
 	store, where the `LE` test and the alignment test used to sit.
 **/
 class MemA {
+	/** The C++ shim's branch hint; a condition here is only itself. */
+	public static inline function likely(c:Bool):Bool return c;
 	public static inline function get16(m:RawBuf, a:Int):Int return m.u16[a >> 1];
 	public static inline function get32(m:RawBuf, a:Int):Int return m.i32[a >> 2];
 	public static inline function set16(m:RawBuf, a:Int, v:Int):Void m.u16[a >> 1] = v;

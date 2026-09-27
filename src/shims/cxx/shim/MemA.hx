@@ -32,6 +32,7 @@ import shim.RawBuf;
 **/
 #if recompsx_bigendian
 class MemA {
+	public static inline function likely(c:Bool):Bool return c;
 	public static inline function get16(m:RawBuf, a:Int):Int return RawMem.get16(m, a);
 	public static inline function get32(m:RawBuf, a:Int):Int return RawMem.get32(m, a);
 	public static inline function set16(m:RawBuf, a:Int, v:Int):Void RawMem.set16(m, a, v);
@@ -39,6 +40,15 @@ class MemA {
 }
 #else
 extern class MemA {
+	/**
+		`c`, which the fast path expects to hold: the hint GCC needs to lay a RAM access out as
+		straight-line code. Without it, in the generated shards the RAM case of every guest load
+		sat out of line — a branch away and a branch back around one `mov.l` — while the port
+		call was the fall-through (see Access).
+	**/
+	@:nativeFunctionCode("(__builtin_expect(!!(({arg0})), 1))")
+	public static function likely(c:Bool):Bool;
+
 	@:nativeFunctionCode("((int)(*((unsigned short*)(({arg0}) + ({arg1})))))")
 	public static function get16(m:RawBuf, a:Int):Int;
 
