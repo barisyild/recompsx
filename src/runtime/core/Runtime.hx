@@ -15,10 +15,24 @@ import shim.Backend;
 	unexplained hang.
 **/
 class Runtime {
-	/** Set once by the generated program's own bootstrap; see `Runtime.bindDispatch`. */
-	// Null<> is required, not decoration: reflaxe.CPP compiles with null-safety enforced, so a
-	// field that can be null has to say so.
-	static var dispatcher:Null<Int -> CpuState -> Bool> = null;
+	/**
+		Set once by the generated program's own bootstrap; see `Runtime.bindDispatch`. Never null:
+		until a program binds one, `noProgram` answers. As `Null<>` it compiled to an optional
+		std::function that every dynamic call copied twice — into a local, then out through
+		`value_or` — so each call paid two clones and two destroys in `_M_manager`: 1.4 % of
+		Crash Bandicoot: Warped on the Dreamcast, on its own.
+	**/
+	static var dispatcher:Int -> CpuState -> Bool = noProgram;
+
+	static function noProgram(addr:Int, ctx:CpuState):Bool return false;
+
+	/**
+		What `call` hands its address to: the program's `FnTable.run` once bound (ADR-0028), this
+		file's own loop until then. The runtime's calls into guest code are few, but a tail chain
+		left for `unwinding` — a renderer hopping once per primitive — continues in whatever loop
+		takes it, and that loop should be the one with the program's answers in front of it.
+	**/
+	static var runner:CpuState -> Int -> Void = callLoop;
 
 	/** How many distinct unimplemented things have been reported, so a run can be judged. */
 	public static var reportedGaps(default, null) = 0;
@@ -45,11 +59,18 @@ class Runtime {
 		Connects the generated `FnTable` to the runtime.
 
 		The runtime cannot reference generated code directly — it is compiled against a program it
-		has never seen — so the program hands its dispatcher over at startup. One indirect call
-		per dynamic dispatch, on a path that is already dynamic by definition.
+		has never seen — so the program hands its dispatcher over at startup. The runtime's own
+		calls into guest code take it: callbacks, handlers, a thread switch, a longjmp. Generated
+		code does not — its calls through registers go to the program's `FnTable.run`, which asks
+		here (`callOnce`) only when it has no answer of its own.
 	**/
 	public static function bindDispatch(f:Int -> CpuState -> Bool):Void {
 		dispatcher = f;
+	}
+
+	/** Hands `call` the program's own loop, `FnTable.run`. */
+	public static function bindRun(f:CpuState -> Int -> Void):Void {
+		runner = f;
 	}
 
 	/**
@@ -189,7 +210,13 @@ class Runtime {
 		After a call that returns to `cont`: runs the tail jumps the callee left, ends a return
 		to elsewhere whose target is `cont`, then says whether the caller must still leave — a
 		longjmp, a halt, a cooperative suspension or a return aimed further out all return true.
+
+		Out of line on C++, like `call`: every generated call site reaches this, behind its own
+		test of the token, and only when a token is set. Inlined, it took `call` and the bound
+		loop's `std::function` with it into each of them — 2,000 copies in Crash Bash, 600 bytes
+		more in its hottest function, and a slower frame (ADR-0028).
 	**/
+	@:specifier("__attribute__((noinline))")
 	public static function unwinding(ctx:CpuState, cont:Int):Bool {
 		if (ctx.unwindToken == TAIL) {
 			ctx.unwindToken = 0;
@@ -200,11 +227,17 @@ class Runtime {
 		return ctx.unwindToken != 0;
 	}
 
+	@:specifier("__attribute__((noinline))")
 	public static function call(ctx:CpuState, addr:Int):Void {
 		// A callback cannot enter guest code while a halt or nonlocal jump is leaving it.
 		// Direct generated callers check their own return boundaries; guard external entry here.
 		if (ctx.unwindToken != 0) return;
 		else {}
+		runner(ctx, addr);
+	}
+
+	/** `call` without a program's loop: each address through the dispatcher, then its tails. */
+	static function callLoop(ctx:CpuState, addr:Int):Void {
 		var target = addr;
 		while (true) {
 			callOnce(ctx, target);
@@ -215,16 +248,23 @@ class Runtime {
 		}
 	}
 
-	static function callOnce(ctx:CpuState, addr:Int):Void {
-		final d = dispatcher;
-		if (d != null && d(addr, ctx)) return;
+	/**
+		One call by address, without the tail loop: the program's dispatcher, then a rescan of a
+		window, then a report. The generated `FnTable.run` falls back to this.
+
+		Out of line on C++: inlined, its cold paths would lend `run` — the one caller that is hot —
+		a frame saving every register they use, on every dynamic call.
+	**/
+	@:specifier("__attribute__((noinline))")
+	public static function callOnce(ctx:CpuState, addr:Int):Void {
+		if (dispatcher(addr, ctx)) return;
 		else {}
 		// Nothing answered. If this address is inside a window the game loads code into, what is
 		// sitting there may have changed without anything telling us — a loader that writes
 		// through the CPU rather than a DMA channel leaves no trace to watch. Looking once is
 		// cheap and turns an unrecognised loader into a working program.
 		if (kernel.OverlayMgr.windowOf(addr) >= 0 && kernel.OverlayMgr.rescan() > 0
-				&& d != null && d(addr, ctx)) {
+				&& dispatcher(addr, ctx)) {
 			return;
 		} else {}
 		notInProgram(ctx, addr);
@@ -286,14 +326,19 @@ class Runtime {
 	/**
 		A handle that named a shard or slot that does not exist — a generator bug, not a game one.
 
-		`where` names the switch that fell through: `"table"` for the shard selector, or the
-		shard's own class name. The two were indistinguishable from their message until a C++-only
-		failure made the difference the whole question — a diagnostic that cannot say *which* of
-		two call sites produced it is only half a diagnostic.
+		`where` names the switch that fell through: -1 for the table's shard selector, or the
+		shard whose own slot switch did. The two were indistinguishable from their message until a
+		C++-only failure made the difference the whole question — a diagnostic that cannot say
+		*which* of two call sites produced it is only half a diagnostic.
+
+		An integer, where it was the class name: the string built at every call site made each
+		dispatch switch reserve a frame for it, hit or not. Out of line on C++ for the same reason.
 	**/
-	public static function badHandle(ctx:CpuState, where:String, shard:Int, slot:Int):Void {
-		Backend.fatal("recompsx: " + where + " dispatch fell through for shard " + shard
-			+ " slot " + slot + " (entry saw " + lastSlot + ") on dispatch #" + dispatches
+	@:specifier("__attribute__((noinline))")
+	public static function badHandle(ctx:CpuState, where:Int, shard:Int, slot:Int):Void {
+		Backend.fatal("recompsx: " + (where < 0 ? "table" : "shard " + where)
+			+ " dispatch fell through for shard " + shard + " slot " + slot
+			+ " (entry saw " + lastSlot + ") on dispatch #" + dispatches
 			+ ", which should exist. This is a code-generation defect.");
 	}
 

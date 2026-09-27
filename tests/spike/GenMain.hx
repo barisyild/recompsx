@@ -16,6 +16,7 @@ class GenMain {
 	public static function main():Void {
 		final ctx = new CpuState();
 		Runtime.bindDispatch(FnTable.call);
+		Runtime.bindRun(FnTable.run);
 		Runtime.boot(ctx);
 		FnTable.init();
 		Overlays.init();

@@ -58,6 +58,27 @@ class OverlayMgr {
 	static var count = 0;
 	static var lo:Array<Int>;
 	static var hi:Array<Int>;
+	/**
+		Where any declared window lies: from the lowest start to the highest end, canonical. Every
+		dynamic call asks `residentAt`, and nearly every one is for an address no window covers —
+		code at a fixed place — so that answer costs two compares, not a walk over the windows.
+		Empty (both zero) until a window is declared.
+	**/
+	static var spanLo = 0;
+	static var spanHi = 0;
+	/**
+		Told whenever the declared windows change. The program keeps answers for addresses outside
+		every window (FnTable's fast path), and those hold only while the windows do. A callback
+		rather than a counter the hot path compares: windows change at boot, calls never stop.
+	**/
+	static var windowsChanged:Void -> Void = unwatched;
+
+	static function unwatched():Void {}
+
+	/** The program's `FnTable` hands over what to run when the windows change. */
+	public static function watchWindows(f:Void -> Void):Void {
+		windowsChanged = f;
+	}
 	static var fingerprint:Array<Int>;
 	static var hashBytes:Array<Int>;
 	static var resident:Array<Bool>;
@@ -81,6 +102,9 @@ class OverlayMgr {
 		loadCount = 0;
 		loadNext = 0;
 		count = 0;
+		spanLo = 0;
+		spanHi = 0;
+		windowsChanged();
 		activations = 0;
 		evictions = 0;
 		fruitlessRescans = 0;
@@ -120,6 +144,18 @@ class OverlayMgr {
 		resident[index] = false;
 		if (index >= count) count = index + 1;
 		else {}
+		// Canonical addresses are all in 80000000h..80200000h, so signed order is address order.
+		var first = true;
+		for (i in 0...count) {
+			if (hi[i] == lo[i]) continue;
+			else {}
+			if (first || lo[i] < spanLo) spanLo = lo[i];
+			else {}
+			if (first || hi[i] > spanHi) spanHi = hi[i];
+			else {}
+			first = false;
+		}
+		windowsChanged();
 	}
 
 	static function tooMany(index:Int):Void {
@@ -142,6 +178,8 @@ class OverlayMgr {
 		// address and the smallest is the one that was most recently made true of it. Anything
 		// else would answer with the code the small overlay replaced.
 		final a = canon(addr);
+		if (a < spanLo || a >= spanHi) return -1;
+		else {}
 		var best = -1;
 		var bestSize = 0;
 		for (i in 0...count) {
@@ -159,6 +197,8 @@ class OverlayMgr {
 	/** Any window containing an address, resident or not — for deciding whether to look again. */
 	public static function windowOf(addr:Int):Int {
 		final a = canon(addr);
+		if (a < spanLo || a >= spanHi) return -1;
+		else {}
 		for (i in 0...count) {
 			if (a >= lo[i] && a < hi[i]) return i;
 			else {}

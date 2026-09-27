@@ -39,9 +39,31 @@ class Dispatch {
 		ctx.v0 = 99;
 		Conf.expect("base code before overlay load", FnTable.call(WINDOW + 0x60, ctx) ? 1 : 0, 1);
 		Conf.expect("base callee writes through", ctx.v0, 0);
+		// Generated code calls through FnTable.run: the runtime's route on a miss, its own kept
+		// answer after that — and never one a window declared later has taken away.
+		core.Runtime.bindDispatch(FnTable.call);
+		for (i in 0...3) {
+			ctx.v0 = 7;
+			FnTable.run(ctx, BASE + 0x100);
+			Conf.expect("run reaches the table, then keeps the answer", ctx.v0, 0);
+		}
+		ctx.v0 = 7;
+		FnTable.run(ctx, WINDOW + 0x60);
+		Conf.expect("run keeps base code while no window covers it", ctx.v0, 0);
+		// The runtime's own calls continue in the program's loop once it is handed over.
+		core.Runtime.bindRun(FnTable.run);
+		ctx.v0 = 7;
+		core.Runtime.call(ctx, BASE + 0x100);
+		Conf.expect("Runtime.call runs through the bound loop", ctx.v0, 0);
 		OverlayMgr.define(0, WINDOW, WINDOW + 0x80, OverlayMgr.hashOf(WINDOW, 64), 16);
 		OverlayMgr.rescan();
 		Conf.expect("resident miss shadows base", FnTable.call(WINDOW + 0x60, ctx) ? 1 : 0, 0);
+		ctx.v0 = 5;
+		FnTable.run(ctx, WINDOW + 0x60);
+		Conf.expect("run honours a window declared after it kept an answer", ctx.v0, 5);
+		ctx.v0 = 7;
+		FnTable.run(ctx, BASE + 0x100);
+		Conf.expect("run still reaches code outside every window", ctx.v0, 0);
 		ctx.v0 = 42;
 		Conf.expect("overlay code dispatches", FnTable.call(WINDOW + 0x40, ctx) ? 1 : 0, 1);
 		Conf.expect("overlay callee writes through", ctx.v0, 0);

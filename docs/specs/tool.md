@@ -151,7 +151,7 @@ function was entered with (`entryRa`); a different value is a return to elsewher
 to the frame whose call continues there (ADR-0027). Every after-call check names that address:
 `Runtime.unwinding(ctx, <continuation>)`.
 
-**Call analysis** — `jal T`: **dynamic (`Runtime.call`) if T is inside any configured overlay VA
+**Call analysis** — `jal T`: **dynamic (`FnTable.run`, ADR-0028) if T is inside any configured overlay VA
 window**, static if T is in the calling universe outside every window, kernel vectors
 (0xA0/B0/C0, low RAM < 0x10000), or unclassified. The window test comes *first*, and the one case
 that makes it matter is the executable's own functions inside a window: windows overlap the
@@ -327,8 +327,8 @@ and keep the one that identifies the most functions consistently.
 - Also generated: `GameInfo.hx` (initial pc/gp/sp, load ranges, memfill, exe payload reference),
   `Overlays.hx` (per overlay: id, VA range, source sectors/file extent, FNV-1a content hash,
   entries) — consumed by runtime CD-tracking activation + hash-fallback.
-- **Overlay call policy**: anything targeting a configured overlay window goes through
-  `Runtime.call` (activation state decides which module answers) — including from the executable
+- **Overlay call policy**: anything targeting a configured overlay window is dispatched by address,
+  `FnTable.run` (activation state decides which module answers) — including from the executable
   to its own in-window functions; static direct calls elsewhere in the calling universe, and from
   an overlay into its own window. Fingerprint length is validated against overlay length at gen
   time: a window shorter than its own fingerprint would hash differently in the tool and the
@@ -548,11 +548,11 @@ arithmetic — if it emits plain C++ `int`, force `-fwrapv` in CMake and record 
 | Jump | j (intra-fn) | `<slot>; ctx.cycles += n; bb = <idx>; continue;` |
 | | j (tail call) | `<slot>; ctx.cycles += n; <call as jal>; return;` |
 | | jal (static) | `ctx.ra = RET; <slot>; Fns_XX.f_<target>(ctx);` (ra always written — cheap, preserves fidelity) |
-| | jal (dynamic) | `ctx.ra = RET; <slot>; ctx.pc = T; Runtime.call(ctx, T);` |
-| | jalr rd,rs | `var tK = RS; ctx.<rd> = RET; <slot>; ctx.pc = tK; Runtime.call(ctx, tK);` (target latched before link — handles `jalr ra, ra`) |
+| | jal (dynamic) | `ctx.ra = RET; <slot>; ctx.pc = T; FnTable.run(ctx, T);` (ADR-0028) |
+| | jalr rd,rs | `var tK = RS; ctx.<rd> = RET; <slot>; ctx.pc = tK; FnTable.run(ctx, tK);` (target latched before link — handles `jalr ra, ra`) |
 | | jr ra | `<slot>; return;` — where a loaded `$ra` reaches it: `if (ra != entryRa) Runtime.returnTo(ctx, ra); return;` (ADR-0027) |
-| | jr rX (table) | `var tK = RX; <slot>; ctx.cycles += n; switch (tK) { case 0x...: bb = i; continue; ... default: ctx.pc = tK; Runtime.call(ctx, tK); return; }` |
-| | jr rX (unrecovered) | `var tK = RX; <slot>; ctx.pc = tK; Runtime.call(ctx, tK); return;` |
+| | jr rX (table) | `var tK = RX; <slot>; ctx.cycles += n; switch (tK) { case 0x...: bb = i; continue; ... default: ctx.pc = tK; Runtime.tail(ctx, tK); return; }` (ADR-0026) |
+| | jr rX (unrecovered) | `var tK = RX; <slot>; ctx.pc = tK; Runtime.tail(ctx, tK); return;` (ADR-0026) |
 | System | syscall/break | `ctx.pc = ADDR; Kernel.syscall(ctx, CODE20);` then continue in-line (no delay slot; Psy-Q div-zero break guards return) |
 | COP0 | mfc0/mtc0 | `RT = Runtime.mfc0(ctx, N);` / `Runtime.mtc0(ctx, N, RT);` |
 | | rfe | `Runtime.rfe(ctx);` |

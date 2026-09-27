@@ -2,6 +2,27 @@
 
 ## Status snapshot
 
+**2026-09-27: Dynamic calls stay in the program (ADR-0028) — Crash 3 on Dreamcast ~48 % -> ~53 %.**
+Crash 3 dispatches 730,308 times in vblanks 4700-5000 (450,513 calls through registers, 279,795
+tail hops); on the SH-4 each passed `Runtime.call`, its out-of-line body, a `std::function` and
+`FnTable.call` — about 150 instructions. Generated code now calls `FnTable.run`: a direct-mapped
+cache (16-byte records, empty slots unmatchable), the tail loop, and `Runtime.callOnce` on a miss;
+`Runtime.call` hands its address to the bound `FnTable.run` too (`bindRun`), which is where the
+renderer's tail chains (2,444 chains of ~114 hops, entered by a static call) were going.
+`OverlayMgr.watchWindows` replaces the per-call window version; `callOnce`, `badHandle` (integers
+only), `buildFlat`, `Runtime.call` and `Runtime.unwinding` are `noinline` — the last two because
+LTO otherwise put `call` and the `std::function` into every generated call site (2,393 copies in
+Crash 3, 2,029 in Crash Bash). JS: 718,509 hits, 11,799 misses (GOOL code, never kept).
+Profiling Flycast, same range, M cycles: 2080.3 before -> 1975.7 (dispatcher not copied, window
+span) -> 1944.2 (cache in `call`) -> 1953.0 (+ version check, needed for correctness) -> 1909.9
+(`FnTable.run`) -> 1880.2 (`bindRun`) -> **1872.8** (out of line) = 9.36 s per 5 s of game.
+Dispatch was `Runtime::call` 476 + `FnTable::call` 341 + `residentAt` 208 + `std::function` 146
+ms; now `FnTable::run` 166 + `FnTable::dispatch` 130 + `FnTable::call` 51 ms. Crash Bash
+18800-20300: 6414.8 -> 6400.9 M (dispatch 367 -> 100 ms; LTO now inlines one more `read32` into
+f_800193a8, +234 instructions, +163 ms). Digests unchanged, JS = desktop C++: Crash 3 9000
+2c8bc61d / 20000 f05fb3ea, Crash Bash 9000 2ff36a18 / 30000 288ed8d6. Conformance JS all, C++
+Dispatch/Overlay/Codegen/Yielding/Regions agree; 436 tool checks. DC image 9,987,375 B.
+
 **2026-09-27: Dreamcast 8bpp textures from 64x64 patches — Crash 3 ~30 % -> ~48 % speed.**
 An 8bpp page through each of its CLUTs was a whole 128 KB ARGB slot; Crash 3's medieval demo binds
 17 such pairs a frame against 12 slots: 5-19 whole-page decodes a frame (`tex_decode` 37 %) and
@@ -1207,6 +1228,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] Dispatch cost on DC: generated code calls FnTable.run (cache + tail loop,
+ADR-0028), Runtime.call hands over via bindRun, window changes are a callback. Crash 3 Flycast
+2080.3 -> 1872.8 M cycles (~53 % speed), Crash Bash 6414.8 -> 6400.9; digests unchanged on JS and
+C++. Next: GTE rtpt/rtps (15 %), GPU present/build_scene/polygonHw (17 %), Memory (8 %).
 
 2026-09-27 [claude] DC backend: 8bpp pages drawn from 64x64 CLUT-baked patches (bake pool) instead of
 whole 128 KB slots; Crash 3 demo 16.4 -> 10.4 s per 5 s of game, no conflicts; Crash Bash unchanged.

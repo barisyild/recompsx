@@ -91,6 +91,13 @@ class Emitter {
 	**/
 	public var staticTargetOf:Int -> String = _ -> null;
 
+	/**
+		What a call by address is emitted as: `(ctx, target)`, runs the target and the tail jumps
+		it leaves. A program has `FnTable.run`, which keeps its answers and skips the runtime's
+		dispatcher on a hit; a fixture compiled without a program keeps `Runtime.call`.
+	**/
+	public var dynamicCall = "Runtime.call";
+
 	public function new(image:Image, discovery:Discovery, optimize:Bool = true, structureRegions:Bool = true) {
 		this.image = image;
 		this.discovery = discovery;
@@ -791,7 +798,7 @@ class Emitter {
 				bump();
 				publish(buf, ind);
 				buf.add('${ind}ctx.pc = $t;\n');
-				buf.add('${ind}Runtime.call(ctx, $t);\n');
+				buf.add('${ind}$dynamicCall(ctx, $t);\n');
 				emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
 				reloadContinuation(buf, ind, continuation);
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
@@ -875,7 +882,7 @@ class Emitter {
 			// The kernel, code this build never found, or a window whose occupant is decided at
 			// run time. All three are the same instruction here: ask by address.
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
-			buf.add('${ind}Runtime.call(ctx, ${hex(t)});\n');
+			buf.add('${ind}$dynamicCall(ctx, ${hex(t)});\n');
 		}
 		// A tail call's callee returns to our caller: this frame is no one's continuation.
 		emitCallUnwind(buf, ind, resumes ? continuation : -1,

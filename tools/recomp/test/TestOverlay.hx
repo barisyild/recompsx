@@ -172,11 +172,11 @@ class TestOverlay {
 			Assert.isTrue(base != null, "the executable's shard was written");
 			Assert.isTrue(base.indexOf("Fns_00_80010000.f_80010100(ctx)") >= 0,
 				"a call inside the executable is a direct call");
-			Assert.isTrue(base.indexOf("Runtime.call(ctx, 0x80020000)") >= 0,
+			Assert.isTrue(base.indexOf("FnTable.run(ctx, 0x80020000)") >= 0,
 				"a call into an overlay window is dispatched by address");
 			// The executable's own function inside the window: its bytes are gone the moment an
 			// overlay loads, so even its own caller cannot bind to it statically.
-			Assert.isTrue(base.indexOf("Runtime.call(ctx, 0x80020060)") >= 0,
+			Assert.isTrue(base.indexOf("FnTable.run(ctx, 0x80020060)") >= 0,
 				"the executable's own code inside a window is dispatched too");
 			Assert.isTrue(base.indexOf(".f_80020060(ctx);") < 0,
 				"and never called directly");
@@ -201,7 +201,7 @@ class TestOverlay {
 				"an overlay calling the executable is a direct call");
 			Assert.isTrue(a.indexOf("Ovl_a_01_80020000.f_80020040(ctx)") >= 0,
 				"an overlay calling into its own window is a direct call");
-			Assert.isTrue(a.indexOf("Runtime.call(ctx, 0x80020040)") < 0,
+			Assert.isTrue(a.indexOf("FnTable.run(ctx, 0x80020040)") < 0,
 				"and is not also dispatched");
 		}
 

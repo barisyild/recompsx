@@ -74,11 +74,13 @@ class Program {
 		for (u in universes) {
 			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
+			u.emitter.dynamicCall = "FnTable.run";
 		}
 		for (r in this.relocSets) {
 			for (unit in r.units) {
 				unit.emitter = new Emitter(unit.image, unit.discovery, optimize, structureRegions);
 				unit.emitter.relocatable = true;
+				unit.emitter.dynamicCall = "FnTable.run";
 				unit.emitter.staticTargetOf = a -> staticTargetFor(universes[0], a);
 			}
 		}
@@ -174,7 +176,7 @@ class Program {
 		for (i in 0...shard.functions.length) {
 			buf.add('\t\t\tcase $i: ${shard.className}.${shard.functions[i].name}(ctx, entry);\n');
 		}
-		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, "${shard.className}", ${shard.index}, slot);\n');
+		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, ${shard.index}, ${shard.index}, slot);\n');
 		buf.add('\t\t}\n');
 		buf.add('\t}\n');
 		buf.add('}\n');
@@ -341,7 +343,41 @@ class Program {
 				buf.add('\t\t\tcase ${s.index}: ${s.className}.dispatch(slot, entry, ctx);\n');
 			}
 		}
-		buf.add("			default: Runtime.badHandle(ctx, \"table\", handle >>> 20, slot);
+		buf.add("			default: Runtime.badHandle(ctx, -1, handle >>> 20, slot);
+		}
+	}
+
+	/**
+		A call through a register, from generated code: the loop `Runtime.call` runs, with this
+		table's kept answers in front of it.
+
+		Nearly every dynamic call is to fixed code outside every overlay window — a renderer
+		hopping between its routines through pointers, an interpreter through its handlers — and
+		for those `FAST` holds the handle and block from the first time. A hit is one compare and
+		the dispatch switch. Anything else is asked the way `Runtime.call` asks
+		(`Runtime.callOnce`), which lands in `call` below, and `call` keeps the answer. Tail jumps
+		the callee leaves (ADR-0026) loop here at a fixed host depth, as they do in `Runtime.call`.
+
+		Generated code calls this rather than `Runtime.call` because the runtime cannot name this
+		table: it reaches it through the dispatcher it was handed, and on the way a call passed
+		`Runtime.call`, its out-of-line body, the `std::function` and `call` — four frames, each
+		saving registers its cold paths need. On a Dreamcast that was about 150 instructions for
+		every dynamic call, 7% of a frame of Crash Bandicoot: Warped.
+	**/
+	public static function run(ctx:CpuState, addr:Int):Void {
+		if (ctx.unwindToken != 0) return;
+		else {}
+		if (!flatReady) buildFlat();
+		else {}
+		var target = addr;
+		while (true) {
+			final at = ((target >>> 2) & 1023) << 4;
+			if (shim.MemA.get32(FAST, at) == target) dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
+			else Runtime.callOnce(ctx, target);
+			if (ctx.unwindToken != Runtime.TAIL) return;
+			else {}
+			ctx.unwindToken = 0;
+			target = ctx.tailTarget;
 		}
 	}
 
@@ -356,6 +392,13 @@ class Program {
 		yet, and either way the honest answer is a miss that names it.
 	**/
 	public static function call(addr:Int, ctx:CpuState):Bool {
+		if (!flatReady) buildFlat();
+		else {}
+		final at = ((addr >>> 2) & 1023) << 4;
+		if (shim.MemA.get32(FAST, at) == addr) {
+			dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
+			return true;
+		} else {}
 		final ovl = kernel.OverlayMgr.residentAt(addr);
 		if (ovl >= 0) {
 			// The resident overlay shadows the executable here: no fallthrough.
@@ -363,12 +406,24 @@ class Program {
 			if (row < 0) return false;
 			dispatch(Overlays.handleAt(row), Overlays.blockAt(row), ctx);
 			return true;
-		}
+		} else {}
 		final row = lookup(addr);
 		// Nothing at a fixed address: it may be relocatable code the game put there (ADR-0025).
 		if (row < 0) return RelocTable.call(addr, ctx);
-		dispatch(shim.MemA.get32(HANDLES_F, row << 2), shim.MemA.get32(BLOCKS_F, row << 2), ctx);
+		final handle = shim.MemA.get32(HANDLES_F, row << 2);
+		final block = shim.MemA.get32(BLOCKS_F, row << 2);
+		// Kept only where no window can take the address away; `clearFast` runs whenever the
+		// windows change, so a window declared later is honoured too.
+		if (kernel.OverlayMgr.windowOf(addr) < 0) keep(at, addr, handle, block);
+		else {}
+		dispatch(handle, block, ctx);
 		return true;
+	}
+
+	static function keep(at:Int, addr:Int, handle:Int, block:Int):Void {
+		shim.MemA.set32(FAST, at, addr);
+		shim.MemA.set32(FAST, at + 4, handle);
+		shim.MemA.set32(FAST, at + 8, block);
 	}
 
 	/** Whether an address is a function entry rather than a block inside one. Diagnostics only. */
@@ -405,7 +460,22 @@ class Program {
 	static var BLOCKS_F:shim.RawBuf;
 	static var CACHE_TAG:shim.RawBuf;
 	static var CACHE_ROW:shim.RawBuf;
+	/**
+		`call`'s answers for fixed code outside every overlay window, direct-mapped on the address:
+		address, handle, block and a spare word per slot, so a lookup touches one cache line. An
+		empty slot holds an address that maps to a different slot, which no lookup can match.
+	**/
+	static var FAST:shim.RawBuf;
 	static var flatReady:Bool = false;
+
+	/** Forgets every kept answer. The windows changed: an address may now belong to one. */
+	static function clearFast():Void {
+		var i = 0;
+		while (i < 1024) {
+			shim.MemA.set32(FAST, i << 4, ((i + 1) & 1023) << 2);
+			i++;
+		}
+	}
 
 	/** Initialize before guest execution; subsequent calls allocate nothing. */
 	public static function init():Void {
@@ -413,6 +483,8 @@ class Program {
 		RelocTable.init();
 	}
 
+	/** Out of line on C++, so `run`'s frame is not the size of a startup loop's. */
+	@:specifier(\"__attribute__((noinline))\")
 	static function buildFlat():Void {
 		ADDRS_F = shim.RawMem.alloc(N << 2);
 		HANDLES_F = shim.RawMem.alloc(N << 2);
@@ -428,8 +500,14 @@ class Program {
 		// Every Int address, including -1, therefore has an unambiguous answer.
 		CACHE_TAG = shim.RawMem.alloc(1024 << 2);
 		CACHE_ROW = shim.RawMem.alloc(1024 << 2);
+		FAST = shim.RawMem.alloc(1024 << 4);
 		i = 0;
-		while (i < 1024) { shim.MemA.set32(CACHE_ROW, i << 2, 0); i++; }
+		while (i < 1024) {
+			shim.MemA.set32(CACHE_ROW, i << 2, 0);
+			i++;
+		}
+		clearFast();
+		kernel.OverlayMgr.watchWindows(clearFast);
 		flatReady = true;
 	}
 
@@ -459,7 +537,7 @@ class Program {
 		for (i in 0...shard.functions.length) {
 			buf.add('\t\t\tcase $i: ${shard.className}.${shard.functions[i].name}(ctx, entry);\n');
 		}
-		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, "${shard.className}", ${shard.index}, slot);\n');
+		buf.add('\t\t\tdefault: Runtime.badHandle(ctx, ${shard.index}, ${shard.index}, slot);\n');
 		buf.add('\t\t}\n');
 		buf.add('\t}\n');
 		buf.add('}\n');
@@ -542,7 +620,11 @@ class Program {
 			+ '${posStart.length} of them shared by several functions.\n');
 		buf.add('**/\n');
 		buf.add('class RelocTable {\n');
-		buf.add('\tpublic static inline var HASH_WORDS = $hashWords;\n\n');
+		buf.add('\tpublic static inline var HASH_WORDS = $hashWords;\n');
+		// Counts as constants and the lengths as a flat buffer: an Array is a deque on
+		// reflaxe.CPP, whose `length` and `[]` cost a call each (see `flatTables`).
+		buf.add('\tstatic inline var KEY_COUNT = ${keys.length};\n');
+		buf.add('\tstatic inline var LENGTH_COUNT = ${lengths.length};\n\n');
 		emitTable(buf, "LENGTHS", "Key lengths in words, longest first.", lengths, a -> Std.string(a));
 		emitTable(buf, "KEYS", "FNV-1a over a function's first words, then their count, ascending.", keys, a -> hex(a));
 		emitTable(buf, "VALUES", "A handle, or -1 - group for a key several functions share.", values, a -> Std.string(a));
@@ -562,6 +644,7 @@ class Program {
 
 	static final RELOC_RUNTIME = "	static var KEYS_F:shim.RawBuf;
 	static var VALUES_F:shim.RawBuf;
+	static var LENGTHS_F:shim.RawBuf;
 	/** FNV-1a state after each word at the address being looked up: entry n after n words. */
 	static var STATES_F:shim.RawBuf;
 	static var ready:Bool = false;
@@ -570,14 +653,20 @@ class Program {
 	public static function init():Void {
 		if (ready) return;
 		else {}
-		final n = KEYS.length;
+		final n = KEY_COUNT;
 		KEYS_F = shim.RawMem.alloc((n + 1) << 2);
 		VALUES_F = shim.RawMem.alloc((n + 1) << 2);
 		STATES_F = shim.RawMem.alloc((HASH_WORDS + 1) << 2);
+		LENGTHS_F = shim.RawMem.alloc((LENGTH_COUNT + 1) << 2);
 		var i = 0;
 		while (i < n) {
 			shim.MemA.set32(KEYS_F, i << 2, KEYS[i]);
 			shim.MemA.set32(VALUES_F, i << 2, VALUES[i]);
+			i++;
+		}
+		i = 0;
+		while (i < LENGTH_COUNT) {
+			shim.MemA.set32(LENGTHS_F, i << 2, LENGTHS[i]);
 			i++;
 		}
 		ready = true;
@@ -608,7 +697,7 @@ class Program {
 	/** The index of `key` in KEYS, or -1. */
 	static function find(key:Int):Int {
 		var lo = 0;
-		var hi = KEYS.length - 1;
+		var hi = KEY_COUNT - 1;
 		while (lo <= hi) {
 			final mid = (lo + hi) >> 1;
 			final at = shim.MemA.get32(KEYS_F, mid << 2);
@@ -625,7 +714,7 @@ class Program {
 		a longer match is the more specific one.
 	**/
 	public static function call(addr:Int, ctx:CpuState):Bool {
-		if (KEYS.length == 0 || (addr & 3) != 0) return false;
+		if (KEY_COUNT == 0 || (addr & 3) != 0) return false;
 		else {}
 		if (!Memory.isPlainMemory(addr) || !Memory.isPlainMemory(addr + ((HASH_WORDS - 1) << 2))) return false;
 		else {}
@@ -633,8 +722,8 @@ class Program {
 		else {}
 		hashPrefixes(addr);
 		var l = 0;
-		while (l < LENGTHS.length) {
-			final n = LENGTHS[l];
+		while (l < LENGTH_COUNT) {
+			final n = shim.MemA.get32(LENGTHS_F, l << 2);
 			final at = find(step(shim.MemA.get32(STATES_F, n << 2), n));
 			if (at >= 0) {
 				final value = shim.MemA.get32(VALUES_F, at << 2);
