@@ -160,11 +160,17 @@ void bp_gpu_rect(int x,int y,int w,int h,int bgr,int semi,int semi_mode);
 void bp_gpu_dirty(int x,int y,int w,int h);
 ```
 
-GP0 parsing, uploads, VRAM copies and device timing still run in the core. Rasterized pixels
-from this optional path are absent from emulated VRAM, so feedback/readback effects can differ;
-this is not a bit-exact substitute for the software renderer. The original decision and its
-measurements are preserved as [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md)
-(renumbered from that branch's ADR-0008 to preserve main's machine-IR decision).
+GP0 parsing, uploads, VRAM copies and device timing still run in the core. Rasterized pixels from
+this optional path are absent from emulated VRAM, so feedback/readback effects can differ; this is
+not a bit-exact substitute for the software renderer. The exception is drawing no picture is made
+of: a primitive whose drawing area lies in neither of the last two displayed rectangles and is
+under three quarters of the picture either way, and a GP0(02h) fill meeting neither, are rasterised
+by the core into emulated VRAM and reported through `bp_gpu_dirty` — a game making a texture for
+itself, such as Crash 3's shadow ([ADR-0030](../decisions/ADR-0030-offscreen-drawing-is-state.md)).
+A fill the backend does draw arrives under `bp_gpu_mask(0, 0)`, since the hardware ignores the mask
+bits for it. The original decision and its measurements are preserved as
+[ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md) (renumbered from that branch's
+ADR-0008 to preserve main's machine-IR decision).
 
 `--audio-hw` is the same kind of fork for sound, taken only if `BP_CAP_SPU_VOICES` is nonzero
 and never on a headless run. The SPU then advances every voice as it does with nobody listening

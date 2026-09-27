@@ -41,9 +41,17 @@
   are not, as in the software path.
 
   The mask bit (bp_gpu_mask) is the stencil: a dirty rectangle's copy writes 1 where VRAM's bit 15
-  is set and 0 elsewhere, a primitive drawn with "set" increments the stencil of every pixel it
-  writes, and one drawn with "check" passes only where the stencil is zero. Anything a game reads
-  back from VRAM after drawing sees what was there before the draw, by the ABI's own terms.
+  is set and 0 elsewhere, and one drawn with "check" passes only where the stencil is zero. Every
+  pixel a primitive writes gets the bit the PlayStation would store (psx-spx, "Mask Bit Setting"):
+  1 under "set", otherwise the texel's bit 15, and 0 for an untextured primitive. A pass cannot
+  see its texels' bit, so it writes 0 — exact for untextured primitives and for texels without
+  it — except the blending pass of a subtracting primitive, whose texels all have it. Keeping the
+  old bit instead left stale mask bits under everything drawn: Crash Bandicoot: Warped clears its
+  shadow texture with a fill over words whose bit 15 was set, and the texture read back through
+  its palette as a hatched rectangle across half the shadow. (That texture is now the runtime's
+  to draw, being off screen — ADR-0030 — but a fill still arrives here under mask bits of zero,
+  as the hardware ignores them for a fill, and clears the bit the same way.) Anything a game
+  reads back from VRAM after drawing sees what was there before the draw, by the ABI's own terms.
 
   Drawn pixels become texels when a primitive samples them. Games render into VRAM and then use
   what they rendered as a texture — Crash Bandicoot: Warped draws Crash's silhouette off screen
@@ -529,13 +537,15 @@ function createHardwareGpu(canvas) {
     }
   }
 
-  // "check": draw only where no mask bit is set. "set": leave a mask bit on what is drawn,
-  // by incrementing, so the check's reference of zero needs no second value.
-  function setStencil(b) {
-    const s = (b.maskCheck ? 1 : 0) | (b.maskSet ? 2 : 0);
+  // "check": draw only where no mask bit is set. What is drawn gets a mask bit when "set" is on
+  // or the pass's texels all carry bit 15 (`texelBit`), by incrementing, so the check's
+  // reference of zero needs no second value; otherwise the bit is cleared (see the header).
+  function setStencil(b, texelBit) {
+    const on = b.maskSet || texelBit;
+    const s = (b.maskCheck ? 1 : 0) | (on ? 2 : 0);
     if (s === glStencil) return;
     gl.stencilFunc(b.maskCheck ? gl.EQUAL : gl.ALWAYS, 0, 0xFF);
-    gl.stencilOp(gl.KEEP, gl.KEEP, b.maskSet ? gl.INCR : gl.KEEP);
+    gl.stencilOp(gl.KEEP, gl.KEEP, on ? gl.INCR : gl.ZERO);
     glStencil = s;
   }
 
@@ -580,11 +590,11 @@ function createHardwareGpu(canvas) {
     for (let i = 0; i < batchCount; i++) {
       const b = batches[i];
       setScissor(b);
-      setStencil(b);
+      setStencil(b, false);
       if (b.kind === SUBTRACT_TEX) {
         setSubtract(0); setPass(1);
         gl.drawArrays(gl.TRIANGLES, b.start, b.count);
-        setSubtract(1); setPass(2);
+        setStencil(b, true); setSubtract(1); setPass(2);
       } else {
         setSubtract(b.kind === SUBTRACT ? 1 : 0); setPass(0);
       }

@@ -27,6 +27,9 @@ class Scanout {
 	static inline var HRES_368 = 368;
 
 	public static function present():Void {
+		// Under hardware drawing, VRAM drawn off screen since the last present is reported
+		// before a picture is made (Gpu.offscreen). Nothing to do otherwise.
+		Gpu.flushDrawn();
 		if (!Gpu.displayOn()) return blank();
 		else {}
 		final origin = Gpu.displayOrigin();
@@ -34,6 +37,7 @@ class Scanout {
 		// Bits 0..9 are the X of the window in halfwords, bits 10..18 its Y.
 		final x = origin & 0x3FF;
 		final y = (origin >>> 10) & 0x1FF;
+		Gpu.shown(x, y, width(mode), height(mode));
 		var flags = 0;
 		if ((mode & 0x10) != 0) flags |= Backend.PRESENT_24BPP;
 		else {}

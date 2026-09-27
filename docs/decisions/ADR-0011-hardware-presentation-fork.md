@@ -55,7 +55,8 @@ path:
 
 - **Rendered pixels are not in emulated VRAM.** Anything reading them back sees what was there
   before: feedback effects, the `vram.bin` diagnostic dump, and GP0(C0h) if it is ever
-  implemented.
+  implemented. (Amended by ADR-0030: drawing where no picture comes from — a texture a game
+  makes for itself — is rasterised into emulated VRAM by the core after all.)
 - **Blend mode 2 (B − F) is approximated** as half-and-half. The PowerVR's eight blend factors
   do not include inverse-source-colour; the hardware cannot express subtraction. Logged once.
 - **Modulation clamps.** The PlayStation multiplies texel by colour and divides by 128, so a

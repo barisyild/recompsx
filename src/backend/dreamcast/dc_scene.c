@@ -215,8 +215,10 @@ static int meets(const int* r, int x, int y, int w, int h) {
  * when the area is the whole buffer: Crash Bandicoot: Warped draws into y 12..227 of a 240-line
  * buffer, and its picture sat twelve lines high. In neither rectangle, the drawing is either a
  * buffer not shown yet — as large as the picture, placed at its own corner as before — or VRAM
- * that a later primitive samples (Crash 3 draws its shadow into 64x64 at 0,320), which the
- * PlayStation never shows, so neither is it drawn here: returns 0. */
+ * that a later primitive samples (Crash 3 draws its shadow into 64x64 at 0,320). The runtime
+ * rasterises that kind itself, into emulated VRAM, by this same rule from the same rectangles
+ * (gpu.Gpu.offscreen), and reports it through bp_gpu_dirty like an upload, so it does not arrive
+ * here; should any arrive anyway, the PlayStation never shows it, so neither is it drawn: 0. */
 static int screen_origin(const gstate_t* s, int* ox, int* oy, int* ow, int* oh) {
     for(int k = 0; k < 2; k++) {
         const int* d = g_disp[k];

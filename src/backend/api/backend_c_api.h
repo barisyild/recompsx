@@ -69,7 +69,11 @@ void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h
  *
  * Consequences a backend must accept: emulated VRAM no longer contains what was drawn, so
  * anything reading rendered pixels back (feedback effects, a VRAM dump) sees what was there
- * before. Frames that draw no primitives fall back to bp_present, so movies still work.
+ * before. Frames that draw no primitives fall back to bp_present, so movies still work. Drawing
+ * no picture is made of never arrives here: a primitive whose drawing area lies in neither of
+ * the last two rectangles bp_present showed (and is under three quarters of the picture either
+ * way), and a GP0(02h) fill meeting neither, are rasterised by the runtime into emulated VRAM
+ * and reported through bp_gpu_dirty — a texture the game makes for itself (ADR-0030).
  *
  * Coordinates arrive with the drawing offset already applied. Colours are 24-bit BGR, exactly as
  * the GP0 command word carries them. Texture and blend state is latched by bp_gpu_state and
@@ -99,7 +103,8 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2);
 
-/* An axis-aligned rectangle in one flat colour: sprites and GP0(02h) fills both land here. */
+/* An axis-aligned rectangle in one flat colour: sprites and GP0(02h) fills both land here. A
+ * fill ignores the mask bits on the PlayStation, so it arrives under bp_gpu_mask(0, 0). */
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
 
 /* Emulated VRAM changed under this rectangle — an upload or a VRAM-to-VRAM copy. Anything the

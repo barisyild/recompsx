@@ -174,6 +174,121 @@ class Gpu {
 	**/
 	public static var hw = false;
 
+	/**
+		Hardware mode: the drawing area is VRAM no picture is made of, so what is drawn there is
+		rasterised here, into emulated VRAM, rather than handed to the backend.
+
+		A game draws into VRAM it never displays to make a texture for itself. Crash Bandicoot:
+		Warped draws Crash's silhouette into 64x64 at (0, 320) every frame and lays it on the
+		ground as his shadow, through a 4-bit palette. A backend's pixels never reach emulated
+		VRAM, so that texture stayed whatever the level had uploaded there — on the Dreamcast, a
+		dark square under Crash. Those pixels are not presentation but state that a later
+		primitive reads, so they take the software path, exactly as with no backend at all, and
+		the backend hears of the rectangle as it hears of an upload (`flushDrawn`).
+
+		"No picture": the drawing area's corner lies in neither of the last two rectangles the
+		scanout presented — a double-buffered game shows one and draws into the other — and the
+		area is smaller than three quarters of the picture either way, which a buffer about to be
+		shown for the first time is not. The Dreamcast backend's screen_origin decides the same
+		from the same rectangles, so what it would decline to draw is what this draws.
+	**/
+	static var offscreen = false;
+
+	// The last two distinct rectangles the scanout presented, newest first. See `shown`.
+	static var shownX0 = 0;
+	static var shownY0 = 0;
+	static var shownW0 = 0;
+	static var shownH0 = 0;
+	static var shownX1 = 0;
+	static var shownY1 = 0;
+	static var shownW1 = 0;
+	static var shownH1 = 0;
+
+	// What primitives drawn here under hardware mode have covered since the backend last heard,
+	// corners inclusive; empty while drawnX0 > drawnX1. Inside one drawing area by construction.
+	static var drawnX0 = 1024;
+	static var drawnY0 = 512;
+	static var drawnX1 = -1;
+	static var drawnY1 = -1;
+
+	/**
+		The scanout presented this rectangle of VRAM; never called for a blank screen. The last
+		two distinct ones are kept, as the Dreamcast backend keeps them from the same calls.
+	**/
+	public static function shown(x:Int, y:Int, w:Int, h:Int):Void {
+		if (x == shownX0 && y == shownY0 && w == shownW0 && h == shownH0) return;
+		else {}
+		shownX1 = shownX0;
+		shownY1 = shownY0;
+		shownW1 = shownW0;
+		shownH1 = shownH0;
+		shownX0 = x;
+		shownY0 = y;
+		shownW0 = w;
+		shownH0 = h;
+		classifyArea();
+	}
+
+	static inline function holds(rx:Int, ry:Int, rw:Int, rh:Int, x:Int, y:Int):Bool {
+		return rw > 0 && rh > 0 && x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+	}
+
+	static inline function meets(rx:Int, ry:Int, rw:Int, rh:Int, x:Int, y:Int, w:Int, h:Int):Bool {
+		return rw > 0 && !(rx + rw <= x || x + w <= rx || ry + rh <= y || y + h <= ry);
+	}
+
+	/** Decides `offscreen` again: the drawing area or the rectangles shown have changed. */
+	static function classifyArea():Void {
+		// Whatever was drawn in the old area is complete; the backend hears of it before any
+		// primitive that might sample it.
+		flushDrawn();
+		final x = drawAreaTopLeft & 0x3FF;
+		final y = (drawAreaTopLeft >>> 10) & 0x1FF;
+		final w = (drawAreaBottomRight & 0x3FF) - x + 1;
+		final h = ((drawAreaBottomRight >>> 10) & 0x1FF) - y + 1;
+		offscreen = hw && !holds(shownX0, shownY0, shownW0, shownH0, x, y)
+			&& !holds(shownX1, shownY1, shownW1, shownH1, x, y)
+			&& !(w * 4 >= shownW0 * 3 && h * 4 >= shownH0 * 3);
+	}
+
+	/** A primitive drawn here under hardware mode covered these pixels (inclusive corners). */
+	static function noteDrawn(x0:Int, y0:Int, x1:Int, y1:Int):Void {
+		if (x0 > x1 || y0 > y1) return;
+		else {}
+		if (x0 < drawnX0) drawnX0 = x0;
+		else {}
+		if (y0 < drawnY0) drawnY0 = y0;
+		else {}
+		if (x1 > drawnX1) drawnX1 = x1;
+		else {}
+		if (y1 > drawnY1) drawnY1 = y1;
+		else {}
+	}
+
+	/**
+		Reports what was drawn here under hardware mode, as an upload is reported: at the end of
+		each drawing area and at every present, so a backend that samples it — or shows it —
+		reads the pixels, not what they replaced.
+	**/
+	public static function flushDrawn():Void {
+		if (drawnX0 > drawnX1) return;
+		else {}
+		reportDrawn();
+	}
+
+	static function reportDrawn():Void {
+		final x0 = drawnX0 < 0 ? 0 : drawnX0;
+		final y0 = drawnY0 < 0 ? 0 : drawnY0;
+		final x1 = drawnX1 > 1023 ? 1023 : drawnX1;
+		final y1 = drawnY1 > 511 ? 511 : drawnY1;
+		drawnX0 = 1024;
+		drawnY0 = 512;
+		drawnX1 = -1;
+		drawnY1 = -1;
+		if (x0 <= x1 && y0 <= y1) Backend.gpuDirty(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+		else {}
+	}
+
 	public static function init():Void {
 		packet = [for (_ in 0...32) 0];
 		vx = [for (_ in 0...4) 0];
@@ -183,6 +298,18 @@ class Gpu {
 		vv = [for (_ in 0...4) 0];
 		opCount = [for (_ in 0...256) 0];
 		Vram.init();
+		shownX0 = 0;
+		shownY0 = 0;
+		shownW0 = 0;
+		shownH0 = 0;
+		shownX1 = 0;
+		shownY1 = 0;
+		shownW1 = 0;
+		shownH1 = 0;
+		drawnX0 = 1024;
+		drawnY0 = 512;
+		drawnX1 = -1;
+		drawnY1 = -1;
 		reset();
 		wordsReceived = 0;
 		commandsReceived = 0;
@@ -213,6 +340,7 @@ class Gpu {
 		displayRangeV = 0x3FC10;
 		readLatch = 0;
 		pending = 0;
+		classifyArea();
 	}
 
 	// ---- the two ports ---------------------------------------------------------------------------
@@ -271,7 +399,7 @@ class Gpu {
 		if (opCount != null) opCount[op]++;
 		else {}
 		packetLen = n + 1;
-		if (hw && op < 0x60) polygonHw(ram, at, op);
+		if (hw && !offscreen && op < 0x60) polygonHw(ram, at, op);
 		else wholeToPacket(ram, at, op, n);
 	}
 
@@ -703,8 +831,68 @@ class Gpu {
 		final y = (packet[1] >>> 16) & 0x1FF;
 		final w = ((packet[2] & 0x3FF) + 0xF) & ~0xF;
 		final h = (packet[2] >>> 16) & 0x1FF;
-		fillRect(x, y, w, h, colour);
+		fillVram(x, y, w, h, colour);
 		primitives++;
+	}
+
+	/**
+		GP0(02h): a rectangle of VRAM set to one colour — a VRAM operation, not a primitive.
+		psx-spx, "Fill Rectangle in VRAM": the drawing area does not clip it, it is "not affected
+		by the GP0(E6h) mask setting, acting as if GP0(E6h).0 and GP0(E6h).1 are both zero", and
+		it writes bit 15 as zero.
+
+		It used to share the sprite's path and obey both mask bits. The hardware path then left
+		the mask bit of every pixel it filled as it was, and a mask bit is bit 15 of the halfword:
+		Crash Bandicoot: Warped clears its shadow texture with a fill every frame, over a corner
+		whose uploaded words have bit 15 set, and read back through a 4-bit palette every fourth
+		texel of the cleared half was index 8 or more, not transparent — a hatched rectangle
+		across half of Crash's shadow.
+
+		Under hardware mode a fill that meets no picture shown is VRAM a later primitive reads, as
+		an off-screen drawing area is (see `offscreen`), so it is done here and reported.
+	**/
+	static function fillVram(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
+		if (hw && (meets(shownX0, shownY0, shownW0, shownH0, x, y, w, h)
+				|| meets(shownX1, shownY1, shownW1, shownH1, x, y, w, h))) {
+			fillHw(x, y, w, h, colour);
+			return;
+		} else {}
+		final left = x < 0 ? 0 : x;
+		final top = y < 0 ? 0 : y;
+		final right0 = x + w;
+		final bottom0 = y + h;
+		final right = right0 > 1024 ? 1024 : right0;
+		final bottom = bottom0 > 512 ? 512 : bottom0;
+		if (left >= right || top >= bottom) return;
+		else {}
+		final count = right - left;
+		var row = Vram.rowStart(top) + left;
+		var j = top;
+		while (j < bottom) {
+			Vram.fillLinear(row, count, colour & 0x7FFF);
+			row += Vram.WIDTH;
+			j++;
+		}
+		pixels = (pixels + count * (bottom - top)) | 0;
+		if (hw) reportFill(left, top, right - 1, bottom - 1);
+		else {}
+	}
+
+	/** A fill the backend draws: under mask bits of zero, whatever GP0(E6h) says. */
+	static function fillHw(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
+		final masked = maskSet || maskCheck;
+		if (masked) Backend.gpuMask(0, 0);
+		else {}
+		rectHw(x, y, w, h, colour);
+		if (masked) Backend.gpuMask(maskSet ? 1 : 0, maskCheck ? 1 : 0);
+		else {}
+	}
+
+	/** A fill done here under hardware mode: reported on its own, after what came before it. */
+	static function reportFill(x0:Int, y0:Int, x1:Int, y1:Int):Void {
+		flushDrawn();
+		noteDrawn(x0, y0, x1, y1);
+		reportDrawn();
 	}
 
 	/**
@@ -720,7 +908,8 @@ class Gpu {
 		// business and a backend with culling disabled does not care which way round the vertices
 		// arrive. Both rejects below are kept so the primitive counter means the same thing in
 		// either mode — a heartbeat that counted differently would make the two incomparable.
-		if (hw) {
+		// An off-screen drawing area is the exception, rasterised here (see `offscreen`).
+		if (hw && !offscreen) {
 			final hx0 = vx[ia], hy0 = vy[ia];
 			final hx1 = vx[ib0], hy1 = vy[ib0];
 			final hx2 = vx[ic0], hy2 = vy[ic0];
@@ -782,6 +971,8 @@ class Gpu {
 		if (area == 0) return;
 		else {}
 		primitives++;
+		if (hw) noteDrawn(minX, minY, maxX, maxY);
+		else {}
 
 		// The edge function is linear in x and y, so stepping it costs an add where evaluating it
 		// costs two multiplies. Six multiplies a pixel over a bounding box is what a scene of three
@@ -1150,18 +1341,22 @@ class Gpu {
 		return shim.IntMath.mul(bx - ax, cy - ay) - shim.IntMath.mul(by - ay, cx - ax);
 	}
 
+	static function rectHw(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
+		sendState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
+			drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
+		// The ABI's colour is 24-bit BGR, as a triangle's is; `colour` is the 15-bit word VRAM
+		// holds. Widened, not taken from the command: a rectangle is not dithered, so the five
+		// bits per channel VRAM keeps are exactly what the hardware shows. Handing the 15-bit
+		// word over as BGR painted Crash Bandicoot: Warped's grey stars orange and green.
+		Backend.gpuRect(x, y, w, h, ((colour & 0x1F) << 3) | (((colour >> 5) & 0x1F) << 11)
+			| (((colour >> 10) & 0x1F) << 19), semiTransparent ? 1 : 0, semiMode);
+	}
+
+	/** An untextured rectangle, already clipped to the drawing area by drawRect. */
 	static function fillRect(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
-		// No `primitives++` here in either mode: both callers count for themselves.
-		if (hw) {
-			sendState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
-				drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
-			// The ABI's colour is 24-bit BGR, as a triangle's is; `colour` is the 15-bit word
-			// VRAM holds. Widened, not taken from the command: a rectangle is not dithered, so
-			// the five bits per channel VRAM keeps are exactly what the hardware shows. Handing
-			// the 15-bit word over as BGR painted Crash Bandicoot: Warped's grey stars orange and
-			// green.
-			Backend.gpuRect(x, y, w, h, ((colour & 0x1F) << 3) | (((colour >> 5) & 0x1F) << 11)
-				| (((colour >> 10) & 0x1F) << 19), semiTransparent ? 1 : 0, semiMode);
+		// No `primitives++` here in either mode: the caller counts for itself.
+		if (hw && !offscreen) {
+			rectHw(x, y, w, h, colour);
 			return;
 		} else {}
 		// Drawing clips at the viewport edge; it does not wrap like a VRAM transfer. Clip once
@@ -1173,6 +1368,8 @@ class Gpu {
 		final right = right0 > 1024 ? 1024 : right0;
 		final bottom = bottom0 > 512 ? 512 : bottom0;
 		if (left >= right || top >= bottom) return;
+		else {}
+		if (hw) noteDrawn(left, top, right - 1, bottom - 1);
 		else {}
 		final count = right - left;
 		if (!semiTransparent && !maskCheck) {
@@ -1298,6 +1495,7 @@ class Gpu {
 		if (hw) Backend.gpuClip(drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF,
 			drawAreaBottomRight & 0x3FF, (drawAreaBottomRight >>> 10) & 0x1FF);
 		else {}
+		classifyArea();
 	}
 
 	static function setMaskBits(v:Int):Void {
