@@ -66,7 +66,7 @@ SYSTEM.CNF
 SCUS_945.70              432,128 bytes   boot executable
 BASHY.                31,752,000 bytes   (name has an empty ISO9660 extension)
 CRASHBSH/CRASHBSH.DAT 73,220,096 bytes   main data archive
-SPYRO3/SPYRO3.EXE        372,736 bytes   bundled Spyro 3 demo — see games/spyro3demo/
+SPYRO3/SPYRO3.EXE        372,736 bytes   bundled Spyro 3 demo (not configured)
 SPYRO3/WAD.WAD        16,797,696 bytes
 SPYRO3/SPEECH.STR     32,249,856 bytes
 ```

@@ -30,15 +30,22 @@ Haxe the system has, which is the wrong compiler.
 
 ## 1. The game media, which is never in git
 
-Create `games/crashbash/local.json` — gitignored, and the only place an absolute path to a disc
-image may appear:
+A game's facts live under its product code — the serial on the disc, upper case, no
+punctuation: `games/SCUS94570/` is Crash Bash, `games/SCUS94244/` Crash Bandicoot: Warped. The
+generator can be handed the disc itself: it reads `SYSTEM.CNF`, takes the code from the name of
+the executable it boots (`SCUS_945.70` is `SCUS94570`), and uses `games/SCUS94570/game.json` when
+there is one; for a game with no directory yet it compiles the executable alone.
+
+To name a game by its code instead, create `games/SCUS94570/local.json` — gitignored, and the only
+place an absolute path to a disc image may appear:
 
     { "cue": "/absolute/path/to/Crash Bash.cue" }
 
 The generator reads the executable and the overlays straight out of the disc image; there is no
 step that copies game data into the repository, and there must never be one. `game.json` carries
 only facts *about* the disc (the executable's path inside it, its SHA-256, where the overlays
-live), which is why it is checked in and `local.json` is not.
+live), which is why it is checked in and `local.json` is not. The SHA-256 is checked: a different
+pressing under the same code stops the build rather than compiling against the wrong hints.
 
 For running, the runtime wants the executable and the disc image as two arguments. The convenient
 arrangement is two gitignored symlinks:
@@ -49,12 +56,13 @@ arrangement is two gitignored symlinks:
 
 ## 2. Generate, build, run
 
-    ./scripts/recompsx.sh gen games/crashbash/game.json    # disc -> Haxe, into out/gen
+    ./scripts/recompsx.sh gen "/path/to/Crash Bash.cue"    # disc -> Haxe, into out/gen
+    ./scripts/recompsx.sh gen SCUS94570                    # the same, via local.json
     haxe build/game-js.hxml                                # out/gen -> out/_gen/game.js
     node out/_gen/game.js web/boot.exe web/disc.bin
 
 Generation runs the tool under Haxe's interpreter and takes a couple of minutes; it only needs
-repeating when `tools/recomp` or `games/<id>/*.json` changes. Editing anything in `src/runtime` or
+repeating when `tools/recomp` or `games/<SERIAL>/*.json` changes. Editing anything in `src/runtime` or
 `src/shims` needs only the `haxe` step.
 
 Headless, for verification rather than watching:
@@ -125,7 +133,7 @@ measuring it on JavaScript in twenty-five seconds answers the question for all o
     src/shims/{js,cxx}  the same names, spelled per target
     out/gen             generated Haxe        (gitignored)
     out/_gen            build output          (gitignored)
-    games/<id>          per-game configuration and RE notes
+    games/<SERIAL>      per-game configuration and RE notes, by the disc's product code
     docs/decisions      ADRs — read before changing anything they cover
 
 `AGENTS.md` is the standing brief: the rules, the commands, and the session protocol. `PROGRESS.md`

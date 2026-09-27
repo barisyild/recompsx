@@ -23,6 +23,7 @@ import recomp.codegen.Relocatable.RelocSet;
 import recomp.codegen.Relocatable.Occurrence;
 import recomp.loader.DiscImage;
 import recomp.loader.IsoWalk;
+import recomp.loader.SystemCnf;
 import recomp.mips.Instr;
 import sys.io.File;
 
@@ -97,10 +98,12 @@ usage:
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
 
-  recompsx gen <games/<id>/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions]
-      Emit a recompiled program. Given a config, the executable is read from the disc
-      that game's gitignored local.json names, and its hints are used as seeds. Given a
-      bare executable, seeds come from --seed.
+  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions]
+      Emit a recompiled program. Given a disc image, its SYSTEM.CNF names the executable
+      and its product code, and games/<code>/game.json, when there is one, supplies the
+      overlays and hints; without one the executable alone is compiled. Given a code or a
+      config, the disc is the one that game's gitignored local.json names. Given a bare
+      executable, seeds come from --seed.
       --no-opt keeps block dispatch, without fusion or forwarding, for differential testing.
       --no-regions keeps simple loops but disables region reductions.
 
@@ -269,11 +272,19 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			i++;
 		}
 
-		// Two ways in, one pipeline. A config names a disc and carries the game's hints; a bare
-		// executable is the homebrew and fixture path, where there is no disc to name. Everything
-		// after this point sees the same executable and the same seeds either way.
-		final input = StringTools.endsWith(path.toLowerCase(), ".json")
-			? fromConfig(path) : fromBareExe(path, seeds);
+		// Several ways in, one pipeline. A disc finds its own config by the product code in its
+		// SYSTEM.CNF; a code or a config names a disc through local.json; a bare executable is the
+		// homebrew and fixture path, where there is no disc to name. Everything after this point
+		// sees the same executable and the same seeds whichever it was.
+		final input = if (StringTools.endsWith(path.toLowerCase(), ".json")) {
+			fromConfig(path);
+		} else if (!sys.FileSystem.exists(path) && SystemCnf.isSerial(path)) {
+			fromConfig(configFor(path));
+		} else if (isPsxExe(path)) {
+			fromBareExe(path, seeds);
+		} else {
+			fromDisc(path, seeds);
+		}
 
 		final exe = input.exe;
 		final base = Image.ofExe(input.name, exe);
@@ -344,12 +355,17 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 
 	/** What `gen` needs, however it was asked for: an executable, a name for it, and seeds. */
 	static function fromBareExe(path:String, seeds:Array<String>):GenInput {
+		return exeAlone(loadExe(path), nameOf(path), seeds);
+	}
+
+	/** An executable with no config: its own entry point and whatever --seed adds. */
+	static function exeAlone(exe:PsxExe, name:String, seeds:Array<String>):GenInput {
 		final hints = [];
 		for (sd in seeds) {
 			final a = parseAddr(sd);
 			hints.push({addr: a, name: 'f_${StringTools.hex(Vaddr.canonRam(a), 8).toLowerCase()}'});
 		}
-		return {exe: loadExe(path), name: nameOf(path), seeds: hints, tableHints: [], overlays: [],
+		return {exe: exe, name: name, seeds: hints, tableHints: [], overlays: [],
 			overlayBytes: new Map(), relocSets: []};
 	}
 
@@ -362,8 +378,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		image is the executable's own — `\SCUS_945.70;1` is `SCUS_945.70` — so generated output
 		says where it came from without saying anything about whose disk it was read from.
 	**/
-	static function fromConfig(path:String):GenInput {
-		final config = GameConfig.load(path);
+	static function fromConfig(path:String, ?disc:String):GenInput {
+		final config = GameConfig.load(path, disc);
 		if (config.exeFile != null) {
 			// Homebrew: local.json names a loose executable and there is no disc at all.
 			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
@@ -388,6 +404,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				+ 'names the wrong file or this is not the right disc.');
 		}
 		final bytes = disc.readExtent(found.lba, 0, found.length);
+		checkSha256(config, bytes);
 		final exe = PsxExe.parse(bytes);
 		final overlayBytes = readOverlays(config, disc);
 		final relocSets = [for (r in config.relocatable) readRelocatable(r, exe, config, disc)];
@@ -395,6 +412,78 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		return {exe: exe, name: isoName(config.exePath),
 			seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
 			overlayBytes: overlayBytes, relocSets: relocSets};
+	}
+
+	/**
+		A disc image, taken as it is: SYSTEM.CNF says which executable boots and, in that name, the
+		product code the repository files the game's facts under.
+
+		With `games/<code>/game.json` present the build is exactly the config's, read from this
+		disc — the config's hints and overlays, its executable path, its hash check. Without one it
+		is the executable alone, as for a bare one, which is where a new game starts: the runtime
+		reports what the analysis missed, and those reports become the config.
+	**/
+	static function fromDisc(path:String, seeds:Array<String>):GenInput {
+		final disc = DiscImage.open(path);
+		final walk = new IsoWalk(disc);
+		final cnf = walk.find("\\SYSTEM.CNF;1");
+		if (cnf == null) {
+			disc.close();
+			throw new LoaderError('$path has no SYSTEM.CNF, so nothing says what it boots. A bare '
+				+ 'executable, a code (SCUS94570) or games/<code>/game.json can be given instead.');
+		}
+		final boot = SystemCnf.bootPath(disc.readExtent(cnf.lba, 0, cnf.length).toString());
+		if (boot == null) {
+			disc.close();
+			throw new LoaderError('$path: its SYSTEM.CNF has no BOOT line naming an executable');
+		}
+		final serial = SystemCnf.serialOf(boot);
+		final config = serial != null ? configFor(serial) : null;
+		if (config != null && sys.FileSystem.exists(config)) {
+			disc.close();
+			Sys.println('$serial: $config');
+			return fromConfig(config, path);
+		}
+		Sys.println(serial != null
+			? '$serial: no $config yet, so the executable alone ($boot): no overlays, no hints'
+			: 'boot executable $boot carries no product code: compiling it alone, with no config');
+		final found = walk.find(boot);
+		if (found == null) {
+			disc.close();
+			throw new LoaderError('$path: SYSTEM.CNF boots $boot, which is not on the disc');
+		}
+		final exe = PsxExe.parse(disc.readExtent(found.lba, 0, found.length));
+		disc.close();
+		return exeAlone(exe, isoName(boot), seeds);
+	}
+
+	/** Where a game's committed facts live: `games/SCUS94570/game.json`, from the repository root. */
+	static function configFor(serial:String):String {
+		return 'games/$serial/game.json';
+	}
+
+	/** Whether `path` is a loose PS-EXE, by its magic — a disc image is anything else. */
+	static function isPsxExe(path:String):Bool {
+		if (!sys.FileSystem.exists(path) || sys.FileSystem.isDirectory(path)) return false;
+		final input = File.read(path, true);
+		final head = input.read(8).toString();
+		input.close();
+		return head == "PS-X EXE";
+	}
+
+	/**
+		A config's facts are about one pressing. The same product code can name a later printing
+		with a different executable, and hints for the wrong one fail far from here, as functions
+		that are not there; so the executable is checked against the hash the config records.
+	**/
+	static function checkSha256(config:GameConfig, bytes:Bytes):Void {
+		if (config.exeSha256 == null) return;
+		final got = haxe.crypto.Sha256.make(bytes).toHex();
+		if (got != config.exeSha256) {
+			throw new LoaderError('${config.exePath} on this disc has SHA-256 $got, but '
+				+ '${config.path} describes the one with ${config.exeSha256}: a different '
+				+ 'pressing or a damaged image, and its hints would point at the wrong code');
+		}
 	}
 
 	static function noDiscReloc(config:GameConfig):Array<RelocSet> {

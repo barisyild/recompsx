@@ -10,6 +10,7 @@ class TestMain {
 		Sys.println("recompsx tool tests");
 		Sys.println("");
 		TestPsxExe.run();
+		TestSystemCnf.run();
 		TestDecoder.run();
 		TestDiscovery.run();
 		TestOverlay.run();

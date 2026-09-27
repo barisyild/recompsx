@@ -2,6 +2,17 @@
 
 ## Status snapshot
 
+**2026-09-27: A game's facts are keyed by its disc's product code, and a disc finds its own.**
+games/crashbash is now **games/SCUS94570** and games/crash3 **games/SCUS94244** (the code upper
+case with its punctuation dropped; `id` repeats it); the Spyro 3 demo's config is gone. `recompsx
+gen <disc image>` reads SYSTEM.CNF (loader.SystemCnf), takes the code from the name of the
+executable it boots and uses games/<SERIAL>/game.json when there is one, with no local.json
+needed; without one it compiles the executable alone, which is how a new game starts. `gen
+SCUS94570` names a game by its code and reads the disc its local.json names. The config's
+`exeSha256` is now checked, so a different pressing under the same code stops with both hashes
+instead of compiling against the wrong hints. Both games generate byte-identical trees by config,
+by code and by disc, identical to the trees measured today; tool tests 438 -> 461.
+
 **2026-09-27: build-dc.sh --max adds three SH-4 code-generation flags — Crash 3 -2.6 %, Crash Bash
 -1.3 %.** `-mbranch-cost=1 -mdiv=call-fp -flto-partition=one`, each measured on the Flycast
 profile, which is exact for a given binary. Flycast M cycles, Crash 3 / Crash Bash: before 1501.5 /
@@ -1368,6 +1379,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] games/ keyed by product code (SCUS94570, SCUS94244), Spyro 3 demo config
+removed; `gen <disc>` finds games/<SERIAL>/ through SYSTEM.CNF, `gen <SERIAL>` through local.json;
+exeSha256 checked. main renamed master, merged branches deleted. Next: PGO feasibility, GPU path.
 
 2026-09-27 [claude] DC --max build: -mbranch-cost=1 -mdiv=call-fp -flto-partition=one (Crash 3
 1501.5 -> 1463.1 M, Crash Bash 5984.6 -> 5906.0); eight other flags measured and left out. Merged

@@ -465,7 +465,7 @@ class OverlayMgr {
 		final l = loadCovering(addr);
 		if (l < 0) return "";
 		else {}
-		return " Add it to games/<id>/game.json with loadAddr " + udec(loadFrom[l])
+		return " Add it to games/<SERIAL>/game.json with loadAddr " + udec(loadFrom[l])
 			+ " length " + (loadTo[l] - loadFrom[l]) + " and entryHint " + udec(canon(addr))
 			+ (loadLba[l] >= 0 ? ", from disc sector " + loadLba[l] : "") + ".";
 	}

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 source scripts/env.sh
-[ $# -eq 1 ] || { echo "usage: scripts/build-web.sh <game-id | games/id/game.json>" >&2; exit 2; }
+[ $# -eq 1 ] || { echo "usage: scripts/build-web.sh <SERIAL | games/SERIAL/game.json>" >&2; exit 2; }
 CONFIG="$1"
 if [[ "$CONFIG" != *.json ]]; then CONFIG="games/$CONFIG/game.json"; fi
 mkdir -p out/_web/gen web

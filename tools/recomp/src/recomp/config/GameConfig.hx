@@ -119,25 +119,30 @@ class GameConfig {
 	/** Where the executable lives inside the disc's filesystem, e.g. `\SCUS_945.70;1`. */
 	public final exePath:String;
 
+	/** The executable's SHA-256, lower-case hex, or null: which pressing these facts are about. */
+	public final exeSha256:String;
+
 	public final functionHints:Array<Hint>;
 	public final tableHints:Array<TableHint>;
 	public final overlays:Array<OverlayConfig>;
 	public final relocatable:Array<RelocConfig>;
 
-	/** From local.json: a CUE or a bare image. Null when the game is a loose executable. */
+	/** A CUE or a bare image: the one `gen` was given, or else local.json's. Null when the game is
+	    a loose executable. */
 	public final discPath:String;
 
 	/** From local.json: a bare PS-EXE, for homebrew with no disc. Null otherwise. */
 	public final exeFile:String;
 
-	function new(path, dir, id, title, region, exePath, functionHints, tableHints, overlays,
-			relocatable, discPath, exeFile) {
+	function new(path, dir, id, title, region, exePath, exeSha256, functionHints, tableHints,
+			overlays, relocatable, discPath, exeFile) {
 		this.path = path;
 		this.dir = dir;
 		this.id = id;
 		this.title = title;
 		this.region = region;
 		this.exePath = exePath;
+		this.exeSha256 = exeSha256;
 		this.functionHints = functionHints;
 		this.tableHints = tableHints;
 		this.overlays = overlays;
@@ -146,7 +151,11 @@ class GameConfig {
 		this.exeFile = exeFile;
 	}
 
-	public static function load(configPath:String):GameConfig {
+	/**
+		`disc`, when given, is the image to read instead of the one local.json names: the path
+		`gen` was handed, which found this config by the product code on it.
+	**/
+	public static function load(configPath:String, ?disc:String):GameConfig {
 		if (!FileSystem.exists(configPath)) {
 			throw new LoaderError('no such config: $configPath');
 		}
@@ -158,13 +167,15 @@ class GameConfig {
 		for (i in 0...rawOverlays.length) overlays.push(overlayOf(rawOverlays[i], i));
 		checkOverlaysDistinct(overlays);
 
-		final local = loadLocal(dir);
+		final local = disc != null ? {disc: disc, exeFile: null} : loadLocal(dir);
+		final sha = stringField(root, "exeSha256", null);
 
 		return new GameConfig(configPath, dir,
 			stringField(root, "id", "game"),
 			stringField(root, "title", "untitled"),
 			stringField(root, "region", "NTSC-U"),
 			stringField(root, "exePath", null),
+			sha != null ? sha.toLowerCase() : null,
 			hintsOf(arrayField(root, "functionHints")),
 			tableHintsOf(arrayField(root, "jumpTableHints")),
 			overlays,

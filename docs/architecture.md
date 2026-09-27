@@ -13,7 +13,7 @@ that *is* the game. No CPU interpreter exists at run time: code the game loads t
 is an overlay (ADR-0006), and code it loads anywhere is compiled from the disc too and recognised
 by content (ADR-0025).
 
-**The goal is every PS1 game**, driven by per-game configuration (`games/<id>/game.json`) and
+**The goal is every PS1 game**, driven by per-game configuration (`games/<SERIAL>/game.json`, by the disc's product code) and
 nothing game-specific in the tool or runtime. Crash Bash NTSC-U (SCUS-94570) is the bring-up
 vehicle — it exercises code overlays, 4-player multitap, MDEC video and streamed audio, so
 making it work forces most of the general machinery into existence. The same disc also carries a
@@ -176,7 +176,7 @@ src/backend/api/  backend_c_api.h — the platform ABI (see docs/specs/backend.m
 src/backend/pc/   backend_sdl2.c — the only file that touches SDL2
 src/shims/cxx/    RawMem, I64, backend externs in reflaxe.CPP form
 src/shims/jvm/    same API in pure Haxe/JVM (M8)
-games/<id>/       game.json, syms.txt, notes.md; local.json is gitignored
+games/<SERIAL>/   game.json, syms.txt, notes.md, e.g. games/SCUS94570; local.json is gitignored
 out/              all generated artifacts — gitignored
 tests/            tool tests, runtime tests, fixtures
 docs/             architecture.md, specs/, decisions/

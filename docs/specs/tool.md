@@ -77,7 +77,15 @@ TCB 4 / EVENT 16 when the file is absent.
 
 ### 1.1 Input modes
 
-A dump reaches the tool in one of four shapes, selected by which key `local.json` provides:
+The simplest input is the disc image itself: `recompsx gen <image>` reads `SYSTEM.CNF`, takes the
+executable its `BOOT` line names and, from that name, the product code (`\SCUS_945.70;1` is
+`SCUS94570`). With `games/<SERIAL>/game.json` present the build is exactly that config's, read
+from the given image, and `local.json` is not consulted; without one the executable is compiled
+alone, with no overlays or hints, which is how a new game starts. `recompsx gen SCUS94570` names a
+game by its code and reads the disc its `local.json` names.
+
+Otherwise a dump reaches the tool in one of four shapes, selected by which key `local.json`
+provides:
 
 | `local.json` key | Shape | analyze / gen | Runtime CD emulation |
 |---|---|---|---|
@@ -386,9 +394,11 @@ people reading the output, and it does not require changing how memory is modell
 
 ## 4. Per-game config schema
 
-`games/<game>/game.json` (committed, schemaVersion 1): `id`, `title`, `region`, `exePath`
-(in-image), `exeSha256` (filled by `--accept-hashes`; mismatch = hard error naming expected
-redump), `overlays[] {id, name, source {kind: file|sectors|memdump, ...}, loadAddr, length,
+`games/<SERIAL>/game.json` (committed, schemaVersion 1). `SERIAL` is the disc's product code,
+upper case with the punctuation dropped — `SCUS94570`, not `SCUS-94570` or `SCUS_945.70` — which is
+what lets a disc find its own config (§1.1); `id` repeats it. Fields: `id`, `title`, `region`,
+`exePath` (in-image), `exeSha256` (checked when the executable is read: a mismatch is a hard
+error naming both hashes, since hints for another pressing point at the wrong code), `overlays[] {id, name, source {kind: file|sectors|memdump, ...}, loadAddr, length,
 entryHints[]}`, `functionHints[] {addr, name, isFunction, noReturn, loadDelayAccurate}`,
 `relocatable[] {id, files[], entryMarker, unit, hashWords}` (position-independent code the game
 loads anywhere, compiled from the disc and recognised by content — ADR-0025),
@@ -402,14 +412,14 @@ game code, which golden rule 4 keeps out of the repository. This corrects the ma
 `games/<game>/dumps/` proposal; see ADR-0006. Runtime activation uses hash-fallback only for
 these.
 
-`games/<game>/local.json` (gitignored, machine-local) supplies exactly one of `cue`, `iso`,
+`games/<SERIAL>/local.json` (gitignored, machine-local) supplies exactly one of `cue`, `iso`,
 `filesDir` or `exeFile` as an absolute path — see §1.1. A committed `local.json.example`
-documents the shape for each game.
+documents the shape for each game. It is optional when the disc is given to `gen` directly.
 
 ## 5. CLI
 
 ```
-recompsx <extract|analyze|gen|dis|mkiso|synth> games/<game>/game.json [flags]
+recompsx <extract|analyze|gen|dis|mkiso|synth> <disc image | SERIAL | games/SERIAL/game.json> [flags]
   extract: mount image, verify hashes, unpack exe + overlays to out/<game>/analysis/extracted/
   analyze: analysis passes → analysis.json + coverage report
   gen:     analyze (or reuse fresh analysis.json) + emit out/<game>/hx/**

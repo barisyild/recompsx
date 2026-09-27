@@ -29,7 +29,7 @@ The runtime implements the PlayStation kernel at a high level (HLE), so no BIOS 
 required to run anything produced by this project.
 
 Users must supply their own legally obtained game dumps via gitignored local configuration
-(`games/<id>/local.json`). All generated output under `out/` derives from the user's own
+(`games/<SERIAL>/local.json`). All generated output under `out/` derives from the user's own
 media and is never committed. Game-specific addresses, symbol names, overlay tables, and
 structural notes under `games/` are original clean-room reverse-engineering artifacts.
 

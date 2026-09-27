@@ -8,8 +8,10 @@ Generated code + the hand-written integer-only RUNTIME (src/runtime) compile via
 
 **Scope: ALL PS1 games are the target.** Crash Bash NTSC-U is only the bring-up vehicle — the
 game whose failures drive the work order. Nothing game-specific ever goes in tools/recomp or
-src/runtime; per-game facts live in games/<id>/game.json (+ syms.txt, notes.md). If a fix would
-only work for one game, it belongs in config, not in code.
+src/runtime; per-game facts live in games/<SERIAL>/game.json (+ syms.txt, notes.md), keyed by
+the product code on the disc, upper case, no punctuation: games/SCUS94570 is Crash Bash, and
+games/SCUS94244 is Crash Bandicoot: Warped. If a fix would only work for one game, it belongs in
+config, not in code.
 
 **Platforms: consoles are the point.** PS2 and derivatives (PSP, Dreamcast, GameCube/Wii,
 Switch) plus JVM follow by implementing one C header (src/backend/api/backend_c_api.h) and one
@@ -60,10 +62,9 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
 ## Commands
     ./scripts/setup.sh              # once: toolchain + submodules + haxelib dev
     source scripts/env.sh           # every shell
-    ./scripts/gen.sh crashbash      # tool -> Haxe -> C++ (+ CMakeLists)            [from M1]
-    ./scripts/build-pc.sh crashbash # cmake+ninja
-    ./scripts/run-pc.sh crashbash [--headless-hash 600]
-    ./scripts/recompsx.sh gen games/<id>/game.json      # generate from disc + config (overlays)
+    ./scripts/recompsx.sh gen <disc.cue>   # disc -> Haxe in out/gen; SYSTEM.CNF's product code
+                                           # picks games/<SERIAL>/game.json when there is one
+    ./scripts/recompsx.sh gen SCUS94570    # the same, the disc named by games/SCUS94570/local.json
     haxe build/game-js.hxml && node out/_gen/game.js <exe> <disc.bin>   # run it (JS = reference)
     haxe build/game-cpp.hxml && ./scripts/build-pc.sh _gen --null       # the same, reflaxe.CPP
     <run> --headless-hash 600    # stop at frame 600, print one digest; the cross-target compare
@@ -78,7 +79,7 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
 ## Directory map
 tools/recomp (tool) · shared/psxdisc (disc model, portable) · src/runtime (core) ·
 src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,js} (RawBuf/RawMem/IntMath/Backend) ·
-games/<id> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
+games/<SERIAL> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
 docs/{architecture.md,specs,decisions} · vendor/{reflaxe,reflaxe.CPP} (pinned submodules) ·
 build/ (hxml) · scripts/
 

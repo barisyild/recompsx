@@ -7,7 +7,7 @@
 # candidate replacement for reflaxe.CPP under evaluation; see PROGRESS.md. It reads `.hx` files
 # itself and requires one project root, so the four source trees a game build uses are staged
 # into one: the runtime, the Hatchet shim (`src/shims/hatchet`), the generated program
-# (`out/gen`, from `./scripts/recompsx.sh gen games/<id>/game.json`) and the launcher.
+# (`out/gen`, from `./scripts/recompsx.sh gen <disc.cue | SERIAL>`) and the launcher.
 #
 # The C++ is compiled with the flags the reflaxe.CPP build uses (`-fwrapv`,
 # `-fno-strict-aliasing`), against the null backend, into out/_hatchet/recompsx. Run it like
