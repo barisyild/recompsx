@@ -5,3 +5,4 @@
 
 unsigned char recompsx_ram[RECOMPSX_RAM_BYTES];
 unsigned char recompsx_scratch[RECOMPSX_SCRATCH_BYTES];
+int recompsx_gte[RECOMPSX_GTE_WORDS];

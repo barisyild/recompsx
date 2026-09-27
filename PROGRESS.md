@@ -2,6 +2,18 @@
 
 ## Status snapshot
 
+**2026-09-27: The GTE's registers are one array (shim.GteFile) — Crash 3 ~66.5 %, Crash Bash -2.3 %.**
+Its 73 registers were static fields, one global each, and on the SH-4 a global is an address loaded
+from the literal pool before every access: RTPS read about thirty. They are now properties over one
+word array, `recompsx_gte[128]` in the C arena beside RAM (an Int32Array on JS, `int[]` on the JVM),
+at constant indices, the RTPS/RTPT registers first so they fall in the sixteen words one instruction
+reaches; the compiler keeps the base in a register. `Gte` includes the arena header itself, as
+`Memory` does (reflaxe does not carry an extern's include along an inlining chain; the first round
+failed to build and profiled the old binary — round scripts now stop on a failed build). Flycast:
+Crash 3 1537.7 -> **1504.7** M (GTE 1415.7 -> 1255.5 ms), Crash Bash 6174.2 -> **6030.7** M (GTE
+6345 -> 5680 ms, RTPS -463). JS unchanged in speed. Digests unchanged, JS = desktop C++; GteOps/
+GteEdge/GteProject/GteSweep unchanged on both targets.
+
 **2026-09-27: Guest registers live in CpuState (ADR-0029) — a stale-register bug fixed, Crash 3 ~65 %.**
 Generated code kept each function's registers in locals, published every register it wrote before
 a call and reloaded only those the continuation read (ADR-0007/0012). A register written, then

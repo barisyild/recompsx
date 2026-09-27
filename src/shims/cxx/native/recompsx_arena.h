@@ -19,6 +19,7 @@
 
 #define RECOMPSX_RAM_BYTES     0x200000   /* 2 MB, the PlayStation's main RAM   */
 #define RECOMPSX_SCRATCH_BYTES 0x400      /* 1 KB, the scratchpad at 1F800000h  */
+#define RECOMPSX_GTE_WORDS     128        /* the GTE's registers, one word each (shim.GteFile) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,7 @@ extern "C" {
 
 extern unsigned char recompsx_ram[RECOMPSX_RAM_BYTES];
 extern unsigned char recompsx_scratch[RECOMPSX_SCRATCH_BYTES];
+extern int recompsx_gte[RECOMPSX_GTE_WORDS];
 
 #ifdef __cplusplus
 }

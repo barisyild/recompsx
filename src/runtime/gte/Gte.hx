@@ -6,6 +6,7 @@ import shim.I64;
 import shim.IntMath;
 import shim.Acc;
 import shim.Backend;
+import shim.GteFile;
 import shim.MemA;
 import shim.RawBuf;
 import shim.RawMem;
@@ -19,10 +20,12 @@ import shim.RawMem;
 	because games feed them straight into geometry that is then depth-sorted — a value off by one
 	changes which polygon is drawn in front.
 
-	The register file is **named static fields, not an array**, for the same reason `CpuState` is:
-	every access is at a constant index (the emitter bakes it in), so a switch over constants
-	compiles to a direct field access, while an array would be an indexed load the compiler cannot
-	keep in a machine register. Matrices are stored unpacked — nine signed halfwords rather than
+	The register file is **named properties over one array** (`shim.GteFile`), one word each at a
+	constant index: every access is at a constant index (the emitter bakes it in), so a switch over
+	constants still compiles to one direct access. It was named static fields, one global each,
+	which on the SH-4 cost an address from the literal pool before every load and store; one
+	array is a base kept in a register and a displacement, the RTPS/RTPT registers first so they
+	fall in the sixteen words one instruction reaches. Matrices are stored unpacked — nine signed halfwords rather than
 	five packed words — because every operation reads them element by element and only the rare
 	`CFC2` needs them packed again.
 
@@ -35,6 +38,10 @@ import shim.RawMem;
 	acceptance gate is `tests/conformance/GteOps.hx` on both targets, and eventually amidog's
 	`psxtest_gte`, which checks values *and* flag bits for every operation.
 **/
+// The register file (shim.GteFile) must be declared in every translation unit that inlines a GTE
+// access, and reflaxe does not carry an extern's include along an inlining chain; this header is the
+// one they all include, as Memory's is for guest memory. Ignored by targets without C++ headers.
+@:headerCode("#include \"recompsx_arena.h\"")
 class Gte {
 	// ---- the data registers ----------------------------------------------------------------------
 	//
@@ -42,54 +49,230 @@ class Gte {
 	// keep their packed word because that is what `MFC2` hands over, and the components are
 	// extracted where they are used.
 
-	static var vxy0 = 0; static var vz0 = 0;
-	static var vxy1 = 0; static var vz1 = 0;
-	static var vxy2 = 0; static var vz2 = 0;
+	static var vxy0(get, set):Int;
+	static inline function get_vxy0():Int return GteFile.get(33);
+	static inline function set_vxy0(v:Int):Int { GteFile.set(33, v); return v; }
+	static var vz0(get, set):Int;
+	static inline function get_vz0():Int return GteFile.get(34);
+	static inline function set_vz0(v:Int):Int { GteFile.set(34, v); return v; }
+	static var vxy1(get, set):Int;
+	static inline function get_vxy1():Int return GteFile.get(35);
+	static inline function set_vxy1(v:Int):Int { GteFile.set(35, v); return v; }
+	static var vz1(get, set):Int;
+	static inline function get_vz1():Int return GteFile.get(36);
+	static inline function set_vz1(v:Int):Int { GteFile.set(36, v); return v; }
+	static var vxy2(get, set):Int;
+	static inline function get_vxy2():Int return GteFile.get(37);
+	static inline function set_vxy2(v:Int):Int { GteFile.set(37, v); return v; }
+	static var vz2(get, set):Int;
+	static inline function get_vz2():Int return GteFile.get(38);
+	static inline function set_vz2(v:Int):Int { GteFile.set(38, v); return v; }
 
 	/** Colour and the "code" byte a game keeps its own meaning in. */
-	static var rgbc = 0;
+	static var rgbc(get, set):Int;
+	static inline function get_rgbc():Int return GteFile.get(39);
+	static inline function set_rgbc(v:Int):Int { GteFile.set(39, v); return v; }
 
-	static var otz = 0;
+	static var otz(get, set):Int;
+	static inline function get_otz():Int return GteFile.get(40);
+	static inline function set_otz(v:Int):Int { GteFile.set(40, v); return v; }
 
-	static var ir0 = 0; static var ir1 = 0; static var ir2 = 0; static var ir3 = 0;
+	static var ir0(get, set):Int;
+	static inline function get_ir0():Int return GteFile.get(30);
+	static inline function set_ir0(v:Int):Int { GteFile.set(30, v); return v; }
+	static var ir1(get, set):Int;
+	static inline function get_ir1():Int return GteFile.get(20);
+	static inline function set_ir1(v:Int):Int { GteFile.set(20, v); return v; }
+	static var ir2(get, set):Int;
+	static inline function get_ir2():Int return GteFile.get(21);
+	static inline function set_ir2(v:Int):Int { GteFile.set(21, v); return v; }
+	static var ir3(get, set):Int;
+	static inline function get_ir3():Int return GteFile.get(22);
+	static inline function set_ir3(v:Int):Int { GteFile.set(22, v); return v; }
 
 	/** The screen-coordinate FIFO: three deep, oldest first. */
-	static var sxy0 = 0; static var sxy1 = 0; static var sxy2 = 0;
+	static var sxy0(get, set):Int;
+	static inline function get_sxy0():Int return GteFile.get(23);
+	static inline function set_sxy0(v:Int):Int { GteFile.set(23, v); return v; }
+	static var sxy1(get, set):Int;
+	static inline function get_sxy1():Int return GteFile.get(24);
+	static inline function set_sxy1(v:Int):Int { GteFile.set(24, v); return v; }
+	static var sxy2(get, set):Int;
+	static inline function get_sxy2():Int return GteFile.get(25);
+	static inline function set_sxy2(v:Int):Int { GteFile.set(25, v); return v; }
 
 	/** The depth FIFO, four deep. */
-	static var sz0 = 0; static var sz1 = 0; static var sz2 = 0; static var sz3 = 0;
+	static var sz0(get, set):Int;
+	static inline function get_sz0():Int return GteFile.get(26);
+	static inline function set_sz0(v:Int):Int { GteFile.set(26, v); return v; }
+	static var sz1(get, set):Int;
+	static inline function get_sz1():Int return GteFile.get(27);
+	static inline function set_sz1(v:Int):Int { GteFile.set(27, v); return v; }
+	static var sz2(get, set):Int;
+	static inline function get_sz2():Int return GteFile.get(28);
+	static inline function set_sz2(v:Int):Int { GteFile.set(28, v); return v; }
+	static var sz3(get, set):Int;
+	static inline function get_sz3():Int return GteFile.get(16);
+	static inline function set_sz3(v:Int):Int { GteFile.set(16, v); return v; }
 
 	/** The colour FIFO, three deep. */
-	static var rgb0 = 0; static var rgb1 = 0; static var rgb2 = 0;
+	static var rgb0(get, set):Int;
+	static inline function get_rgb0():Int return GteFile.get(41);
+	static inline function set_rgb0(v:Int):Int { GteFile.set(41, v); return v; }
+	static var rgb1(get, set):Int;
+	static inline function get_rgb1():Int return GteFile.get(42);
+	static inline function set_rgb1(v:Int):Int { GteFile.set(42, v); return v; }
+	static var rgb2(get, set):Int;
+	static inline function get_rgb2():Int return GteFile.get(43);
+	static inline function set_rgb2(v:Int):Int { GteFile.set(43, v); return v; }
 
 	/** Scratch, with no meaning to the hardware — but it stores and reads back. */
-	static var res1 = 0;
+	static var res1(get, set):Int;
+	static inline function get_res1():Int return GteFile.get(44);
+	static inline function set_res1(v:Int):Int { GteFile.set(44, v); return v; }
 
-	static var mac0 = 0; static var mac1 = 0; static var mac2 = 0; static var mac3 = 0;
+	static var mac0(get, set):Int;
+	static inline function get_mac0():Int return GteFile.get(29);
+	static inline function set_mac0(v:Int):Int { GteFile.set(29, v); return v; }
+	static var mac1(get, set):Int;
+	static inline function get_mac1():Int return GteFile.get(17);
+	static inline function set_mac1(v:Int):Int { GteFile.set(17, v); return v; }
+	static var mac2(get, set):Int;
+	static inline function get_mac2():Int return GteFile.get(18);
+	static inline function set_mac2(v:Int):Int { GteFile.set(18, v); return v; }
+	static var mac3(get, set):Int;
+	static inline function get_mac3():Int return GteFile.get(19);
+	static inline function set_mac3(v:Int):Int { GteFile.set(19, v); return v; }
 
-	static var lzcs = 0; static var lzcr = 32;
+	static var lzcs(get, set):Int;
+	static inline function get_lzcs():Int return GteFile.get(45);
+	static inline function set_lzcs(v:Int):Int { GteFile.set(45, v); return v; }
+	static var lzcr(get, set):Int;
+	static inline function get_lzcr():Int return GteFile.get(46);
+	static inline function set_lzcr(v:Int):Int { GteFile.set(46, v); return v; }
 
 	// ---- the control registers -------------------------------------------------------------------
 
 	// Rotation matrix, unpacked.
-	static var rt11 = 0; static var rt12 = 0; static var rt13 = 0;
-	static var rt21 = 0; static var rt22 = 0; static var rt23 = 0;
-	static var rt31 = 0; static var rt32 = 0; static var rt33 = 0;
-	static var trX = 0; static var trY = 0; static var trZ = 0;
+	static var rt11(get, set):Int;
+	static inline function get_rt11():Int return GteFile.get(0);
+	static inline function set_rt11(v:Int):Int { GteFile.set(0, v); return v; }
+	static var rt12(get, set):Int;
+	static inline function get_rt12():Int return GteFile.get(1);
+	static inline function set_rt12(v:Int):Int { GteFile.set(1, v); return v; }
+	static var rt13(get, set):Int;
+	static inline function get_rt13():Int return GteFile.get(2);
+	static inline function set_rt13(v:Int):Int { GteFile.set(2, v); return v; }
+	static var rt21(get, set):Int;
+	static inline function get_rt21():Int return GteFile.get(3);
+	static inline function set_rt21(v:Int):Int { GteFile.set(3, v); return v; }
+	static var rt22(get, set):Int;
+	static inline function get_rt22():Int return GteFile.get(4);
+	static inline function set_rt22(v:Int):Int { GteFile.set(4, v); return v; }
+	static var rt23(get, set):Int;
+	static inline function get_rt23():Int return GteFile.get(5);
+	static inline function set_rt23(v:Int):Int { GteFile.set(5, v); return v; }
+	static var rt31(get, set):Int;
+	static inline function get_rt31():Int return GteFile.get(6);
+	static inline function set_rt31(v:Int):Int { GteFile.set(6, v); return v; }
+	static var rt32(get, set):Int;
+	static inline function get_rt32():Int return GteFile.get(7);
+	static inline function set_rt32(v:Int):Int { GteFile.set(7, v); return v; }
+	static var rt33(get, set):Int;
+	static inline function get_rt33():Int return GteFile.get(8);
+	static inline function set_rt33(v:Int):Int { GteFile.set(8, v); return v; }
+	static var trX(get, set):Int;
+	static inline function get_trX():Int return GteFile.get(9);
+	static inline function set_trX(v:Int):Int { GteFile.set(9, v); return v; }
+	static var trY(get, set):Int;
+	static inline function get_trY():Int return GteFile.get(10);
+	static inline function set_trY(v:Int):Int { GteFile.set(10, v); return v; }
+	static var trZ(get, set):Int;
+	static inline function get_trZ():Int return GteFile.get(11);
+	static inline function set_trZ(v:Int):Int { GteFile.set(11, v); return v; }
 
 	// Light-source matrix.
-	static var l11 = 0; static var l12 = 0; static var l13 = 0;
-	static var l21 = 0; static var l22 = 0; static var l23 = 0;
-	static var l31 = 0; static var l32 = 0; static var l33 = 0;
-	static var rbk = 0; static var gbk = 0; static var bbk = 0;
+	static var l11(get, set):Int;
+	static inline function get_l11():Int return GteFile.get(47);
+	static inline function set_l11(v:Int):Int { GteFile.set(47, v); return v; }
+	static var l12(get, set):Int;
+	static inline function get_l12():Int return GteFile.get(48);
+	static inline function set_l12(v:Int):Int { GteFile.set(48, v); return v; }
+	static var l13(get, set):Int;
+	static inline function get_l13():Int return GteFile.get(49);
+	static inline function set_l13(v:Int):Int { GteFile.set(49, v); return v; }
+	static var l21(get, set):Int;
+	static inline function get_l21():Int return GteFile.get(50);
+	static inline function set_l21(v:Int):Int { GteFile.set(50, v); return v; }
+	static var l22(get, set):Int;
+	static inline function get_l22():Int return GteFile.get(51);
+	static inline function set_l22(v:Int):Int { GteFile.set(51, v); return v; }
+	static var l23(get, set):Int;
+	static inline function get_l23():Int return GteFile.get(52);
+	static inline function set_l23(v:Int):Int { GteFile.set(52, v); return v; }
+	static var l31(get, set):Int;
+	static inline function get_l31():Int return GteFile.get(53);
+	static inline function set_l31(v:Int):Int { GteFile.set(53, v); return v; }
+	static var l32(get, set):Int;
+	static inline function get_l32():Int return GteFile.get(54);
+	static inline function set_l32(v:Int):Int { GteFile.set(54, v); return v; }
+	static var l33(get, set):Int;
+	static inline function get_l33():Int return GteFile.get(55);
+	static inline function set_l33(v:Int):Int { GteFile.set(55, v); return v; }
+	static var rbk(get, set):Int;
+	static inline function get_rbk():Int return GteFile.get(56);
+	static inline function set_rbk(v:Int):Int { GteFile.set(56, v); return v; }
+	static var gbk(get, set):Int;
+	static inline function get_gbk():Int return GteFile.get(57);
+	static inline function set_gbk(v:Int):Int { GteFile.set(57, v); return v; }
+	static var bbk(get, set):Int;
+	static inline function get_bbk():Int return GteFile.get(58);
+	static inline function set_bbk(v:Int):Int { GteFile.set(58, v); return v; }
 
 	// Light-colour matrix.
-	static var lr1 = 0; static var lr2 = 0; static var lr3 = 0;
-	static var lg1 = 0; static var lg2 = 0; static var lg3 = 0;
-	static var lb1 = 0; static var lb2 = 0; static var lb3 = 0;
-	static var rfc = 0; static var gfc = 0; static var bfc = 0;
+	static var lr1(get, set):Int;
+	static inline function get_lr1():Int return GteFile.get(59);
+	static inline function set_lr1(v:Int):Int { GteFile.set(59, v); return v; }
+	static var lr2(get, set):Int;
+	static inline function get_lr2():Int return GteFile.get(60);
+	static inline function set_lr2(v:Int):Int { GteFile.set(60, v); return v; }
+	static var lr3(get, set):Int;
+	static inline function get_lr3():Int return GteFile.get(61);
+	static inline function set_lr3(v:Int):Int { GteFile.set(61, v); return v; }
+	static var lg1(get, set):Int;
+	static inline function get_lg1():Int return GteFile.get(62);
+	static inline function set_lg1(v:Int):Int { GteFile.set(62, v); return v; }
+	static var lg2(get, set):Int;
+	static inline function get_lg2():Int return GteFile.get(63);
+	static inline function set_lg2(v:Int):Int { GteFile.set(63, v); return v; }
+	static var lg3(get, set):Int;
+	static inline function get_lg3():Int return GteFile.get(64);
+	static inline function set_lg3(v:Int):Int { GteFile.set(64, v); return v; }
+	static var lb1(get, set):Int;
+	static inline function get_lb1():Int return GteFile.get(65);
+	static inline function set_lb1(v:Int):Int { GteFile.set(65, v); return v; }
+	static var lb2(get, set):Int;
+	static inline function get_lb2():Int return GteFile.get(66);
+	static inline function set_lb2(v:Int):Int { GteFile.set(66, v); return v; }
+	static var lb3(get, set):Int;
+	static inline function get_lb3():Int return GteFile.get(67);
+	static inline function set_lb3(v:Int):Int { GteFile.set(67, v); return v; }
+	static var rfc(get, set):Int;
+	static inline function get_rfc():Int return GteFile.get(68);
+	static inline function set_rfc(v:Int):Int { GteFile.set(68, v); return v; }
+	static var gfc(get, set):Int;
+	static inline function get_gfc():Int return GteFile.get(69);
+	static inline function set_gfc(v:Int):Int { GteFile.set(69, v); return v; }
+	static var bfc(get, set):Int;
+	static inline function get_bfc():Int return GteFile.get(70);
+	static inline function set_bfc(v:Int):Int { GteFile.set(70, v); return v; }
 
-	static var ofx = 0; static var ofy = 0;
+	static var ofx(get, set):Int;
+	static inline function get_ofx():Int return GteFile.get(12);
+	static inline function set_ofx(v:Int):Int { GteFile.set(12, v); return v; }
+	static var ofy(get, set):Int;
+	static inline function get_ofy():Int return GteFile.get(13);
+	static inline function set_ofy(v:Int):Int { GteFile.set(13, v); return v; }
 
 	/**
 		The projection plane distance.
@@ -99,12 +282,26 @@ class Gte {
 		sign-extended, so a game that writes 0x8000 and reads it back sees 0xFFFF8000. Games have
 		been written against that.
 	**/
-	static var h = 0;
+	static var h(get, set):Int;
+	static inline function get_h():Int return GteFile.get(14);
+	static inline function set_h(v:Int):Int { GteFile.set(14, v); return v; }
 
-	static var dqa = 0; static var dqb = 0;
-	static var zsf3 = 0; static var zsf4 = 0;
+	static var dqa(get, set):Int;
+	static inline function get_dqa():Int return GteFile.get(31);
+	static inline function set_dqa(v:Int):Int { GteFile.set(31, v); return v; }
+	static var dqb(get, set):Int;
+	static inline function get_dqb():Int return GteFile.get(32);
+	static inline function set_dqb(v:Int):Int { GteFile.set(32, v); return v; }
+	static var zsf3(get, set):Int;
+	static inline function get_zsf3():Int return GteFile.get(71);
+	static inline function set_zsf3(v:Int):Int { GteFile.set(71, v); return v; }
+	static var zsf4(get, set):Int;
+	static inline function get_zsf4():Int return GteFile.get(72);
+	static inline function set_zsf4(v:Int):Int { GteFile.set(72, v); return v; }
 
-	static var flag = 0;
+	static var flag(get, set):Int;
+	static inline function get_flag():Int return GteFile.get(15);
+	static inline function set_flag(v:Int):Int { GteFile.set(15, v); return v; }
 
 	// ---- FLAG bits, docs/specs/runtime.md §5 -------------------------------------------------------
 
