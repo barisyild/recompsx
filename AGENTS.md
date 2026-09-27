@@ -76,11 +76,23 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
     haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300   # fast inner loop
     ./scripts/build-pc.sh _demo && ./scripts/run-pc.sh _demo                   # windowed
 
+## Backend notes — read only the one you are working on
+Each backend keeps its own agent notes beside its code. Before working on a backend, read ITS
+note, and not the others: they are written to be loaded one at a time (Claude Code loads the
+matching `CLAUDE.md` in that directory by itself).
+- Dreamcast — `src/backend/dreamcast/AGENTS.md`: **sh4zam first — every std function with an
+  sh4zam counterpart uses sh4zam**; measuring on Flycast vs hardware; CDIs; the PVR scene.
+- PC (SDL2) — `src/backend/pc/AGENTS.md`
+- Null — `src/backend/null/AGENTS.md`
+- Browser (JavaScript) — `web/AGENTS.md`: the page, the WebGL2 renderer, `src/shims/js`.
+A new backend gets a note of its own, listed here, in the same change that adds it.
+
 ## Directory map
 tools/recomp (tool) · shared/psxdisc (disc model, portable) · src/runtime (core) ·
-src/backend/{api,pc} (C ABI + SDL2) · src/shims/{cxx,js} (RawBuf/RawMem/IntMath/Backend) ·
-games/<SERIAL> (configs, RE notes) · out/ (generated, gitignored) · tests/ ·
-docs/{architecture.md,specs,decisions} · vendor/{reflaxe,reflaxe.CPP} (pinned submodules) ·
+src/backend/{api,pc,null,dreamcast} (C ABI + backends) · src/shims/{cxx,js} (RawBuf/RawMem/
+IntMath/Backend) · web/ (browser page + WebGL2 renderer) · games/<SERIAL> (configs, RE notes) ·
+out/ (generated, gitignored) · tests/ · docs/{architecture.md,specs,decisions} ·
+vendor/{reflaxe,reflaxe.CPP,sh4zam} (pinned submodules; sh4zam is the Dreamcast's) ·
 build/ (hxml) · scripts/
 
 ## Testing discipline

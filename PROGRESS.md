@@ -2,6 +2,56 @@
 
 ## Status snapshot
 
+**2026-09-28: sh4zam first on the Dreamcast; per-backend agent notes; the RAM access path laid out
+straight.** The user's rule, now in `src/backend/dreamcast/AGENTS.md` and ADR-0031: on the
+Dreamcast a std function with an sh4zam counterpart uses sh4zam (vendored, pinned MIT submodule
+`vendor/sh4zam` @ ae8d4c1; the build takes its headers and assembles `shz_mem_sh4.s`). Applied:
+every `memcpy`/`memset` in the backend; headers, restated headers and background-mark quads go to
+the TA through the direct-rendering store queue (`shz_sq_memcpy32_1`) instead of `pvr_prim`; kept
+headers copied with `shz_memcpy32_1`; `gcmd_t` 36 -> 32 bytes, 32-aligned (state 14 bits + kind 2),
+so recording allocates its line with `movca.l` (`shz_dcache_alloc_line`) and `build_scene`
+prefetches four records ahead; the clipper's vertex padded to 32 bytes (no more `__movstr_i4_odd`
+in the backend). Each backend now has its own agent note (`src/backend/{dreamcast,pc,null}/AGENTS.md`,
+`web/AGENTS.md`, each with a `CLAUDE.md` that imports it) and AGENTS.md says to read only the one
+being worked on. Separately, `MemA.likely` (`__builtin_expect` on C++, identity elsewhere) on the
+RAM test of every guest access: GCC had laid the RAM load out of line — a branch away and back
+around one `mov.l` at every `lw`/`sw`. Flycast, which models neither branch penalties fully nor
+anything sh4zam buys (cache misses, store queues, `movca.l`), gives: Crash 3 1536.3 -> 1510.2 M
+with the hint, 1504.2 M with sh4zam too; Crash Bash 5935.9 -> 5827.0 -> 5800.1 M. The verdict on
+the sh4zam work is the console's; both playable CDIs in `out/dc` are rebuilt for it. Pictures
+checked in Flycast (Crash 3 demo with its shadow, a Crash Bash arena, the title).
+
+**2026-09-27: Crash's shadow on the Dreamcast and in the browser — off-screen drawing stays in
+VRAM, and a fill ignores the mask bits.** Crash 3 draws Crash's silhouette every frame into 64x64
+at (0,320), which it never displays, and lays that corner on the ground as a subtractive 4-bit
+texture (ADR-0030). Under `--video-hw` the Dreamcast never drew it and sampled what the level had
+uploaded there (words 1111h..FFFFh): a dark square. The browser's WebGL renderer drew it, but the
+game clears the corner with GP0(02h), which psx-spx says ignores the mask bits and writes bit 15
+as zero; the renderer kept the old mask bit (stencil) of every pixel, and the words it converted
+back read as index 8+ in every fourth texel of the right half — a hatched rectangle over half the
+shadow. Now, under hardware drawing, `gpu.Gpu` rasterises into emulated VRAM itself whatever the
+Dreamcast's `screen_origin` would decline (drawing area in neither of the last two displayed
+rectangles and under 3/4 of the picture; `Scanout.present` feeds `Gpu.shown`) and every fill
+meeting neither, reporting the rectangle through `bp_gpu_dirty` at each area change and present.
+The software fill no longer obeys E6h (conformance `GpuFill` 4ac33d32 on both targets); a
+backend fill is sent under `bp_gpu_mask(0, 0)`; WebGL stores the bit a write would (ZERO unless
+"set", INCR in a subtracting primitive's blending pass). Measured headless: Crash 3 draws ~100
+off-screen triangles and one 64x64 fill per game frame from frame 4441; Crash Bash none in 30000
+frames. Digests unchanged: Crash 3 9000 ee91f215 / 20000 8888c37f, Crash Bash 3000 654669df /
+9000 fda4764f / 30000 2d1ca4b6, Raster a749a71a; `RECOMPSX_JS_ONLY=0 scripts/test.sh` passes
+(26 conformance tests on both targets, demo 329de455). Flycast shows the silhouette under Crash
+and no square. The price, Crash 3's demo window: 1495.0 -> 1536.3 M (+2.8 %, 24.6 -> 25.3 ms a
+vblank): the software triangle path (triangle/rowSpan/__sdivsi3/drawPolygon ~220 ms of 7.7 s)
+and the page-4 mirror re-decoding that corner (+26 ms), less the hardware path it replaces
+(-64 ms). About 3,000 cycles per 4x4 silhouette triangle — the obvious next thing to cut.
+
+**2026-09-27: Bake patches start every 32 texels — Crash's eyebrows, Aku Aku's feathers, the life
+icon.** The mixed-CLUT split above still missed primitives whose 64 texels begin on an odd
+multiple of 32 (v 160..223): they fit no 64-aligned patch, so they were drawn whole, solid texels
+blended, and came out see-through. Measured over Crash 3's demo window: 1,141 such triangles of
+14,840 mixed-CLUT 4bpp ones, on two CLUTs. A patch may now start on any 32-texel step, the aligned
+one still tried first; Flycast shows the eyebrows opaque. Crash 3 1492.4 -> 1495.0 M.
+
 **2026-09-27: Controllers on the Dreamcast — Crash Bash's libpad handlers, Uka Uka's jaw, profiles
 that ignore the host.** With a pad in the port (Flycast plugs one in) Crash Bash's libpad ran its
 per-port state machine for the first time and reached three functions the analysis had never
@@ -1411,6 +1461,18 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] sh4zam first on the Dreamcast (ADR-0031, vendor/sh4zam): std calls replaced, header
+SQ submission, 32-byte movca'd command records + prefetch; per-backend AGENTS.md notes; MemA.likely on
+the RAM fast path (Flycast C3 1536.3->1504.2 M, CB 5935.9->5800.1 M; hardware is the verdict); CDIs
+rebuilt. Next: hardware numbers from the user; codegen patterns (region routing, copy loops).
+
+2026-09-27 [claude] Crash 3's shadow: off-screen drawing rasterised into VRAM under --video-hw
+(ADR-0030), GP0(02h) fill ignores the mask bits on every path, WebGL stencil stores the written
+mask bit; conformance GpuFill. Next: commit on request; analog/config mode, multitap, memory cards.
+
+2026-09-27 [claude] DC bake patches on 32-texel steps (BAKE_STEP): Crash's eyebrows, Aku Aku's feathers
+and the life icon no longer see-through; CDIs rebuilt. Crash 3 1495.0 M.
 
 2026-09-27 [claude] DC with controllers: Crash Bash libpad handlers as hints, Uka Uka's jaw (mixed
 4bpp CLUT blends split via bakes, pool 128), --dc-rxprof ports empty; CDIs rebuilt for both games.

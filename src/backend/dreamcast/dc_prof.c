@@ -10,6 +10,7 @@
 pvr_ptr_t      g_txt;
 pvr_poly_hdr_t g_txt_hdr;
 static uint16_t g_txt_buf[TXT_W * TXT_H] __attribute__((aligned(32)));
+_Static_assert(sizeof(g_txt_buf) % 8 == 0, "g_txt_buf is cleared with shz_memset8");
 static int      g_txt_ready;
 #endif
 
@@ -186,7 +187,7 @@ void perf_window_close(uint64_t emu_us) {
  * name. */
 #define SAMP_SLOTS 1024
 #define SAMP_GRAN  7
-static uint32_t g_samp_key[SAMP_SLOTS], g_samp_hit[SAMP_SLOTS];
+static uint32_t g_samp_key[SAMP_SLOTS] __attribute__((aligned(8))), g_samp_hit[SAMP_SLOTS] __attribute__((aligned(8)));
 static uint32_t g_samp_total, g_samp_lost;
 uint32_t g_samp_frames;
 
@@ -213,8 +214,8 @@ void syms_load(void) {
     uint8_t head[12];
     uint32_t count = 0, anchor = 0;
     if(fread(head, 1, sizeof(head), f) == sizeof(head) && memcmp(head, "RSY1", 4) == 0) {
-        memcpy(&count, head + 4, 4);
-        memcpy(&anchor, head + 8, 4);
+        shz_memcpy(&count, head + 4, 4);
+        shz_memcpy(&anchor, head + 8, 4);
     } else {}
     if(count == 0 || count > 16384) {
         g_sym_state = "SYMS.BIN unreadable";
@@ -335,8 +336,8 @@ void samp_start(void) {
  *  scene on screen when they are printed. */
 void samp_report(void) {
     if(g_samp_total < 200 || g_samp_frames < 10) return;
-    uint8_t taken[SAMP_SLOTS];
-    memset(taken, 0, sizeof(taken));
+    uint8_t taken[SAMP_SLOTS] __attribute__((aligned(8)));
+    shz_memset8(taken, 0, sizeof(taken));
     char msg[260];
     /* Tenths of a millisecond, because the interesting buckets are under 10 ms and integers
      * would round most of them to the same number. */
@@ -359,8 +360,8 @@ void samp_report(void) {
     bp_log(BP_LOG_INFO, msg);
 
     /* The window closes with the report. */
-    memset(g_samp_key, 0, sizeof(g_samp_key));
-    memset(g_samp_hit, 0, sizeof(g_samp_hit));
+    shz_memset8(g_samp_key, 0, sizeof(g_samp_key));
+    shz_memset8(g_samp_hit, 0, sizeof(g_samp_hit));
     g_samp_total = 0;
     g_samp_lost = 0;
     g_samp_frames = 0;
@@ -498,12 +499,12 @@ void profile_report(void) {
     /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
      * header counts that were here are in the serial line. */
     syms_top(l3, l4, sizeof(l3));
-    if(g_bench_state == 2) memcpy(l4, g_bench_line, sizeof(l4));
-    else if(g_fm_line[0]) memcpy(l4, g_fm_line, sizeof(l4));
+    if(g_bench_state == 2) shz_memcpy(l4, g_bench_line, sizeof(l4));
+    else if(g_fm_line[0]) shz_memcpy(l4, g_fm_line, sizeof(l4));
     else {}
 
     if(g_txt) {
-        memset(g_txt_buf, 0, sizeof(g_txt_buf));
+        shz_memset8(g_txt_buf, 0, sizeof(g_txt_buf));
         bfont_draw_str_ex(g_txt_buf,                        TXT_W, 0xFFFF, 0, 16, true, l0);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE,     TXT_W, 0xFFFF, 0, 16, true, l1);
         bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 2, TXT_W, 0xFFFF, 0, 16, true, l2);

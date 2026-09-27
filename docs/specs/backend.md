@@ -141,7 +141,11 @@ The KallistiOS backend in `src/backend/dreamcast/`, its launcher and `scripts/bu
 restored from commits `25d9a5d` / `6819782`. It implements video, audio, pads and file/storage
 access through the same ABI, split by subsystem over several C files (backend_kos.c lists them)
 that share only what `dc_internal.h` declares; `scripts/check.sh` checks a backend's ABI coverage
-over all the C files in its directory. The September reconciliation verifies the PC/null ABI and both
+over all the C files in its directory. It is built with sh4zam (`vendor/sh4zam`, pinned, MIT):
+any std function with an sh4zam counterpart uses sh4zam, and hardware work — store queues,
+`movca.l`, prefetching — goes through its intrinsics
+([ADR-0031](../decisions/ADR-0031-sh4zam-on-the-dreamcast.md); the backend's own agent notes are
+`src/backend/dreamcast/AGENTS.md`). The September reconciliation verifies the PC/null ABI and both
 Haxe targets; it does not constitute a new Dreamcast hardware acceptance run.
 
 `--video-hw` selects the optional primitive submission path only if `BP_CAP_GPU_DRAW` is

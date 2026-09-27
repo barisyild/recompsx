@@ -162,11 +162,19 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
     s->clip_x1 = (int16_t)g_clip_x1; s->clip_y1 = (int16_t)g_clip_y1;
 }
 
+/* A new record's line, allocated in the cache without a read (see gcmd_t). The caller writes
+ * every field a reader of its kind looks at; the rest of the line is undefined, as it was stale. */
+static inline gcmd_t* cmd_alloc(void) {
+    gcmd_t* c = &g_cmds[g_cmd_count++];
+    shz_dcache_alloc_line(c);
+    return c;
+}
+
 static inline gcmd_t* cmd_new(void) {
     begin_frame_if_needed();
     g_scene_dirty = 1;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }
-    gcmd_t* c = &g_cmds[g_cmd_count++];
+    gcmd_t* c = cmd_alloc();
     c->state = (uint16_t)(g_state_count > 0 ? g_state_count - 1 : 0);
     return c;
 }
@@ -270,11 +278,15 @@ static void mark_vram(int x, int y, int w, int h) {
     int out = i;
     for(int k = i; k < g_cmd_count; k++) {
         const gcmd_t* m = &g_cmds[k];
-        if(!inside(m->x[0], m->y[0], m->x[1], m->y[1], x, y, w, h)) g_cmds[out++] = *m;
+        if(!inside(m->x[0], m->y[0], m->x[1], m->y[1], x, y, w, h)) {
+            if(out != k) shz_memcpy32_1(&g_cmds[out], m);
+            else {}
+            out++;
+        } else {}
     }
     g_cmd_count = out;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return; }
-    gcmd_t* c = &g_cmds[g_cmd_count++];
+    gcmd_t* c = cmd_alloc();
     c->is_rect = GCMD_VRAM;
     c->state = 0;
     c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
@@ -362,11 +374,13 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
     /* A baked patch has the CLUT inside it, so it goes stale from either direction. */
     for(int i = 0; i < g_bake_n; i++) {
         if(!g_bake[i].used) continue;
-        /* A patch is 64 texels: 16 halfwords at 4bpp, 32 at 8bpp; its CLUT 16 or 256. */
+        /* A patch is 64 texels: 16 halfwords at 4bpp, 32 at 8bpp; its CLUT 16 or 256. It starts
+         * on a BAKE_STEP boundary: 8 halfwords at 4bpp, 16 at 8bpp. */
         const int bw = g_bake[i].depth == 1 ? BAKE_DIM / 2 : BAKE_DIM / 4;
+        const int bs = g_bake[i].depth == 1 ? BAKE_STEP / 2 : BAKE_STEP / 4;
         const int cw = g_bake[i].depth == 1 ? 256 : 16;
-        const int bx = g_bake[i].tex_x + g_bake[i].tu * bw;
-        const int by = g_bake[i].tex_y + g_bake[i].tv * BAKE_DIM;
+        const int bx = g_bake[i].tex_x + g_bake[i].tu * bs;
+        const int by = g_bake[i].tex_y + g_bake[i].tv * BAKE_STEP;
         const int page_hit = !(bx + bw <= x || x + w <= bx
                             || by + BAKE_DIM <= y || y + h <= by);
         const int clut_hit = g_bake[i].clut_y >= y && g_bake[i].clut_y < y + h
@@ -443,6 +457,17 @@ int marks_from(int first, int sx, int sy, int sw, int sh) {
     return 0;
 }
 
+/* 32 bytes to the TA through the store queue KOS direct rendering is writing — sh4zam's one-burst
+ * copy: four paired 64-bit moves and the `pref` that sends them. A header went through pvr_prim,
+ * a library call per header, and this list sends one at nearly every change of binding. Both
+ * types are 32-byte aligned (KOS declares them so), which the paired moves need. */
+static inline void put_hdr(const pvr_poly_hdr_t* h) {
+    shz_sq_memcpy32_1(pvr_dr_target(), h);
+}
+static inline void put_vtx(const pvr_vertex_t* v) {
+    shz_sq_memcpy32_1(pvr_dr_target(), v);
+}
+
 /** The part of the background texture a VRAM mark covers, drawn where the mark sits in the order.
  *  Returns 1 when something was drawn, so the caller restates its own header after it. */
 static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scale_x, float scale_y) {
@@ -452,7 +477,7 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
     if(x1 > sx + sw) x1 = sx + sw;
     if(y1 > sy + sh) y1 = sy + sh;
     if(x0 >= x1 || y0 >= y1) return 0;
-    pvr_prim(&g_hdr, sizeof(g_hdr));
+    put_hdr(&g_hdr);
     pvr_vertex_t v;
     v.argb = 0xFFFFFFFFu;
     v.oargb = 0;
@@ -462,11 +487,11 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
     const float px0 = (float)(x0 - sx) * scale_x, px1 = (float)(x1 - sx) * scale_x;
     const float py0 = (float)(y0 - sy) * scale_y, py1 = (float)(y1 - sy) * scale_y;
     v.flags = PVR_CMD_VERTEX;
-    v.x = px0; v.y = py0; v.u = u0; v.v = w0; pvr_prim(&v, sizeof(v));
-    v.x = px1; v.y = py0; v.u = u1; v.v = w0; pvr_prim(&v, sizeof(v));
-    v.x = px0; v.y = py1; v.u = u0; v.v = w1; pvr_prim(&v, sizeof(v));
+    v.x = px0; v.y = py0; v.u = u0; v.v = w0; put_vtx(&v);
+    v.x = px1; v.y = py0; v.u = u1; v.v = w0; put_vtx(&v);
+    v.x = px0; v.y = py1; v.u = u0; v.v = w1; put_vtx(&v);
     v.flags = PVR_CMD_VERTEX_EOL;
-    v.x = px1; v.y = py1; v.u = u1; v.v = w1; pvr_prim(&v, sizeof(v));
+    v.x = px1; v.y = py1; v.u = u1; v.v = w1; put_vtx(&v);
     return 1;
 }
 
@@ -483,8 +508,8 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
        && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over
        && g_hdrc[hs].kind == kind) {
         g_hdr_hits++;
-        pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
-        if(keep) *keep = g_hdrc[hs].hdr;
+        put_hdr(&g_hdrc[hs].hdr);
+        if(keep) shz_memcpy32_1(keep, &g_hdrc[hs].hdr);
         else {}
         return g_hdrc[hs].alpha;
     }
@@ -539,8 +564,8 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     g_hdrc[hs].kind = (uint8_t)kind;
     g_hdrc[hs].alpha = alpha;
     g_hdr_compiles++;
-    pvr_prim(&g_hdrc[hs].hdr, sizeof(pvr_poly_hdr_t));
-    if(keep) *keep = g_hdrc[hs].hdr;
+    put_hdr(&g_hdrc[hs].hdr);
+    if(keep) shz_memcpy32_1(keep, &g_hdrc[hs].hdr);
     else {}
     return alpha;
 }
@@ -662,6 +687,15 @@ static void run_begin(grun_t* r, const gstate_t* s, int state) {
 }
 
 /* The 64x64 patch a primitive samples within, if it samples within one. */
+/* Along one axis, the origin (in BAKE_STEP units) of a patch holding texels lo..hi: the aligned
+ * patch when they fit in it, else the one starting at lo's own step. 0 when neither holds them. */
+static inline int patch_origin(int lo, int hi, int* t) {
+    int o = (lo / BAKE_DIM) * (BAKE_DIM / BAKE_STEP);
+    if(hi >= o * BAKE_STEP + BAKE_DIM) o = lo / BAKE_STEP;
+    *t = o;
+    return hi < o * BAKE_STEP + BAKE_DIM;
+}
+
 static int one_patch(const gcmd_t* c, int* tu, int* tv) {
     int umin = c->u[0], umax = c->u[0], vmin = c->v[0], vmax = c->v[0];
     for(int k = 1; k < 3; k++) {
@@ -670,9 +704,7 @@ static int one_patch(const gcmd_t* c, int* tu, int* tv) {
         if(c->v[k] < vmin) vmin = c->v[k];
         if(c->v[k] > vmax) vmax = c->v[k];
     }
-    *tu = umin / BAKE_DIM;
-    *tv = vmin / BAKE_DIM;
-    return umax / BAKE_DIM == *tu && vmax / BAKE_DIM == *tv;
+    return patch_origin(umin, umax, tu) && patch_origin(vmin, vmax, tv);
 }
 
 /** Where primitive c's texels come from in variant `am`, into b; 0 when nowhere, and then the
@@ -694,7 +726,7 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
         if(k >= 0) {
             b->mem = g_bake[k].mem;
             b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-            b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+            b->dim = BAKE_DIM; b->ou = tu * BAKE_STEP; b->ov = tv * BAKE_STEP;
             return 1;
         }
         /* Sampling wider than one patch, or the patch pool is all in flight: the nearest banked
@@ -710,7 +742,7 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
         if(k >= 0) {
             b->mem = g_bake[k].mem;
             b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-            b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+            b->dim = BAKE_DIM; b->ou = tu * BAKE_STEP; b->ov = tv * BAKE_STEP;
             return 1;
         }
         /* Sampling wider than one patch, or every patch in flight: the page. */
@@ -745,12 +777,15 @@ static int bind_baked(const gcmd_t* c, const gstate_t* s, int am, gbind_t* b) {
     if(k < 0) return 0;
     b->mem = g_bake[k].mem;
     b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-    b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+    b->dim = BAKE_DIM; b->ou = tu * BAKE_STEP; b->ov = tv * BAKE_STEP;
     return 1;
 }
 
-/* A vertex of a clipped polygon, in VRAM units, with what is interpolated along an edge. */
-typedef struct { float x, y, u, v, r, g, b; } cvert_t;
+/* A vertex of a clipped polygon, in VRAM units, with what is interpolated along an edge. Padded to
+ * 32 bytes and aligned so a kept vertex is one shz_memcpy32_1: at seven floats every copy was a
+ * call to GCC's __movstr_i4_odd, 0.4-0.6 % of a frame in both games. */
+typedef struct __attribute__((aligned(32))) { float x, y, u, v, r, g, b, pad; } cvert_t;
+_Static_assert(sizeof(cvert_t) == 32, "a clipped vertex is one cache line");
 
 /* One Sutherland-Hodgman step: keeps the part of polygon v (n vertices) on the inner side of an
  * edge — coordinate `axis` (0 x, 1 y) at least `lim` when `lower`, at most it otherwise. */
@@ -761,7 +796,7 @@ static int clip_step(const cvert_t* v, int n, cvert_t* out, int axis, float lim,
         const cvert_t* b = &v[i + 1 == n ? 0 : i + 1];
         const float ca = axis ? a->y : a->x, cb = axis ? b->y : b->x;
         const float da = lower ? ca - lim : lim - ca, db = lower ? cb - lim : lim - cb;
-        if(da >= 0.0f) out[m++] = *a;
+        if(da >= 0.0f) shz_memcpy32_1(&out[m++], a);
         if((da >= 0.0f) != (db >= 0.0f)) {
             const float t = da / (da - db);
             cvert_t* o = &out[m++];
@@ -909,7 +944,7 @@ static void scene_rect(const gscene_t* g, const gcmd_t* c, int kind) {
 __attribute__((noinline))
 static void scene_bright(gscene_t* g, const gcmd_t* c, const gstate_t* s, const gbind_t* b,
                          int kind) {
-    if(g->over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
+    if(g->over_ready) put_hdr(&g_run_over);
     else {
         emit_header(b->mem, b->fmt, b->dim, s, 1, kind, &g_run_over);
         g->over_ready = 1;
@@ -957,7 +992,7 @@ static void scene_pass(gscene_t* g, const gcmd_t* c, int state, const gstate_t* 
        || b->ou != g->ou || b->ov != g->ov || kind != g->kind) {
         scene_header(g, state, s, b, kind);
     } else if(g->restate) {
-        pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
+        put_hdr(&g_run_hdr);
         g->restate = 0;
     }
     if(c->is_rect) {
@@ -1046,7 +1081,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
     pvr_list_begin(PVR_LIST_TR_POLY);
 
     if(with_background) {
-        pvr_prim(&g_hdr, sizeof(g_hdr));
+        put_hdr(&g_hdr);
         draw_quad(sw, sh);
     }
 
@@ -1091,6 +1126,10 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
     uint32_t cur_a = 0xFF000000u;
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
+        /* Four records — four lines — ahead: the buffer is far larger than the cache and is read
+         * once, front to back, so every line is a miss unless it was asked for in time. Past the
+         * end it touches the memory after the array, which is harmless. */
+        SHZ_PREFETCH(c + 4);
         if(c->is_rect == GCMD_VRAM) {
             if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) { restate = 1; g.state = -1; }
             else {}
@@ -1167,7 +1206,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 if(b >= 0) {
                     mem = g_bake[b].mem;
                     fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-                    dim = BAKE_DIM; ou = tu * BAKE_DIM; ov = tv * BAKE_DIM;
+                    dim = BAKE_DIM; ou = tu * BAKE_STEP; ov = tv * BAKE_STEP;
                 } else if(run_mir) {
                     /* Sampling wider than one patch, or the patch pool is all in flight: the
                      * nearest banked palette, which is the only lossy path left in the scene. */
@@ -1216,7 +1255,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             cur_a = (uint32_t)(alpha * 255.0f) << 24;
             g.state = -1;           /* the semi-transparent path's header is not the last one now */
         } else if(restate) {
-            pvr_prim(&g_run_hdr, sizeof(g_run_hdr));
+            put_hdr(&g_run_hdr);
             restate = 0;
         } else {}
 
@@ -1261,7 +1300,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             if(inside) put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
             else put_clipped(c, col, &g);
             if(bright && !(s->flags & BP_GPU_RAW)) {
-                if(over_ready) pvr_prim(&g_run_over, sizeof(g_run_over));
+                if(over_ready) put_hdr(&g_run_over);
                 else {
                     emit_header(mem, fmt, dim, s, 1, HK_NORMAL, &g_run_over);
                     over_ready = 1;

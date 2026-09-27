@@ -357,7 +357,7 @@ int bp_file_read(int slot, int offset, uint8_t* buf, int len) {
     if(win_starts(c, slot, offset)) {
         const int here = c->at + c->got - offset;
         if(len <= here) {
-            memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)len);
+            shz_memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)len);
             result = len;
         } else {
             /* Across the seam: the head from this window, the tail from the next one, which is
@@ -369,8 +369,8 @@ int bp_file_read(int slot, int offset, uint8_t* buf, int len) {
             }
             if(n->state == WIN_READY && n->slot == slot && n->at == c->at + c->got
                && n->got >= len - here) {
-                memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)here);
-                memcpy(buf + here, g_winbuf[1 - cur], (size_t)(len - here));
+                shz_memcpy(buf, g_winbuf[cur] + (offset - c->at), (size_t)here);
+                shz_memcpy(buf + here, g_winbuf[1 - cur], (size_t)(len - here));
                 result = len;
             } else {
                 /* The file ends here, or the read failed: answered directly and honestly. */

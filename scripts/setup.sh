@@ -117,6 +117,7 @@ git submodule update --init --recursive
 
 [ -f vendor/reflaxe/haxelib.json ]     || die "vendor/reflaxe is empty — submodule init failed"
 [ -f vendor/reflaxe.CPP/haxelib.json ] || die "vendor/reflaxe.CPP is empty — submodule init failed"
+[ -f vendor/sh4zam/include/sh4zam/shz_mem.h ] || die "vendor/sh4zam is empty — submodule init failed"
 
 # Generated block dispatchers need statements preceding continue to survive optimization.
 CONTINUE_PATCH=../patches/0004-reflaxe-continue-deletes-preceding.patch

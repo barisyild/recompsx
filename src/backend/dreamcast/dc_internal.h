@@ -41,6 +41,10 @@
 #include <string.h>
 #include <sys/time.h>
 
+/* sh4zam first: a std function with an sh4zam counterpart is not called here — see AGENTS.md in
+ * this directory. The memory group is what the backend needs; include others where used. */
+#include <sh4zam/shz_mem.h>
+
 /* PS1 VRAM geometry. Fixed by the hardware, not a preference. */
 #define VRAM_W 1024
 #define VRAM_H 512
@@ -116,13 +120,20 @@
 /* One primitive. A rectangle borrows the triangle's slots: corner in [0], size in [1]. So does a
  * VRAM write into the picture (GCMD_VRAM, see bp_gpu_dirty): VRAM corner in [0], size in [1]. */
 enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2 };
-typedef struct {
+/* 32 bytes, 32-aligned: one operand-cache line a record. Recording one allocates its line without
+ * reading memory (shz_dcache_alloc_line, `movca.l`: the SH-4 caches write-back, and a store that
+ * misses would otherwise fetch 32 bytes only to overwrite them), and build_scene reads the buffer
+ * as a stream it prefetches ahead of. It was 36 bytes, so most records straddled two lines. The
+ * state index and the kind share the last halfword: states <= GPU_MAX_STATES < 2^14. */
+typedef struct __attribute__((aligned(32))) {
     int16_t  x[3], y[3];
-    uint8_t  u[3], v[3];
     uint32_t argb[3];
-    uint16_t state;
-    uint8_t  is_rect;
+    uint8_t  u[3], v[3];
+    uint16_t state   : 14;
+    uint16_t is_rect : 2;
 } gcmd_t;
+_Static_assert(sizeof(gcmd_t) == 32, "a command record is one cache line");
+_Static_assert(GPU_MAX_STATES <= (1 << 14), "a state index fits the record's 14 bits");
 
 /* Texture and blend state, recorded once per run of primitives that share it. */
 typedef struct {
@@ -194,6 +205,11 @@ typedef struct {
  * floor free). At 64, Crash 3's demo window re-baked every frame and cost 3.5 %; at 128, about 1 %. */
 #define BAKE_DIM   64
 #define BAKE_MAX   128
+/* Where a patch may start, in texels: every 32, not every 64. A primitive whose 64 texels begin on
+ * an odd multiple of 32 — Crash's eyebrows and Aku Aku's feathers in Crash 3 sample v 160..223 —
+ * fits no aligned patch, and without one it fell back to being drawn whole, its solid texels
+ * blended. The aligned patch is still the first choice (one_patch), so neighbours keep sharing. */
+#define BAKE_STEP  32
 
 typedef struct {
     pvr_ptr_t mem;

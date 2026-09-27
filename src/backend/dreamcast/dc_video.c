@@ -244,7 +244,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 #endif
 
     if(!blank && (sx != g_disp[0][0] || sy != g_disp[0][1] || sw != g_disp[0][2] || sh != g_disp[0][3])) {
-        memcpy(g_disp[1], g_disp[0], sizeof(g_disp[0]));
+        shz_memcpy4(g_disp[1], g_disp[0], sizeof(g_disp[0]));
         g_disp[0][0] = sx; g_disp[0][1] = sy; g_disp[0][2] = sw; g_disp[0][3] = sh;
     } else {}
 

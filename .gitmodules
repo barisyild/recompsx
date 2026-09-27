@@ -4,3 +4,6 @@
 [submodule "vendor/reflaxe.CPP"]
 	path = vendor/reflaxe.CPP
 	url = https://github.com/SomeRanDev/reflaxe.CPP.git
+[submodule "vendor/sh4zam"]
+	path = vendor/sh4zam
+	url = https://github.com/gyrovorbis/sh4zam.git

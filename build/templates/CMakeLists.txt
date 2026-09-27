@@ -103,7 +103,14 @@ elseif(RECOMPSX_BACKEND STREQUAL "dreamcast")
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_scene.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_textures.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_video.c"
-    "${RECOMPSX_ROOT}/src/backend/dreamcast/main_dc.cpp")
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/main_dc.cpp"
+    # sh4zam's out-of-line routines (large copies, memset, store-queue runs): its inline
+    # headers call into them. Assembly: the KOS toolchain file names kos-cc as the assembler.
+    "${RECOMPSX_ROOT}/vendor/sh4zam/source/sh4/shz_mem_sh4.s")
+  if(NOT EXISTS "${RECOMPSX_ROOT}/vendor/sh4zam/source/sh4/shz_mem_sh4.s")
+    message(FATAL_ERROR "vendor/sh4zam is empty: run scripts/setup.sh (git submodule update --init)")
+  endif()
+  enable_language(ASM)
 else()
   set(BACKEND_SRC
     "${RECOMPSX_ROOT}/src/backend/pc/backend_sdl2.c"
@@ -136,6 +143,9 @@ if(RECOMPSX_BACKEND STREQUAL "dreamcast")
   # time is free and, on this target, not optional.
   target_compile_options(recompsx PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(recompsx PRIVATE -Wl,--gc-sections)
+  # sh4zam (vendor/sh4zam, pinned): the backend's std replacements and SH4 intrinsics — the rule
+  # in src/backend/dreamcast/AGENTS.md. Its headers, and its one assembly file in BACKEND_SRC.
+  target_include_directories(recompsx PRIVATE "${RECOMPSX_ROOT}/vendor/sh4zam/include")
   # dcload and every disc-mastering tool expect the ELF to say so in its name.
   set_target_properties(recompsx PROPERTIES SUFFIX ".elf")
 elseif(NOT RECOMPSX_BACKEND STREQUAL "null")

@@ -419,7 +419,7 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s, int amode) {
         if(s->depth == 0) {
             uint8_t* dst = page + (size_t)ty * (TEX_DIM / 2);
             if(plain && s->tex_x + TEX_DIM / 4 <= VRAM_W) {
-                memcpy(dst, src + s->tex_x, TEX_DIM / 2);
+                shz_memcpy(dst, src + s->tex_x, TEX_DIM / 2);
             } else {
                 for(int tx = 0; tx < TEX_DIM; tx += 2) {
                     const int su0 = plain ? tx : (((tx & ~(mx << 3)) | (ox << 3)) & 0xFF);
@@ -550,7 +550,7 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
     g_pal_next = (bank + 1) % PAL_BANKS_4BPP;
     g_pal4[bank].used = 1;
     g_pal4[bank].hash = h;
-    memcpy(g_pal4[bank].entry, want, sizeof(want));
+    shz_memcpy2_16(g_pal4[bank].entry, want);
     if(g_pal4[bank].bound_frame != g_tex_frame) g_pal_live++;
     g_pal4[bank].bound_frame = g_tex_frame;
     for(int i = 0; i < 16; i++)
@@ -703,9 +703,9 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv, int am
      * 4bpp and two at 8bpp. */
     uint32_t* d = twid_open(dst);
     if(s->depth == 1)
-        twid_bake8(d, s->tex_x + tu * (BAKE_DIM / 2), s->tex_y + tv * BAKE_DIM, lo, hi);
+        twid_bake8(d, s->tex_x + tu * (BAKE_STEP / 2), s->tex_y + tv * BAKE_STEP, lo, hi);
     else
-        twid_bake(d, s->tex_x + tu * (BAKE_DIM / 4), s->tex_y + tv * BAKE_DIM, lo, hi);
+        twid_bake(d, s->tex_x + tu * (BAKE_STEP / 4), s->tex_y + tv * BAKE_STEP, lo, hi);
     twid_close();
 }
 
@@ -792,10 +792,11 @@ PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
  *  is about which path is cheaper for the majority of the picture. Counting is a direct-mapped
  *  table with four probes: a collision costs a palette its count, never its correctness. */
 #define PRIO_SLOTS 256
-static struct { uint16_t cx, cy; uint32_t n; uint8_t used; } g_prio[PRIO_SLOTS];
+static struct { uint16_t cx, cy; uint32_t n; uint8_t used; } g_prio[PRIO_SLOTS] __attribute__((aligned(8)));
+_Static_assert(sizeof(g_prio) % 8 == 0, "g_prio is cleared with shz_memset8");
 
 PROF_NOINLINE void palette_priority(void) {
-    memset(g_prio, 0, sizeof(g_prio));
+    shz_memset8(g_prio, 0, sizeof(g_prio));
     /* The slots in use, collected as they fill: the ranking below then sorts a few dozen entries
      * where it used to scan all 256 slots once per bank — sixty-four passes, some sixteen
      * thousand iterations a scene, for a list that is sorted once. And primitives arrive in runs
