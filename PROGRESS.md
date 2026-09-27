@@ -2,6 +2,19 @@
 
 ## Status snapshot
 
+**2026-09-27: build-dc.sh --max adds three SH-4 code-generation flags — Crash 3 -2.6 %, Crash Bash
+-1.3 %.** `-mbranch-cost=1 -mdiv=call-fp -flto-partition=one`, each measured on the Flycast
+profile, which is exact for a given binary. Flycast M cycles, Crash 3 / Crash Bash: before 1501.5 /
+5984.6; branch-cost=1 1473.8 / 5989.4 (GCC's default of 2 makes if-conversion trade short branches
+for longer branch-free sequences: the hottest recompiled functions lose 7 % of their instructions);
+call-fp alone 1496.6 / 5945.6 (integer division through the FPU's double divide, exact for every
+quotient C defines; x / 0 and INT_MIN / -1 never reach C); both 1468.8 / 5957.5; all three
+**1463.1 / 5906.0** (one LTO partition: every call sees its callee's register use; the link takes
+~3 minutes instead of ~1). Tried and left out: -fschedule-insns -fsched-pressure,
+-fsched2-use-superblocks, -fselective-scheduling2, -fira-algorithm=priority (all +0.3 to +0.7 %),
+-mpretend-cmove and -fipa-pta (-0.1 % alone, nothing on top), -mlra (GCC 15.2 ICE in reload). The
+recorded reasons live beside the flags in build-dc.sh.
+
 **2026-09-27: The Dreamcast backend is split by subsystem — no behaviour change.**
 backend_kos.c (4,744 lines) is now nine files: backend_kos.c (lifecycle, launch parameters, time,
 logs), dc_video.c, dc_scene.c, dc_textures.c, dc_audio.c, dc_input.c, dc_files.c, dc_prof.c and
@@ -1355,6 +1368,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] DC --max build: -mbranch-cost=1 -mdiv=call-fp -flto-partition=one (Crash 3
+1501.5 -> 1463.1 M, Crash Bash 5984.6 -> 5906.0); eight other flags measured and left out. Merged
+crash3-warped into main. Next: PGO feasibility (gcda over serial, partial instrumentation), GPU path.
 
 2026-09-27 [claude] Split the Dreamcast backend into nine files + dc_internal.h, no behaviour change
 (Flycast Crash 3 1501.5 M, Crash Bash 5984.6 M); check.sh checks ABI coverage per backend directory.
