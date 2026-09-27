@@ -48,6 +48,11 @@
     const hwBox = document.querySelector('#hw');
     const audioBox = document.querySelector('#audio');
     const paceBox = document.querySelector('#pace');
+    // Without the Web Audio API the game still runs, silent: the box is cleared as if Sound had
+    // been switched off, and startAudio treats a context it cannot make the same way.
+    if (typeof AudioContext !== 'function') {
+      audioBox.checked = false; audioBox.disabled = true; audioBox.parentElement.title = 'No AudioContext';
+    }
     // Live: the loop reads host.unpaced every tick. Off, it runs as many frames as fit in a
     // display interval — for profiling and for seeing what the machine can do, not for playing.
     paceBox.addEventListener('change', () => {
@@ -153,7 +158,15 @@
       return Math.max(0, Math.round(reportedFrames - drained + pushedSinceReport));
     }
     async function startAudio() {
-      audioContext = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      // No context, no sound: audioContext stays null, which is what tells the runtime --no-audio.
+      try {
+        audioContext = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      } catch (error) {
+        writeLog(`[audio] no AudioContext (${error.message}); running without sound`);
+        audioContext = null;
+        audioBox.checked = false;
+        return;
+      }
       if (audioContext.audioWorklet) {
         try {
           await audioContext.audioWorklet.addModule('audio-worklet.js');
