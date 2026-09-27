@@ -68,7 +68,7 @@
     }
   ],
 
-  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first.",
+  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first. 0x80040540, 0x80040584 and 0x80040910 are libpad's per-port handlers (its port records at 0x8007765c, F0h apart), reached through pointers only once a controller answers: with the port empty they never ran.",
   "functionHints": [
     2147564692,
     2147566472,
@@ -106,6 +106,9 @@
     2147725756,
     2147725860,
     2147746740,
+    2147747136,
+    2147747204,
+    2147748112,
     2147766812,
     2147767036,
     2147767612,

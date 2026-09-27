@@ -78,6 +78,21 @@ static uint8_t axis_to_byte(int v) {
 }
 
 void bp_input_poll(void) {
+#if RECOMPSX_DC_PROFILE
+    /* An automated profiling run (--dc-rxprof) has to measure the same frames every time. With a
+     * controller in the port, whatever reaches the emulator's window — a key pressed while it had
+     * focus — changes what the game does, and the benchmark with it: a run of Crash 3's demo
+     * window measured the title screen instead. So its ports stay empty, as every measurement
+     * before controllers existed had them. */
+    if(g_rxprof) {
+        for(int i = 0; i < MAX_PADS; i++) {
+            g_pad_present[i] = 0;
+            g_pad_buttons[i] = 0;
+            g_pad_axes[i][0] = g_pad_axes[i][1] = g_pad_axes[i][2] = g_pad_axes[i][3] = 0x80;
+        }
+        return;
+    }
+#endif
     for(int i = 0; i < MAX_PADS; i++) {
         maple_device_t* dev = maple_enum_dev(i, 0);
         const cont_state_t* st = NULL;

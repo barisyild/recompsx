@@ -734,6 +734,19 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
     return 1;
 }
 
+/** Variant `am` of the one 64x64 patch primitive c samples, baked with its CLUT applied: exact,
+ *  and no palette bank spent. 0 when c samples more than one patch or the pool is all in flight. */
+static int bind_baked(const gcmd_t* c, const gstate_t* s, int am, gbind_t* b) {
+    int tu, tv;
+    if(!one_patch(c, &tu, &tv)) return 0;
+    const int k = bake_slot(s, tu, tv, am);
+    if(k < 0) return 0;
+    b->mem = g_bake[k].mem;
+    b->fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+    b->dim = BAKE_DIM; b->ou = tu * BAKE_DIM; b->ov = tv * BAKE_DIM;
+    return 1;
+}
+
 /* A vertex of a clipped polygon, in VRAM units, with what is interpolated along an edge. */
 typedef struct { float x, y, u, v, r, g, b; } cvert_t;
 
@@ -982,10 +995,14 @@ static void subtract_passes(gscene_t* g, const gcmd_t* c, int state, const gstat
 
 /** A semi-transparent primitive, as the PlayStation draws it: per texel for a textured one —
  *  where the CLUT holds both kinds, the solid texels first as an opaque primitive draws them, then
- *  the STP ones in the state's blend, at 8bpp and 15bpp (a 4bpp CLUT holding both is drawn whole,
- *  every visible texel blended: its variants would be two more palette banks per CLUT, and Crash
- *  Bandicoot: Warped already binds sixty-odd CLUTs a frame against the hardware's sixty-four;
- *  split, the banks ran out and the frame went 10 % slower) — and B - F in three passes. */
+ *  the STP ones in the state's blend — and B - F in three passes.
+ *
+ *  At 4bpp the two variants come from baked patches rather than palette banks: as banks they
+ *  would be two more per CLUT, and Crash Bandicoot: Warped already binds sixty-odd CLUTs a frame
+ *  against the hardware's sixty-four (split that way, the banks ran out and the frame went 10 %
+ *  slower). A primitive sampling more than one patch, or one on a windowed page, is still drawn
+ *  whole, every visible texel blended. Uka Uka's jaw in Crash 3's intro is such a CLUT — black
+ *  opaque texels and two STP ones in a 50 % blend — and drawn whole it was see-through red. */
 __attribute__((noinline))
 static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const gstate_t* s) {
     static const gbind_t none = { NULL, 0, TEX_DIM, 0, 0 };
@@ -1002,6 +1019,15 @@ static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const 
         /* No texel blends: drawn as the opaque primitive it is. */
         if(bind_texture(c, s, AM_VIS, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);
         return;
+    }
+    if(r->cls == CLS_MIXED && s->depth == 0 && r->mir) {
+        gbind_t solid;
+        if(bind_baked(c, s, AM_SOLID, &solid) && bind_baked(c, s, AM_STP, &b)) {
+            scene_pass(g, c, state, s, &solid, HK_OPAQUE);
+            if(sub) subtract_passes(g, c, state, s, &b);
+            else scene_pass(g, c, state, s, &b, HK_NORMAL);
+            return;
+        }
     }
     const int split = r->cls == CLS_MIXED && s->depth != 0;
     if(split && bind_texture(c, s, AM_SOLID, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);

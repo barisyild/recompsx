@@ -484,3 +484,13 @@ fallthrough to stale base functions); the executable's own functions inside a wi
 dispatched, never direct-called, for the same reason; and a window shorter than its own
 fingerprint is a build error, because the tool and the runtime would hash different lengths and
 the overlay would silently never activate.
+
+## libpad's handlers, found by plugging a controller in (2026-09-27)
+
+Until SIO0 had a device on it, libpad only ever ran its probe: the port answered FFh and never
+acknowledged, and the library settled on "no controller". With a digital pad answering, it runs
+its per-port state machine, whose steps it reaches through pointers — so the first Dreamcast run
+with a pad connected (Flycast plugs one in) reported three functions the analysis had never
+seen: `0x80040540`, `0x80040584` and `0x80040910`. All three work on libpad's port records at
+`0x8007765c`, F0h apart. Headless runs keep the ports empty and never reach them, which is why no
+digest ever pointed at them; the hints are in game.json.

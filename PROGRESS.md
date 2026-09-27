@@ -2,6 +2,20 @@
 
 ## Status snapshot
 
+**2026-09-27: Controllers on the Dreamcast — Crash Bash's libpad handlers, Uka Uka's jaw, profiles
+that ignore the host.** With a pad in the port (Flycast plugs one in) Crash Bash's libpad ran its
+per-port state machine for the first time and reached three functions the analysis had never
+seen (0x80040540, 0x80040584, 0x80040910); they are hints now, and the run is clean. Crash 3's
+intro drew Uka Uka's jaw see-through red on the PVR: it is 4bpp with a CLUT of thirteen solid
+texels and two STP ones in a 50 % blend, which dc_scene.c drew whole, every texel blended, to save
+palette banks. Such primitives now take their solid and STP variants from baked patches, which
+spend no bank; the bake pool is 128 (at 64 the demo window re-baked every frame, 3.5 % slower; at
+128 about 1 %), and Flycast shows the jaw black as the software renderer does. A `--dc-rxprof` run
+keeps its ports empty: with live controllers a key reaching Flycast's window changed what the game
+did, and one Crash 3 run measured the title screen instead of the demo. New Flycast baselines, no
+pads: Crash 3 **1492.4 M**, Crash Bash **5924.1 M** (the game timeline moved with SIO0, so these
+are not comparable with the figures below).
+
 **2026-09-27: Controllers — a digital pad on SIO0, the BIOS pad driver, keyboard and gamepads on JS.**
 No game had input on any platform: the SDL2 and Dreamcast backends read pads and the ABI carried
 them, but SIO0 was an empty port and nothing sampled the backend. Now `sio.Pads` samples it once
@@ -1397,6 +1411,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] DC with controllers: Crash Bash libpad handlers as hints, Uka Uka's jaw (mixed
+4bpp CLUT blends split via bakes, pool 128), --dc-rxprof ports empty; CDIs rebuilt for both games.
+Baselines Crash 3 1492.4 M, Crash Bash 5924.1 M. Next: analog/config mode, multitap, memory cards.
 
 2026-09-27 [claude] Input: digital pad on SIO0 (psx-spx timing), BIOS pad driver B0:12h-16h from
 OpenBIOS, keyboard/Gamepad API via JS externs; headless ports empty; new digests C3 ee91f215 /

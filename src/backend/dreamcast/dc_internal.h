@@ -187,9 +187,13 @@ typedef struct {
  * 1024-entry table (register base 0x1000) at render time — 64 banks of 16 at 4bpp. This arena
  * wants about a hundred. No format escapes that arithmetic, so the overflow is drawn from
  * texels with the CLUT already applied. What makes it affordable is baking the region the
- * primitive actually samples instead of the whole page: 64x64 is 8 KB, where a page is 128. */
+ * primitive actually samples instead of the whole page: 64x64 is 8 KB, where a page is 128.
+ *
+ * The same patches draw a semi-transparent 4bpp primitive whose CLUT holds solid and STP texels
+ * both, in two variants (semi_prim), so the pool is 128 (1 MB, and only as much as leaves the
+ * floor free). At 64, Crash 3's demo window re-baked every frame and cost 3.5 %; at 128, about 1 %. */
 #define BAKE_DIM   64
-#define BAKE_MAX   64
+#define BAKE_MAX   128
 
 typedef struct {
     pvr_ptr_t mem;
