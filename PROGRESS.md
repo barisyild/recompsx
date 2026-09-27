@@ -2,6 +2,15 @@
 
 ## Status snapshot
 
+**2026-09-27: DMA list walk follows empty nodes in a loop of its own — Crash Bash -0.8 %.**
+Most of an ordering table is empty nodes that only link on: 2.93 M of the 4.14 M nodes Crash Bash
+walks in vblanks 18800-20300 (10.5 M words in the rest). walkList followed each through the full
+step — counters, the GPU's entry, the guard — about 76 cycles a node; they now take a load and a
+mask each in an inner loop, with the same order, guard and runaway exit. Flycast: Crash Bash
+6030.7 -> **5982.7** M (walkList 1574 -> 1301 ms), Crash 3 1504.7 -> **1501.4** M (180 -> 163 ms).
+Digests unchanged, JS = desktop C++. (Tried and dropped the same afternoon: registers in locals per
+basic block in functions that call — neutral on both games, JS bundle +21 %; see ADR-0029.)
+
 **2026-09-27: The GTE's registers are one array (shim.GteFile) — Crash 3 ~66.5 %, Crash Bash -2.3 %.**
 Its 73 registers were static fields, one global each, and on the SH-4 a global is an address loaded
 from the literal pool before every access: RTPS read about thirty. They are now properties over one
@@ -1330,6 +1339,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-27 [claude] GTE registers as one array (shim.GteFile), DMA list walk following empty nodes in
+its own loop: Crash 3 1537.7 -> 1501.4 M (~66.6 %), Crash Bash 6174.2 -> 5982.7. Register locals per
+basic block tried and dropped (neutral). Next: split the Dreamcast backend into modules (user's ask).
 
 2026-09-27 [claude] Registers as CpuState fields (ADR-0029), locals only in looping leaves: fixes a
 stale-register publish (Crash 3 diverged from vblank 9898; digest 20,000 now a3419ae4); Crash 3

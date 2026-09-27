@@ -182,24 +182,41 @@ class Dma {
 		var addr = madr[CH_GPU] & 0x1FFFFC;
 		var guard = 0;
 		final ram = Memory.ram();
+		var header = MemA.get32(ram, addr);
 		while (true) {
-			final header = MemA.get32(ram, addr);
+			// Most of an ordering table is empty nodes, which only link on: 71 % of the 4.1 M nodes
+			// Crash Bash walks in vblanks 18800-20300. They are followed here, a load and a mask
+			// each, where the full step below cost them its counters and the GPU's entry.
+			while ((header & 0xFF800000) == 0) {
+				addr = header & 0x1FFFFC;
+				header = MemA.get32(ram, addr);
+				guard++;
+				if (guard > 0x10000) {
+					runaway();
+					return;
+				} else {}
+			}
 			final count = (header >>> 24) & 0xFF;
 			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
 			// addresses RAM, wrapping at 2 MB exactly as `Memory.read32`'s decode does for these
 			// addresses, and GP0 is all 0x1F801810 is. Going through `write32` cost each word a
 			// read, a write, a region search and three calls — half of all the time spent in this
 			// channel, measured on the hardware-drawing path. The GPU takes the node whole.
-			Gpu.writeGp0Words(ram, addr + 4, count);
-			wordsToGpu += count;
-			addr = header & 0x1FFFFC;
+			if (count != 0) {
+				Gpu.writeGp0Words(ram, addr + 4, count);
+				wordsToGpu += count;
+			} else {}
 			// Bit 23 of the link marks the end. A table that neither ends nor repeats would
 			// otherwise walk all of RAM.
 			if ((header & 0x800000) != 0) break;
 			else {}
+			addr = header & 0x1FFFFC;
+			header = MemA.get32(ram, addr);
 			guard++;
-			if (guard > 0x10000) return runaway();
-			else {}
+			if (guard > 0x10000) {
+				runaway();
+				return;
+			} else {}
 		}
 		listsWalked++;
 		madr[CH_GPU] = 0xFFFFFF;
