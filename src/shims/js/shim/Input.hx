@@ -12,13 +12,14 @@ import js.html.PointerEvent;
 	Only in a page. Under Node there is no window and no navigator, so no pad is connected — and a
 	headless run never asks anyway: `sio.Pads` keeps every port empty while a digest is taken.
 
-	Pad 0 is the keyboard merged with the first gamepad, pad 1 the second gamepad: the desktop
-	backend's arrangement (backend_sdl2.c), and its key map — arrows for the d-pad, X S Z A for
-	cross, square, triangle and circle, Q W for L1 R1, 1 2 for L2 R2, Enter for Start and right
-	Shift for Select. Keys are matched by position (`KeyboardEvent.code`), so the buttons under a
-	player's fingers do not move with the keyboard's language. Gamepads are read in the W3C
-	"standard" mapping: face buttons 0-3, shoulders 4-7, select and start 8-9, stick clicks
-	10-11, d-pad 12-15.
+	Pad 0 is the keyboard merged with the first gamepad, and pads 1-3 are the second to fourth
+	gamepads. With the multitap in port 1 (ADR-0042) they are slots A-D, and pad 1 is also port 2
+	until a game uses the tap. This is the desktop backend's arrangement (backend_sdl2.c), and so
+	is the key map: arrows for the d-pad, X S Z A for cross, square, triangle and circle, Q W for
+	L1 R1, 1 2 for L2 R2, Enter for Start and right Shift for Select. Keys are matched by
+	position (`KeyboardEvent.code`), so the buttons under a player's fingers do not move with the
+	keyboard's language. Gamepads are read in the W3C "standard" mapping: face buttons 0-3,
+	shoulders 4-7, select and start 8-9, stick clicks 10-11, d-pad 12-15.
 
 	The Gamepad API may be missing — browsers withhold it from pages that are not a secure
 	context, which a page served to the LAN over plain HTTP is not — and the keyboard still works.
@@ -61,7 +62,10 @@ class Input {
 	/** The snapshot `poll` takes, which is all the runtime ever reads. */
 	static var pad0 = 0;
 	static var pad1 = 0;
-	static var pad1Connected = false;
+	static var pad2 = 0;
+	static var pad3 = 0;
+	/** Gamepads connected at the last poll: pad n > 0 is there when more than n are. */
+	static var gamepads = 0;
 
 	static inline var TYPED_CAPACITY = 64;
 	/** Whether the keyboard types (`Backend.keyText`), and what it typed, oldest first. */
@@ -83,19 +87,23 @@ class Input {
 	/** The machine's pointer as the kernel last said (`showPointer`): 0 none, 1 shown, 2 hidden. */
 	static var pointerState = 0;
 
-	/** Once per vblank, from `Backend.inputPoll`: a stable snapshot of both pads. */
+	/** Once per vblank, from `Backend.inputPoll`: a stable snapshot of the four pads. */
 	public static function poll():Void {
 		if (Browser.supported) {
 			if (!attached) attach();
 			else {}
 			var first = 0;
 			var second = 0;
+			var third = 0;
+			var fourth = 0;
 			var seen = 0;
 			if (hasGamepads()) {
 				for (g in Browser.navigator.getGamepads()) {
 					if (g != null && g.connected) {
 						if (seen == 0) first = gamepadButtons(g);
 						else if (seen == 1) second = gamepadButtons(g);
+						else if (seen == 2) third = gamepadButtons(g);
+						else if (seen == 3) fourth = gamepadButtons(g);
 						else {}
 						seen++;
 					} else {}
@@ -103,7 +111,9 @@ class Input {
 			} else {}
 			pad0 = keys | first;
 			pad1 = second;
-			pad1Connected = seen > 1;
+			pad2 = third;
+			pad3 = fourth;
+			gamepads = seen;
 			mouseOver = pointerOver ? 1 : 0;
 			mouseX = pointerX;
 			mouseY = pointerY;
@@ -123,13 +133,17 @@ class Input {
 		}
 	}
 
-	/** Pad 0 is always there in a page — it is the keyboard — and pad 1 when a second gamepad is. */
+	/** Pad 0 is always there in a page — it is the keyboard — and pad n when an (n+1)th gamepad is. */
 	public static function connected(pad:Int):Bool {
-		return Browser.supported && (pad == 0 || (pad == 1 && pad1Connected));
+		return Browser.supported && (pad == 0 || (pad > 0 && pad < 4 && gamepads > pad));
 	}
 
 	public static function buttons(pad:Int):Int {
-		return pad == 0 ? pad0 : (pad == 1 ? pad1 : 0);
+		if (pad == 0) return pad0;
+		else if (pad == 1) return pad1;
+		else if (pad == 2) return pad2;
+		else if (pad == 3) return pad3;
+		else return 0;
 	}
 
 	static function attach():Void {

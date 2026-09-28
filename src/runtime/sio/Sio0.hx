@@ -14,11 +14,12 @@ import shim.RawMem;
 	interrupt (IRQ7) that libraries drive their transfers from. Registers and timing per psx-spx
 	"Serial Interfaces (SIO)" and "Controllers and Memory Cards" (docs/specs/runtime.md §7.11).
 
-	What is plugged in comes from `Pads`, latched once per vblank: a digital pad (SCPH-1080) on
-	each port the backend reports, answering the standard read — address 01h, then ID 5A41h and two
-	bytes of buttons, active low. The memory card in slot 1 (`MemoryCard`) answers at 81h with the
-	read, write and ID commands a Sony card has. An empty port, and the card address of an empty
-	slot, answer every byte with FFh and never acknowledge: that is how libpad and libcard see
+	What is plugged in comes from `Pads`, latched once per vblank: digital pads (SCPH-1080)
+	answering the standard read — address 01h, then ID 5A41h and two bytes of buttons, active low.
+	Port 1 has a multitap in it (`Multitap`, ADR-0042), which answers for its slot A as a pad does
+	and, asked, for all four slots. The memory card in slot 1 (`MemoryCard`) answers at 81h with
+	the read, write and ID commands a Sony card has. An empty port, and the card address of an
+	empty slot, answer every byte with FFh and never acknowledge: that is how libpad and libcard see
 	nothing there and move on.
 
 	A digital pad answers every command as it answers 42h (read). It has no configuration mode, so a
@@ -65,6 +66,8 @@ class Sio0 {
 	static inline var NOBODY = 0;
 	static inline var PAD = 1;
 	static inline var CARD = 2;
+	static inline var TAP_LONG = 3;        // the multitap, all four slots
+	static inline var TAP_GARBAGE = 4;     // the multitap, the four bytes after a long read asked again
 
 	static var mode = 0;
 	static var control = 0;
@@ -83,6 +86,11 @@ class Sio0 {
 	static var device = NOBODY;
 	/** The pad's buttons as of its address byte, so that one transfer reports one moment. */
 	static var latched = 0;
+	/** The selection is a slot-A read through the multitap: what it answers, and its request —
+	    whether the third byte was 01h — which the tap acts on at the next one. */
+	static var tapAccess = false;
+	static var tapKind = 0;
+	static var tapRequest = false;
 	/** The answer to the byte on the wire, and whether the device acknowledges it, and when. */
 	static var reply = 0xFF;
 	static var acks = false;
@@ -121,6 +129,10 @@ class Sio0 {
 	}
 
 	static function endSelection():Void {
+		if (tapAccess) {
+			tapAccess = false;
+			Multitap.finished(tapKind, tapRequest);
+		} else {}
 		step = 0;
 		device = NOBODY;
 	}
@@ -267,9 +279,13 @@ class Sio0 {
 			reply = 0xFF;
 			acks = false;
 		} else {
+			if (step == 2 && tapAccess) tapRequest = v == 0x01;
+			else {}
 			if (step == 0) address(v);
 			else if (device == PAD) padByte();
 			else if (device == CARD) cardByte(v);
+			else if (device == TAP_LONG) tapLongByte();
+			else if (device == TAP_GARBAGE) tapGarbageByte();
 			else {
 				reply = 0xFF;
 				acks = false;
@@ -281,17 +297,88 @@ class Sio0 {
 	/** The address byte: the device it names answers from now on, or nobody does. */
 	static function address(v:Int):Void {
 		final port = (control & CR_PORT) != 0 ? 1 : 0;
-		if (v == 0x01 && Pads.isConnected(port)) {
+		device = NOBODY;
+		reply = 0xFF;
+		acks = false;
+		if (port == 0 && Multitap.plugged) tapAddress(v);
+		else portAddress(port, v);
+	}
+
+	/** A port with a pad or a card in it directly. */
+	static function portAddress(port:Int, v:Int):Void {
+		final pad = Pads.padOnPort(port);
+		if (v == 0x01 && pad >= 0 && Pads.isConnected(pad)) {
 			device = PAD;
-			latched = Pads.buttonsOf(port);
-			reply = 0xFF;
+			latched = Pads.buttonsOf(pad);
 			acks = true;
 		} else if (v == 0x81 && MemoryCard.isPresent(port)) {
 			device = CARD;
-			reply = 0xFF;
 			acks = true;
+		} else {}
+	}
+
+	/**
+		The multitap's addresses: 01h is slot A, answering as `Multitap.next` says; 02h-04h slots
+		B-D, each as a pad of its own; 81h slot A's card, the machine's one. An empty slot, and the
+		cards of B-D, are answered by nobody.
+	**/
+	static function tapAddress(v:Int):Void {
+		if (v == 0x01) {
+			if (Pads.isConnected(0)) {
+				tapAccess = true;
+				tapKind = Multitap.next();
+				tapRequest = false;
+				latched = Pads.buttonsOf(0);
+				if (tapKind == Multitap.LONG) {
+					Multitap.latch();
+					Multitap.used();
+					device = TAP_LONG;
+				} else if (tapKind == Multitap.GARBAGE) device = TAP_GARBAGE;
+				else device = PAD;
+				acks = true;
+			} else Multitap.aborted();
+		} else if (v >= 0x02 && v <= 0x04) {
+			if (Pads.isConnected(v - 1)) {
+				device = PAD;
+				latched = Pads.buttonsOf(v - 1);
+				acks = true;
+				Multitap.used();
+			} else {}
+		} else if (v == 0x81 && MemoryCard.isPresent(0)) {
+			device = CARD;
+			acks = true;
+		} else {}
+	}
+
+	/** The long read after its address: ID 5A80h, then the four slots' 32 bytes; no /ACK last. */
+	static function tapLongByte():Void {
+		if (step == 1) {
+			reply = 0x80;
+			acks = true;
+		} else if (step == 2) {
+			reply = 0x5A;
+			acks = true;
+		} else if (step < 3 + Multitap.SLOT_BYTES) {
+			reply = Multitap.slotByte(step - 3);
+			acks = step < 2 + Multitap.SLOT_BYTES;
 		} else {
-			device = NOBODY;
+			reply = 0xFF;
+			acks = false;
+		}
+	}
+
+	/** Garbage: the tap's ID, then slot A's ID low byte, and the transfer ends there. */
+	static function tapGarbageByte():Void {
+		if (step == 1) {
+			reply = 0x80;
+			acks = true;
+		} else if (step == 2) {
+			reply = 0x5A;
+			acks = true;
+		} else if (step == 3) {
+			reply = 0x41;
+			acks = false;
+		} else {
 			reply = 0xFF;
 			acks = false;
 		}

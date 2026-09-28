@@ -199,7 +199,9 @@ void bp_audio_push(const int16_t* frames, int frame_count);
 int  bp_audio_buffered(void);
 
 /* ---- input -------------------------------------------------------------------------------
- * Four pads, because the multitap is not optional for the games this project targets.
+ * Four pads, because the multitap is not optional for the games this project targets: pads 0-3
+ * are the slots A-D of the multitap in port 1, and pad 1 is also port 2 until a game uses the tap
+ * (ADR-0042). Pad 0 is the one a one-player game hears.
  * Call bp_input_poll once per emulated vertical blank; the accessors then read a stable
  * snapshot, so a frame never sees input change underneath it. */
 enum { BP_PAD_NONE = 0, BP_PAD_DIGITAL = 1, BP_PAD_ANALOG = 2 };

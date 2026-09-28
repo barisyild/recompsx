@@ -242,8 +242,9 @@ class ModHost {
 	/** Sets and keeps a console setting; false when the backend could not keep it. */
 	public static inline function setSetting(key:String, value:String):Bool return kernel.KSettings.set(key, value);
 
-	/** The buttons held on a port, PS1 layout, active high — what the game will read this frame. */
-	public static inline function buttons(port:Int):Int return sio.Pads.buttonsOf(port);
+	/** The buttons held on the host's pad `pad` (0..3; with the multitap, slot A..D), PS1 layout,
+	    active high — what the game will read this frame. */
+	public static inline function buttons(pad:Int):Int return sio.Pads.buttonsOf(pad);
 
 	/**
 		The game quits — a menu's QUIT: its memory card kept, then the host's own menu (the

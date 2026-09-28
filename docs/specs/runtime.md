@@ -539,7 +539,7 @@ JOY_MODE, /ACK 170 cycles after a byte and low for 100, IRQ7 on its edge when bi
 a digital pad (ID 5A41h) on each port `sio.Pads` reports, answering every command as 42h; the
 memory card address and empty ports answer FFh with no /ACK; and the kernel pad path, B0:12h-16h
 (`kernel.KPads`, adapted from OpenBIOS sio0/pad.c and driver.c, MIT). Headless runs keep both
-ports empty. Not yet: analog pads and config mode, the multitap. Conformance: `PadSio`, `PadBios`.
+ports empty. Not yet: analog pads and config mode. Conformance: `PadSio`, `PadBios`.
 
 **Memory cards (2026-09-28, ADR-0037)**: one card, in slot 1 (`sio.MemoryCard`); slot 2 is empty.
 It answers at 81h on SIO0 with a Sony card's read, write and ID commands (the table below, the
@@ -561,19 +561,25 @@ active-low: 0 Sel, 1 L3, 2 R3, 3 Start, 4–7 Up/Right/Down/Left, 8 L2, 9 R2, 10
 13 ○, 14 ✕, 15 □). Analog ID 0x5A73 + RX,RY,LX,LY (center 0x80). Config mode: 0x43 (ID 0xF3),
 0x44 LED, 0x45 status, 0x46/47/4C constants, 0x4D rumble map; P0 scope = digital + analog reads.
 
-**Multitap (required — 4-player games)**: the console sets byte index 2 of the 0x42 frame to 0x01
-→ the multitap block is returned **on the following poll** (previous-tap addressing; `tapArmed`
-latched per port per frame). Tap frame = 34 bytes: header `80 5A`, then 4 slots × 8 bytes (digital
-`41 5A lo hi FF FF FF FF`; analog `73 5A lo hi rx ry lx ly`; empty `FF FF…`). Non-armed polls
-return slot A in normal format. Per-slot padding byte values: verify against psx-spx "Multitap"
-before lock-in. `Pads.hx` is the single state source: 4 × `PadState{id, buttons, sticks, rumble}`
-latched once per vblank, consumed by BOTH the raw-SIO and kernel paths.
+**Multitap (2026-09-29, ADR-0042)**: a Multitap is in port 1 (`sio.Multitap`), and the host's
+pads 0-3 are in its slots A-D.
+- **Reads:** a read (01h 42h) answers for slot A. The third byte 01h asks that the *next* read be
+  the long one. Asked again during a long read, the one after is garbage, then long again
+  (psx-spx's table). A long read is `80 5A`, then 4 slots × 8 bytes: digital `41 5A lo hi FF FF
+  FF FF`, empty `FF`×8, the last byte unacknowledged. Garbage is `80 5A 41`, then no /ACK. An
+  empty slot A leaves the address unacknowledged.
+- **Other addresses:** 02h-04h answer as slots B-D's pads. 81h is the machine's card; 82h-84h
+  hold none.
+- **Port 2:** pad 1 is in port 2 as well until the game uses the tap (a long read, or B-D
+  answering). Then it is in slot B only.
+- **No digest moves:** with no pads, the tap answers as an empty port does.
+- **Conformance:** `MultitapSio`.
 
-**Kernel pad path (primary — Psy-Q libpad uses BIOS buffers)**: InitPad(buf1,0x22,buf2,0x22) +
-StartPad → at each VBLANK dispatch (before game callbacks) HLE writes the 0x22-byte buffers:
-byte0 status, byte1 `(type<<4)|halfwords`, payload (multitap: the full 4×8 block; exact layout:
-psx-spx "BIOS Pad Functions" — verify before lock-in). Games driving SIO0 directly get the raw
-path above; both read the same Pads snapshot.
+**Kernel pad path (libetc's PadInit/PadRead; libpad drives SIO0 itself)**: InitPad(buf1, siz1,
+buf2, siz2) + StartPad → at each VBLANK dispatch (before game callbacks) HLE writes the buffers:
+byte0 status, byte1 the ID, then the button halfword. The BIOS sends 00h as a read's third byte
+(OpenBIOS sio0/driver.c), so a multitap gives it slot A only: port 1 is pad 0, and port 2 is pad 1
+while the tap is unused (`Pads.padOnPort`). Both paths read the same `Pads` snapshot.
 
 **Memory card protocol**: select 0x81; ID `81 53` → `FLAG 5A 5D 5C 5D 04 00 00 80`; read sector
 `81 52 00 00 MSB LSB …` ⇄ `… 5C 5D MSB LSB data×128 CHK 47` (CHK = XOR); write

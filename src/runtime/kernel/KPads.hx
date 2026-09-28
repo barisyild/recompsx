@@ -156,13 +156,16 @@ class KPads {
 
 	/**
 		One port, as OpenBIOS `readPad` leaves its buffer: a digital pad writes status 00h, ID 41h
-		and its two button bytes (active low); a port nobody answers only gets status FFh.
+		and its two button bytes (active low); a port nobody answers only gets status FFh. The BIOS
+		sends 00h as a read's third byte, so a multitap never gives it more than slot A: port 1 is
+		pad 0 either way (`Pads.padOnPort`).
 	**/
 	static function readPad(pad:Int):Void {
-		if (!Pads.isConnected(pad)) {
+		final on = Pads.padOnPort(pad);
+		if (on < 0 || !Pads.isConnected(on)) {
 			put(pad, 0, 0xFF);
 		} else {
-			final pressed = Pads.buttonsOf(pad);
+			final pressed = Pads.buttonsOf(on);
 			put(pad, 1, 0x41);
 			put(pad, 2, ~pressed & 0xFF);
 			put(pad, 3, (~pressed >> 8) & 0xFF);

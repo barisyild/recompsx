@@ -362,8 +362,21 @@ Two things worth carrying forward:
   capture the decompressed regions once with a debugger and use `memdump` overlay sources.
 - **Audio**: whether music is sequenced through SPU registers, XA streams, CDDA, or a mix.
 - **FMV**: MDEC usage and where the STR data lives.
-- **Multitap**: which path the game uses (kernel `InitPad` buffers vs raw SIO0) — both are
-  implemented, but the 4-player arming behavior needs verifying against the real game.
+- **Multitap** (answered 2026-09-29, ADR-0042): raw SIO0 through libpad, never the kernel's
+  `InitPad`. See "The multitap" below.
+
+## The multitap (2026-09-29)
+
+libpad asks port 1's tap for long reads from boot on. In a headless run with four scripted pads
+the tap was in use by vblank 300. The pad reader (800138A4h) fills eight controller records,
+80051338h + i * 58h: records 0-3 are port 1's slots A-D and 4-7 port 2's. A record in use holds 5
+at +0; the buttons pressed this frame are at +48h. 80051600h counts the pads the game has found,
+and SELECT NUMBER OF PLAYERS goes up to that count. Measured (ADR-0042):
+
+- Four pads: 80051600h = 4. Records 0-3 are in use and 4-7 empty. Cross, circle, square and
+  triangle, one on each pad, reached records 0, 1, 2 and 3 as 4000h, 2000h, 8000h and 1000h.
+- Two pads: 80051600h = 2, records 0 and 1. Pad 1 has left port 2 for slot B, so it is not counted
+  twice.
 
 ## Prior art on this machine
 

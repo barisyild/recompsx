@@ -75,7 +75,8 @@ void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h
 /* audio: 44100 Hz stereo s16 interleaved; count = stereo frames */
 void bp_audio_push(const int16_t* frames, int frame_count);
 int  bp_audio_buffered(void);
-/* input: 4 pads (multitap). Poll once per emulated vsync. */
+/* input: 4 pads, the multitap's slots A-D in port 1; pad 1 is also port 2 until a game uses the
+   tap (ADR-0042). Poll once per emulated vsync. */
 enum { BP_PAD_NONE = 0, BP_PAD_DIGITAL = 1, BP_PAD_ANALOG = 2 };
 void bp_input_poll(void);
 int  bp_pad_connected(int pad);

@@ -2,6 +2,28 @@
 
 ## Status snapshot
 
+**2026-09-29: The multitap (ADR-0042) — four players, on by default.** A Multitap (SCPH-1070)
+is in port 1 (`sio.Multitap`) with the host's four pads in slots A-D. It follows psx-spx:
+- a read answers for slot A, so a game without tap support sees an ordinary pad;
+- a third byte of 01h makes the next read the long one (80 5A, then four slots of eight bytes);
+- asked again during a long read, the next is four bytes of garbage;
+- 02h-04h read slots B-D directly, and 81h is the machine's card (82h-84h hold none);
+- an empty slot A answers nothing, so with no pads (headless) nothing moves.
+
+Pad 1 is also port 2 until the game uses the tap, then slot B only, so no game counts it twice.
+The BIOS driver sends 00h third (OpenBIOS), so `KPads` sees slot A. The browser now reads four
+gamepads; SDL2 and the Dreamcast's maple A-D already did.
+
+Verified:
+- `MultitapSio` agrees on JS and C++ (644b488d); `PadSio`, `PadBios` and the card tests are
+  unchanged; Crash Bash 3000 is still `db892c4b`; check.sh passes.
+- Crash Bash, headless with four scripted pads, counts four (80051600h = 4) and fills its records
+  0-3; each pad's own button reached its own record. With two pads it counts two (slots A and B,
+  port 2 empty).
+- On the Dreamcast, in the Flycast fork with four Sega controllers, it counts four too. Each maple
+  port's button (held by the fork's new `RXPAD`) reached its own record: A cross, B circle, C
+  square, D triangle. CDI `out/dc/crashbash-tap-max.cdi` (mouse and onlinemenu mods).
+
 **2026-09-28: Dreamcast — a frame drawn across a vblank is no longer shown in two halves.** The
 owner saw Crash 3's first level flicker on Flycast from one point of the level on: the sky alone,
 the lower half black, Crash on his log over black. The cause was ADR-0039's list walk. It takes
@@ -1778,9 +1800,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   at 253, by a few hundred CPU cycles at a walk's start and then in the scene itself.
   Disc reads are synchronous and the audio path is written to leave game state alone, so the
   first suspects are host input reaching the window (Flycast maps the keyboard to the pad, and
-  the fork's window takes focus) and anything else the backend returns into emulated state. The
-  next step is a run with the fork's input cut off. If it still diverges, it is a golden-rule-3
-  leak on the Dreamcast.
+  the fork's window takes focus) and anything else the backend returns into emulated state.
+  `dc_input.c` empties the ports under `--dc-rxprof` for exactly that reason, and the watched CDI
+  had no `--dc-rxprof`. The next step is a run with the fork's input cut off. If it still diverges,
+  it is a golden-rule-3 leak on the Dreamcast.
 
 - **Open: I_MASK.7 (SIO0) after `_bu_init`.** The kernel has unmasked SIO0 there since e468132
   ("_bu_init does the same for SIO0"), and games that drive their pads through SIO0 have run
@@ -1818,6 +1841,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-29 [claude] The multitap (ADR-0042): sio.Multitap in port 1, the host's pads 0-3 in slots A-D, psx-spx's
+request table (slot A / long / garbage), 02h-04h and 81h-84h, pad 1 in port 2 until the tap is used; KPads through
+Pads.padOnPort; four gamepads in the browser. MultitapSio on both targets; Crash Bash counts four pads headless and
+on the Dreamcast, where each maple port's press reached its own record (fork RXPAD). Next: the owner's four players.
 
 2026-09-28 [claude] Crash 3 flickered on the Dreamcast when ADR-0039's list walk crossed a vblank (the frame went
 out in two halves): BP_PRESENT_DRAWING from the scanout while Dma walks a list, and the Dreamcast holds its last

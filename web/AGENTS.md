@@ -30,7 +30,8 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   those links at another game once left Crash Bash's executable cached beside Crash 3's disc and
   bundle, which jumped to address zero at boot.
 - Input: `src/shims/js/shim/Input.hx`, browser externs (`js.Browser`, `KeyboardEvent`,
-  `Gamepad`), SDL2 key names, the standard gamepad mapping. It also types for the machine's PS/2
+  `Gamepad`), SDL2 key names, the standard gamepad mapping. Four pads: the keyboard with the first
+  gamepad, then the second to fourth gamepads — the multitap's slots A-D (ADR-0042). It also types for the machine's PS/2
   keyboard (ADR-0036, ADR-0040): while text entry is on — while that keyboard is polled —
   `KeyboardEvent.key` goes to a queue and only the arrows stay pad buttons. Synthetic key events reach it, but a pad press must outlast a vblank — and a
   hidden pane throttles rAF to about one frame a second, so hold presses for over a second there.

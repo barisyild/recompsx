@@ -120,7 +120,10 @@ so it is not tuned for. The instruction-cache fill is what the result hangs on (
   (`gpu.Gpu.offscreen`, ADR-0030) is the same rule, so off-screen drawing never arrives here.
 - Semi-transparency: modes 0/1/3 as PVR blends; B-F as three passes; mixed-CLUT primitives split
   into solid and STP passes from baked variants.
-- Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits. A maple
+- Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits. Maple
+  ports A-D are pads 0-3, the multitap's slots A-D in port 1 (ADR-0042); the controller in port B
+  is also the PS1's port 2 until a game uses the tap. In Flycast each player's host device must be
+  assigned to its own port (Controls: a Sega Controller in A-D). A maple
   keyboard is pad 0 as well (the desktop's key map, `keyboard_pad`) and types while text entry is
   on — while the machine's PS/2 keyboard is polled (ADR-0036, ADR-0040) — by the keyboard's own
   region — Flycast passes the host's keys on by position and
