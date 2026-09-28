@@ -263,6 +263,7 @@ int bp_init(const char* title) {
             tc.txr.uv_clamp = PVR_UVCLAMP_UV;
             tc.txr.env = PVR_TXRENV_REPLACE;
             pvr_poly_compile(&g_txt_hdr, &tc);
+            glyphs_load();                   /* before the disc streams (dc_prof.c) */
             bp_log(BP_LOG_INFO, "profile overlay on");
 #if RECOMPSX_DC_PROFILE
             syms_load();

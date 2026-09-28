@@ -2,6 +2,7 @@
  * on-screen overlay. Nothing here may influence emulated state. */
 
 #include "dc_internal.h"
+#include <dc/syscalls.h>
 
 /* The overlay's text: a texture of its own (TXT_W x TXT_H, dc_internal.h), drawn over the game. */
 #if RECOMPSX_DC_PROFILE_OVERLAY
@@ -12,6 +13,56 @@ pvr_poly_hdr_t g_txt_hdr;
 static uint16_t g_txt_buf[TXT_W * TXT_H] __attribute__((aligned(32)));
 _Static_assert(sizeof(g_txt_buf) % 32 == 0, "g_txt_buf is cleared by shz_memset8 and sent by txr_put");
 static int      g_txt_ready;
+
+/* The overlay's glyphs, copied out of the BIOS font once. The font is in the boot ROM, on the G1
+ * bus the GD-ROM's DMA uses, and the BIOS lends it (syscall_font_lock) only while no G1 DMA is
+ * under way — "you can't access the BIOS font during G1 DMA" (dc/syscalls.h). bfont_draw_str_ex
+ * asks for it on every string and polls with no timeout, so once the disc streamed the first
+ * report never returned: on a real BIOS, booted from the disc, the emulation froze at its first
+ * frame and the screen stayed black. Flycast's HLE BIOS has no such lock and dcload never uses
+ * the drive, which is why neither showed it. So the lock is taken once, at init, before the
+ * disc streams, and not waited on for long: a busy font costs the overlay its text, not the
+ * machine its game. */
+#define GLYPH_FIRST 32
+#define GLYPH_COUNT 95
+static uint8_t g_glyph[GLYPH_COUNT][BFONT_BYTES_PER_CHAR];
+static int     g_glyphs_ok;
+
+void glyphs_load(void) {
+    const uint64_t until = bp_time_us() + 1000000;
+    while(syscall_font_lock() != 0) {
+        if(bp_time_us() >= until) {
+            bp_log(BP_LOG_WARN, "--dc-overlay: the BIOS font stayed busy; the overlay has no text");
+            return;
+        } else {}
+        thd_pass();
+    }
+    for(int i = 0; i < GLYPH_COUNT; i++)
+        shz_memcpy(g_glyph[i], bfont_find_char(GLYPH_FIRST + i), BFONT_BYTES_PER_CHAR);
+    syscall_font_unlock();
+    g_glyphs_ok = 1;
+}
+
+/* One line of text at buf, as bfont_draw_str_ex(buf, TXT_W, 0xFFFF, 0, 16, true, s) drew it —
+ * two 12-bit rows in every three bytes of a glyph, leftmost pixel in the top bit — except that
+ * a line stops at the texture's edge instead of running on into the next. */
+static void txt_line(uint16_t* buf, const char* s) {
+    if(!g_glyphs_ok) return;
+    else {}
+    for(int cx = 0; *s && cx + BFONT_THIN_WIDTH <= TXT_W; s++, cx += BFONT_THIN_WIDTH) {
+        const int c = (uint8_t)*s;
+        const uint8_t* g = g_glyph[(c >= GLYPH_FIRST && c < GLYPH_FIRST + GLYPH_COUNT) ? c - GLYPH_FIRST : 0];
+        uint16_t* row = buf + cx;
+        for(int y = 0; y < BFONT_HEIGHT; y += 2, g += 3, row += TXT_W * 2) {
+            const unsigned w0 = ((unsigned)g[0] << 4) | (g[1] >> 4);
+            const unsigned w1 = ((unsigned)(g[1] & 0x0F) << 8) | g[2];
+            for(int x = 0; x < BFONT_THIN_WIDTH; x++) {
+                row[x] = (w0 & (0x800u >> x)) ? 0xFFFF : 0;
+                row[TXT_W + x] = (w1 & (0x800u >> x)) ? 0xFFFF : 0;
+            }
+        }
+    }
+}
 #endif
 
 /* ---- counters the other files keep, reported here -------------------------------------------- */
@@ -505,11 +556,11 @@ void profile_report(void) {
 
     if(g_txt) {
         shz_memset8(g_txt_buf, 0, sizeof(g_txt_buf));
-        bfont_draw_str_ex(g_txt_buf,                        TXT_W, 0xFFFF, 0, 16, true, l0);
-        bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE,     TXT_W, 0xFFFF, 0, 16, true, l1);
-        bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 2, TXT_W, 0xFFFF, 0, 16, true, l2);
-        bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 3, TXT_W, 0xFFFF, 0, 16, true, l3);
-        bfont_draw_str_ex(g_txt_buf + TXT_W * TXT_LINE * 4, TXT_W, 0xFFFF, 0, 16, true, l4);
+        txt_line(g_txt_buf,                        l0);
+        txt_line(g_txt_buf + TXT_W * TXT_LINE,     l1);
+        txt_line(g_txt_buf + TXT_W * TXT_LINE * 2, l2);
+        txt_line(g_txt_buf + TXT_W * TXT_LINE * 3, l3);
+        txt_line(g_txt_buf + TXT_W * TXT_LINE * 4, l4);
         txr_put(g_txt_buf, g_txt, sizeof(g_txt_buf));
         sq_wait();
         g_txt_ready = 1;

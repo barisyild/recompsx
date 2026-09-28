@@ -408,6 +408,7 @@ extern int g_pc_armed;
 void perf_window_close(uint64_t emu_us);
 extern uint32_t g_samp_frames;
 void syms_load(void);
+void glyphs_load(void);
 void samp_start(void);
 void samp_report(void);
 void perf_window_open(void);

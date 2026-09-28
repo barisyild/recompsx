@@ -1501,16 +1501,18 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
-- **Open (2026-09-28): Crash 3 on a real Dreamcast — the program runs; the run had no game.** The
-  report came from a dcload-ip run of the ELF with no data source (neither `-c` nor `-i`, no game
-  disc): KOS, the backend and the recompiled program came up and the frame loop held 60 Hz for
-  2,400 frames without a fault, but the log says `no recompsx.cfg and no /cd/BOOT.EXE` and the
-  guest ran on empty RAM. Next: the same run with the data — `-c` onto a directory holding
-  `BOOT.EXE`, `DISC.BIN` and a `recompsx.cfg` of `/pc/` paths, or the CDI — for the first frame
-  times on hardware. The console's performance counters work there (IPC, cache and branch
-  stalls). Checked meanwhile, for what Flycast lets through and the SH-4 does not: every buffer
-  handed to sh4zam is 8- or 32-byte aligned (`pvr_poly_hdr_t` and `pvr_vertex_t` are
-  `alignas(32)` in this KOS), and every `movca.l` record is 32 bytes, aligned and written whole.
+- **Resolved (2026-09-28): the CDIs stopped at a black screen on a real BIOS.** Booted from the
+  disc — on the console, and in Demul and Flycast with a real BIOS — the playable CDIs showed the
+  Dreamcast logo and then nothing, while the same ELF ran under dcload and Flycast's HLE BIOS hid
+  it. The profile overlay drew its text with KOS's bfont, which takes the BIOS font lock by polling
+  `syscall_font_lock()` with no timeout, and the BIOS lends that lock only while no G1 DMA runs
+  ("you can't access the BIOS font during G1 DMA", dc/syscalls.h): the disc's reads kept it away
+  and the first overlay report never returned. Found by booting the CDI in Flycast with the real
+  BIOS (a HOME of its own, so the profiling setup keeps its HLE BIOS), `rxprof` enabled for the
+  serial console, and a PC histogram of the hang — all KOS scheduler and `bfont_lock`. Fixed: the
+  overlay copies its 95 ASCII glyphs once at init, before the disc streams, taking the lock with a
+  one-second limit, and draws from RAM; a busy font costs the overlay its text, not the game.
+  Verified on the real BIOS in Flycast: Crash 3 reaches the hub with the overlay up.
 
 - **Resolved: missing console-branch integration caused the browser regression.** Commits
   `25d9a5d` / `6819782` were present all along. Their GTE/CD/rendering/timing and per-game
@@ -1529,6 +1531,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Real-BIOS black screen fixed: the Dreamcast profile overlay polled the BIOS font lock during
+G1 DMA; its glyphs are now cached at init. Found in Flycast with the real BIOS (serial console via rxprof, PC
+histogram of the hang). Next: memory cards (per-game blocks, a save format per target), once the mods and
+settings work is committed.
 
 2026-09-28 [claude] ADR-0032 revised after Flycast: OT walk node by node again (line runs +9 % on Crash 3's
 dense table), list uploads word by word (they cost the walk 12 %), short fills as halfword stores. Crash 3
