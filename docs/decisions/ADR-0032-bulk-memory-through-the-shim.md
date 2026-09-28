@@ -24,31 +24,34 @@ and falls back to that code everywhere else:
 - VRAM-to-VRAM copies by rows when no mask bit is set or checked and neither run wraps at the
   right edge — except a row copied onto itself further right, which the hardware's in-order copy
   repeats and memmove would not.
-- Uploads from RAM (`Gpu.uploadRun`, used by DMA2 blocks and lists) by row segments, with the
-  word count, the padding halfword, `uploaded`, `wordsReceived` and the backend's dirty rectangle
-  exactly as the per-word path leaves them; mask bits fall back, and a run stops at the end of
-  RAM, where the channel's address wraps. A list node asks for a run only where one can be under
-  way — at its start and after a word the command path took — not before every packet.
+- Uploads a DMA2 block carries from RAM (`Gpu.uploadRun`) by row segments, with the word count,
+  the padding halfword, `uploaded`, `wordsReceived` and the backend's dirty rectangle exactly as
+  the per-word path leaves them; mask bits fall back, and a run stops at the end of RAM, where the
+  channel's address wraps. An upload inside a list stays word by word: the list walk inlines
+  `writeGp0Words`, and asking there for a run — even only where one could be under way — cost
+  the walk registers GCC then kept on the stack, 12 % of it on Flycast (Crash 3, 164.5 -> 183.8
+  ms), for uploads neither game sends that way.
 - DMA3 forwards inside RAM (`Cdrom.dmaCopy`: the FIFO's bytes, then zeroes), DMA4 inside RAM
   (`Spu.dmaCopy`: runs up to the end of sound RAM, counted and marked dirty the same), DMA6 inside
-  RAM stored directly, and `Vram.fillLinear` on `Bulk.fill16`.
+  RAM stored directly, and `Vram.fillLinear` on `Bulk.fill16`. On the Dreamcast a fill of 64
+  halfwords or more goes to `shz_memset8`; shorter ones — a rasterised primitive's spans — are
+  halfword stores, because that routine's set-up (the value through the stack into FPU
+  registers, two `fschg`) outweighs it there: sending every span to it made Crash 3's
+  `triangle()` 3.6 % slower on Flycast.
 - Under hardware drawing, a copy or upload still tells the backend only when a pixel changed:
   `equal` before the run is the per-pixel comparison, since nothing is read after it is written.
-- The DMA2 list walk takes untouched stretches of an ordering table a cache line at a time. Such
-  an entry links to its neighbour — the word below in a table ClearOTagR or DMA6 built (Crash
-  Bash), the word above in one ClearOTag built (Crash 3) — so from a line's first word in the
-  walk's direction, a line is eight independent loads compared against their addresses, and one
-  `prefetch` two lines ahead, instead of eight loads each waiting on the last. The walk lands where
-  its single steps would have, with their header and guard, and never passes the guard's limit
-  inside a line. Measured on JavaScript: 86 % of Crash 3's empty-node steps and 70 % of Crash
-  Bash's go this way, in runs of 155 and 166 nodes on average.
+
+`prefetch` has no caller in the runtime yet: it is there for the code generator's hints (PROGRESS
+Next up 6), and the one place the runtime tried it is under Alternatives.
 
 The BulkPaths conformance test covers the copies, uploads, fills and DMA3/4/6; OtWalk covers the
-list walk — tables in both directions at every alignment, fills at a line's ends and middle, a
-skipping link, a link through the RAM mirror, tables at either end of RAM, the guard met exactly
-and passed, tables looped on themselves — and uploads carried across list nodes and past the
-end of RAM. Both digests were taken from the per-element code before this existed, and both
-targets reproduce them.
+DMA2 list walk — tables in both directions at every alignment, fills at a line's ends and middle,
+a skipping link, a link through the RAM mirror, tables at either end of RAM, the guard met
+exactly and passed, tables looped on themselves — and uploads carried across list nodes and past
+the end of RAM. Both digests were taken from the per-element code before this existed, and both
+targets reproduce them. The Dreamcast fill, which neither test reaches, was checked on the host
+against a stand-in for sh4zam that asserts its contract: every offset in a line, every length
+to 300, no byte outside the run.
 
 ## Alternatives
 
@@ -56,10 +59,19 @@ targets reproduce them.
   what differs per machine belongs to the shim.
 - Bulk paths without the fallbacks: the mask bits, the wraps and the in-order overlap are all
   observable, and a digest would move for the rare game that uses them.
-- A prefetch alone in the node-at-a-time walk, asked for at each line boundary: tried first.
-  The test on every node, and the register it cost (GCC moved the guard to the stack), made
-  the walk 16 % slower on Flycast's count (Crash 3, 164.5 -> 191.0 ms of 7,525) — more than the
-  hint can win back on a console. Taking the line whole pays for its prefetch.
+- The ordering table's untouched stretches a cache line at a time. Such an entry links to its
+  neighbour — the word below in a table ClearOTagR or DMA6 built (Crash Bash), the word above in
+  one ClearOTag built (Crash 3) — so a line can be eight independent loads compared against their
+  addresses, with a prefetch two lines ahead, instead of eight loads each waiting on the last.
+  Tried twice and left out; the walk stays node by node. A prefetch alone at each line boundary
+  made the walk 16 % slower on Flycast (Crash 3, 164.5 -> 191.0 ms of 7,525): the test on every
+  node, and the guard GCC then kept on the stack. Whole lines, in or out of line, made the empty
+  nodes 12 % faster and the walk as a whole 9 % slower: the table in the measured window is
+  dense — 685 packets and 1,024 empty nodes a frame, runs of 14 — so the test at every node
+  outweighed the runs, and the link-time-inlined packet path lost registers to the loop. The
+  86 % of Crash 3's empty nodes that a JavaScript count over 9,000 frames put in runs came from
+  loading screens and menus, where the frame costs little. What the console could gain is
+  bounded too: some 130 lines of table a frame, a few thousand cycles of misses.
 
 ## Consequences
 

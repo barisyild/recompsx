@@ -4,8 +4,8 @@ import dma.Dma;
 import mem.Memory;
 
 /**
-	The DMA2 list walk over ordering tables, against the node-at-a-time walk its fast path stands
-	in for (a line of untouched entries at once, see `Dma.walkList`).
+	The DMA2 list walk over ordering tables, and the uploads a list carries: what any faster walk
+	must leave exactly as the node-at-a-time one does (two were tried, ADR-0032).
 
 	Tables cleared by DMA6 (linked downwards) and built as ClearOTag builds them (upwards), their
 	first entry at each position in a cache line, long and short; fills hung on entries at either

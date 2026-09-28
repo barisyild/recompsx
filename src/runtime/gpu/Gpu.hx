@@ -372,10 +372,10 @@ class Gpu {
 		state commands, transfers, a packet split across nodes — takes the word path.
 	**/
 	public static function writeGp0Words(ram:RawBuf, addr:Int, count:Int):Void {
-		// The words of an upload go to VRAM a row at a time (uploadRun): one under way when the
-		// node starts, and one a word of this node starts. Nothing else starts one, so the packet
-		// path does not ask.
-		var i = xferLeft > 0 ? uploadRun(ram, addr, count) : 0;
+		// An upload a list carries goes word by word: row runs here (uploadRun, as DMA2 blocks
+		// have) cost the walk they are inlined into its registers — 12 % slower on Flycast for
+		// uploads no game in hand sends this way (ADR-0032).
+		var i = 0;
 		while (i < count) {
 			final v = MemA.get32(ram, (addr + (i << 2)) & 0x1FFFFC);
 			final n = (xferLeft == 0 && pending == 0) ? wholeParameters(v >>> 24) : -1;
@@ -385,8 +385,6 @@ class Gpu {
 			} else {
 				writeGp0(v);
 				i++;
-				if (xferLeft > 0 && i < count) i += uploadRun(ram, addr + (i << 2), count - i);
-				else {}
 			}
 		}
 	}

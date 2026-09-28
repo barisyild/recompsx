@@ -38,22 +38,30 @@ static inline int recompsx_bulk_equal(const unsigned char* a, int a_off, const u
     return memcmp(a + a_off, b + b_off, (size_t)bytes) == 0;
 }
 
+/* Halfwords from which a Dreamcast fill goes to shz_memset8 (see recompsx_bulk_fill16). */
+#define RECOMPSX_BULK_FILL8_MIN 64
+
 /* `count` halfwords of `v`, little-endian, from the even byte offset `off`. */
 static inline void recompsx_bulk_fill16(unsigned char* m, int off, int count, int v) {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     uint16_t* p = (uint16_t*)(void*)(m + off);
     const uint16_t h = (uint16_t)v;
 #if defined(_arch_dreamcast)
-    /* Halfwords up to an 8-byte boundary, then shz_memset8's paired 64-bit stores, then the
-     * last few halfwords. */
-    while(count > 0 && ((uintptr_t)p & 7) != 0) { *p++ = h; count--; }
-    if(count >= 4) {
+    /* Long runs — a row of a clear — go to shz_memset8's 64-bit stores from an 8-byte
+     * boundary. Its set-up (the value moved through the stack into FPU registers, two fschg)
+     * costs more than it saves on a rasterised primitive's short spans: sent there, the spans
+     * of Crash 3's shadow made triangle() 3.6 % slower on Flycast. Those, and the ends of a long
+     * run, are halfword stores — the smallest code at the call, which is inlined into the
+     * rasteriser's span loop. */
+    if(count >= RECOMPSX_BULK_FILL8_MIN) {
+        while(((uintptr_t)p & 7) != 0) { *p++ = h; count--; }
         const int quads = count >> 2;
-        shz_memset8(p, (uint64_t)h * 0x0001000100010001ull, (size_t)quads * 8);
+        const uint32_t w = (uint32_t)h | ((uint32_t)h << 16);
+        shz_memset8(p, ((uint64_t)w << 32) | w, (size_t)quads * 8);
         p += quads * 4;
         count &= 3;
     }
-    while(count > 0) { *p++ = h; count--; }
+    for(int i = 0; i < count; i++) p[i] = h;
 #else
     for(int i = 0; i < count; i++) p[i] = h;
 #endif

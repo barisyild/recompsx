@@ -2,23 +2,33 @@
 
 ## Status snapshot
 
-**2026-09-28: the runtime moves memory in runs (`shim.Bulk`, ADR-0032), and the ordering-table
-walk takes untouched lines whole.** `shim.Bulk` — copy, equal, fill16, prefetch; sh4zam on the
-Dreamcast through `native/recompsx_bulk.h`, the C library elsewhere, `copyWithin` and typed-array
-loops on JavaScript — sits under VRAM-to-VRAM copies by rows (mask bits, right-edge wraps and a
-row copied onto itself further right stay per pixel), uploads from RAM by row segments
-(`Gpu.uploadRun`, for DMA2 blocks and list nodes), DMA3 sectors (`Cdrom.dmaCopy`), DMA4 wave data
-(`Spu.dmaCopy`), DMA6 tables stored directly, and every VRAM fill (`fill16Index` was a loop of
-byte stores on C++). The DMA2 list walk checks an untouched stretch a cache line at a time —
-eight loads compared against their addresses, none waiting on another, and a prefetch two lines
-ahead — in both directions: Crash Bash's tables link downwards (ClearOTagR), Crash 3's upwards
-(ClearOTag); 70 % and 86 % of their empty-node steps go this way on JavaScript. A prefetch test
-alone in the node-at-a-time loop was tried first and made that loop 16 % slower on Flycast (the
-ADR keeps the numbers). New conformance tests BulkPaths (6e54771e) and OtWalk (e0887e11): both
-digests taken from the per-element code, both reproduced on both targets. Game digests unchanged
-on JavaScript — Crash 3 9000 ee91f215 / 20000 8888c37f, Crash Bash 3000 654669df / 9000 fda4764f
-/ 30000 2d1ca4b6. The Hatchet shim gained `Bulk` and the `MemA.likely` it lacked. The Flycast
-profile and CDIs of this version follow in the next entry.
+**2026-09-28: the runtime moves memory in runs (`shim.Bulk`, ADR-0032).** `shim.Bulk` — copy, equal,
+fill16, prefetch; sh4zam on the Dreamcast through `native/recompsx_bulk.h`, the C library elsewhere,
+`copyWithin` and typed-array loops on JavaScript — sits under VRAM-to-VRAM copies by rows (mask
+bits, right-edge wraps and a row copied onto itself further right stay per pixel), uploads from RAM
+by row segments (`Gpu.uploadRun`, for DMA2 blocks; a list's stay word by word), DMA3 sectors
+(`Cdrom.dmaCopy`), DMA4 wave data (`Spu.dmaCopy`), DMA6 tables stored directly, and every VRAM fill
+(`fill16Index` was a loop of byte stores on C++; on the Dreamcast, runs of 64 halfwords or more go
+to `shz_memset8` and shorter spans to halfword stores, the routine's set-up costing more than it
+saves on a primitive's spans). The ordering-table walk stays node by node: taking untouched lines
+whole, with a prefetch, was tried twice and measured slower on Flycast, because Crash 3's table in
+the measured window is dense (685 packets and 1,024 empty nodes a frame, runs of 14) — ADR-0032
+keeps the numbers. New conformance tests BulkPaths (6e54771e) and OtWalk (e0887e11, the list walk in
+both directions and uploads across list nodes): both digests taken from the per-element code, both
+reproduced on both targets; the Dreamcast fill checked on the host against a stand-in for sh4zam at
+every offset and length. Game digests unchanged on JavaScript — Crash 3 9000 ee91f215 / 20000
+8888c37f, Crash Bash 3000 654669df / 9000 fda4764f / 30000 2d1ca4b6. The Hatchet shim gained `Bulk`
+and the `MemA.likely` it lacked. On the Dreamcast the software rasterizer draws only off-screen VRAM
+a game reads back (ADR-0030): Crash 3's shadow, 2.5 % of its frame; Crash Bash's arena, none.
+Flycast: Crash 3 1498.8 M against round 2's 1498.3 M, 24.7 ms a frame either way — neutral in the
+demo, where these paths are small (the 64x64 shadow clear got cheaper, `draw` -5.4 ms); their ground
+is loading, menus and FMV. Crash Bash, whose arena uploads and clears every frame, 5775.1 -> 5705.4
+M (-1.2 %; its busy time about -2.5 %, the rest now waiting on the vblank): `slowWrite32` 638 -> 217
+ms, the fills in `draw` 312 -> 159, uploads (`transferWord`, `putTexel`) 165 -> 5, against 46 ms of
+`memmove` and `memcmp`, of 28.5 s. Pictures checked (Crash 3's title and demo, Crash Bash's arenas),
+both CDIs rebuilt with the previous round kept as `*.prev.cdi`, and the C++ build's Crash Bash
+digest at 3000 is JavaScript's (654669df). The Crash 3 ELF of this build is kept with its source
+patch and hashes beside the repository, for addresses a console may report.
 
 **2026-09-28: sh4zam, second round on the Dreamcast — no pvr_prim or pvr_txr_load left, every VRAM
 walk prefetched, state records one line each.** `put_hdr`/`put_vtx`/`txr_put` (sh4zam store-queue
@@ -1491,6 +1501,17 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
+- **Open (2026-09-28): Crash 3 on a real Dreamcast — the program runs; the run had no game.** The
+  report came from a dcload-ip run of the ELF with no data source (neither `-c` nor `-i`, no game
+  disc): KOS, the backend and the recompiled program came up and the frame loop held 60 Hz for
+  2,400 frames without a fault, but the log says `no recompsx.cfg and no /cd/BOOT.EXE` and the
+  guest ran on empty RAM. Next: the same run with the data — `-c` onto a directory holding
+  `BOOT.EXE`, `DISC.BIN` and a `recompsx.cfg` of `/pc/` paths, or the CDI — for the first frame
+  times on hardware. The console's performance counters work there (IPC, cache and branch
+  stalls). Checked meanwhile, for what Flycast lets through and the SH-4 does not: every buffer
+  handed to sh4zam is 8- or 32-byte aligned (`pvr_poly_hdr_t` and `pvr_vertex_t` are
+  `alignas(32)` in this KOS), and every `movca.l` record is 32 bytes, aligned and written whole.
+
 - **Resolved: missing console-branch integration caused the browser regression.** Commits
   `25d9a5d` / `6819782` were present all along. Their GTE/CD/rendering/timing and per-game
   metadata are now reconciled into main; the browser reaches the menu and JS variants report
@@ -1508,6 +1529,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] ADR-0032 revised after Flycast: OT walk node by node again (line runs +9 % on Crash 3's
+dense table), list uploads word by word (they cost the walk 12 %), short fills as halfword stores. Crash 3
+1498.8 M = round 2; Crash Bash 5775.1 -> 5705.4 M; CDIs rebuilt. The console report was a dcload run with
+no data: the program runs there. Next: that run with the game's files; then Next up 6.
 
 2026-09-28 [claude] Next up 5: runtime bulk ops via shim.Bulk (ADR-0032; sh4zam on the Dreamcast) —
 VRAM copies by rows, uploads by row segments, DMA3/4/6 in runs, fills; the OT walk a cache line at a

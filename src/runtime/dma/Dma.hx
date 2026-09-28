@@ -5,9 +5,7 @@ import core.Runtime;
 import gpu.Gpu;
 import mem.Memory;
 import shim.Backend;
-import shim.Bulk;
 import shim.MemA;
-import shim.RawBuf;
 
 /**
 	The DMA controller — and, for a PlayStation game, the thing that actually draws.
@@ -197,24 +195,6 @@ class Dma {
 					runaway();
 					return;
 				} else {}
-				// An untouched stretch links each entry to its neighbour: the word below in a table
-				// ClearOTagR or DMA6 built, the word above in one ClearOTag built. Entering a cache
-				// line at its first word in that direction, the walk takes whole lines while they
-				// are untouched (runDown, runUp) and lands where the single steps would have: on the
-				// last node taken, its header the link to the word beyond.
-				if (((addr + 4) & 24) == 0) {
-					if ((addr & 4) != 0 && header == addr - 4) {
-						final n = runDown(ram, addr, 0x10000 - guard);
-						addr -= n << 2;
-						header = addr - 4;
-						guard += n;
-					} else if ((addr & 4) == 0 && header == addr + 4) {
-						final n = runUp(ram, addr, 0x10000 - guard);
-						addr += n << 2;
-						header = addr + 4;
-						guard += n;
-					} else {}
-				} else {}
 			}
 			final count = (header >>> 24) & 0xFF;
 			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
@@ -240,72 +220,6 @@ class Dma {
 		}
 		listsWalked++;
 		madr[CH_GPU] = 0xFFFFFF;
-	}
-
-	/**
-		How many nodes past `top` — a line's top word, which links to the word below it — the walk
-		takes while each links to the word below: whole lines, and at most `budget` nodes (the
-		guard's room). Each line is checked with eight loads that do not wait on one another,
-		where following the links waits on each, and the line two below is asked for ahead: a
-		hint, and on a console the difference between waiting on RAM once a line and not at all.
-	**/
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function runDown(ram:RawBuf, top:Int, budget:Int):Int {
-		var n = -1;                           // the node at `top` is already taken
-		var t = top;
-		while (n + 8 <= budget && t >= 0 && lineDown(ram, t)) {
-			n += 8;
-			t -= 32;
-		}
-		return n < 0 ? 0 : n;
-	}
-
-	/** `runDown` for a table linked upwards, from `bottom`, a line's bottom word. */
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function runUp(ram:RawBuf, bottom:Int, budget:Int):Int {
-		var n = -1;
-		var b = bottom;
-		while (n + 8 <= budget && b <= 0x1FFFE0 && lineUp(ram, b)) {
-			n += 8;
-			b += 32;
-		}
-		return n < 0 ? 0 : n;
-	}
-
-	/** Whether the line whose top word is at `t` holds eight entries, each linking to the word
-	    below it. */
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function lineDown(ram:RawBuf, t:Int):Bool {
-		Bulk.prefetch(ram, (t - 64) & 0x1FFFFC);
-		final e = t - 4;
-		return ((MemA.get32(ram, t) ^ e)
-			| (MemA.get32(ram, t - 4) ^ (e - 4))
-			| (MemA.get32(ram, t - 8) ^ (e - 8))
-			| (MemA.get32(ram, t - 12) ^ (e - 12))
-			| (MemA.get32(ram, t - 16) ^ (e - 16))
-			| (MemA.get32(ram, t - 20) ^ (e - 20))
-			| (MemA.get32(ram, t - 24) ^ (e - 24))
-			| (MemA.get32(ram, t - 28) ^ (e - 28))) == 0;
-	}
-
-	/** Whether the line whose bottom word is at `b` holds eight entries, each linking to the word
-	    above it. */
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function lineUp(ram:RawBuf, b:Int):Bool {
-		Bulk.prefetch(ram, (b + 64) & 0x1FFFFC);
-		final e = b + 4;
-		return ((MemA.get32(ram, b) ^ e)
-			| (MemA.get32(ram, b + 4) ^ (e + 4))
-			| (MemA.get32(ram, b + 8) ^ (e + 8))
-			| (MemA.get32(ram, b + 12) ^ (e + 12))
-			| (MemA.get32(ram, b + 16) ^ (e + 16))
-			| (MemA.get32(ram, b + 20) ^ (e + 20))
-			| (MemA.get32(ram, b + 24) ^ (e + 24))
-			| (MemA.get32(ram, b + 28) ^ (e + 28))) == 0;
 	}
 
 	static function runaway():Void {
