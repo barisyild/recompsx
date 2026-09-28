@@ -7,6 +7,7 @@
  */
 
 #include "backend_c_api.h"
+#include "pointer_art.h"
 
 #include <SDL.h>
 #include <stdio.h>
@@ -40,6 +41,7 @@ static int g_typed_head, g_typed_count;
 static SDL_Rect g_picture;                 /* where bp_present last put the picture */
 static int      g_mouse_over, g_mouse_x, g_mouse_y, g_mouse_buttons;
 static int      g_mouse_pressed;           /* buttons that went down since the last poll */
+static SDL_Cursor* g_pointer;              /* the machine's pointer as a cursor (bp_mouse_pointer) */
 
 static FILE* g_files[MAX_FILES];
 static int   g_file_size[MAX_FILES];
@@ -135,6 +137,7 @@ void bp_shutdown(void) {
     if (g_texture)  SDL_DestroyTexture(g_texture);
     if (g_renderer) SDL_DestroyRenderer(g_renderer);
     if (g_window)   SDL_DestroyWindow(g_window);
+    if (g_pointer)  { SDL_FreeCursor(g_pointer); g_pointer = NULL; }
     SDL_Quit();
 }
 
@@ -384,6 +387,34 @@ static void latch_mouse(void) {
         g_mouse_x = g_mouse_y = g_mouse_buttons = 0;
     }
     g_mouse_pressed = 0;
+}
+
+/* The machine's pointer is the host's cursor: the system's own while it has none, the art of
+ * pointer_art.h while it is shown (made once, a pixel a pixel, tip at the hotspot), no cursor at all
+ * while a pad is in use. */
+static SDL_Cursor* pointer_cursor(void) {
+    if (!g_pointer) {
+        SDL_Surface* art = SDL_CreateRGBSurfaceWithFormat(0, POINTER_W, POINTER_H, 32, SDL_PIXELFORMAT_ARGB8888);
+        if (art) {
+            for (int y = 0; y < POINTER_H; y++) {
+                uint32_t* row = (uint32_t*)((uint8_t*)art->pixels + y * art->pitch);
+                for (int x = 0; x < POINTER_W; x++) row[x] = pointer_argb(k_pointer[y][x]);
+            }
+            g_pointer = SDL_CreateColorCursor(art, 0, 0);
+            SDL_FreeSurface(art);
+        }
+    }
+    return g_pointer;
+}
+
+void bp_mouse_pointer(int state) {
+    if (state == BP_POINTER_HIDDEN) {
+        SDL_ShowCursor(SDL_DISABLE);
+    } else {
+        SDL_Cursor* art = state == BP_POINTER_SHOWN ? pointer_cursor() : NULL;
+        SDL_SetCursor(art ? art : SDL_GetDefaultCursor());
+        SDL_ShowCursor(SDL_ENABLE);
+    }
 }
 
 int bp_mouse(int field) {
@@ -641,4 +672,137 @@ void bp_fatal(const char* msg) {
     }
     bp_shutdown();
     exit(1);
+}
+
+/* ---- network (bp_http_*, ADR-0040) ---------------------------------------------------------
+ * The i-mode adaptor's phone reaches the host's network through these: one HTTP/1.0 exchange a
+ * handle over a plain TCP socket, never blocking the game. The name is resolved as the request
+ * opens (getaddrinfo — on a slow resolver the one wait there is), the socket connects in the
+ * background, the request goes out as the socket takes it, and the response comes back as it
+ * arrives until the server closes. */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET http_sock;
+#define HTTP_BAD INVALID_SOCKET
+#define http_closesock closesocket
+static int http_would_block(void) {
+    const int e = WSAGetLastError();
+    return e == WSAEWOULDBLOCK || e == WSAEINPROGRESS || e == WSAEALREADY;
+}
+static int http_nonblock(http_sock s) { u_long on = 1; return ioctlsocket(s, FIONBIO, &on); }
+static void http_startup(void) {
+    static int up;
+    if (!up) { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); up = 1; }
+}
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+typedef int http_sock;
+#define HTTP_BAD (-1)
+#define http_closesock close
+static int http_would_block(void) {
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS || errno == EALREADY;
+}
+static int http_nonblock(http_sock s) { return fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK); }
+static void http_startup(void) {}
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+#define MAX_HTTP 4
+
+typedef struct {
+    int used;
+    http_sock sock;
+    int connected;
+    uint8_t* request;
+    int len, sent;
+} http_t;
+
+static http_t g_http[MAX_HTTP];
+
+int bp_http_open(const char* host, int port, const uint8_t* request, int len) {
+    int h = -1;
+    for (int i = 0; i < MAX_HTTP && h < 0; i++) if (!g_http[i].used) h = i;
+    if (h < 0 || !host || !*host || port <= 0 || len <= 0) return -1;
+    http_startup();
+    char service[8];
+    snprintf(service, sizeof service, "%d", port);
+    struct addrinfo hints, *found = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, service, &hints, &found) != 0 || !found) return -1;
+    http_sock s = socket(found->ai_family, found->ai_socktype, found->ai_protocol);
+    int ok = s != HTTP_BAD && http_nonblock(s) == 0;
+#ifdef SO_NOSIGPIPE
+    if (ok) { int one = 1; setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
+    if (ok && connect(s, found->ai_addr, (int)found->ai_addrlen) != 0 && !http_would_block()) ok = 0;
+    freeaddrinfo(found);
+    uint8_t* copy = ok ? (uint8_t*)malloc((size_t)len) : NULL;
+    if (!copy) {
+        if (s != HTTP_BAD) http_closesock(s);
+        return -1;
+    }
+    memcpy(copy, request, (size_t)len);
+    http_t* t = &g_http[h];
+    t->used = 1;
+    t->sock = s;
+    t->connected = 0;
+    t->request = copy;
+    t->len = len;
+    t->sent = 0;
+    return h;
+}
+
+/* Whether the socket has connected: 1, 0 not yet, -1 it failed. */
+static int http_connected(http_t* t) {
+    if (t->connected) return 1;
+#ifdef _WIN32
+    fd_set w, e;
+    FD_ZERO(&w); FD_ZERO(&e);
+    FD_SET(t->sock, &w); FD_SET(t->sock, &e);
+    struct timeval zero = {0, 0};
+    if (select(0, NULL, &w, &e, &zero) <= 0) return 0;
+    if (FD_ISSET(t->sock, &e)) return -1;
+#else
+    struct pollfd p = { t->sock, POLLOUT, 0 };
+    if (poll(&p, 1, 0) <= 0) return 0;
+    int err = 0;
+    socklen_t n = sizeof err;
+    if (getsockopt(t->sock, SOL_SOCKET, SO_ERROR, &err, &n) != 0 || err != 0) return -1;
+#endif
+    t->connected = 1;
+    return 1;
+}
+
+int bp_http_read(int handle, uint8_t* buf, int cap) {
+    if (handle < 0 || handle >= MAX_HTTP || !g_http[handle].used) return -2;
+    http_t* t = &g_http[handle];
+    const int c = http_connected(t);
+    if (c <= 0) return c < 0 ? -2 : 0;
+    while (t->sent < t->len) {
+        const int n = (int)send(t->sock, (const char*)t->request + t->sent, t->len - t->sent, MSG_NOSIGNAL);
+        if (n > 0) t->sent += n;
+        else if (n < 0 && http_would_block()) return 0;
+        else return -2;
+    }
+    const int n = (int)recv(t->sock, (char*)buf, cap, 0);
+    if (n > 0) return n;
+    if (n == 0) return -1;
+    return http_would_block() ? 0 : -2;
+}
+
+void bp_http_close(int handle) {
+    if (handle < 0 || handle >= MAX_HTTP || !g_http[handle].used) return;
+    http_closesock(g_http[handle].sock);
+    free(g_http[handle].request);
+    memset(&g_http[handle], 0, sizeof g_http[handle]);
 }

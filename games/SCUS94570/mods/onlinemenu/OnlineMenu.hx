@@ -76,6 +76,8 @@ class OnlineMenu {
 	static var onlineText = 0;
 	static var aboutText = 0;
 	static var resultText = 0;
+	/** The online result `resultText` says (Online.IDLE.. ). */
+	static var shown = 0;
 
 	static var onMain = false;
 	static var choice = 0;
@@ -85,6 +87,11 @@ class OnlineMenu {
 	static var lastFrame = 0;
 
 	public static function install():Void {
+		// The main menu and the address keyboard answer to the mouse and type on the keyboard: the
+		// machine's own, on ports of the mod's (ADR-0040).
+		Pointer.install();
+		IpKeyboard.install();
+		Online.install();
 		ModHost.onBoot(boot);
 		ModHost.onFrame(countVblank);
 		ModHost.hook(BUILD_MENU, buildMenu);
@@ -187,8 +194,9 @@ class OnlineMenu {
 		if (IpKeyboard.accepted) {
 			final address = IpKeyboard.address();
 			ModHost.log("onlinemenu: online address " + address + (IpKeyboard.kept ? " (kept)" : " (not kept)"));
-			final connecting = Online.connect(address);
-			writeText(resultText, (connecting ? "connecting to\n" : "no network yet\n") + address);
+			Online.connect(address);
+			shown = Online.result;
+			writeText(resultText, Online.describe());
 			message = resultText;
 		} else {
 			message = aboutText;
@@ -209,6 +217,11 @@ class OnlineMenu {
 	}
 
 	static function frame(ctx:CpuState, addr:Int):Void {
+		// What the i-mode session has come to, as it comes to it.
+		if (Online.result != shown) {
+			shown = Online.result;
+			writeText(resultText, Online.describe());
+		} else {}
 		// Back from a screen that ran instead (OPTIONS): what the mouse did there was for it.
 		if (vblanks - lastFrame > 4) Pointer.sync();
 		else {}

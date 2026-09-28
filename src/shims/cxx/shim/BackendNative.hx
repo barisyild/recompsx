@@ -63,6 +63,12 @@ extern function bp_audio_push(frames:Ptr<Int16>, frameCount:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_key_text(on:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_key_next():Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_mouse(field:Int):Int;
+@:include("backend_c_api.h") @:topLevel extern function bp_mouse_pointer(state:Int):Void;
+
+@:include("backend_c_api.h") @:topLevel
+extern function bp_http_open(host:ConstCharPtr, port:Int, request:Ptr<UInt8>, len:Int):Int;
+@:include("backend_c_api.h") @:topLevel extern function bp_http_read(handle:Int, buf:Ptr<UInt8>, cap:Int):Int;
+@:include("backend_c_api.h") @:topLevel extern function bp_http_close(handle:Int):Void;
 
 @:include("backend_c_api.h") @:topLevel
 extern function bp_storage_read(name:ConstCharPtr, buf:Ptr<UInt8>, len:Int):Int;

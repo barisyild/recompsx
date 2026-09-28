@@ -91,7 +91,8 @@ and audio on every platform and every target.
 - Host time (`bp_time_us`) paces presentation only and never reaches emulated state. Host audio
   consumption never back-pressures the emulated timeline.
 - Inputs are latched once per emulated VBlank (replay-friendly by construction). Online play is
-  never netplay: it is built per game over the HLE kernel's network service (ADR-0035).
+  never netplay: it is built per game (ADR-0035) over the PS1's own i-mode adaptor, whose phone
+  and centre the HLE kernel plays, HTTP out to the host's network (ADR-0040).
 - All RAM/VRAM/SPU-RAM is explicitly zero-initialized; no host randomness; no dependence on
   map iteration order.
 - Verified by `--headless-hash N`: FNV-1a over scanout and audio per frame folded into a

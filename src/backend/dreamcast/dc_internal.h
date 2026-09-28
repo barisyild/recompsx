@@ -368,11 +368,11 @@ void* audio_pull(snd_stream_hnd_t hnd, int req, int* got);
 
 /* dc_input.c */
 void reset_combo(uint8_t addr, uint32_t btns);
-
-/* dc_files.c */
 /* The mouse pointer, over the picture, while a maple mouse is attached: the last thing each scene
  * submits, inside the translucent list (build_scene and a blank present both end with it). */
 void draw_mouse_pointer(void);
+
+/* dc_files.c */
 extern const char* g_storage_root;
 #if RECOMPSX_DC_PROFILE
 extern uint64_t g_prof_disc_us;

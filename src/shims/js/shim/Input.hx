@@ -78,6 +78,10 @@ class Input {
 	static var mouseX = 0;
 	static var mouseY = 0;
 	static var mouseButtons = 0;
+	/** The element the picture fills, once `attach` has found it. */
+	static var screen:Null<Element> = null;
+	/** The machine's pointer as the kernel last said (`showPointer`): 0 none, 1 shown, 2 hidden. */
+	static var pointerState = 0;
 
 	/** Once per vblank, from `Backend.inputPoll`: a stable snapshot of both pads. */
 	public static function poll():Void {
@@ -138,7 +142,8 @@ class Input {
 			keys = 0;
 			pointerHeld = 0;
 		});
-		final screen:Null<Element> = js.Syntax.code("((globalThis.recompsxHost && globalThis.recompsxHost.screen) || null)");
+		screen = js.Syntax.code("((globalThis.recompsxHost && globalThis.recompsxHost.screen) || null)");
+		final screen = Input.screen;
 		if (screen != null) {
 			screen.addEventListener("pointermove", (e:PointerEvent) -> point(screen, e));
 			screen.addEventListener("pointerdown", (e:PointerEvent) -> press(screen, e, true));
@@ -147,14 +152,36 @@ class Input {
 				pointerOver = false;
 				pointerHeld = 0;
 			});
-			screen.addEventListener("contextmenu", (e:PointerEvent) -> e.preventDefault());
-			// The side buttons are the browser's Back and Forward, taken on the way up.
+			// While the machine has a pointer its buttons are the game's: the right one opens no
+			// context menu, and the side ones — the browser's Back and Forward, taken on the way
+			// up — leave no page.
+			screen.addEventListener("contextmenu", (e:PointerEvent) -> {
+				if (pointerState != 0) e.preventDefault();
+				else {}
+			});
 			for (kind in ["mousedown", "mouseup", "auxclick"]) {
 				screen.addEventListener(kind, (e:PointerEvent) -> {
-					if (e.button == 3 || e.button == 4) e.preventDefault();
+					if (pointerState != 0 && (e.button == 3 || e.button == 4)) e.preventDefault();
 					else {}
 				});
 			}
+			// Mods turn the mouse on as they install, before the first poll finds the box.
+			showPointer(pointerState);
+		} else {}
+	}
+
+	/**
+		The machine's pointer over the picture (`Backend.mousePointer`, backend_c_api.h): 0 none —
+		the page's own cursor — 1 shown, the class `pointer` whose cursor is the art, 2 hidden while
+		a pad is in use, no cursor at all.
+	**/
+	public static function showPointer(state:Int):Void {
+		pointerState = state;
+		final screen = Input.screen;
+		if (screen != null) {
+			if (state == 1) screen.classList.add("pointer");
+			else screen.classList.remove("pointer");
+			screen.style.cursor = state == 2 ? "none" : "";
 		} else {}
 	}
 

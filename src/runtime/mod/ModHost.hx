@@ -245,50 +245,82 @@ class ModHost {
 	/** The buttons held on a port, PS1 layout, active high — what the game will read this frame. */
 	public static inline function buttons(port:Int):Int return sio.Pads.buttonsOf(port);
 
-	/**
-		Text entry on the host's keyboard (`kernel.KKeyboard`, ADR-0036), for a field the mod has
-		open: while it is on, the keyboard types rather than plays. Turn it off when the field closes.
-	**/
-	public static inline function textEntry(on:Bool):Void kernel.KKeyboard.textEntry(on);
+	// ---- controllers of the mod's own (ADR-0040) --------------------------------------------------
+	//
+	// The machine's own peripherals, each on a controller port that is the mod's alone — the game
+	// never sees it — and spoken to the way the machine speaks to one: a transfer (`exchange`), byte
+	// for byte, as SIO0 makes it. What the bytes mean is the device's documented protocol (psx-spx,
+	// "Controllers and Memory Cards"), and nothing else.
 
 	/**
-		The next thing typed while text entry is on, oldest first: a Unicode code point, or
-		`KKeyboard.BACKSPACE`, `ENTER` or `ESCAPE`; -1 when nothing is waiting. What the game cannot
-		show is the mod's to ignore.
+		A Sony Mouse (SCPH-1030, `sio.SonyMouse`): the port, or -1. Read it with 01h, 42h and four
+		zeros: back come Hi-Z, ID 12h, 5Ah, the buttons (bit 10 right, bit 11 left of the halfword, 0 =
+		pressed) and the motion since the last read (signed bytes, across then down). A cursor that
+		starts in the middle of the display (`displayWidth` x `displayHeight`), adds the motion up and
+		stays inside the display is where the host's pointer is. While a mod reads one, the machine
+		shows its pointer on it (hidden while a pad is in use).
 	**/
-	public static inline function typed():Int return kernel.KKeyboard.next();
-
-	/** Mouse buttons, for `mouseHeld` and `mouseClicks`. */
-	public static inline var MOUSE_LEFT = 0;
-	public static inline var MOUSE_RIGHT = 1;
-	public static inline var MOUSE_MIDDLE = 2;
-	/** The side buttons: back (nearer the wrist) and forward. */
-	public static inline var MOUSE_BACK = 3;
-	public static inline var MOUSE_FORWARD = 4;
+	public static function plugMouse():Int {
+		final unit = sio.SonyMouse.plug();
+		return unit >= 0 ? addPort(PORT_MOUSE, unit) : -1;
+	}
 
 	/**
-		Whether the pointer is over the picture (`kernel.KMouse`, ADR-0038); never where the machine
-		has no mouse. Its position is in the display's pixels, `pictureWidth` x `pictureHeight`.
+		The PS1 keyboard (`sio.Ps2Keyboard`, the protocol of Sony's SCPH-2000 PS/2 adaptor): the port,
+		or -1. Read it with 01h, 42h, twelve zeros and 06h: back come Hi-Z, ID 96h, 5Ah, how many
+		scancode bytes follow (0..11) and those bytes, PS/2 Scan Code Set 2 as a US keyboard sends
+		them. While a mod reads one, the host's keyboard types into it rather than playing the pad.
 	**/
-	public static inline function mouseOver():Bool return kernel.KMouse.over;
-
-	public static inline function mouseX():Int return kernel.KMouse.x;
-
-	public static inline function mouseY():Int return kernel.KMouse.y;
-
-	public static inline function pictureWidth():Int return kernel.KMouse.width;
-
-	public static inline function pictureHeight():Int return kernel.KMouse.height;
-
-	public static inline function mouseHeld(button:Int):Bool return (kernel.KMouse.buttons & (1 << button)) != 0;
+	public static function plugKeyboard():Int {
+		final unit = sio.Ps2Keyboard.plug();
+		return unit >= 0 ? addPort(PORT_KEYBOARD, unit) : -1;
+	}
 
 	/**
-		Presses of a button, and moves of the pointer, counted from boot: keep the last count seen,
-		and a different one is a click, or a move, since then — nothing is taken from another reader.
+		The i-mode adaptor (SCPH-10180, `sio.IModeAdaptor`): the port, or -1. Addressed with 41h, it
+		takes commands 11h..18h; `mod.LibImode` speaks it as Sony's libimode did, and the phone behind
+		it takes HTTP requests to the host's network.
 	**/
-	public static inline function mouseClicks(button:Int):Int return kernel.KMouse.clicks(button);
+	public static function plugIMode():Int {
+		final unit = sio.IModeAdaptor.plug();
+		return unit >= 0 ? addPort(PORT_IMODE, unit) : -1;
+	}
 
-	public static inline function mouseMoves():Int return kernel.KMouse.moves;
+	/**
+		One transfer on one of the mod's ports, as SIO0 makes it: `send[0..length)` goes out — the
+		address byte first (01h a controller, 41h the i-mode adaptor), then the command and its bytes —
+		and as many come back into `reply`, one for each sent. False when nothing answered — no mouse
+		on the host, a transfer the device does not take — and `reply` then reads FFh throughout.
+	**/
+	public static function exchange(port:Int, send:Array<Int>, length:Int, reply:Array<Int>):Bool {
+		var answered = false;
+		if (port >= 0 && port < portKinds.length) {
+			final kind = portKinds[port];
+			if (kind == PORT_MOUSE) answered = sio.SonyMouse.exchange(portUnits[port], send, length, reply);
+			else if (kind == PORT_KEYBOARD) answered = sio.Ps2Keyboard.exchange(portUnits[port], send, length, reply);
+			else answered = sio.IModeAdaptor.exchange(portUnits[port], send, length, reply);
+		} else {
+			for (i in 0...length) reply[i] = 0xFF;
+		}
+		return answered;
+	}
+
+	/** The display's size at the last vblank, in its pixels: what a mouse's motion is counted in. */
+	public static inline function displayWidth():Int return kernel.KMouse.width;
+
+	public static inline function displayHeight():Int return kernel.KMouse.height;
+
+	static inline var PORT_MOUSE = 1;
+	static inline var PORT_KEYBOARD = 2;
+	static inline var PORT_IMODE = 3;
+	static final portKinds:Array<Int> = [];
+	static final portUnits:Array<Int> = [];
+
+	static function addPort(kind:Int, unit:Int):Int {
+		portKinds.push(kind);
+		portUnits.push(unit);
+		return portKinds.length - 1;
+	}
 
 	/** Whether an address is in mod memory (`mod.ModRam`): data a mod made, not the game. */
 	public static inline function isModMemory(addr:Int):Bool return ModRam.contains(addr & 0x1FFFFFFF);

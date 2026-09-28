@@ -14,6 +14,15 @@ Read this when the work touches `src/backend/pc/`, `scripts/build-pc.sh` or
   from here must equal the JavaScript one — that comparison is the point of the C++ build.
 - Input: SDL game controller n is port n, and the keyboard is merged into port 0 (which is a
   digital pad when no controller is there); the key layout matches the browser's (SDL2 names).
-  The keyboard also types (`bp_key_*`, ADR-0036) and the mouse is the HLE pointer (`bp_mouse`,
-  ADR-0038): `bp_present` keeps the letterbox rectangle, `latch_mouse` scales window points to
-  renderer pixels (high-DPI) and reports a fraction of that rectangle; X1/X2 are the side buttons.
+  The keyboard also types (`bp_key_*`, ADR-0036) — the runtime turns that on while the machine's
+  PS/2 keyboard is polled (ADR-0040) — and the mouse is the pointer the machine's Sony Mouse
+  follows (`bp_mouse`, ADR-0038, ADR-0040): `bp_present` keeps the letterbox rectangle,
+  `latch_mouse` scales window points to renderer pixels (high-DPI) and reports a fraction of that
+  rectangle; X1/X2 are the side buttons. `bp_mouse_pointer`: the system cursor while the machine
+  has no pointer, the art of `src/backend/api/pointer_art.h` as a color cursor while its mouse is
+  polled, and no cursor while the kernel says a pad is in use.
+- Network (`bp_http_*`, ADR-0040): the i-mode centre's HTTP requests over non-blocking TCP —
+  POSIX sockets, Winsock on Windows — resolved with `getaddrinfo`, connected in the background
+  (`poll` + `SO_ERROR`), the request sent as the socket takes it and the response read raw until
+  the server closes; SIGPIPE is kept away (`SO_NOSIGPIPE` / `MSG_NOSIGNAL`). Nothing blocks a
+  frame but a name lookup.

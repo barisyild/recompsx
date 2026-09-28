@@ -1,7 +1,7 @@
 {
   "id": "onlinemenu",
   "title": "ONLINE in Select Game Type",
-  "_description": "Adds ONLINE under BATTLE MODE in the main menu, and behind it an address keyboard in the look of the game's ENTER NAME screen. The menu is data: the game builds it from a list of 36-byte records, so the mod hands the builder a longer list, steers the frame handler's selection around the new line, and builds the keyboard in the same slot from records of its own. The game's own name keyboard (adventure overlay) is never touched. How the menu works is in ../../notes.md, 'The main menu'.",
+  "_description": "Adds ONLINE under BATTLE MODE in the main menu, and behind it an address keyboard in the look of the game's ENTER NAME screen. The menu is data: the game builds it from a list of 36-byte records, so the mod hands the builder a longer list, steers the frame handler's selection around the new line, and builds the keyboard in the same slot from records of its own. The game's own name keyboard (adventure overlay) is never touched. The rest is the PS1's own devices, each on a controller port of the mod's (ADR-0040): a Sony Mouse points and clicks, a PS/2 keyboard types the address, and DONE goes online through the i-mode adaptor — one libimode session, an HTTP request to the address on the game's port, 9457. How the menu works is in ../../notes.md, 'The main menu'.",
   "entry": "onlinemenu.OnlineMenu",
   "_hooks": "0x80095bec in boot: the menu builder, (slot a0, records a1). 0x800b3ca8 in stage: Select Game Type's frame handler.",
   "hooks": [

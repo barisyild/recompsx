@@ -207,6 +207,10 @@ struct Backend {
     static inline void keyText(bool on) { bp_key_text(on ? 1 : 0); }
     static inline int keyNext() { return bp_key_next(); }
     static inline int mouse(int field) { return bp_mouse(field); }
+    static inline void mousePointer(int state) { bp_mouse_pointer(state); }
+    static inline int httpOpen(const std::string& host, int port, unsigned char* request, int len) { return bp_http_open(host.c_str(), port, request, len); }
+    static inline int httpRead(int handle, unsigned char* buf, int cap) { return bp_http_read(handle, buf, cap); }
+    static inline void httpClose(int handle) { bp_http_close(handle); }
     static inline void requestQuit() { quitting() = true; }
     static inline bool quitRequested() { return bp_quit_requested() != 0; }
     static inline int storageRead(const std::string& name, unsigned char* buf, int len) {

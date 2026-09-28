@@ -5,8 +5,14 @@ import mod.ModHost;
 import shim.IntMath;
 
 /**
-	The mouse in Crash Bash's own menus (ADR-0038): point at a line, a portrait or a thumbnail and
-	it is chosen, click it and it is taken, right-click or press the side (back) button to go back.
+	The mouse in Crash Bash's own menus: point at a line, a portrait or a thumbnail and it is
+	chosen, click it and it is taken, right-click (or the side button) to go back.
+
+	The mouse is the machine's own — a Sony Mouse (SCPH-1030) on a port of the mod's
+	(`ModHost.plugMouse`, ADR-0040) — polled every frame like any controller, which is also what
+	shows the machine's pointer. It gives two buttons and the motion since the last poll; the
+	cursor is kept here as a PS1 mouse program keeps it — from the middle of the display, the motion
+	added up, held inside the display — and that is where the host's pointer is.
 
 	**A choice is an index, and the mouse writes it.** Every screen keeps what is chosen as a number
 	— Select Game Type 0..3 at 800B95F0h, SELECT NUMBER OF PLAYERS the players (1..4) at 8005A63Ah,
@@ -29,6 +35,13 @@ import shim.IntMath;
 	screen (onlinemenu's main menu and address keyboard drive the mouse themselves) and is left
 	alone. A list of a screen this mod does not know is still driven, by pressing down or up a step
 	a frame until its highlight is under the pointer.
+
+	**The menus in play** — PAUSED and what opens from it: its OPTIONS, the questions ("QUIT
+	GAME?", YES and NO on one row) — are the boot overlay's own, not the slots: 800809A0h draws the
+	current one every frame from its definition, and the mod measures it there, as the drawer will
+	place it, for the next frame's pointer. The choice is 8009AEECh, the n-th line that can be chosen,
+	and the pad that drives the menu is the one of the player at 8009AEF0h, so a click is cross in
+	that player's buttons; going back is triangle, or start on PAUSED itself, which resumes the game.
 
 	With no menu up nothing is pressed, so gameplay and the demo never see a press from here. Any
 	mouse activity zeroes the game's count of idle frames (80051604h), which would otherwise start
@@ -106,10 +119,43 @@ class Mouse {
 	static inline var LEVEL_TOP = -154;
 	static inline var LEVEL_STEP = 99;
 
-	static var seenMoves = 0;
-	static var seenLeft = 0;
-	static var seenRight = 0;
-	static var seenBack = 0;
+	// The menus in play. 800809A0h (definition a0, base y a1) walks 24-byte items to a type of -1:
+	// +0 the type, +2 x (8000h plus a centre, 320 for none; otherwise the left), +4 y below the base,
+	// +6 the index of a string in the language's table (80059748h + 4 * language, the language at +2Ch
+	// of the game state), in the 640 x 480 units the frontend uses, from the top left. Type 0 is a
+	// line to choose, and so is type 1 while the cheats are on (game +4 holds 80010000h); they are
+	// counted in order. Types 10+k, 20+k and 30+k are the values of option k, drawn while the word
+	// at 8009BD1Ch + 2k is 1, 0 and 9. A line is as wide as its letters: the font at 8005B2B4h, the
+	// letters' widths at 8005AEB4h + 100h * font (a glyph flagged 2 at 8005B0B4h + 100h * font does
+	// not advance), counted in the display's pixels — the width at +4 of 8005B698h's record — where
+	// the menus count 640; spaces pad a line to share a row (YES, NO), so only its letters count.
+	static inline var DRAW_IN_PLAY = 0x800809a0;
+	static inline var IN_PLAY_CHOICE = 0x8009aeec;
+	static inline var IN_PLAY_PLAYER = 0x8009aef0;
+	static inline var OPTION_STATES = 0x8009bd1c;
+	static inline var PLAYER_BUTTONS = 0x58;   // one player's buttons after the other's, from PAD_EDGES
+	static inline var STRING_TABLES = 0x80059748;
+	static inline var LANGUAGE = 0x2c;
+	static inline var CHEATS = 0x80010000;
+	static inline var FONT = 0x8005b2b4;
+	static inline var WIDTHS = 0x8005aeb4;
+	static inline var GLYPH_FLAGS = 0x8005b0b4;
+	static inline var DISPLAY = 0x8005b698;
+	static inline var ITEM = 0x18;
+	static inline var MAX_ITEMS = 32;
+	static inline var MAX_HITS = 16;
+	static inline var START = 0x0008;
+
+	// The mouse: its port, and the cursor kept from its motion, in the display's pixels.
+	static inline var MOUSE_ID = 0x12;
+	static var port = -1;
+	static var send:Array<Int>;                // a read: 01h, 42h, zeros under the four data bytes
+	static var reply:Array<Int>;
+	static var present = false;
+	static var cursorX = 0;
+	static var cursorY = 0;
+	static var wasLeft = false;
+	static var wasRight = false;
 	/** Per slot, the screen its list was built for. */
 	static var builtFor:Array<Int>;
 	static var list = 0;                       // the first widget of the lit line's list
@@ -119,16 +165,39 @@ class Mouse {
 	static var lastLit = 0;
 	static var waited = 0;
 	static var steps = 0;
+	// The menu in play last drawn, measured: what each place chooses, its top, its letters' span.
+	static var pauseMenus:Array<Int>;
+	static var hitChoice:Array<Int>;
+	static var hitTop:Array<Int>;
+	static var hitFrom:Array<Int>;
+	static var hitTo:Array<Int>;
+	static var hits = 0;
+	static var inPlayMenu = 0;
+	static var inPlayAt = -2;
+	static var frames = 0;                     // game frames, counted by the pad reader
 
 	public static function install():Void {
+		// The game's menus answer to the mouse: the machine's own, on a port of the mod's (ADR-0040).
+		send = [0x01, 0x42, 0, 0, 0, 0, 0];
+		reply = [0, 0, 0, 0, 0, 0, 0];
+		port = ModHost.plugMouse();
+		cursorX = ModHost.displayWidth() >> 1;
+		cursorY = ModHost.displayHeight() >> 1;
 		builtFor = [for (_ in 0...SLOTS) 0];
 		listFrames = [0x800b3ca8, 0x800b3f7c, 0x800b42b0, 0x800b4910];
 		listChoices = [0x800b95f0, 0x8005a63a, 0x800b9628, 0x800b9508];
 		listBytes = [4, 1, 4, 4];
 		listFirst = [0, 1, 0, 0];
 		listTimers = [0x800b9624, 0, 0, 0];
+		// PAUSED as each kind of game has it: the ones start resumes from.
+		pauseMenus = [0x8005975c, 0x8005981c, 0x800598dc, 0x800599b4];
+		hitChoice = [for (_ in 0...MAX_HITS) 0];
+		hitTop = [for (_ in 0...MAX_HITS) 0];
+		hitFrom = [for (_ in 0...MAX_HITS) 0];
+		hitTo = [for (_ in 0...MAX_HITS) 0];
 		ModHost.hook(READ_PADS, readPads);
 		ModHost.hook(BUILD_MENU, built);
+		ModHost.hook(DRAW_IN_PLAY, drawnInPlay);
 	}
 
 	/** The builder: which screen the slot's new list belongs to. */
@@ -141,28 +210,37 @@ class Mouse {
 	/** The pad reader: the game's first, then the mouse on top of what it read. */
 	static function readPads(ctx:CpuState, addr:Int):Bool {
 		ModHost.callOriginal(ctx, addr);
+		frames = (frames + 1) | 0;
 		drive(ctx);
 		return true;
 	}
 
 	static function drive(ctx:CpuState):Void {
-		final over = ModHost.mouseOver();
-		final m = ModHost.mouseMoves();
-		final l = ModHost.mouseClicks(ModHost.MOUSE_LEFT);
-		final r = ModHost.mouseClicks(ModHost.MOUSE_RIGHT);
-		final b = ModHost.mouseClicks(ModHost.MOUSE_BACK);
-		final moved = over && m != seenMoves;
-		final left = over && l != seenLeft;
-		final back = over && (r != seenRight || b != seenBack);
-		seenMoves = m;
-		seenLeft = l;
-		seenRight = r;
-		seenBack = b;
+		// A poll of the mouse: the buttons (bit 11 left, bit 10 right, 0 = pressed) and the motion.
+		present = ModHost.exchange(port, send, 7, reply) && reply[1] == MOUSE_ID;
+		var moved = false;
+		var left = false;
+		var back = false;
+		if (present) {
+			final dx = signedByte(reply[5]);
+			final dy = signedByte(reply[6]);
+			cursorX = inside(cursorX + dx, ModHost.displayWidth());
+			cursorY = inside(cursorY + dy, ModHost.displayHeight());
+			final l = (reply[4] & 8) == 0;
+			final r = (reply[4] & 4) == 0;
+			moved = dx != 0 || dy != 0;
+			left = l && !wasLeft;
+			back = r && !wasRight;
+			wasLeft = l;
+			wasRight = r;
+		} else {}
 		if (moved || left || back) ModHost.write32(IDLE, 0);
 		else {}
 		final screen = ModHost.read32(SCREEN);
 		final frame = frameOf(screen);
-		if (back && menuUp(screen)) {
+		if (inPlayAt >= 0 && inPlayAt >= ((frames - 1) | 0)) {
+			inPlay(ctx, moved, left, back);
+		} else if (back && menuUp(screen)) {
 			forget();
 			press(TRIANGLE);
 		} else if (frame == CHARACTER_FRAME) {
@@ -310,7 +388,7 @@ class Mouse {
 	/** The line of the lit one's list under a point, one that can be chosen. */
 	static function lineAt(lit:Int, x:Int, y:Int):Int {
 		var found = 0;
-		if (ModHost.mouseOver()) {
+		if (present) {
 			spanOf(lit);
 			var w = list;
 			var n = 0;
@@ -409,9 +487,9 @@ class Mouse {
 	/** The portrait under the pointer, 0..7, or -1. */
 	static function portraitAt():Int {
 		var found = -1;
-		if (ModHost.mouseOver()) {
-			final x = IntMath.div(ModHost.mouseX() * 640, ModHost.pictureWidth());
-			final y = IntMath.div(ModHost.mouseY() * 480, ModHost.pictureHeight());
+		if (present) {
+			final x = pointerX() + 320;
+			final y = pointerY() + 240;
 			for (p in 0...PORTRAITS) {
 				final w = slot0(FIRST_PORTRAIT + p);
 				if (w != 0) {
@@ -447,7 +525,7 @@ class Mouse {
 	/** The level thumbnail under the pointer, 0..3, or -1. */
 	static function levelAt():Int {
 		var found = -1;
-		if (ModHost.mouseOver()) {
+		if (present) {
 			final x = pointerX();
 			final y = pointerY();
 			if (x >= 135 && x <= 290) {
@@ -465,7 +543,144 @@ class Mouse {
 	static function previewAt():Bool {
 		final x = pointerX();
 		final y = pointerY();
-		return ModHost.mouseOver() && x >= -287 && x <= 91 && y >= -2 && y <= 198;
+		return present && x >= -287 && x <= 91 && y >= -2 && y <= 198;
+	}
+
+	// ---- the menus in play --------------------------------------------------------------------------------
+
+	/** The drawer of the menus in play: a menu with choices is measured for the next frame. */
+	static function drawnInPlay(ctx:CpuState, addr:Int):Bool {
+		final n = measure(ctx.a0, ctx.a1);
+		if (n > 0) {
+			hits = n;
+			inPlayMenu = ctx.a0;
+			inPlayAt = frames;
+		} else {}
+		return false;
+	}
+
+	/** Pointing at a line chooses it, a click takes it, back is triangle — or start, on PAUSED. */
+	static function inPlay(ctx:CpuState, moved:Bool, left:Bool, back:Bool):Void {
+		final player = ModHost.read32(IN_PLAY_PLAYER);
+		final buttons = (PAD_EDGES + (player >= 0 && player < 8 ? player : 0) * PLAYER_BUTTONS) | 0;
+		if (back) {
+			ModHost.write32(buttons, ModHost.read32(buttons) | (isPauseMenu(inPlayMenu) ? START : TRIANGLE));
+		} else {
+			final k = inPlayChoiceAt();
+			if (k >= 0 && (moved || left)) {
+				if (ModHost.read32(IN_PLAY_CHOICE) != k) {
+					ModHost.write32(IN_PLAY_CHOICE, k);
+					sound(ctx, SOUND_MOVE);
+				} else {}
+				if (left) ModHost.write32(buttons, ModHost.read32(buttons) | CROSS);
+				else {}
+			} else {}
+		}
+	}
+
+	static function isPauseMenu(menu:Int):Bool {
+		var found = false;
+		for (i in 0...pauseMenus.length) {
+			if (pauseMenus[i] == menu) found = true;
+			else {}
+		}
+		return found;
+	}
+
+	/** The choice under the pointer, or -1. */
+	static function inPlayChoiceAt():Int {
+		var found = -1;
+		if (present) {
+			final x = pointerX() + 320;
+			final y = pointerY() + 240;
+			for (n in 0...hits) {
+				if (hitTo[n] > hitFrom[n] && y >= hitTop[n] - ABOVE && y < hitTop[n] + BELOW
+					&& x >= hitFrom[n] - MARGIN && x < hitTo[n] + MARGIN) found = hitChoice[n];
+				else {}
+			}
+		} else {}
+		return found;
+	}
+
+	/** A definition's choices as the drawer will place them, into the hit arrays; how many. */
+	static function measure(menu:Int, base:Int):Int {
+		var n = 0;
+		final display = ModHost.read32(DISPLAY);
+		final scale = inRam(display) ? ModHost.read16s((display + 4) | 0) : 0;
+		final table = ModHost.read32((STRING_TABLES + ModHost.read32((GAME + LANGUAGE) | 0) * 4) | 0);
+		if (inRam(menu) && inRam(table) && scale > 0) {
+			final cheats = (ModHost.read32((GAME + 4) | 0) & CHEATS) == CHEATS;
+			final font = (ModHost.read32(FONT) & 0xFF) << 8;
+			var line = 0;
+			var item = menu;
+			var k = 0;
+			var type = ModHost.read16s(item);
+			while (type != -1 && k < MAX_ITEMS) {
+				final choice = choiceOf(type, cheats, line);
+				if (type == 0 || (type == 1 && cheats)) line++;
+				else {}
+				if (choice >= 0 && n < MAX_HITS) {
+					place(n, choice, item, base, table, font, scale);
+					n++;
+				} else {}
+				item = (item + ITEM) | 0;
+				type = ModHost.read16s(item);
+				k++;
+			}
+		} else {}
+		return n;
+	}
+
+	/** The choice an item stands for, when it is one and is drawn: a line, or an option's value. */
+	static function choiceOf(type:Int, cheats:Bool, line:Int):Int {
+		var choice = -1;
+		if (type == 0 || (type == 1 && cheats)) {
+			choice = line;
+		} else if (type >= 10 && type < 40) {
+			final option = type < 20 ? type - 10 : (type < 30 ? type - 20 : type - 30);
+			final drawnAt = type < 20 ? 1 : (type < 30 ? 0 : 9);
+			if (ModHost.read16u((OPTION_STATES + option * 2) | 0) == drawnAt) choice = option;
+			else {}
+		} else {}
+		return choice;
+	}
+
+	/** Hit area n: an item's letters where the drawer puts them. */
+	static function place(n:Int, choice:Int, item:Int, base:Int, table:Int, font:Int, scale:Int):Void {
+		final text = ModHost.read32((table + ModHost.read16s((item + 6) | 0) * 4) | 0);
+		var total = 0;                         // the advance: of the whole line,
+		var lead = 0;                          // of its leading spaces,
+		var last = 0;                          // and to the end of its last letter
+		var leading = true;
+		var i = 0;
+		var going = inRam(text);
+		while (going && i < 64) {
+			final c = ModHost.read8u((text + i) | 0);
+			if (c == 0 || c == 10 || c == 13) {
+				going = false;
+			} else {
+				if ((ModHost.read8u((GLYPH_FLAGS + font + c) | 0) & 2) == 0)
+					total = (total + signedByte(ModHost.read8u((WIDTHS + font + c) | 0))) | 0;
+				else {}
+				if (c != 32) {
+					leading = false;
+					last = total;
+				} else if (leading) {
+					lead = total;
+				} else {}
+				i++;
+			}
+		}
+		final raw = ModHost.read16u((item + 2) | 0);
+		var start = ModHost.read16s((item + 2) | 0);
+		if ((raw & 0xC000) == 0x8000) {
+			final centre = (raw & 0x3FFF) == 0 ? 320 : raw & 0x3FFF;
+			start = centre - (IntMath.div(total * 640, scale) >> 1);
+		} else {}
+		hitChoice[n] = choice;
+		hitTop[n] = (ModHost.read16s((item + 4) | 0) + base) | 0;
+		hitFrom[n] = (start + IntMath.div(lead * 640, scale)) | 0;
+		hitTo[n] = (start + IntMath.div(last * 640, scale)) | 0;
 	}
 
 	// ---- the game's own ---------------------------------------------------------------------------------
@@ -506,7 +721,9 @@ class Mouse {
 	static inline function isLine(w:Int):Bool return (ModHost.read32(w) & KIND) == TEXT_LINE;
 
 	/** The pointer in the menus' centred units (the same scaling as onlinemenu's Game.pointerX). */
-	static function pointerX():Int return IntMath.div(ModHost.mouseX() * 640, ModHost.pictureWidth()) - 320;
+	static function pointerX():Int return IntMath.div(cursorX * 640, ModHost.displayWidth()) - 320;
 
-	static function pointerY():Int return IntMath.div(ModHost.mouseY() * 480, ModHost.pictureHeight()) - 240;
+	static function pointerY():Int return IntMath.div(cursorY * 480, ModHost.displayHeight()) - 240;
+
+	static inline function inside(v:Int, size:Int):Int return v < 0 ? 0 : (v >= size ? size - 1 : v);
 }

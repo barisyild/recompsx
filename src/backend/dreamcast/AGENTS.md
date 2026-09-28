@@ -76,6 +76,21 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
 - Semi-transparency: modes 0/1/3 as PVR blends; B-F as three passes; mixed-CLUT primitives split
   into solid and STP passes from baked variants.
 - Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits. A maple
-  keyboard types while text entry is on (ADR-0036); a maple mouse is the HLE pointer (ADR-0038),
-  integrated on the 640 x 480 screen, with its arrow drawn by `draw_mouse_pointer` last in each
-  scene (both `build_scene` and a blank present end with it).
+  keyboard is pad 0 as well (the desktop's key map, `keyboard_pad`) and types while text entry is
+  on — while the machine's PS/2 keyboard is polled (ADR-0036, ADR-0040) — by the keyboard's own
+  region — Flycast passes the host's keys on by position and
+  reports a host layout it does not recognise as US (Turkish Q: its '.' key types '/'); the keypad
+  types the same under every region. A maple mouse is the pointer the machine's Sony Mouse
+  follows (ADR-0038, ADR-0040): a vblank handler adds up every bus frame's motion, the pointer lives on the
+  640 x 480 screen, and `draw_mouse_pointer` draws it last in each scene — the art of
+  `src/backend/api/pointer_art.h` as a 16 x 32 ARGB1555 texture, a texel a pixel (both
+  `build_scene` and a blank present end with it) while the kernel says it is shown
+  (`bp_mouse_pointer`: the machine's mouse is polled, no pad in use). In Flycast the host mouse
+  and keyboard must be assigned to the same maple port as the Dreamcast Mouse and Keyboard
+  devices, or those hear nothing.
+- Network (`dc_net.c`, `bp_http_*`, ADR-0040): the i-mode centre's HTTP requests over
+  KallistiOS's TCP. The network comes up at the first request, not at boot — `net_init` (the
+  broadband or LAN adaptor, DHCP or the flashrom's settings) in a thread of its own while the
+  requests wait — so a game that never goes online never waits for it; no adaptor, and every
+  request fails. Sockets are non-blocking; a name lookup is the one wait. Flycast needs its
+  broadband adaptor emulation for any of it; untested on hardware.

@@ -2,6 +2,36 @@
 
 ## Status snapshot
 
+**2026-09-28: The PS1's own mouse, keyboard and internet (ADR-0040) — no custom input API left.**
+Mods reach three official devices on controller ports of their own (`ModHost.plugMouse`,
+`plugKeyboard`, `plugIMode`; `ModHost.exchange` moves the bytes as SIO0 would): the Sony Mouse
+SCPH-1030 (`sio.SonyMouse`: 5A12h, the buttons, the motion toward the host's pointer, at most 7Fh a
+read, per reader), a PS/2 keyboard in the Lightspan Online Connection CD's protocol
+(`sio.Ps2Keyboard`: 96h, a count and Set 2 codes — the host's typing as the presses of a US
+keyboard, so any layout types right) and the i-mode adaptor SCPH-10180 (`sio.IModeAdaptor`: 41h,
+commands 11h..18h, XOR checksums, 58h-byte snippets, X.25 CRC per packet; `sio.IModeWire`). The
+kernel plays the host's half: `kernel.KMouse` shows the machine's pointer while a Sony Mouse is
+polled (hidden on pad input, gone half a second after the polls stop), `kernel.KKeyboard` types
+while a keyboard is polled, and `kernel.KIMode` is the phone and the i-mode centre — the session
+messages (auth, gateway, pings), the transport's 01h,3Fh/53h, TLP connect/data/EOF/disconnect —
+turning each request's absolute URL origin-form for the new `bp_http_open/read/close` (SDL2 and
+Dreamcast sockets, the Dreamcast's network brought up at the first request in a thread; `fetch` in
+the page). `mod.LibImode` is libimode's shape (RCV/SND/STS/ABORT/AUTH_*/GW_*, DORMANT..AUTH_ENDED).
+Gone: `enableMouse`, `mouseOver/X/Y/Held/Clicks/Moves`, `pictureWidth/Height`, `textEntry`,
+`typed`. Crash Bash: both mods on the Sony Mouse, the address keyboard on the PS/2 keyboard, DONE
+one i-mode session (`GET http://<address>:9457/SCUS94570 HTTP/1.0`). Verified: conformance `Mouse`
+`8d7276ce`, `Keyboard` `89f31197`, `IMode` `df5df22f` on JS and reflaxe.CPP, all 38 on JS;
+check.sh clean (46 ABI functions); test.sh (JS) passes, demo `329de455`; Crash Bash 3000
+`db892c4b` on JS, unchanged; headless, ONLINE → the address typed on the PS/2 keyboard → DONE
+→ libimode AUTH_STARTING..AUTH_ENDED → "connected to" against a canned answer; the SDL2 sockets
+against a local server (the raw response whole; a closed port -2); in the browser (builds
+b82f94c44bde and the final 3b89dfc7646c) the pointer shown over the menu, ONLINE clicked, `127.0.0.1` typed (a stray `x`
+ignored, no cross pressed), Enter → "CONNECTED TO 127.0.0.1", the server logging `GET /SCUS94570`;
+with the server stopped, DONE clicked → "NO ANSWER FROM 127.0.0.1". Dreamcast: dc_net.c compiles;
+`out/dc/crashbash-periph-max.cdi` built for the owner's test (its network needs Flycast's
+broadband adaptor; untested at runtime). Crash 3 on JS 9000 `4de78425`, unchanged; its CDI from
+the same code: `out/dc/crash3-periph-max.cdi`.
+
 **2026-09-28: VRAM read back to the CPU (GP0 C0h) — Crash Bash's saves carry their icon.** GPUREAD
 hands over a C0h rectangle two pixels a word (the first in the low halfword, wrapping within VRAM,
 a zero beside an odd last pixel), GPUSTAT bit 27 is set while pixels remain, and DMA2 in block
@@ -79,7 +109,11 @@ the game's screens by writing the index each keeps (players 8005A63Ah, OPTIONS 8
 pad reader (800138A4h) for a click — nine menu slots, a list live while the screen it was built
 under is current (OPTIONS opens in slot 4 and is never emptied); stepping down/up only for lists not
 yet known. The owner asked for the indexes: a stepping first version took several ten-frame
-slides to reach a character at the far end. Found on the way: onlinemenu
+slides to reach a character at the far end. The pointer hides while a pad is in use and comes
+back when the mouse moves (the kernel's rule, `bp_mouse_show` carries it out). On the Dreamcast a
+vblank handler adds up every bus frame's motion (KallistiOS keeps only the last), and a maple
+keyboard is pad 0 as well; in Flycast the host mouse and keyboard must be on the same maple port
+as the Dreamcast Mouse and Keyboard devices — the owner's arrow never moved otherwise. Found on the way: onlinemenu
 took OPTIONS's slot-4 build for leaving the main menu, so ONLINE (pad and mouse) stopped working
 after it; fixed. Verified: conformance `Mouse` `adc65922`, `Keyboard`, `ModHooks` on JS and
 reflaxe.CPP; a scripted headless walk (main menu, OPTIONS and back, Adventure submenu, the side
@@ -1721,9 +1755,25 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-28 [claude] The PS1's own peripherals (ADR-0040): Sony Mouse, PS/2 keyboard (Lightspan protocol),
+i-mode adaptor + libimode, KIMode as the phone/centre over new bp_http_* (SDL2/Dreamcast sockets, browser
+fetch); the custom mouse/keyboard ModHost API removed, Crash Bash's mods on the official devices. Conformance
+Mouse/Keyboard/IMode on JS+C++; browser: "connected to" a local server. Next: the owner's test of
+out/dc/crashbash-periph-max.cdi; Crash Bash's lobby as HTTP requests over the adaptor.
+
+2026-09-28 [claude] Mouse in Crash Bash's menus in play (PAUSED, its OPTIONS, QUIT GAME? YES/NO: mods/mouse
+measures 800809A0h's definitions, writes 8009AEECh, clicks with the driving player's cross). The machine's
+pointer only once a mod calls ModHost.enableMouse (bp_mouse_pointer: off/shown/hidden; art in
+src/backend/api/pointer_art.h, SDL2 colour cursor); DC keyboard types by its own region (keypad under every
+region; a layout option was dropped at the owner's word). Conformance Mouse b0789b91 JS+C++. Next: the owner's test of out/dc/crashbash-mouse3-max.cdi.
+
 2026-09-28 [claude] GP0 C0h VRAM read (GPUREAD, GPUSTAT.27, DMA2 GPU->RAM); conformance GpuRead; Crash Bash's
 save now carries its icon and palette (verified in the browser); VMU long description = title. Next: the owner's
 look at the icon on the Dreamcast VMU, once a CDI is built with it (out/dc/crashbash-card-max.cdi predates it).
+
+2026-09-28 [claude] Pointer hides on pad input (bp_mouse_show, KMouse.showOrHide); Dreamcast: mouse motion
+summed per bus frame in a vblank handler, maple keyboard as pad 0; Flycast needs the host mouse on the DC
+mouse's maple port. Next: the owner's test of out/dc/crashbash-mouse2-max.cdi.
 
 2026-09-28 [claude] DMA2 ordering tables walked over time with the GPU's estimated drawing time (ADR-0039):
 Crash Bash's pause text drawn; the first estimate (unclipped) dropped the hub to ~10 fps, clipped to the drawing

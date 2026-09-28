@@ -3,9 +3,14 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
-## 2026-09-28: The mouse in the menus (mods/mouse, mods/onlinemenu; ADR-0038)
+## 2026-09-28: The mouse in the menus (mods/mouse, mods/onlinemenu; ADR-0038, ADR-0040)
 
 Measured headless (a scripted pad, then a scripted mouse through `kernel.KMouse.update`).
+
+**The mouse is the PS1's own** (ADR-0040): each mod plugs a Sony Mouse into a controller port of
+its own and reads it every frame (01h 42h; 12h, 5Ah, the buttons, the motion), keeping its cursor
+in display pixels, from the middle of the display, as a PS1 mouse program does; the kernel's
+mouse moves that cursor to wherever the host's pointer is. Reading it is what shows the pointer.
 
 **Units.** Menu records and widgets place things in a 640 x 480 space centred on the screen: the
 widget draw (8001C690h) sets the GTE's screen offset to x times the display's width over 640
@@ -30,7 +35,9 @@ is live while the screen it was built under is. A torn-down menu (the demo, a ma
 
 **The picture screens.** The Battle Mode path is main menu, SELECT NUMBER OF PLAYERS (800B8E3Ch,
 a list; it takes cross only after some 150 frames), CHARACTER SELECT (800B9DF4h, frame handler
-800B6734h), CHOOSE LEVEL (800BA72Ch, 800B7458h), then the match (800BAAB4h). CHARACTER SELECT's
+800B6734h), CHOOSE LEVEL (800BA72Ch, 800B7458h), SELECT BATTLE TYPE (800BAAB4h: VS BATTLE, left
+and right the type, cross starts) and GAME OPTIONS (800B8E8Ch: cups to win, difficulty), then the
+match, under a current screen of 0, its objective panels waiting for cross. CHARACTER SELECT's
 slot 0 holds the P1 marker (widget 0) and the eight portraits (widgets 4..11) as sprites placed
 from the screen's top left in 640 x 480 units: x 150/240/330/420, y 38/138, each about 70 x 77
 inside a frame 90 x 100. Right and left walk the eight as one ring (7 -> 0 -> 1); the marker
@@ -59,14 +66,41 @@ idle frames at 80051604h. The mouse mod adds its presses there right after it. T
 had a bug this uncovered: it took any build into another slot as leaving the main menu, so after
 OPTIONS its ONLINE line and the mouse stopped working; only slot 0's builds count now.
 
+**The menus in play** — PAUSED and what opens from it — are not widgets but the boot overlay's
+own. 80080FBCh, called every frame, picks a definition by the game state's flags (8005A614h + 10h)
+and 800809A0h (definition a0, base y a1 — 8009BD18h, 112) draws it: 24-byte items to a type of
+-1, +0 the type, +2 x (8000h plus a centre, 320 for none), +4 y below the base, +6 the index of a
+string in the language's table (80059748h + 4 * language, English 80059668h: 0 CONTINUE, 1 SHOW
+RULES, 2 OPTIONS, 3 CHANGE ARENA, 5 QUIT GAME, 6 EXIT ARENA, 12 CHEAT MENU, 14 QUIT GAME?, 16
+"YES" and 17 "NO", padded with spaces to share a row). Type 0 lines, and type 1 while game +4 holds
+80010000h (the cheat line), are counted, and the one equal to 8009AEECh is drawn lit; types
+10+k, 20+k and 30+k are option k's values, drawn while the halfword at 8009BD1Ch + 2k is 1, 0 and
+9; 2 is the panel, 4 and 5 titles. PAUSED is 800598DCh in a battle (CONTINUE, SHOW RULES,
+OPTIONS, CHANGE ARENA, QUIT GAME), 800599B4h in the Adventure hub (CONTINUE, OPTIONS, QUIT GAME),
+8005975Ch and 8005981Ch in other modes; QUIT GAME? is 80059ABCh and the pause's OPTIONS
+80059C9Ch. The lines are drawn by 800243A0h, whose width 80024008h measures: the font at
+8005B2B4h (0 here), a letter's width the signed byte at 8005AEB4h + 100h * font + the letter (a
+glyph flagged 2 at 8005B0B4h + the same does not advance), times 640 over the display's width (+4
+of 8005B698h's record, 512). So CONTINUE spans 240..400, QUIT GAME 233..408, YES 223..283 and NO
+375..415, each line from its y to some 30 below — the owner's screenshot of the hub's PAUSED
+agrees to a unit. The input is 8007EFC0h (pad, last line): up and down move 8009AEECh (sound 190h,
+clamped), START resumes (clearing the pause's bits of game +10h), and it returns cross, which the
+menu's handler takes by the line; the pad is the player at 8009AEF0h, whose buttons pressed this
+frame are at 80051380h + 58h * player. The questions and the pause's OPTIONS go back on
+triangle; PAUSED itself does not look at it.
+
 ## 2026-09-28: ONLINE — an address only, the game's port, typing, and the demo timer
 
 The address keyboard takes an IPv4 address and nothing else (four numbers 0..255, no leading
 zeros): the port is the game's own, 9457 (`onlinemenu.Online.PORT`, ADR-0035), and DONE tries it
-at that address — today it says "no network yet", since the kernel has no network service. Where
-the machine has a keyboard it types into the field too (ADR-0036): digits and '.', Backspace,
-Enter for DONE, Escape for CANCEL; every other character is ignored, as the game's keyboard has
-no key for it.
+at that address the PS1's own way (ADR-0040): the i-mode adaptor on a port of the mod's, driven
+through libimode one transfer a vblank — AUTH_START, GW_CONNECT, SND of `GET
+http://<address>:9457/SCUS94570 HTTP/1.0`, RCV, GW_DISCONNECT, AUTH_END — and the line under the
+field says "connecting to", then "connected to" (an HTTP response came back), "no answer from" or
+"no network". Where the machine has a keyboard it types into the field too: the mod reads a PS/2
+keyboard on a port of its own (Set 2 scancodes, as a US keyboard types what the host typed) and
+takes digits and '.', Backspace, Enter for DONE, Escape for CANCEL; every other key is ignored,
+as the game's keyboard has no key for it.
 
 **The demo timer.** The executable's pad reader (80013974h) counts frames with no pad input at
 80051604h and zeroes it on any press; Select Game Type's frame handler calls 800B39C8h first,
@@ -74,8 +108,8 @@ which past 900 (`slti 385h`) resets it and starts the attract demo (8001E588h, w
 object 8009F644h). The count runs once per game frame — the menus run at 30 fps, so about 30 s.
 Typing is no pad input, so a player typing an address let it run on, and back in the menu the
 handler's first call started the demo at once. The keyboard holds 80051604h at zero while it is
-open, and gives the field up (text entry off, nothing kept) if the game builds any other screen
-under it. Verified headless: 2,400 frames at the keyboard, Enter, and the demo 1,861 frames later —
+open, and gives the field up (the PS1 keyboard no longer read, so the host's keyboard plays the
+pad again) if the game builds any other screen under it. Verified headless: 2,400 frames at the keyboard, Enter, and the demo 1,861 frames later —
 the full wait.
 
 ## 2026-09-28: Cross in the menus did nothing — the screen manager's leaves, and a fourth stage block

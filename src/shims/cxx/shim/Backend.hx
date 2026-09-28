@@ -108,8 +108,15 @@ class Backend {
 	public static inline function padAxis(pad:Int, axis:Int):Int return BackendNative.bp_pad_axis(pad, axis);
 	public static inline function keyText(on:Bool):Void BackendNative.bp_key_text(on ? 1 : 0);
 	public static inline function keyNext():Int return BackendNative.bp_key_next();
-	public static inline function requestQuit():Void {
 	public static inline function mouse(field:Int):Int return BackendNative.bp_mouse(field);
+	public static inline function mousePointer(state:Int):Void BackendNative.bp_mouse_pointer(state);
+	/** HTTP for the i-mode adaptor's phone (backend_c_api.h, ADR-0040). */
+	public static inline function httpOpen(host:String, port:Int, request:RawBuf, len:Int):Int
+		return BackendNative.bp_http_open(ConstCharPtr.fromString(host), port, RawMem.u8Ptr(request), len);
+	public static inline function httpRead(handle:Int, buf:RawBuf, cap:Int):Int
+		return BackendNative.bp_http_read(handle, RawMem.u8Ptr(buf), cap);
+	public static inline function httpClose(handle:Int):Void BackendNative.bp_http_close(handle);
+	public static inline function requestQuit():Void {
 		quitting = true;
 	}
 

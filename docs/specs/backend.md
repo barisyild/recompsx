@@ -77,17 +77,28 @@ int  bp_pad_type(int pad);
 uint32_t bp_pad_buttons(int pad);            /* PS1 bit layout, low 16 bits */
 int  bp_pad_axis(int pad, int axis);         /* 0=LX 1=LY 2=RX 3=RY; 0..255 center 128 */
 int  bp_quit_requested(void);
-/* keyboard as text (ADR-0036): typed only while text entry is on; then only the arrows of a
-   keyboard that also plays a pad still press it. Next: a code point or BP_KEY_*, -1 when none */
+/* keyboard as text (ADR-0036, ADR-0040): typed only while text entry is on — while the machine's
+   PS/2 keyboard is polled; then only the arrows of a keyboard that also plays a pad still press
+   it. Next: a code point or BP_KEY_*, -1 when none */
 enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
 void bp_key_text(int on);
 int  bp_key_next(void);
-/* mouse (ADR-0038): latched by bp_input_poll; over the picture, x/y as fractions 0..65535 of it,
-   buttons held (left, right, middle, back, forward) */
+/* mouse (ADR-0038, ADR-0040): latched by bp_input_poll; over the picture, x/y as fractions
+   0..65535 of it, buttons held (left, right, middle, back, forward); the machine's Sony Mouse
+   follows it */
 enum { BP_MOUSE_OVER = 0, BP_MOUSE_X = 1, BP_MOUSE_Y = 2, BP_MOUSE_BUTTONS = 3 };
 int  bp_mouse(int field);
-/* storage: name in [A-Za-z0-9._-]{1,64}; memcards & config — the HLE kernel's console
-   settings are one such blob, system.cfg (ADR-0034); the browser keeps them in localStorage */
+enum { BP_POINTER_OFF = 0, BP_POINTER_SHOWN = 1, BP_POINTER_HIDDEN = 2 };
+void bp_mouse_pointer(int state); /* the machine's pointer: shown while its Sony Mouse is polled,
+                                    hidden while a pad is in use; the art is pointer_art.h */
+/* network (ADR-0040): the i-mode centre's way out — one HTTP request (origin form, raw bytes) to
+   host:port, never blocking. open: a handle, -1 no network; read: bytes > 0, 0 not yet, -1 the
+   response is complete, -2 failed; close once per handle */
+int  bp_http_open(const char* host, int port, const uint8_t* request, int len);
+int  bp_http_read(int handle, uint8_t* buf, int cap);
+void bp_http_close(int handle);
+/* storage: name in [A-Za-z0-9._-]{1,64}; config — the HLE kernel's console settings are one
+   such blob, system.cfg (ADR-0034); the browser keeps them in localStorage */
 int  bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 none */
 int  bp_storage_write(const char* name, const uint8_t* buf, int len); /* 0 ok, -1 fail */
 /* memory cards (ADR-0037): a game's card in recompsx's card format — a 16-byte header and a
@@ -152,27 +163,47 @@ key (`KeyboardEvent.code`), and the Gamepad API in the W3C standard mapping, thr
 browser externs (`shim.Input`); under Node no pad is connected. The Dreamcast backend reads maple
 controllers (`dc_input.c`); the null backend has none.
 
-The keyboard also types, for the HLE kernel's keyboard (`kernel.KKeyboard`, ADR-0036). A reader —
-a mod's text field — turns text entry on (`bp_key_text(1)`) while it is open; right after
-`bp_input_poll` the runtime drains `bp_key_next` into the kernel's queue, so typing arrives once
-per vblank like the buttons. What comes out is whatever the host's layout and input method made:
+The keyboard also types, for the machine's own keyboard (`sio.Ps2Keyboard` behind
+`kernel.KKeyboard`; ADR-0036, ADR-0040). While something polls that keyboard — a mod's text field,
+every frame it is open — the runtime keeps text entry on (`bp_key_text(1)`), and right after
+`bp_input_poll` it drains `bp_key_next` into the keyboard as the key presses that type each
+character on a US keyboard (Scan Code Set 2), so typing arrives once per vblank like the
+buttons. What comes out is whatever the host's layout and input method made:
 SDL2's `SDL_TEXTINPUT` (UTF-8, decoded) on the desktop, `KeyboardEvent.key` in the browser, a
 maple keyboard's KallistiOS queue translated by its region (ISO-8859-1, which is Unicode's first
 256 code points) on the Dreamcast; Backspace, Enter and Escape come as `BP_KEY_*`. While text
 entry is on, a backend whose keyboard also plays pad 0 lets only the arrows press it, so a typed
 `s` is never square as well, and the desktop's Escape cancels instead of quitting; a key held when
 it ends becomes a button only when pressed again. The null backend, JVM and Node type nothing,
-and a headless run never drains the queue.
+and a headless run never drains the keyboard.
 
-The pointer is the HLE kernel's mouse (`kernel.KMouse`, ADR-0038): `bp_mouse` answers, after
+The pointer is what the machine's Sony Mouse follows (`kernel.KMouse`, `sio.SonyMouse`; ADR-0038,
+ADR-0040): `bp_mouse` answers, after
 `bp_input_poll`, whether the pointer is over the picture, where as a fraction of it (0..65535 each
 way — the kernel turns that into the emulated display's pixels), and which buttons are held, a
 press shorter than a poll counted for one. SDL2 keeps the letterbox rectangle `bp_present` drew
 in and scales the window's points to the renderer's pixels (high-DPI); the browser reads pointer
 events over the page's picture element (`recompsxHost.screen`) and keeps the right button's menu
 and the side buttons' history navigation from the page; the Dreamcast integrates a maple mouse's
-motion on its 640 x 480 screen and draws the arrow itself, last in each scene. Null, JVM and Node
-have no mouse; a headless run never samples one.
+motion on its 640 x 480 screen (a vblank handler adds up every bus frame's) and draws the arrow
+itself, last in each scene. The machine has a pointer while its mouse is polled (a mod driving
+its game with it); `bp_mouse_pointer` then says shown, or hidden while a pad is in use —
+the Dreamcast draws `src/backend/api/pointer_art.h`, SDL2 makes its cursor of that art (the
+system's own while the machine has none, none while hidden), the page adds the class `pointer`
+whose CSS cursor is the same art (`cursor: none` while hidden). A maple keyboard is the
+Dreamcast's pad 0 too, with the desktop's map, and types by the keyboard's own region
+(ADR-0036). Null, JVM and Node have no mouse; a headless run never samples one.
+
+The network is the i-mode centre's way out (`kernel.KIMode`, ADR-0040): the machine's i-mode
+adaptor carries HTTP/1.0 requests, and the centre hands each to `bp_http_open` in origin form, with
+the host and port apart, then reads the response raw with `bp_http_read` once a vblank. SDL2 opens
+a non-blocking TCP socket (POSIX, or Winsock on Windows) and sends the request as it is; the
+Dreamcast does the same over KallistiOS's TCP stack, bringing the network up (`net_init`: the
+broadband or LAN adaptor, DHCP) in a thread at the first request, so nothing blocks a frame; the
+browser sends it with `fetch` — the method, the headers a page may set and the body — and rebuilds
+the raw response (status line, headers, `Content-Length`, body), which reaches only servers that
+allow the page's origin (CORS). Null, JVM and Node have no network: `bp_http_open` returns -1, and
+a headless run's centre rejects every request.
 
 ## 2.1 Dreamcast and optional hardware drawing
 
@@ -244,7 +275,8 @@ shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliase
 
 `src/runtime/Backend.hx` — the only platform surface the runtime sees:
 `init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/
-keyText/keyNext/mouse/quitRequested/storageRead/storageWrite/fileOpen/fileSize/fileRead/fileClose/
+keyText/keyNext/mouse/mousePointer/httpOpen/httpRead/httpClose/quitRequested/storageRead/
+storageWrite/fileOpen/fileSize/fileRead/fileClose/
 timeUs/log/fatal`.
 
 `src/shims/cxx/BackendNative.hx` — flat externs in the verified reflaxe.CPP form:

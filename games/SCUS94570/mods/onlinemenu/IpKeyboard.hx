@@ -1,7 +1,6 @@
 package onlinemenu;
 
 import core.CpuState;
-import kernel.KKeyboard;
 import mod.ModHost;
 import onlinemenu.Game;
 
@@ -23,12 +22,13 @@ import onlinemenu.Game;
 	DONE tries that port at this address (ADR-0035: online is built per game, never netplay). The
 	menu font has no '_', so the cursor is '-'.
 
-	Where the machine has a keyboard, it types too (`kernel.KKeyboard`, ADR-0036): the keyboard is
-	put into text entry while this is open, so what it types is taken — a digit or '.' as its key
-	would type it, Backspace as '<', Enter as DONE, Escape as CANCEL — and anything else it types
-	is ignored, since this keyboard has no key for it. The pad keeps working beside it, and so does
-	the mouse (ADR-0038): pointing at a key selects it, a left click presses it, and back (the right
-	button, or the side button) is CANCEL.
+	The machine's keyboard types too — the PS1 keyboard on a port of the mod's own
+	(`ModHost.plugKeyboard`, ADR-0040), polled every frame this is open, which is what makes the
+	host's keyboard type rather than play the pad meanwhile. It sends PS/2 Set 2 scancodes as a US
+	keyboard types what the host typed, and this takes a digit or '.' as its key would type it,
+	Backspace as '<', Enter as DONE and Escape as CANCEL; anything else is ignored, since this
+	keyboard has no key for it. The pad keeps working beside it, and so does the mouse: pointing at
+	a key selects it, a left click presses it, and back (the right button) is CANCEL.
 
 	The last address DONE accepted is a console setting (`net.last_address`, kernel.KSettings,
 	ADR-0034), so it outlives the session like a network setting on a console, beside — not
@@ -37,6 +37,24 @@ import onlinemenu.Game;
 class IpKeyboard {
 	/** "255.255.255.255". */
 	public static inline var MAX = 15;
+
+	// The keyboard: its ID, and the Set 2 codes this reads.
+	static inline var KEYBOARD = 0x96;
+	static inline var RELEASE = 0xF0;
+	static inline var EXTENDED = 0xE0;
+	static inline var LEFT_SHIFT = 0x12;
+	static inline var RIGHT_SHIFT = 0x59;
+	static inline var CODE_BACKSPACE = 0x66;
+	static inline var CODE_ENTER = 0x5A;
+	static inline var CODE_ESCAPE = 0x76;
+
+	static var keyboard = -1;
+	/** A read, as the Online Connection CD sends it: 01h, 42h, twelve zeros, 06h. */
+	static var keyboardRead:Array<Int>;
+	static var keyboardReply:Array<Int>;
+	static var releasing = false;              // F0h came: the next code is a key let go
+	static var extended = false;               // E0h came: the next code is an extended key
+	static var shifted = false;                // a Shift is held
 
 	// The list, in order; the builder makes the widgets in the same order.
 	static inline var ENTRY_BOX = 0;
@@ -141,12 +159,19 @@ class IpKeyboard {
 
 	public static inline function isOpen():Bool return open;
 
+	/** When the mod installs: the keyboard, plugged into a port of the mod's own. */
+	public static function install():Void {
+		keyboardRead = [0x01, 0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06];
+		keyboardReply = [for (_ in 0...15) 0];
+		keyboard = ModHost.plugKeyboard();
+	}
+
 	/** Builds the keyboard in slot 0, from the main menu's own records (`menu`, the mod's list). */
 	public static function show(ctx:CpuState, menu:Int):Void {
 		layOut(menu);
 		restore();
 		open = true;
-		ModHost.textEntry(true);
+		keysSync();
 		Pointer.sync();
 		accepted = false;
 		kept = false;
@@ -242,11 +267,7 @@ class IpKeyboard {
 		else if ((edges & Game.PAD_SQUARE) != 0) press(ctx, DELETE);
 		else if ((edges & Game.PAD_CROSS) != 0) activate(ctx);
 		else {}
-		var c = ModHost.typed();
-		while (open && c >= 0) {
-			type(ctx, c);
-			c = ModHost.typed();
-		}
+		keys(ctx);
 		if (open) pointer(ctx);
 		else {}
 		if (open) paint();
@@ -334,13 +355,66 @@ class IpKeyboard {
 		return found;
 	}
 
-	/** Something typed on the machine's keyboard: taken if one of these keys types it, else ignored. */
-	static function type(ctx:CpuState, c:Int):Void {
-		if (c == KKeyboard.BACKSPACE) press(ctx, DELETE);
-		else if (c == KKeyboard.ENTER) finish(ctx);
-		else if (c == KKeyboard.ESCAPE) close(ctx, false);
-		else if (c != DELETE && typedByKey(c)) press(ctx, c);
+	/** A poll of the keyboard: what it typed since the last one, byte by byte. */
+	static function keys(ctx:CpuState):Void {
+		if (ModHost.exchange(keyboard, keyboardRead, 15, keyboardReply) && keyboardReply[1] == KEYBOARD) {
+			final n = keyboardReply[3] <= 11 ? keyboardReply[3] : 0;
+			for (i in 0...n) {
+				if (open) scancode(ctx, keyboardReply[4 + i]);
+				else {}
+			}
+		} else {}
+	}
+
+	/** A poll that takes nothing: what was typed before the keyboard opened is not typed into it. */
+	static function keysSync():Void {
+		ModHost.exchange(keyboard, keyboardRead, 15, keyboardReply);
+		releasing = false;
+		extended = false;
+		shifted = false;
+	}
+
+	/** One Set 2 byte: F0h lets the next key go, E0h marks an extended one, a code is a key. */
+	static function scancode(ctx:CpuState, b:Int):Void {
+		if (b == RELEASE) {
+			releasing = true;
+		} else if (b == EXTENDED) {
+			extended = true;
+		} else {
+			if (b == LEFT_SHIFT || b == RIGHT_SHIFT) shifted = !releasing;
+			else if (!releasing && !extended) key(ctx, b);
+			else {}
+			releasing = false;
+			extended = false;
+		}
+	}
+
+	/** A key pressed on the machine's keyboard: taken if one of these keys types it, else ignored. */
+	static function key(ctx:CpuState, code:Int):Void {
+		final c = shifted ? -1 : typedBy(code);
+		if (code == CODE_BACKSPACE) press(ctx, DELETE);
+		else if (code == CODE_ENTER) finish(ctx);
+		else if (code == CODE_ESCAPE) close(ctx, false);
+		else if (c >= 0 && typedByKey(c)) press(ctx, c);
 		else {}
+	}
+
+	/** What a US key types without Shift, of what this keyboard has: the digits and '.'; else -1. */
+	static function typedBy(code:Int):Int {
+		return switch (code) {
+			case 0x16: "1".code;
+			case 0x1E: "2".code;
+			case 0x26: "3".code;
+			case 0x25: "4".code;
+			case 0x2E: "5".code;
+			case 0x36: "6".code;
+			case 0x3D: "7".code;
+			case 0x3E: "8".code;
+			case 0x46: "9".code;
+			case 0x45: "0".code;
+			case 0x49: ".".code;
+			default: -1;
+		}
 	}
 
 	static function typedByKey(c:Int):Bool {
@@ -379,7 +453,6 @@ class IpKeyboard {
 	static function close(ctx:CpuState, keep:Bool):Void {
 		accepted = keep;
 		open = false;
-		ModHost.textEntry(false);
 		if (keep) kept = ModHost.setSetting(SETTING, address());
 		else {}
 		if (keep) Game.sound(ctx, Game.SOUND_SELECT);
@@ -388,13 +461,12 @@ class IpKeyboard {
 
 	/**
 		The game has left the menu under the keyboard (its demo, a reset): close it without keeping
-		anything, and give the keyboard back to the pad.
+		anything. Nothing polls the keyboard then, so the host's keyboard plays the pad again.
 	**/
 	public static function abandon():Void {
 		if (open) {
 			open = false;
 			accepted = false;
-			ModHost.textEntry(false);
 		} else {}
 	}
 

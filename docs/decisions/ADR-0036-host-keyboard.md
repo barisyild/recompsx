@@ -1,7 +1,13 @@
 # ADR-0036: The host's keyboard as text — an HLE device the PS1 never had
-Status: accepted   Date: 2026-09-28
+Status: accepted; its kernel service superseded-by-0040   Date: 2026-09-28
 Direction set by the project owner; the second "PS1 Pro" kernel feature after console settings
 (ADR-0034), first used by Crash Bash's address keyboard (ADR-0033's `onlinemenu`).
+
+**Since ADR-0040** the keyboard a mod reads is the machine's own — a PS/2 keyboard on a controller
+port of the mod's, speaking the protocol of the Lightspan Online Connection CD (ID 96h, PS/2 Scan
+Code Set 2) — and `ModHost.textEntry`/`typed` and the kernel's queue are gone. The backend ABI
+below stays: the kernel turns text entry on while that keyboard is polled, and sends what was
+typed on as the key presses that type it on a US keyboard.
 
 ## Context
 
@@ -33,8 +39,16 @@ never drains it, as it never samples the pads.
 
 Backends: SDL2 decodes `SDL_TEXTINPUT`'s UTF-8 (and calls `SDL_Start/StopTextInput`); the browser
 takes `KeyboardEvent.key` (one code point; AltGr still types, Ctrl/Meta shortcuts do not); the
-Dreamcast pops a maple keyboard's KallistiOS queue translated by its region — ISO-8859-1, which
-is Unicode's first 256 code points; null, JVM and Node type nothing.
+Dreamcast pops a maple keyboard's KallistiOS queue untranslated and turns each key into a code
+point by the keyboard's region (KallistiOS's maps, ISO-8859-1, which is Unicode's first 256 code
+points), the keypad the same under every region; null, JVM and Node type nothing.
+
+A Dreamcast keyboard's region is its layout, and the host of an emulator has its own: Flycast
+passes the host's keys on by position and reports the host's layout only when it recognises it,
+US otherwise — so on a Turkish Q keyboard the '.' key, where US has '/', types '/', and '.' is the
+key where US has it (Turkish Q's Ç) or the keypad's. A setting naming the layout was built and
+dropped the same day: the owner wants the automatic default, the keyboard's own region, and
+nothing to configure.
 
 ## Alternatives
 

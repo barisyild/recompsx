@@ -47,8 +47,12 @@ extern class Backend {
 	public static function padAxis(pad:Int, axis:Int):Int;
 	public static function keyText(on:Bool):Void;
 	public static function keyNext():Int;
-	public static function requestQuit():Void;
 	public static function mouse(field:Int):Int;
+	public static function mousePointer(state:Int):Void;
+	public static function httpOpen(host:String, port:Int, request:RawBuf, len:Int):Int;
+	public static function httpRead(handle:Int, buf:RawBuf, cap:Int):Int;
+	public static function httpClose(handle:Int):Void;
+	public static function requestQuit():Void;
 	public static function quitRequested():Bool;
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int;
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int;

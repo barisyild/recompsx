@@ -99,6 +99,7 @@ elseif(RECOMPSX_BACKEND STREQUAL "dreamcast")
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_fastmem.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_files.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_input.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_net.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_prof.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_scene.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_textures.c"

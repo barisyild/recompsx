@@ -93,12 +93,12 @@ class Game {
 	public static inline function record(list:Int, i:Int):Int return (list + i * RECORD) | 0;
 
 	/**
-		The pointer in the menus' own units. A record's x and y are in a 640 x 480 space centred on
-		the screen, which the widget draw (8001C690h) scales to the display it draws on — x times
-		the display's width over 640, y halved for its 240 lines — so the pointer's pixels go back
+		A display pixel in the menus' own units. A record's x and y are in a 640 x 480 space centred
+		on the screen, which the widget draw (8001C690h) scales to the display it draws on — x times
+		the display's width over 640, y halved for its 240 lines — so the cursor's pixels go back
 		the same way. A text line's y is its top; its letters are about 28 units tall, and 20 wide.
 	**/
-	public static function pointerX():Int return IntMath.div(ModHost.mouseX() * 640, ModHost.pictureWidth()) - 320;
+	public static function pointerX(px:Int):Int return IntMath.div(px * 640, ModHost.displayWidth()) - 320;
 
-	public static function pointerY():Int return IntMath.div(ModHost.mouseY() * 480, ModHost.pictureHeight()) - 240;
+	public static function pointerY(py:Int):Int return IntMath.div(py * 480, ModHost.displayHeight()) - 240;
 }

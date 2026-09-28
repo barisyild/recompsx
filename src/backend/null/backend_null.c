@@ -77,6 +77,11 @@ int  bp_key_next(void) { return -1; }
 
 /* No mouse: never over the picture, nothing held. */
 int bp_mouse(int field) { (void)field; return 0; }
+void bp_mouse_pointer(int state) { (void)state; }
+/* No network: the i-mode adaptor's phone finds none (ADR-0040). */
+int  bp_http_open(const char* host, int port, const uint8_t* request, int len) { (void)host; (void)port; (void)request; (void)len; return -1; }
+int  bp_http_read(int handle, uint8_t* buf, int cap) { (void)handle; (void)buf; (void)cap; return -2; }
+void bp_http_close(int handle) { (void)handle; }
 
 int bp_storage_read(const char* name, uint8_t* buf, int len) {
     (void)name; (void)buf; (void)len; return -1;

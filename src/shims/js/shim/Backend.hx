@@ -209,14 +209,42 @@ class Backend {
 	/** The page's keyboard as text (shim.Input); under Node nothing is ever typed. */
 	public static function keyText(on:Bool):Void Input.textEntry(on);
 	public static function keyNext():Int return Input.nextTyped();
+	/** The pointer over the page's picture (shim.Input); under Node there is none. */
+	public static function mouse(field:Int):Int return Input.mouse(field);
+	public static function mousePointer(state:Int):Void Input.showPointer(state);
+
+	/**
+		HTTP for the i-mode adaptor's phone (backend_c_api.h, ADR-0040): the page's `fetch`, through
+		its host (web/index.html); under Node, no network.
+	**/
+	public static function httpOpen(name:String, port:Int, request:RawBuf, len:Int):Int {
+		var h = -1;
+		if (hosted()) {
+			h = js.Syntax.code("(typeof {0}.httpOpen === 'function' ? ({0}.httpOpen({1}, {2}, {3}.u8.slice(0, {4})) | 0) : -1)",
+				host(), name, port, request, len);
+		} else {}
+		return h;
+	}
+
+	public static function httpRead(handle:Int, buf:RawBuf, cap:Int):Int {
+		var n = -2;
+		if (hosted()) {
+			n = js.Syntax.code("(typeof {0}.httpRead === 'function' ? ({0}.httpRead({1}, {2}.u8.subarray(0, {3})) | 0) : -2)",
+				host(), handle, buf, cap);
+		} else {}
+		return n;
+	}
+
+	public static function httpClose(handle:Int):Void {
+		if (hosted()) js.Syntax.code("(typeof {0}.httpClose === 'function' && {0}.httpClose({1}))", host(), handle);
+		else {}
+	}
 	public static function requestQuit():Void {
 		quit = true;
 	}
 
 	public static function quitRequested():Bool return quit;
 
-	/** The pointer over the page's picture (shim.Input); under Node there is none. */
-	public static function mouse(field:Int):Int return Input.mouse(field);
 	/**
 		Reads a kept blob: the page's (its local storage), or under Node a file beside the program,
 		where `storageWrite` puts it. -1 when there is none.

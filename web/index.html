@@ -14,6 +14,12 @@
     button { border: 0; border-radius: 8px; padding: 10px 18px; font: inherit; cursor: pointer; background: #f4b942; color: #17130a; }
     button:disabled { cursor: wait; opacity: .65; }
     .screen { aspect-ratio: 4 / 3; background: #000; border: 1px solid #292f3a; border-radius: 10px; overflow: hidden; box-shadow: 0 24px 80px #0009; }
+    /* The machine's pointer over the picture, while a mod has turned the mouse on: the same
+       16 x 24 art the Dreamcast draws (src/backend/api/pointer_art.h), tip at 0 0, and twice the
+       size where a CSS pixel is two device pixels. The runtime adds the class, and sets
+       `cursor: none` while a pad is in use (ADR-0038). */
+    .screen.pointer { cursor: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAYCAYAAADzoH0MAAAAmklEQVR42qXUwQ2AIAwFUEbh4EaO4Cie9Ow0uAvOIRcNJphKSvmtJA0JgZfSFJz3w5XDWUcBzEg+mNJ5jdNqQ/KhI0Y7UoAQ9mdWIxQwITWgRjhAhbQAGJEACOkBXQQBRAQFmogGYJEeMC8bGy+CAPTF1sECWa8BuA9KajUI9QHdSJEu8CkKWYeykL40OAupPnAtEOTXv9m65g1iKifH7MkowAAAAABJRU5ErkJggg==) 0 0, default;
+      cursor: -webkit-image-set(url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAYCAYAAADzoH0MAAAAmklEQVR42qXUwQ2AIAwFUEbh4EaO4Cie9Ow0uAvOIRcNJphKSvmtJA0JgZfSFJz3w5XDWUcBzEg+mNJ5jdNqQ/KhI0Y7UoAQ9mdWIxQwITWgRjhAhbQAGJEACOkBXQQBRAQFmogGYJEeMC8bGy+CAPTF1sECWa8BuA9KajUI9QHdSJEu8CkKWYeykL40OAupPnAtEOTXv9m65g1iKifH7MkowAAAAABJRU5ErkJggg==) 1x, url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAwCAYAAABwrHhvAAAAwElEQVR42t3YQQqAIBAFUI/Soht1hI7Sqtadxu5S56hNgSBEMZg5jvMV/kKQeDSWOKZp2vMeIz3UAcQhagDHsbt0/eQiBlED2NbVRRyiDmDt4uLn2SFqAWIQ9YDsEBhANggcgB0CC2CDwAOSIdUAfkOqA0RDqgV8hsADhnGOygtSDYC64oWCA/CvLgTIdhwXAzw3TQjIfhwXA1APpCD4APJHQaxnK4UaQGyTiq0UxQGpNyr2zxIGoL4UxfqNcD3nC76InxkmNDjFAAAAAElFTkSuQmCC) 2x) 0 0, default; }
     canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; object-fit: contain; }
     canvas[hidden] { display: none; }
     #screen-gl { object-fit: fill; }
@@ -383,6 +389,60 @@
             } catch (error) { writeLog(`[card] ${title}: not kept (${error.message})`); return -1; }
             writeLog(`[card] ${title}: ${bytes.length} bytes kept`);
             return 0;
+          },
+          // The i-mode adaptor's phone on the network (bp_http_*, ADR-0040): the request comes raw,
+          // origin-form with a Host header, and goes out as fetch(); the answer goes back raw, as
+          // an HTTP/1.0 server would send it. The server has to allow this page's origin (CORS),
+          // and a page served over https can reach https only.
+          httpOpen(host, port, bytes) {
+            const text = new TextDecoder('latin1').decode(bytes);
+            const end = text.indexOf('\r\n\r\n');
+            const head = (end < 0 ? text : text.slice(0, end)).split('\r\n');
+            const [method, path] = head[0].split(' ');
+            const headers = new Headers();
+            for (const line of head.slice(1)) {
+              const colon = line.indexOf(':');
+              const name = colon < 0 ? '' : line.slice(0, colon).trim();
+              if (name && !/^(host|content-length|connection|user-agent)$/i.test(name)) {
+                try { headers.append(name, line.slice(colon + 1).trim()); } catch (error) {}
+              }
+            }
+            const body = end < 0 || /^(GET|HEAD)$/i.test(method) ? undefined : bytes.slice(end + 4);
+            const id = (this.nextHttp = (this.nextHttp || 0) + 1);
+            const exchange = { data: new Uint8Array(0), done: false, failed: false };
+            (this.http = this.http || new Map()).set(id, exchange);
+            const url = `${location.protocol === 'https:' ? 'https' : 'http'}://${host}${port === 80 ? '' : ':' + port}${path}`;
+            fetch(url, { method, headers, body }).then(async (response) => {
+              const content = new Uint8Array(await response.arrayBuffer());
+              let status = `HTTP/1.0 ${response.status} ${response.statusText || ''}\r\n`;
+              response.headers.forEach((value, name) => {
+                if (!/^(content-length|content-encoding|transfer-encoding|connection)$/i.test(name)) status += `${name}: ${value}\r\n`;
+              });
+              status += `Content-Length: ${content.length}\r\n\r\n`;
+              const all = new Uint8Array(status.length + content.length);
+              for (let i = 0; i < status.length; i++) all[i] = status.charCodeAt(i) & 0xFF;
+              all.set(content, status.length);
+              exchange.data = all;
+              exchange.done = true;
+            }).catch((error) => {
+              writeLog(`[net] ${method} ${url}: ${error.message}`);
+              exchange.failed = true;
+            });
+            return id;
+          },
+          httpRead(handle, into) {
+            const exchange = this.http && this.http.get(handle);
+            if (!exchange || exchange.failed) return -2;
+            if (exchange.data.length > 0) {
+              const n = Math.min(into.length, exchange.data.length);
+              into.set(exchange.data.subarray(0, n));
+              exchange.data = exchange.data.subarray(n);
+              return n;
+            }
+            return exchange.done ? -1 : 0;
+          },
+          httpClose(handle) {
+            if (this.http) this.http.delete(handle);
           }
         };
         const script = document.createElement('script');

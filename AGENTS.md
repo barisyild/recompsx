@@ -16,9 +16,11 @@ games/<SERIAL>/mods/<id> (ADR-0033), and reaches the game only through `mod.ModH
 
 **Online is never netplay (ADR-0035).** No lockstep, rollback, input exchange or savestate sync —
 ever. Online play is written per game: a lobby in the game's own UI and a game-level protocol in
-the game's mod, over one network service in the HLE kernel ("PS1 Pro") with a transport per
-target, so consoles, web and desktop play together. Never propose netplay as a design. A player
-types only an address; each game's port is fixed in its mod.
+the game's mod, over the PS1's own i-mode adaptor (ADR-0040) — its phone and i-mode centre are
+the HLE kernel's ("PS1 Pro"), HTTP out through a transport per target — so consoles, web and
+desktop play together. Never propose netplay as a design. A player types only an address; each
+game's port is fixed in its mod. Mods read the mouse and keyboard the same way: the PS1's own
+devices (Sony Mouse, PS/2 keyboard) on ports of their own, never a custom API.
 
 **Platforms: consoles are the point.** PS2 and derivatives (PSP, Dreamcast, GameCube/Wii,
 Switch) plus JVM follow by implementing one C header (src/backend/api/backend_c_api.h) and one
@@ -114,6 +116,9 @@ Prefer this over single-target unit tests for anything numeric, bit-level or mem
 
 ## Session protocol (both Codex CLI and Claude Code)
 - START: read PROGRESS.md "Status snapshot" + "Next up". Do the top item unless told otherwise.
+- ONE TREE: work only in this working tree. Never in another worktree — no `git worktree`, no
+  copy of the tree to build, test or measure in — unless the owner says otherwise. Several
+  sessions share this tree at once.
 - END: update snapshot, append ONE log entry (<=5 lines, newest-first):
   `YYYY-MM-DD [agent] did X; next Y`.
 - A milestone is DONE only when its acceptance command's output is pasted into PROGRESS.md.

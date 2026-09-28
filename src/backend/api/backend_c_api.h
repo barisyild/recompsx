@@ -197,12 +197,13 @@ int      bp_pad_axis(int pad, int axis);   /* 0=LX 1=LY 2=RX 3=RY; 0..255, centr
 int      bp_quit_requested(void);
 
 /* ---- keyboard ------------------------------------------------------------------------------
- * The host's keyboard as text: a device the PS1 never had, which the HLE kernel offers games
- * and mods (kernel.KKeyboard, ADR-0036). A target that has a keyboard — a PC, a browser, a
- * Dreamcast with its keyboard plugged in — passes on what is typed; one that has none types
- * nothing, and everything that reads it still works.
+ * The host's keyboard as text, which the runtime sends on to the machine's own keyboard as the
+ * key presses that type it (kernel.KKeyboard, sio.Ps2Keyboard, ADR-0040). A target that has a
+ * keyboard — a PC, a browser, a Dreamcast with its keyboard plugged in — passes on what is
+ * typed; one that has none types nothing, and everything that reads it still works.
  *
- * bp_key_text(1) starts text entry, bp_key_text(0) ends it; it starts off. While it is on the
+ * bp_key_text(1) starts text entry, bp_key_text(0) ends it; it starts off. The runtime turns it on
+ * while something polls the machine's keyboard, and off when the polls stop. While it is on the
  * keyboard types rather than plays: what it types goes to a queue, and a backend that also
  * plays a pad with the keyboard lets only the arrow keys still press the d-pad, so that a
  * letter typed is never a button pressed as well. While it is off nothing is queued, and
@@ -212,15 +213,16 @@ int      bp_quit_requested(void);
  * Unicode code point — whatever the host's own layout and input method made of the keys — or
  * one of the three editing keys below. The runtime drains it right after bp_input_poll, so what
  * was typed reaches the machine once per vblank, as buttons do. Which characters mean anything
- * is for the reader to decide; a backend passes on everything the host can type. */
+ * is for the runtime to decide; a backend passes on everything the host can type. */
 enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
 
 void bp_key_text(int on);
 int  bp_key_next(void);
 
 /* ---- mouse ---------------------------------------------------------------------------------
- * The host's pointer over the picture, which the HLE kernel offers games and mods
- * (kernel.KMouse, ADR-0038). bp_input_poll latches it with the pads; then bp_mouse answers:
+ * The host's pointer over the picture, which the machine's own mouse follows (kernel.KMouse,
+ * sio.SonyMouse; ADR-0038, ADR-0040). bp_input_poll latches it with the pads; then bp_mouse
+ * answers:
  *
  *   BP_MOUSE_OVER     1 while the target has a mouse and the pointer is over the picture
  *   BP_MOUSE_X, _Y    where, as a fraction of the picture: 0..65535 from its left edge across its
@@ -232,11 +234,43 @@ int  bp_key_next(void);
  *                     backend keeps from the page). A press that began and ended between two
  *                     polls counts as held for the second, so a quick click is never lost.
  *
- * A target without a mouse answers 0 to everything. One whose host draws no pointer of its own
- * (a console) draws one over the picture while the pointer is over it. */
+ * A target without a mouse answers 0 to everything.
+ *
+ * The machine reads the mouse as its own, a Sony Mouse (ADR-0040). bp_mouse_pointer(state) says
+ * whether the machine has a pointer over the picture: it has one while something polls that mouse
+ * (a mod driving its game with it), so a game nothing reads the mouse for shows none; the mouse is
+ * sampled either way.
+ *
+ *   BP_POINTER_OFF     (the start) no pointer of the machine's: a host with a cursor of its own
+ *                      shows that as over any other window, a console draws nothing.
+ *   BP_POINTER_SHOWN   the machine's pointer over the picture — the art in pointer_art.h, which a
+ *                      console draws and a host with a cursor takes for its cursor.
+ *   BP_POINTER_HIDDEN  on, but hidden while the player is on a pad (a pad button pressed; the
+ *                      mouse moving or clicking shows it again): no pointer over the picture, not
+ *                      even the host's. */
 enum { BP_MOUSE_OVER = 0, BP_MOUSE_X = 1, BP_MOUSE_Y = 2, BP_MOUSE_BUTTONS = 3 };
+enum { BP_POINTER_OFF = 0, BP_POINTER_SHOWN = 1, BP_POINTER_HIDDEN = 2 };
 
-int bp_mouse(int field);
+int  bp_mouse(int field);
+void bp_mouse_pointer(int state);
+
+/* ---- network ---------------------------------------------------------------------------------
+ * The host's side of the i-mode adaptor (ADR-0040): the machine goes online the PS1's own way, an
+ * i-mode phone on a controller port, and the phone's i-mode centre — the HLE kernel's
+ * (kernel.KIMode) — takes the HTTP requests it carries out to the host's network. So this is
+ * HTTP, one request at a time, and never blocks.
+ *
+ * bp_http_open sends one request: `request` is the whole of it, `len` bytes — request line,
+ * headers, blank line, body — in origin form ("GET /path HTTP/1.0", a Host: header), for `host`
+ * (a name or dotted address) at `port`. It returns a handle, or -1 when the target has no network
+ * or cannot start one. bp_http_read then hands over the response as it arrives, raw — status
+ * line, headers, body, as a server sends them over HTTP/1.0 — into `buf`: the bytes written
+ * (> 0), 0 when nothing more has come yet, -1 when the response is complete, -2 when it failed.
+ * bp_http_close ends it, answered or not; every handle is closed once. The runtime reads once a
+ * vblank. A target without a network returns -1 from bp_http_open and is still correct. */
+int  bp_http_open(const char* host, int port, const uint8_t* request, int len);
+int  bp_http_read(int handle, uint8_t* buf, int cap);
+void bp_http_close(int handle);
 
 /* ---- storage -----------------------------------------------------------------------------
  * Configuration and other small blobs. `name` is restricted to [A-Za-z0-9._-]{1,64}; the

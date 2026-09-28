@@ -1,11 +1,12 @@
 {
   "id": "mouse",
   "title": "The mouse in Crash Bash's menus",
-  "_description": "Point at a line of any of the game's menus and it is selected, click it and it is chosen, right-click or press the side (back) button to go back (ADR-0038). The mod finds the highlighted text line of the list on screen and presses down or up one step a frame until the highlight is under the pointer, then cross — added to the buttons the game read, right after its pad reader, so every screen's own handler does the rest. Screens a mod built (onlinemenu's) are left to that mod.",
+  "_description": "Point at a line of any of the game's menus and it is chosen, click it and it is taken, right-click or press the side (back) button to go back (ADR-0038). The mouse is the PS1's own: a Sony Mouse on a controller port of the mod's, read every game frame, which is what shows the machine's pointer (ADR-0040). The mod writes the index each screen keeps — a list's line, CHARACTER SELECT's portrait, CHOOSE LEVEL's level, the line of PAUSED and what opens from it — plays the game's move sound, and adds cross for a click to the buttons the game read, right after its pad reader, so every screen's own handler does the rest. Screens a mod built (onlinemenu's) are left to that mod.",
   "entry": "mouse.Mouse",
-  "_hooks": "0x800138a4 in exe: the pad reader, once a game frame; after it, the buttons pressed this frame are at 80051380h. 0x80095bec in boot: the menu builder (slot a0, records a1), to note which screen each slot's list belongs to.",
+  "_hooks": "0x800138a4 in exe: the pad reader, once a game frame; after it, the buttons pressed this frame are at 80051380h, 58h a player. 0x80095bec in boot: the menu builder (slot a0, records a1), to note which screen each slot's list belongs to. 0x800809a0 in boot: the drawer of the menus in play (definition a0, base y a1), to measure where their lines are.",
   "hooks": [
     { "_addr": "0x800138a4", "addr": 2147563684, "in": "exe" },
-    { "_addr": "0x80095bec", "addr": 2148097004, "in": "boot" }
+    { "_addr": "0x80095bec", "addr": 2148097004, "in": "boot" },
+    { "_addr": "0x800809a0", "addr": 2148010400, "in": "boot" }
   ]
 }

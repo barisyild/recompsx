@@ -2,8 +2,11 @@
  * mouse as the HLE kernel's pointer. */
 
 #include "dc_internal.h"
+#include "pointer_art.h"
 #include <dc/maple/keyboard.h>
 #include <dc/maple/mouse.h>
+#include <dc/vblank.h>
+#include <kos/irq.h>
 
 /* ---- input state ---------------------------------------------------------------------------- */
 
@@ -81,6 +84,9 @@ static uint8_t axis_to_byte(int v) {
 }
 
 static void poll_mouse(void);
+static maple_device_t* keyboard(void);
+static uint32_t keyboard_pad(const kbd_state_t* ks);
+static int g_typing;
 
 void bp_input_poll(void) {
     poll_mouse();
@@ -126,6 +132,39 @@ void bp_input_poll(void) {
          * polling, and that one cannot see a pad the maple driver has not enumerated. */
         if((st->buttons & CONT_RESET_BUTTONS) == CONT_RESET_BUTTONS) g_quit = 1;
     }
+
+    /* A keyboard is pad 0 as well — merged with the pad in port A, and pad 0 even without one. */
+    maple_device_t* kbd = keyboard();
+    const kbd_state_t* ks = kbd ? (const kbd_state_t*)maple_dev_status(kbd) : NULL;
+    if(ks) {
+        g_pad_present[0] = 1;
+        g_pad_buttons[0] |= keyboard_pad(ks);
+    }
+}
+
+/* The keyboard as the desktop and the browser map it: arrows for the d-pad, X S Z A for cross,
+ * square, triangle and circle, Q W for L1 R1, 1 2 for L2 R2, Enter for Start, the right Shift for
+ * Select. While text entry is on only the arrows count, so that a letter typed is never a button
+ * pressed as well (backend_c_api.h). */
+static uint32_t keyboard_pad(const kbd_state_t* ks) {
+    uint32_t b = 0;
+    if(ks->key_states[KBD_KEY_UP].is_down)    b |= PAD_UP;
+    if(ks->key_states[KBD_KEY_DOWN].is_down)  b |= PAD_DOWN;
+    if(ks->key_states[KBD_KEY_LEFT].is_down)  b |= PAD_LEFT;
+    if(ks->key_states[KBD_KEY_RIGHT].is_down) b |= PAD_RIGHT;
+    if(!g_typing) {
+        if(ks->key_states[KBD_KEY_X].is_down) b |= PAD_CROSS;
+        if(ks->key_states[KBD_KEY_S].is_down) b |= PAD_SQUARE;
+        if(ks->key_states[KBD_KEY_Z].is_down) b |= PAD_TRIANGLE;
+        if(ks->key_states[KBD_KEY_A].is_down) b |= PAD_CIRCLE;
+        if(ks->key_states[KBD_KEY_Q].is_down) b |= PAD_L1;
+        if(ks->key_states[KBD_KEY_W].is_down) b |= PAD_R1;
+        if(ks->key_states[KBD_KEY_1].is_down) b |= PAD_L2;
+        if(ks->key_states[KBD_KEY_2].is_down) b |= PAD_R2;
+        if(ks->key_states[KBD_KEY_ENTER].is_down || ks->key_states[KBD_KEY_PAD_ENTER].is_down) b |= PAD_START;
+        if(ks->cond.modifiers.raw & KBD_MOD_RSHIFT) b |= PAD_SELECT;
+    }
+    return b;
 }
 
 int      bp_pad_connected(int pad) { return (pad >= 0 && pad < MAX_PADS) ? g_pad_present[pad] : 0; }
@@ -147,14 +186,28 @@ int bp_pad_axis(int pad, int axis) {
 
 /* ---- keyboard as text (bp_key_text, bp_key_next) -------------------------------------------------
  * A Dreamcast keyboard on any port types while text entry is on (backend_c_api.h). KallistiOS
- * queues its presses, repeats included, and translates each by the keyboard's own region into
- * ISO-8859-1 — the first 256 code points of Unicode, so a translated key already is what
- * bp_key_next returns. Enter comes as 13 (10 with Shift), Escape as 27, Backspace as 8; a key KOS
- * cannot translate comes back as its key code shifted up a byte, and of those only the keypad's
- * Enter means anything here. The keyboard is never a pad, so nothing else changes while typing;
- * without one, nothing is typed. */
+ * queues its presses, repeats included, each with the modifiers and lock lights of its moment, and
+ * bp_key_next turns them into code points by the keyboard's own region — the layout a Dreamcast
+ * keyboard reports, translated by KallistiOS into ISO-8859-1, the first 256 code points of
+ * Unicode. (An emulator reports its host's layout when it recognises it: Flycast passes the host's
+ * keys on by position and says US otherwise, so on a Turkish Q keyboard the '.' key, where US has
+ * '/', types '/', and the key where US has '.' types '.'.) The keypad types the same under every
+ * region, digits and '.' while Num Lock is on — KallistiOS makes them arrows and navigation keys
+ * while it is off, as a PC does — and / * - + either way. Enter, Backspace and Escape are the three
+ * editing keys; a key with no character (an arrow, a function key) types nothing. The same keyboard
+ * is pad 0 (keyboard_pad), and while it types only its arrows are; without one, nothing is typed. */
 
-static int g_typing;
+/* The keypad from / to . (54h..63h); Enter is an editing key. */
+static const char k_keypad[] = "/*-+\n1234567890.";
+
+static int key_char(int key, kbd_mods_t mods, kbd_leds_t leds, int region) {
+    if(key == KBD_KEY_ENTER || key == KBD_KEY_PAD_ENTER) return BP_KEY_ENTER;
+    if(key == KBD_KEY_BACKSPACE) return BP_KEY_BACKSPACE;
+    if(key == KBD_KEY_ESCAPE) return BP_KEY_ESCAPE;
+    if(key >= KBD_KEY_PAD_DIVIDE && key <= KBD_KEY_PAD_PERIOD) return k_keypad[key - KBD_KEY_PAD_DIVIDE];
+    /* KallistiOS's char is signed: a character past 7Fh must not come back negative. */
+    return (unsigned char)kbd_key_to_ascii((kbd_key_t)key, (kbd_region_t)region, mods, leds);
+}
 
 static maple_device_t* keyboard(void) {
 #if RECOMPSX_DC_PROFILE
@@ -168,59 +221,101 @@ void bp_key_text(int on) {
     g_typing = on != 0;
     /* What was pressed before the field opened is not typed into it. */
     maple_device_t* kbd = keyboard();
-    if(kbd) while(kbd_queue_pop(kbd, true) != KBD_QUEUE_END) {}
+    if(kbd) while(kbd_queue_pop(kbd, false) != KBD_QUEUE_END) {}
 }
 
 int bp_key_next(void) {
     maple_device_t* kbd = g_typing ? keyboard() : NULL;
-    if(!kbd) return -1;
+    const kbd_state_t* ks = kbd ? (const kbd_state_t*)maple_dev_status(kbd) : NULL;
+    if(!ks) return -1;
     for(;;) {
-        const int k = kbd_queue_pop(kbd, true);
+        /* Untranslated: the key, its modifiers a byte up, its lock lights two. */
+        const int k = kbd_queue_pop(kbd, false);
         if(k == KBD_QUEUE_END) return -1;
-        if(k == 13) return BP_KEY_ENTER;
-        if(k < 0x100) return k;   /* the kernel drops what is not a character (Tab, say) */
-        if((k >> 8) == KBD_KEY_PAD_ENTER) return BP_KEY_ENTER;
-        /* an arrow, a function key: nothing typed — on to the next */
+        kbd_mods_t mods; kbd_leds_t leds;
+        mods.raw = (uint8_t)(k >> 8);
+        leds.raw = (uint8_t)(k >> 16);
+        const int c = key_char(k & 0xFF, mods, leds, (int)ks->region);
+        if(c > 0) return c;   /* the kernel drops what is not a character (Tab, say) */
     }
 }
 
 /* ---- mouse (bp_mouse) -----------------------------------------------------------------------------
- * A maple mouse on any port is the pointer (backend_c_api.h). KallistiOS hands over the motion of
- * its last bus frame (dx, dy) and the buttons; the pointer itself is kept here, on the 640 x 480
- * screen the picture fills, and reported as a fraction of it. A frame of motion the emulator did
- * not poll for — it runs below 60 frames a second — is not seen, so the pointer is slower then;
- * that is the whole cost. The console draws no pointer of its own, so the backend draws one:
- * draw_mouse_pointer, the last thing in each scene. Left, right and the side button are the
- * mouse's; there is no middle one. */
+ * A maple mouse on any port is the pointer (backend_c_api.h). KallistiOS asks it for its motion
+ * every bus frame, 60 a second, and keeps only the last frame's (dx, dy) — while the emulator,
+ * below 60 frames a second, polls less often. So a vblank handler adds each frame's motion up and
+ * zeroes what it took, which also keeps a frame the bus did not answer from being counted twice;
+ * bp_input_poll takes the sums. The pointer itself is kept here, on the 640 x 480 screen the
+ * picture fills, and reported as a fraction of it. The console draws no pointer of its own, so the
+ * backend draws the machine's — draw_mouse_pointer, the last thing in each scene — while the kernel
+ * says it is shown (bp_mouse_pointer: a mod has turned the mouse on and no pad is in use). Left,
+ * right and the third button (KOS's "side") are the mouse's. */
+
+static volatile int g_acc_on, g_acc_dx, g_acc_dy, g_acc_held, g_acc_pressed;
+static int g_vblank_hooked;
+
+static void mouse_vblank(uint32_t code, void* data) {
+    (void)code; (void)data;
+    maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_MOUSE);
+    mouse_state_t* st = dev ? (mouse_state_t*)maple_dev_status(dev) : NULL;
+    if(!st) {
+        g_acc_on = 0;
+        g_acc_held = 0;
+        return;
+    }
+    g_acc_on = 1;
+    g_acc_dx += st->dx;
+    g_acc_dy += st->dy;
+    st->dx = 0;
+    st->dy = 0;
+    g_acc_held = (int)st->buttons;
+    g_acc_pressed |= (int)st->buttons;
+}
 
 static int g_mouse_on;                     /* a mouse is attached */
 static int g_mouse_px = 320, g_mouse_py = 240;
 static int g_mouse_buttons;
+static int g_pointer_shown;                /* BP_POINTER_SHOWN: none until a mod turns the mouse on */
 
 static void poll_mouse(void) {
-    maple_device_t* dev = NULL;
 #if RECOMPSX_DC_PROFILE
-    if(!g_rxprof) dev = maple_enum_type(0, MAPLE_FUNC_MOUSE);
-#else
-    dev = maple_enum_type(0, MAPLE_FUNC_MOUSE);
-#endif
-    const mouse_state_t* st = dev ? (const mouse_state_t*)maple_dev_status(dev) : NULL;
-    g_mouse_on = st != NULL;
-    if(!st) {
+    if(g_rxprof) {
+        g_mouse_on = 0;
         g_mouse_buttons = 0;
         return;
     }
-    g_mouse_px += st->dx;
-    g_mouse_py += st->dy;
+#endif
+    if(!g_vblank_hooked) {
+        vblank_handler_add(mouse_vblank, NULL);
+        g_vblank_hooked = 1;
+    }
+    const irq_mask_t mask = irq_disable();
+    const int on = g_acc_on, dx = g_acc_dx, dy = g_acc_dy, held = g_acc_held, pressed = g_acc_pressed;
+    g_acc_dx = 0;
+    g_acc_dy = 0;
+    g_acc_pressed = 0;
+    irq_restore(mask);
+    g_mouse_on = on;
+    if(!on) {
+        g_mouse_buttons = 0;
+        return;
+    }
+    g_mouse_px += dx;
+    g_mouse_py += dy;
     if(g_mouse_px < 0) g_mouse_px = 0;
     if(g_mouse_px > 639) g_mouse_px = 639;
     if(g_mouse_py < 0) g_mouse_py = 0;
     if(g_mouse_py > 479) g_mouse_py = 479;
-    int b = 0;
-    if(st->buttons & MOUSE_LEFTBUTTON)  b |= 1;
-    if(st->buttons & MOUSE_RIGHTBUTTON) b |= 2;
-    if(st->buttons & MOUSE_SIDEBUTTON)  b |= 8;
-    g_mouse_buttons = b;
+    const int b = held | pressed;
+    int out = 0;
+    if(b & MOUSE_LEFTBUTTON)  out |= 1;
+    if(b & MOUSE_RIGHTBUTTON) out |= 2;
+    if(b & MOUSE_SIDEBUTTON)  out |= 8;
+    g_mouse_buttons = out;
+}
+
+void bp_mouse_pointer(int state) {
+    g_pointer_shown = state == BP_POINTER_SHOWN;
 }
 
 int bp_mouse(int field) {
@@ -233,10 +328,44 @@ int bp_mouse(int field) {
     }
 }
 
-/* An arrow: a black one, then a white one inside it, untextured, in submission order like
- * everything else in the list (no depth, ADR-0011). */
+/* The pointer's picture (pointer_art.h). The PVR draws it at the console's own 640 x 480, a texel
+ * to a pixel with no filtering, so it stays sharp whatever resolution the game's picture has; it is
+ * drawn in submission order like everything else (no depth, ADR-0011). */
+#define POINTER_TEX_H 32                   /* a texture's sides are powers of two */
+
+static uint16_t pointer_texel(char c) {
+    const uint32_t v = pointer_argb(c);
+    if(!(v >> 24)) return 0;               /* clear: the alpha bit off */
+    return (uint16_t)(0x8000 | (((v >> 19) & 31) << 10) | (((v >> 11) & 31) << 5) | ((v >> 3) & 31));
+}
+
 static pvr_poly_hdr_t g_pointer_hdr __attribute__((aligned(32)));
-static int g_pointer_ready;
+static pvr_ptr_t g_pointer_tex;
+static int g_pointer_ready;                /* 1 the texture, -1 no texture memory: plain arrows */
+
+/* Once, at the first pointer drawn: the art into a texture through the store queues. */
+static void pointer_prepare(void) {
+    static uint16_t texels[POINTER_W * POINTER_TEX_H] __attribute__((aligned(32)));
+    for(int y = 0; y < POINTER_TEX_H; y++)
+        for(int x = 0; x < POINTER_W; x++)
+            texels[y * POINTER_W + x] = y < POINTER_H ? pointer_texel(k_pointer[y][x]) : 0;
+    g_pointer_tex = pvr_mem_malloc(sizeof texels);
+    pvr_poly_cxt_t cxt;
+    if(g_pointer_tex) {
+        txr_put(texels, g_pointer_tex, sizeof texels);
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
+                         POINTER_W, POINTER_TEX_H, g_pointer_tex, PVR_FILTER_NONE);
+        cxt.txr.env = PVR_TXRENV_REPLACE;
+        cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+    } else {
+        pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
+    }
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    cxt.depth.write = false;
+    pvr_poly_compile(&g_pointer_hdr, &cxt);
+    g_pointer_ready = g_pointer_tex ? 1 : -1;
+}
 
 static void pointer_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t argb) {
     pvr_vertex_t v __attribute__((aligned(32)));
@@ -252,18 +381,23 @@ static void pointer_tri(float x0, float y0, float x1, float y1, float x2, float 
 }
 
 void draw_mouse_pointer(void) {
-    if(!g_mouse_on) return;
-    if(!g_pointer_ready) {
-        pvr_poly_cxt_t cxt;
-        pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
-        cxt.gen.culling = PVR_CULLING_NONE;
-        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
-        cxt.depth.write = false;
-        pvr_poly_compile(&g_pointer_hdr, &cxt);
-        g_pointer_ready = 1;
-    }
+    if(!g_mouse_on || !g_pointer_shown) return;
+    if(!g_pointer_ready) pointer_prepare();
     const float x = (float)g_mouse_px, y = (float)g_mouse_py;
     put_hdr(&g_pointer_hdr);
-    pointer_tri(x - 1.0f, y - 2.0f, x - 1.0f, y + 20.0f, x + 15.0f, y + 14.0f, 0xFF000000u);
-    pointer_tri(x, y, x, y + 16.0f, x + 11.0f, y + 12.0f, 0xFFFFFFFFu);
+    if(g_pointer_ready > 0) {
+        pvr_vertex_t v __attribute__((aligned(32)));
+        v.flags = PVR_CMD_VERTEX;
+        v.z = 2.0f;
+        v.argb = 0xFFFFFFFFu;
+        v.oargb = 0;
+        v.x = x;             v.y = y;                 v.u = 0.0f; v.v = 0.0f; put_vtx(&v);
+        v.x = x + POINTER_W; v.y = y;                 v.u = 1.0f; v.v = 0.0f; put_vtx(&v);
+        v.x = x;             v.y = y + POINTER_TEX_H; v.u = 0.0f; v.v = 1.0f; put_vtx(&v);
+        v.flags = PVR_CMD_VERTEX_EOL;
+        v.x = x + POINTER_W; v.y = y + POINTER_TEX_H; v.u = 1.0f; v.v = 1.0f; put_vtx(&v);
+    } else {
+        pointer_tri(x - 1.0f, y - 2.0f, x - 1.0f, y + 20.0f, x + 15.0f, y + 14.0f, 0xFF000000u);
+        pointer_tri(x, y, x, y + 16.0f, x + 11.0f, y + 12.0f, 0xFFFFFFFFu);
+    }
 }
