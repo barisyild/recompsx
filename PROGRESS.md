@@ -1782,6 +1782,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-28 [claude] Crash Bash warp room: circle froze the character — boot 8008671Ch and adventure 800C2F60h/
+800C013Ch were pointer-only entries, and the boss pad's message needed boot 80090248h (now hints; headless walk
+into the hub, circle, every pad, nothing unimplemented);
+OverlayMgr.reportMiss compared an exclusive end with end+1 and misreported an overlay's own load as foreign;
+the address keyboard copied QUIT as its list end (OnlineMenu.END_RECORD). Next: OPTIONS' mouse highlight.
+
 2026-09-28 [claude] QUIT under OPTIONS in Crash Bash's main menu (ADR-0041): bp_exit_to_menu on every backend
 (Dreamcast: KallistiOS exit path to the BIOS menu), Kernel.exitToMenu keeps the card first, ModHost.exitToMenu;
 headless walk verified. Next: the owner's test of QUIT on the Dreamcast (out/dc/crashbash-periph-max.cdi).

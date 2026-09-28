@@ -3,6 +3,29 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-09-28: Circle in the warp room froze the character — three entries the analysis never had
+
+Reported by the owner (the keyboard's A is circle). Reproduced headless with a scripted pad —
+main menu, ADVENTURE, 1 PLAYER, CHARACTER SELECT, the intro skipped with cross, the hub — and
+circle there: the runtime reported three misses in the frame circle was pressed, and nothing
+before it (walking right and left was clean). `boot` had no code at 8008671Ch (called from
+8008713Ch), and the resident `adventure` overlay none at 800C2F60h and 800C013Ch (called from
+boot's 80086908h and 80084538h): reached through pointers only, so no pass found them. They are
+entry hints now; with them, circle twice and cross in the hub reach nothing unimplemented.
+
+The runtime's own advice for the two adventure addresses was wrong — "the disc has since been read
+over this part of its window", with a stanza identical to `adventure` itself. `OverlayMgr.reportMiss`
+compared the covering load's exclusive end with the window's end plus one, but the window's end is
+exclusive too (`define` keeps start plus length), so an overlay's own load always looked foreign.
+Fixed: both ends exclusive; such a miss now says "add it to its entryHints".
+
+**The boss pad said nothing.** On Papu Pummel's pad (the hub's boss) the message at the top — "YOU
+NEED 4 TROPHIES TO FACE PAPU PAPU" — never came, where every level's pad shows "PRESS X BUTTON TO
+START". Headless, walking the hub's ring and up each branch: the level pads reach nothing missing;
+the boss pad calls boot's 80090248h from the adventure overlay (800B67F4h), a function only a
+pointer reaches. An entry hint; with it the message is there. Not an overlay missing — the overlay
+was resident, one function of it had never been compiled.
+
 ## 2026-09-28: The mouse in the menus (mods/mouse, mods/onlinemenu; ADR-0038, ADR-0040)
 
 Measured headless (a scripted pad, then a scripted mouse through `kernel.KMouse.update`).

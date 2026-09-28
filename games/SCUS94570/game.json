@@ -19,8 +19,8 @@
         "offset": 72833024,
         "length": 387072
       },
-      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game; 0x80086d88, 0x8008ab50 and 0x8008a810, reached in the battle Battle Mode starts; 0x8009020c on the way into Adventure mode; 0x800923fc from the save screen, once a memory card is there.",
-      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324, 2148035976, 2148051792, 2148050960, 2148073996, 2148082684],
+      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game; 0x80086d88, 0x8008ab50 and 0x8008a810, reached in the battle Battle Mode starts; 0x8009020c on the way into Adventure mode; 0x800923fc from the save screen, once a memory card is there; 0x8008671c when circle is pressed in the Adventure hub (the warp room); 0x80090248, called from the adventure overlay (0x800b67f4) on the hub's boss pad (Papu Pummel) to put up what the boss asks for — without it the pad showed no message.",
+      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324, 2148035976, 2148051792, 2148050960, 2148073996, 2148082684, 2148034332, 2148074056],
       "hashWords": 64
     },
     {
@@ -84,8 +84,8 @@
       "loadAddr": 2148217524,
       "length": 86016,
       "source": { "kind": "discFile", "path": "\\CRASHBSH\\CRASHBSH.DAT;1", "offset": 57139200, "length": 86016 },
-      "_entryHints": "0x800b4e1c, 0x800b7e0c, 0x800b8098, 0x800b7e04, then 0x800b86ac, 0x800b8148, 0x800b5248, 0x800b5230, 0x800b5260, 0x800b7d7c, 0x800b8174, 0x800b821c, 0x800b8224 and 0x800b822c, one round at a time as the runtime reported them, walking into the hub with cross.",
-      "entryHints": [2148224540, 2148236812, 2148237464, 2148236804, 2148239020, 2148237640, 2148225608, 2148225584, 2148225632, 2148236668, 2148237684, 2148237852, 2148237860, 2148237868],
+      "_entryHints": "0x800b4e1c, 0x800b7e0c, 0x800b8098, 0x800b7e04, then 0x800b86ac, 0x800b8148, 0x800b5248, 0x800b5230, 0x800b5260, 0x800b7d7c, 0x800b8174, 0x800b821c, 0x800b8224 and 0x800b822c, one round at a time as the runtime reported them, walking into the hub with cross. 0x800c2f60 and 0x800c013c, called from boot (0x80086908, 0x80084538) when circle is pressed in the hub — until they were here, the character stood frozen.",
+      "entryHints": [2148224540, 2148236812, 2148237464, 2148236804, 2148239020, 2148237640, 2148225608, 2148225584, 2148225632, 2148236668, 2148237684, 2148237852, 2148237860, 2148237868, 2148282208, 2148270396],
       "hashWords": 64
     }
   ],

@@ -413,7 +413,8 @@ class OverlayMgr {
 			// the disc, so a covering load whose span is exactly this window is how it got here,
 			// and says nothing about anything else being on top. Only a foreign span does.
 			final l = loadCovering(addr);
-			if (l >= 0 && !(loadFrom[l] == lo[r] && loadTo[l] == hi[r] + 1)) {
+			// Both ends exclusive: `hi` is start plus length (see `define`), as a load's `loadTo` is.
+			if (l >= 0 && !(loadFrom[l] == lo[r] && loadTo[l] == hi[r])) {
 				Runtime.reportOnce(addr, "no code at " + hex(addr) + " (ra=" + hex(ra) + "): "
 					+ "overlay " + r + " is resident, but the disc has since been read over this "
 					+ "part of its window, so what is there belongs to something else."
