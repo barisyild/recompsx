@@ -38,6 +38,16 @@ figures are the gate for **correctness** and for **CPU-work regressions** only; 
 the hardware — sh4zam, alignment, prefetching, store queues — is judged on a real console with a
 CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdict on such a change.
 
+Demul (a Windows PC; the GDI below) models the SH-4's timing but not its caches either, and the
+difference is now measured. Crash 3's title screen, 30 frames, crash3-periph-max.cdi on the
+console against the same sources as a GDI in Demul (2026-09-28): total 1180 vs 818 ms (25.4 vs
+36.6 fps). The backend's compact C code matched — gpu 159/157, build 168/147, `polygonHw` 100/110,
+`build_scene` 89/77 — while the generated code ran fast in Demul: emu 646/377 (1.7x), `dispatch`
+138/53 (2.6x), gte 155/111 (1.4x). So Demul is a fair stand-in for work on the backend's own
+loops, and not for the recompiled code or the dispatcher, whose cost on a console is instruction-
+cache misses: megabytes of generated code and a two-level switch per indirect call, against an
+8 KB cache. `dispatch` alone is ~12 % of the console's frame there.
+
 - Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`; the link
   takes minutes). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
   memory: run one at a time.
@@ -47,6 +57,12 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
   VMU by (Per Game VMU A1, on by default). Without it mkdcdisc makes one from a hash of the boot
   binary, so every build gets a new, empty VMU and saves seem to vanish. The BIOS, with no disc,
   shows the shared VMU (`vmu_save_A1.bin`), not a game's.
+- GDI, for Demul (it reads GDI and CHD; a CDI is a MIL-CD to it, and its BIOS plays the audio
+  session): the same command with `-F gdi` instead of `-N`, `-o <dir>/disc.gdi`. KallistiOS's
+  /cd mounts the data track of the disc's *low-density* TOC — on a GD-ROM, the small area that
+  holds only mkdcdisc's three text files — so `dc_gdrom.c` remounts /cd from the high-density
+  area when the disc is a GD-ROM (logged: "GD-ROM: /cd is the high-density area"). Without it a
+  GDI boots to a black screen: no launch line, nothing to run (Demul's title: RPS 0).
 - Data directories under `out/dc/` hold `BOOT.EXE`, `DISC.BIN`, `SYMS.BIN` and `RECOMPSX.CFG`
   (the command line: `--video-hw --audio-hw [--dc-overlay]`; profiling adds
   `--dc-bench=FROM:TO --dc-rxprof`). Bench windows: Crash 3 `4700:5000` (attract demo), Crash Bash

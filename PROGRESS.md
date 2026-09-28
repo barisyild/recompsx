@@ -1782,6 +1782,16 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-28 [claude] Crash 3 on the web again (b4a8ad4144b5): the browser kept Crash Bash's boot.exe beside Crash 3's
+disc and bundle (a jump to 0 at boot) — serve-https.py now ETags every file by identity with no-cache, the page
+revalidates the game files. Dreamcast GDI for Demul (it reads GDI/CHD, not our CDIs): KOS mounts /cd from a GD-ROM's
+low-density area, so dc_gdrom.c remounts it from the high-density one (out/dc/crash3-periph-gdi, relinked _c3periph).
+The GDI runs in Demul (full speed on a Windows PC). Measured, Crash 3's title screen, 30 frames, console
+(crash3-periph-max.cdi) vs Demul: 1180 vs 818 ms; backend C code equal (gpu 159/157, build 168/147), generated
+code 1.7x fast in Demul (emu 646/377), dispatch 2.6x (138/53): no emulator models the SH-4's caches
+(src/backend/dreamcast/AGENTS.md, Measuring). Next: the owner's choice — a cache model in the Flycast fork
+calibrated on these numbers, a one-level dispatcher, or hot-code ordering.
+
 2026-09-28 [claude] JVM shim (src/shims/jvm, build/game-jvm.hxml; a parallel session's) committed with the
 PRESENT_FAST and cardLoad/cardSave it lacked (no card kept, as null): all 38 conformance tests on the JVM give
 JavaScript's digests (hxjava from a scratch haxelib repo; the project's .haxelib has none). Next: a whole game on

@@ -13,6 +13,7 @@
  *   dc_audio.c      the sample stream, and the SPU's voices on the AICA (bp_spu_*, bp_audio_*)
  *   dc_input.c      maple controllers as pads (bp_input_poll, bp_pad_*), the reset combo
  *   dc_files.c      saves (bp_storage_*) and the disc with its read-ahead thread (bp_file_*)
+ *   dc_gdrom.c      a GD-ROM's high-density area as /cd (GDI and CHD images, Demul)
  *   dc_prof.c       where the frame went, the benchmark range, the PC sampler, the overlay
  *   dc_fastmem.c    the fastmem feasibility test (`--dc-fastmem-test`)
  *
@@ -232,6 +233,7 @@ int bp_init(const char* title) {
 
     cont_btn_callback(0, CONT_RESET_BUTTONS, reset_combo);
 
+    gdrom_mount();
     find_storage();
     load_args();
 

@@ -382,6 +382,11 @@ extern int g_prof_misses;
 #endif
 void find_storage(void);
 
+/* dc_gdrom.c */
+/* On a GD-ROM, /cd becomes the high-density area's filesystem; on a CD, nothing changes. Before
+ * anything opens /cd. */
+void gdrom_mount(void);
+
 /* dc_prof.c */
 #if RECOMPSX_DC_PROFILE_OVERLAY
 extern pvr_ptr_t g_txt;
