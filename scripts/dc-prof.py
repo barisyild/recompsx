@@ -15,9 +15,14 @@ presents, and the Flycast build records between the first two and quits at the t
 
 A profile recorded with RXPROF_CALLERS (scripts/dc-flycast-prof.sh --callers) also lists, for
 each watched function, its callers by the return address.
+
+A profile recorded under the cache model (scripts/dc-flycast-model.sh) has <prof.txt>.cache beside
+it, and each function's time is then split into what it waited for: instruction-cache fills,
+operand-cache fills, operand dependencies and uncached accesses (the rest is issue).
 """
 import bisect
 import os
+import re
 import subprocess
 import sys
 
@@ -42,6 +47,24 @@ def load_profile(path):
             else:
                 samples.append((int(a, 16), int(b)))
     return meta, samples
+
+
+def load_costs(path):
+    """<prof.txt>.cache from the cache model: per instruction address, instruction misses, operand
+    misses, dependency stall cycles and uncached-access cycles; None without one."""
+    if not os.path.exists(path):
+        return None
+    costs, fill = {}, (0, 0)
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#"):
+                m = re.search(r"ifill (\d+) ofill (\d+)", line)
+                if m:
+                    fill = (int(m.group(1)), int(m.group(2)))
+                continue
+            a, im, om, dep, ext = line.split()
+            costs[int(a, 16)] = (int(im) * fill[0], int(om) * fill[1], int(dep), int(ext))
+    return costs
 
 
 def load_symbols(nm, elf):
@@ -97,9 +120,26 @@ def main():
     print(f"{meta.get('kind', '?')}: {total} samples x {slice_} cycles = {total * slice_ / 1e6:.1f} M cycles "
           f"({cycles / 200e6 * 1000:.0f} ms of a 200 MHz SH-4), host {meta.get('wall_s', 0):.1f} s")
     print(f"outside RAM {meta.get('other', 0)}, outside any symbol {unknown}")
-    print(f"{'share':>6} {'ms@200MHz':>9}  function")
+    costs = load_costs(prof + ".cache")
+    per_cost = {}
+    if costs is not None:
+        for addr, c in costs.items():
+            k = bisect.bisect_right(starts, addr) - 1
+            if k >= 0 and addr < ends[k]:
+                p = per_cost.setdefault(k, [0, 0, 0, 0])
+                for i in range(4):
+                    p[i] += c[i]
+        sums = [sum(p[i] for p in per_cost.values()) / 200e3 for i in range(4)]
+        print(f"cache model: ifill {sums[0]:.0f} ofill {sums[1]:.0f} dep {sums[2]:.0f} ext {sums[3]:.0f} ms")
+        print(f"{'share':>6} {'ms@200MHz':>9} {'ifill':>6} {'ofill':>6} {'dep':>6} {'ext':>5}  function")
+    else:
+        print(f"{'share':>6} {'ms@200MHz':>9}  function")
     for k, count in sorted(per_fn.items(), key=lambda kv: -kv[1])[:top]:
-        print(f"{100.0 * count / total:5.1f}% {count * slice_ / 200e3:9.1f}  {names[k]}")
+        split = ""
+        if costs is not None:
+            p = per_cost.get(k, [0, 0, 0, 0])
+            split = " " + " ".join(f"{v / 200e3:{w}.1f}" for v, w in zip(p, (6, 6, 6, 5)))
+        print(f"{100.0 * count / total:5.1f}% {count * slice_ / 200e3:9.1f}{split}  {names[k]}")
     def name_of(addr):
         k = bisect.bisect_right(starts, addr) - 1
         return names[k] if k >= 0 and addr < ends[k] else f"{addr:08x}"

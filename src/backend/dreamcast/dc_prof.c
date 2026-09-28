@@ -474,6 +474,10 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
 
 void profile_report(void) {
     g_presents++;
+    /* A picture every 150 presents for the profiling Flycast, named by the present: the same name
+     * is the same frame in every build and every emulator, which is how a bench range is found. */
+    if(g_rxprof && g_presents % 150 == 0) { printf("@@rxprof shot p%05lu\n", (unsigned long)g_presents); fflush(stdout); }
+    else {}
     if(g_bench_state == 0 && g_bench_from >= 0 && g_presents == (uint32_t)g_bench_from) {
         profile_reset();        /* the range starts with a window of its own */
         g_bench_state = 1;

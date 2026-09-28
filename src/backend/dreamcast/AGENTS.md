@@ -48,6 +48,23 @@ loops, and not for the recompiled code or the dispatcher, whose cost on a consol
 cache misses: megabytes of generated code and a two-level switch per indirect call, against an
 8 KB cache. `dispatch` alone is ~12 % of the console's frame there.
 
+**The cache model is the stand-in for a console** (`scripts/dc-flycast-model.sh`): the profiling
+fork's interpreter at the SH-4's own rate (not its default underclock of 8), with shadow tags for
+the 8 KB instruction and 16 KB operand caches (direct-mapped, 32-byte lines, copy-back as
+`CCR_DEFAULT`), a stall for every operand not yet ready (a scoreboard from the opcode table's
+latencies: a load's result, fmul's 4, ftrv's 8) and Flycast's per-area costs for uncached
+accesses; data always comes from memory, only time is modelled (core/profiler/rx_cache.h in the
+clone, built as `build-rxcache`, on with RXCACHE=1). Flycast's own STRICT_MODE cache emulation
+was tried first and jumps to address zero at boot on our binaries. With its default costs —
+a line fill 24 cycles either cache, a write-back 12, a store-queue burst 8 — over Crash 3's title
+screen (presents 3300..4050, the crash3-rxbench GDI) it reads 39.2 ms a frame against the
+console's 39.3 (crash3-periph-max.cdi, one 30-frame window): emu+gte 27.0/26.7, gpu 5.3/5.3,
+build 5.5/5.6, and `f_8003fc50` 122/139, `dispatch` 134/138, `polygonHw` 95/100, `f_8003d0fc`
+73/74 per 30 frames. Flycast's own timing read the same screen at 24.4 ms, Demul at 27.3. Its
+one known lean: the GTE, `cmdRtps` 138 against 109 — the console's figure is one sampled window,
+so it is not tuned for. The instruction-cache fill is what the result hangs on (+12 cycles is
++19 %, the operand fill +5 %). It runs at about a third of real time: to present 4050 is ~20 min.
+
 - Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`; the link
   takes minutes). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
   memory: run one at a time.
@@ -65,14 +82,18 @@ cache misses: megabytes of generated code and a two-level switch per indirect ca
   GDI boots to a black screen: no launch line, nothing to run (Demul's title: RPS 0).
 - Data directories under `out/dc/` hold `BOOT.EXE`, `DISC.BIN`, `SYMS.BIN` and `RECOMPSX.CFG`
   (the command line: `--video-hw --audio-hw [--dc-overlay]`; profiling adds
-  `--dc-bench=FROM:TO --dc-rxprof`). Bench windows: Crash 3 `4700:5000` (attract demo), Crash Bash
-  `18800:20300`. A `--dc-rxprof` run keeps the pad ports empty so every run measures the same
-  frames.
-- Profile: `scripts/dc-flycast-prof.sh <cdi> <elf> <out.txt>` then
-  `scripts/dc-prof.py <out.txt> <elf> --top N [--hot FUNC]`; `--callers NAME` on the first counts
-  callers. `RXPROF_SHOTS=<dir> RXPROF_SHOT_SEC=<s>` saves screenshots by emulated time — the
-  way to check a picture. The count is exact for a given binary; a relink moves code, so compare
-  builds of the same sources.
+  `--dc-bench=FROM:TO --dc-rxprof`). Bench windows: Crash 3 `4700:5000` (attract demo) and
+  `3300:4050` (title screen, the console-calibrated one), Crash Bash `18800:20300`. A
+  `--dc-rxprof` run keeps the pad ports empty so every run measures the same frames, and prints
+  `@@rxprof shot pNNNNN` every 150 presents: the profiling fork saves `<RXPROF_SHOTS>/pNNNNN.png`,
+  the same frame by the same name in every build and emulator — how a bench range is found.
+- Profile: `scripts/dc-flycast-prof.sh <cdi> <elf> <out.txt>` (Flycast's timing) or
+  `scripts/dc-flycast-model.sh <image> <out.txt>` (the cache model), then
+  `scripts/dc-prof.py <out.txt> <elf> --top N [--hot FUNC]` — under the model with each
+  function's instruction fills, operand fills, dependency stalls and uncached accesses beside
+  its time; `--callers NAME` on the first counts callers. `RXPROF_SHOTS=<dir>
+  RXPROF_SHOT_SEC=<s>` saves screenshots by emulated time — the way to check a picture. The count
+  is exact for a given binary; a relink moves code, so compare builds of the same sources.
 
 ## How the backend draws (hardware mode, ADR-0011)
 

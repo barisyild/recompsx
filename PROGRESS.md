@@ -2,6 +2,20 @@
 
 ## Status snapshot
 
+**2026-09-28: A model of the SH-4's timing — the console's frame time without a console.** No
+emulator models what makes the recompiled code slow on a Dreamcast (Flycast read Crash 3's title
+screen 1.6x fast, Demul 1.44x), so the profiling Flycast fork gained one
+(`scripts/dc-flycast-model.sh`; core/profiler/rx_cache.h in the clone): its interpreter at the
+SH-4's own rate, shadow tags for the 8 KB instruction and 16 KB operand caches, a stall for each
+operand not yet ready, uncached access costs — time only, the data untouched. With its default
+costs it reads the title screen (presents 3300..4050) at 39.2 ms a frame against the console's
+39.3, emu+gte 27.0/26.7, gpu 5.3/5.3, build 5.5/5.6, and the console's top functions within
+0-15 % but the GTE (`cmdRtps` +27 %, against one sampled window). The instruction-cache fill is
+what it hangs on (+12 cycles, +19 %). `--dc-rxprof` now also names screenshots by present
+(`pNNNNN`), and `scripts/dc-prof.py` splits each function's modelled time into its fills, stalls
+and uncached accesses. Flycast's STRICT_MODE cache emulation was tried first: it jumps to address
+zero at boot on our binaries. Details in src/backend/dreamcast/AGENTS.md, Measuring.
+
 **2026-09-28: QUIT in Crash Bash's main menu (ADR-0041) — back to the host's own menu.** A line
 under OPTIONS, added to Select Game Type's list the way ONLINE is; cross (or a click) on it has the
 kernel write the memory card back and call the new `bp_exit_to_menu`: the Dreamcast's BIOS menu
@@ -1781,6 +1795,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] SH-4 timing model in the profiling Flycast fork (rx_cache: caches, operand stalls, uncached
+costs; RXCACHE=1, build-rxcache): Crash 3's title screen 39.2 ms a frame vs the console's 39.3 (Flycast 24.4,
+Demul 27.3); scripts/dc-flycast-model.sh, dc-prof.py cost columns, --dc-rxprof present-named shots. Fork changes
+uncommitted in the clone. Next: the dispatcher and hot-code layout, measured with the model.
 
 2026-09-28 [claude] Crash 3 on the web again (b4a8ad4144b5): the browser kept Crash Bash's boot.exe beside Crash 3's
 disc and bundle (a jump to 0 at boot) — serve-https.py now ETags every file by identity with no-cache, the page
