@@ -248,6 +248,9 @@
           paused: false,
           unpaced: !paceBox.checked,
           gpu: renderer,
+          // The element the picture fills, whichever canvas draws it: the pointer is read over it
+          // as the HLE kernel's mouse (shim.Input, ADR-0038).
+          screen: document.querySelector('.screen'),
           present(vram, sx, sy, width, height, flags) {
             // Fast-forwarding, every emulated vblank still arrives here; one picture per display
             // interval is all a viewer can see, so the rest are skipped before any blit.

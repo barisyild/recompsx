@@ -209,6 +209,8 @@ class Backend {
 
 	public static function quitRequested():Bool return quit;
 
+	/** The pointer over the page's picture (shim.Input); under Node there is none. */
+	public static function mouse(field:Int):Int return Input.mouse(field);
 	/**
 		Reads a kept blob: the page's (its local storage), or under Node a file beside the program,
 		where `storageWrite` puts it. -1 when there is none.

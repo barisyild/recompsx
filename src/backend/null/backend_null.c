@@ -75,6 +75,9 @@ int      bp_quit_requested(void) { return 0; }
 void bp_key_text(int on) { (void)on; }
 int  bp_key_next(void) { return -1; }
 
+/* No mouse: never over the picture, nothing held. */
+int bp_mouse(int field) { (void)field; return 0; }
+
 int bp_storage_read(const char* name, uint8_t* buf, int len) {
     (void)name; (void)buf; (void)len; return -1;
 }

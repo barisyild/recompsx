@@ -31,6 +31,10 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   (ADR-0036): while text entry is on, `KeyboardEvent.key` goes to a queue and only the arrows
   stay pad buttons. Synthetic key events reach it, but a pad press must outlast a vblank — and a
   hidden pane throttles rAF to about one frame a second, so hold presses for over a second there.
+  The pointer is the HLE mouse (ADR-0038): pointer events over `recompsxHost.screen` (the page's
+  `.screen` box, which both renderers fill), as fractions of it; the context menu and the side
+  buttons' history navigation are kept from the page there. The browser tool's `hover` and
+  `left_click` are real pointer events and reach it.
 - Mods (ADR-0033): `./scripts/build-web.sh <SERIAL> --mods <id,id | all>` builds the game with
   `games/<SERIAL>/mods/<id>` in (`-D recompsx_mods`); `build.json` lists them. Without the flag
   the bundle is the unmodded game.

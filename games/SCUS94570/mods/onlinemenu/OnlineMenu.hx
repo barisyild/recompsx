@@ -23,6 +23,11 @@ import mod.ModHost;
 	  the description, and highlights; the mod then moves the highlight to ONLINE when that is
 	  the choice. Cross on ONLINE is taken from the game, which never learns there is a fifth line.
 
+	The mouse (ADR-0038) works here as the pad does: pointing at a line moves the selection to it
+	— with the game's own move sound and description — a left click is cross on it, and the right
+	button or the side button that means Back is triangle. Pointing moves the selection only when the pointer moves, so a mouse left
+	resting on a line never fights the pad.
+
 	Cross on ONLINE opens an address keyboard in the look of the game's ENTER NAME screen
 	(`IpKeyboard`), in this same menu slot; DONE keeps the address and tries to connect to it on
 	the game's own port (`Online`), CANCEL leaves it, and both come back here with ONLINE
@@ -51,7 +56,10 @@ class OnlineMenu {
 
 	static inline var PAD_UP = 0x10;
 	static inline var PAD_DOWN = 0x40;
+	static inline var PAD_TRIANGLE = 0x1000;
 	static inline var PAD_CROSS = 0x4000;
+	static inline var RECORD_X0 = 4;                // a panel's x extent, halfwords
+	static inline var RECORD_X1 = 6;
 
 	// Records in the game's list: the panel, four lines, the description, title and banner.
 	static inline var LINES = 8;
@@ -72,9 +80,13 @@ class OnlineMenu {
 	static var onMain = false;
 	static var choice = 0;
 	static var message = 0;
+	/** Vblanks, and the last one Select Game Type's frame ran in (see `frame`). */
+	static var vblanks = 0;
+	static var lastFrame = 0;
 
 	public static function install():Void {
 		ModHost.onBoot(boot);
+		ModHost.onFrame(countVblank);
 		ModHost.hook(BUILD_MENU, buildMenu);
 		ModHost.hook(MAIN_FRAME, mainFrame);
 	}
@@ -88,19 +100,27 @@ class OnlineMenu {
 		IpKeyboard.boot();
 	}
 
+	static function countVblank(ctx:CpuState):Void {
+		vblanks = (vblanks + 1) | 0;
+	}
+
 	/**
 		The builder: our list for the main menu's; the menu or the keyboard built again by us; and
 		any other list — every other screen of the game, its name keyboard included — as it came.
-		The game building a screen of its own means the keyboard, if it was up, is gone.
+		The game building a screen of its own in slot 0 means the keyboard, if it was up, is gone.
+		Lists in other slots leave the main menu where it is: OPTIONS opens in slot 4 over it, and
+		closing it builds nothing — Select Game Type simply runs again.
 	**/
 	static function buildMenu(ctx:CpuState, addr:Int):Bool {
-		if (ctx.a1 == MAIN_RECORDS && isMainMenu()) {
+		if (ctx.a0 != 0) {}
+		else if (ctx.a1 == MAIN_RECORDS && isMainMenu()) {
 			IpKeyboard.abandon();
 			layOut();
 			ctx.a1 = records;
 			onMain = true;
 			choice = 0;
 			message = aboutText;
+			Pointer.sync();
 			ModHost.log("onlinemenu: Select Game Type built with ONLINE (records at "
 				+ ModHost.hex(records) + ")");
 		} else if (ctx.a1 == records || (ctx.a1 == IpKeyboard.records && IpKeyboard.isOpen())) {
@@ -161,6 +181,7 @@ class OnlineMenu {
 	/** Back from the keyboard: the menu again, on ONLINE, saying what became of the address. */
 	static function closed(ctx:CpuState):Void {
 		Game.build(ctx, records);
+		Pointer.sync();
 		choice = ONLINE;
 		ModHost.write32(SELECTION, 1);
 		if (IpKeyboard.accepted) {
@@ -188,7 +209,12 @@ class OnlineMenu {
 	}
 
 	static function frame(ctx:CpuState, addr:Int):Void {
-		final edges = ModHost.read32(PAD_EDGES);
+		// Back from a screen that ran instead (OPTIONS): what the mouse did there was for it.
+		if (vblanks - lastFrame > 4) Pointer.sync();
+		else {}
+		lastFrame = vblanks;
+		final real = ModHost.read32(PAD_EDGES);
+		final edges = real | mouse(ctx);
 		final before = choice;
 		var pass = edges;
 		if (before == ONLINE) {
@@ -201,7 +227,7 @@ class OnlineMenu {
 		final selBefore = ModHost.read32(SELECTION);
 		ModHost.write32(PAD_EDGES, pass);
 		ModHost.callOriginal(ctx, addr);
-		ModHost.write32(PAD_EDGES, edges);
+		ModHost.write32(PAD_EDGES, real);
 
 		final sel = ModHost.read32(SELECTION);
 		choice = next(before, sel, sel != selBefore, edges);
@@ -214,6 +240,58 @@ class OnlineMenu {
 			else {}
 			show(sel);
 		}
+	}
+
+	/**
+		This frame's mouse: pointing at a line selects it, and a click adds the button it stands
+		for to the frame's pad — cross on the line pointed at, triangle for back.
+	**/
+	static function mouse(ctx:CpuState):Int {
+		Pointer.read();
+		var extra = 0;
+		if (Pointer.active()) ModHost.write32(Game.IDLE, 0);
+		else {}
+		final line = lineAt(Pointer.x, Pointer.y);
+		if (line >= 0 && line != choice && (Pointer.moved || Pointer.left)) jump(ctx, line);
+		else {}
+		if (Pointer.left && line >= 0) extra |= PAD_CROSS;
+		else {}
+		if (Pointer.back) extra |= PAD_TRIANGLE;
+		else {}
+		return extra;
+	}
+
+	/** The line (the player's 0..4) under the pointer: inside the panel, within a line's band. */
+	static function lineAt(x:Int, y:Int):Int {
+		var found = -1;
+		final x0 = ModHost.read16s(records + RECORD_X0);
+		final x1 = ModHost.read16s(records + RECORD_X1);
+		if (Pointer.over && x >= x0 && x <= x1) {
+			for (c in 0...5) {
+				final top = ModHost.read16s(records + lineRecord(c) * RECORD + RECORD_Y);
+				if (y >= top - 3 && y < top + STEP - 3) found = c;
+				else {}
+			}
+		} else {}
+		return found;
+	}
+
+	/** Which of our records holds the player's line `c`: ONLINE is the ninth, the others in order. */
+	static inline function lineRecord(c:Int):Int {
+		return c == ONLINE ? ONLINE_WIDGET : (c < ONLINE ? c + 1 : c);
+	}
+
+	/** Selects line `c` as the game's own up and down would: its sound, its description. */
+	static function jump(ctx:CpuState, c:Int):Void {
+		choice = c;
+		var sel = c;
+		if (c == ONLINE) sel = BATTLE_LINE - 1;       // the game stays on BATTLE; show() moves the highlight
+		else if (c > ONLINE) sel = c - 1;
+		else {}
+		ModHost.write32(SELECTION, sel);
+		ModHost.write32(DESC_TIMER, 90);
+		message = aboutText;
+		Game.sound(ctx, Game.SOUND_MOVE);
 	}
 
 	/** The line the player is on now, from the one before and what the game made of the pad. */

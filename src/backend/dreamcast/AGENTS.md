@@ -75,4 +75,7 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
   (`gpu.Gpu.offscreen`, ADR-0030) is the same rule, so off-screen drawing never arrives here.
 - Semi-transparency: modes 0/1/3 as PVR blends; B-F as three passes; mixed-CLUT primitives split
   into solid and STP passes from baked variants.
-- Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits.
+- Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits. A maple
+  keyboard types while text entry is on (ADR-0036); a maple mouse is the HLE pointer (ADR-0038),
+  integrated on the 640 x 480 screen, with its arrow drawn by `draw_mouse_pointer` last in each
+  scene (both `build_scene` and a blank present end with it).

@@ -2,6 +2,27 @@
 
 ## Status snapshot
 
+**2026-09-28: The mouse (ADR-0038) — Crash Bash's menus answer to it.** `bp_mouse` in the backend
+ABI (over the picture, x and y as fractions 0..65535 of it, left/right/middle/back/forward held,
+quick clicks latched), implemented by SDL2 (letterbox rectangle, high-DPI points), the browser
+(pointer events over the page's picture, context menu and history buttons kept from the page) and
+the Dreamcast (a maple mouse on the 640 x 480 screen, its arrow drawn last in each scene); null
+has none. `kernel.KMouse` samples it after the pads, turns fractions into the display's pixels and
+counts moves and presses from boot so readers never take events from each other; `ModHost.mouse*`.
+`mods/onlinemenu`: point, click and back on the main menu and the address keyboard; `mods/mouse`:
+the game's screens by writing the index each keeps (players 8005A63Ah, OPTIONS 800B9508h, Adventure
+800B9628h, P1's portrait 800BA004h, the level 8005A64Bh) with the move sound, cross added after the
+pad reader (800138A4h) for a click — nine menu slots, a list live while the screen it was built
+under is current (OPTIONS opens in slot 4 and is never emptied); stepping down/up only for lists not
+yet known. The owner asked for the indexes: a stepping first version took several ten-frame
+slides to reach a character at the far end. Found on the way: onlinemenu
+took OPTIONS's slot-4 build for leaving the main menu, so ONLINE (pad and mouse) stopped working
+after it; fixed. Verified: conformance `Mouse` `adc65922`, `Keyboard`, `ModHooks` on JS and
+reflaxe.CPP; a scripted headless walk (main menu, OPTIONS and back, Adventure submenu, the side
+button); the browser with a real mouse; SDL2 and Dreamcast compile clean; check.sh (42 ABI
+functions). With only this change on HEAD, Crash Bash 3000 `654669df`, 9000 `fda4764f` — the
+working tree's in-progress memory card work moves them (3000 `4754e627`, 9000 `6cea1549`).
+
 **2026-09-28: The host's keyboard types (ADR-0036); ONLINE takes an address only and tries the
 game's port.** A keyboard-as-text group in the backend ABI (`bp_key_text`, `bp_key_next`: Unicode
 code points as the host's layout makes them, plus Backspace/Enter/Escape), implemented by SDL2
@@ -1629,6 +1650,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Mouse (ADR-0038): bp_mouse on SDL2, browser, Dreamcast (drawn arrow), null; kernel.KMouse;
+mods/mouse drives the game's lists, onlinemenu its own screens; onlinemenu's slot bug (OPTIONS) fixed. Dreamcast
+CDI with ONLINE: out/dc/crashbash-online-max.cdi (before the mouse). Next: a Dreamcast build with the mouse; the
+HLE network service.
 
 2026-09-28 [claude] HLE keyboard as text (ADR-0036: bp_key_text/next on SDL2, browser, Dreamcast, null;
 kernel.KKeyboard; conformance Keyboard on both targets). onlinemenu: IP only, port 9457 per game, typing,

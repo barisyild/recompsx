@@ -218,6 +218,26 @@ int  bp_key_next(void);
  * backend decides where that lives. Writes must be atomic from the caller's point of view:
  * a crash mid-write must not leave a half-written memory card. */
 int bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 if absent */
+/* ---- mouse ---------------------------------------------------------------------------------
+ * The host's pointer over the picture, which the HLE kernel offers games and mods
+ * (kernel.KMouse, ADR-0038). bp_input_poll latches it with the pads; then bp_mouse answers:
+ *
+ *   BP_MOUSE_OVER     1 while the target has a mouse and the pointer is over the picture
+ *   BP_MOUSE_X, _Y    where, as a fraction of the picture: 0..65535 from its left edge across its
+ *                     width, from its top edge down its height. A backend needs to know only
+ *                     where it put the picture, never the emulated display's size; the kernel
+ *                     turns the fraction into that display's pixels.
+ *   BP_MOUSE_BUTTONS  the buttons held: bit 0 left, bit 1 right, bit 2 middle, bit 3 back and
+ *                     bit 4 forward (the side buttons; a browser's history buttons, which the
+ *                     backend keeps from the page). A press that began and ended between two
+ *                     polls counts as held for the second, so a quick click is never lost.
+ *
+ * A target without a mouse answers 0 to everything. One whose host draws no pointer of its own
+ * (a console) draws one over the picture while the pointer is over it. */
+enum { BP_MOUSE_OVER = 0, BP_MOUSE_X = 1, BP_MOUSE_Y = 2, BP_MOUSE_BUTTONS = 3 };
+
+int bp_mouse(int field);
+
 int bp_storage_write(const char* name, const uint8_t* buf, int len); /* 0 ok, -1 fail */
 
 /* ---- disc / file streaming ---------------------------------------------------------------

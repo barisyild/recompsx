@@ -1,7 +1,9 @@
-/* dc_input.c — maple controllers as PlayStation pads, the reset combo, and a keyboard as text. */
+/* dc_input.c — maple controllers as PlayStation pads, the reset combo, a keyboard as text, and a
+ * mouse as the HLE kernel's pointer. */
 
 #include "dc_internal.h"
 #include <dc/maple/keyboard.h>
+#include <dc/maple/mouse.h>
 
 /* ---- input state ---------------------------------------------------------------------------- */
 
@@ -78,7 +80,10 @@ static uint8_t axis_to_byte(int v) {
     return (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
 }
 
+static void poll_mouse(void);
+
 void bp_input_poll(void) {
+    poll_mouse();
 #if RECOMPSX_DC_PROFILE
     /* An automated profiling run (--dc-rxprof) has to measure the same frames every time. With a
      * controller in the port, whatever reaches the emulator's window — a key pressed while it had
@@ -177,4 +182,88 @@ int bp_key_next(void) {
         if((k >> 8) == KBD_KEY_PAD_ENTER) return BP_KEY_ENTER;
         /* an arrow, a function key: nothing typed — on to the next */
     }
+}
+
+/* ---- mouse (bp_mouse) -----------------------------------------------------------------------------
+ * A maple mouse on any port is the pointer (backend_c_api.h). KallistiOS hands over the motion of
+ * its last bus frame (dx, dy) and the buttons; the pointer itself is kept here, on the 640 x 480
+ * screen the picture fills, and reported as a fraction of it. A frame of motion the emulator did
+ * not poll for — it runs below 60 frames a second — is not seen, so the pointer is slower then;
+ * that is the whole cost. The console draws no pointer of its own, so the backend draws one:
+ * draw_mouse_pointer, the last thing in each scene. Left, right and the side button are the
+ * mouse's; there is no middle one. */
+
+static int g_mouse_on;                     /* a mouse is attached */
+static int g_mouse_px = 320, g_mouse_py = 240;
+static int g_mouse_buttons;
+
+static void poll_mouse(void) {
+    maple_device_t* dev = NULL;
+#if RECOMPSX_DC_PROFILE
+    if(!g_rxprof) dev = maple_enum_type(0, MAPLE_FUNC_MOUSE);
+#else
+    dev = maple_enum_type(0, MAPLE_FUNC_MOUSE);
+#endif
+    const mouse_state_t* st = dev ? (const mouse_state_t*)maple_dev_status(dev) : NULL;
+    g_mouse_on = st != NULL;
+    if(!st) {
+        g_mouse_buttons = 0;
+        return;
+    }
+    g_mouse_px += st->dx;
+    g_mouse_py += st->dy;
+    if(g_mouse_px < 0) g_mouse_px = 0;
+    if(g_mouse_px > 639) g_mouse_px = 639;
+    if(g_mouse_py < 0) g_mouse_py = 0;
+    if(g_mouse_py > 479) g_mouse_py = 479;
+    int b = 0;
+    if(st->buttons & MOUSE_LEFTBUTTON)  b |= 1;
+    if(st->buttons & MOUSE_RIGHTBUTTON) b |= 2;
+    if(st->buttons & MOUSE_SIDEBUTTON)  b |= 8;
+    g_mouse_buttons = b;
+}
+
+int bp_mouse(int field) {
+    switch(field) {
+        case BP_MOUSE_OVER:    return g_mouse_on;
+        case BP_MOUSE_X:       return g_mouse_on ? (g_mouse_px * 65536) / 640 : 0;
+        case BP_MOUSE_Y:       return g_mouse_on ? (g_mouse_py * 65536) / 480 : 0;
+        case BP_MOUSE_BUTTONS: return g_mouse_on ? g_mouse_buttons : 0;
+        default:               return 0;
+    }
+}
+
+/* An arrow: a black one, then a white one inside it, untextured, in submission order like
+ * everything else in the list (no depth, ADR-0011). */
+static pvr_poly_hdr_t g_pointer_hdr __attribute__((aligned(32)));
+static int g_pointer_ready;
+
+static void pointer_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t argb) {
+    pvr_vertex_t v __attribute__((aligned(32)));
+    v.flags = PVR_CMD_VERTEX;
+    v.z = 2.0f;
+    v.u = v.v = 0.0f;
+    v.argb = argb;
+    v.oargb = 0;
+    v.x = x0; v.y = y0; put_vtx(&v);
+    v.x = x1; v.y = y1; put_vtx(&v);
+    v.flags = PVR_CMD_VERTEX_EOL;
+    v.x = x2; v.y = y2; put_vtx(&v);
+}
+
+void draw_mouse_pointer(void) {
+    if(!g_mouse_on) return;
+    if(!g_pointer_ready) {
+        pvr_poly_cxt_t cxt;
+        pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
+        cxt.gen.culling = PVR_CULLING_NONE;
+        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        cxt.depth.write = false;
+        pvr_poly_compile(&g_pointer_hdr, &cxt);
+        g_pointer_ready = 1;
+    }
+    const float x = (float)g_mouse_px, y = (float)g_mouse_py;
+    put_hdr(&g_pointer_hdr);
+    pointer_tri(x - 1.0f, y - 2.0f, x - 1.0f, y + 20.0f, x + 15.0f, y + 14.0f, 0xFF000000u);
+    pointer_tri(x, y, x, y + 16.0f, x + 11.0f, y + 12.0f, 0xFFFFFFFFu);
 }

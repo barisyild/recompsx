@@ -37,6 +37,7 @@ class Kernel {
 		// Every table is built here rather than at its declaration: reflaxe emits a statement
 		// block at namespace scope for a static initialised with a comprehension, which is not
 		// valid C++ — and nothing may allocate after boot anyway.
+		KMouse.init();
 		autoAck = [for (_ in 0...11) true];
 		clearRCnt = [true, true, true, true];
 		lastError = 0;

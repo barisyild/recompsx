@@ -14,3 +14,6 @@ Read this when the work touches `src/backend/pc/`, `scripts/build-pc.sh` or
   from here must equal the JavaScript one — that comparison is the point of the C++ build.
 - Input: SDL game controller n is port n, and the keyboard is merged into port 0 (which is a
   digital pad when no controller is there); the key layout matches the browser's (SDL2 names).
+  The keyboard also types (`bp_key_*`, ADR-0036) and the mouse is the HLE pointer (`bp_mouse`,
+  ADR-0038): `bp_present` keeps the letterbox rectangle, `latch_mouse` scales window points to
+  renderer pixels (high-DPI) and reports a fraction of that rectangle; X1/X2 are the side buttons.

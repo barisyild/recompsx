@@ -61,7 +61,7 @@ class Scanout {
 		Bit 6 overrides the two low bits entirely — 368 is not part of their sequence, it is a
 		separate mode that ignores them.
 	**/
-	static function width(mode:Int):Int {
+	public static function width(mode:Int):Int {
 		if ((mode & 0x40) != 0) return HRES_368;
 		else if ((mode & 3) == 0) return HRES_256;
 		else if ((mode & 3) == 1) return HRES_320;
@@ -71,7 +71,7 @@ class Scanout {
 
 	/** 480 only when interlace is on as well: bit 2 alone means the game asked for a taller
 	    buffer it is drawing into one field at a time. */
-	static function height(mode:Int):Int {
+	public static function height(mode:Int):Int {
 		return (mode & 0x04) != 0 && (mode & 0x20) != 0 ? 480 : 240;
 	}
 

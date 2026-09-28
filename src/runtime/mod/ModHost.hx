@@ -258,6 +258,41 @@ class ModHost {
 	**/
 	public static inline function typed():Int return kernel.KKeyboard.next();
 
+	/** Mouse buttons, for `mouseHeld` and `mouseClicks`. */
+	public static inline var MOUSE_LEFT = 0;
+	public static inline var MOUSE_RIGHT = 1;
+	public static inline var MOUSE_MIDDLE = 2;
+	/** The side buttons: back (nearer the wrist) and forward. */
+	public static inline var MOUSE_BACK = 3;
+	public static inline var MOUSE_FORWARD = 4;
+
+	/**
+		Whether the pointer is over the picture (`kernel.KMouse`, ADR-0038); never where the machine
+		has no mouse. Its position is in the display's pixels, `pictureWidth` x `pictureHeight`.
+	**/
+	public static inline function mouseOver():Bool return kernel.KMouse.over;
+
+	public static inline function mouseX():Int return kernel.KMouse.x;
+
+	public static inline function mouseY():Int return kernel.KMouse.y;
+
+	public static inline function pictureWidth():Int return kernel.KMouse.width;
+
+	public static inline function pictureHeight():Int return kernel.KMouse.height;
+
+	public static inline function mouseHeld(button:Int):Bool return (kernel.KMouse.buttons & (1 << button)) != 0;
+
+	/**
+		Presses of a button, and moves of the pointer, counted from boot: keep the last count seen,
+		and a different one is a click, or a move, since then — nothing is taken from another reader.
+	**/
+	public static inline function mouseClicks(button:Int):Int return kernel.KMouse.clicks(button);
+
+	public static inline function mouseMoves():Int return kernel.KMouse.moves;
+
+	/** Whether an address is in mod memory (`mod.ModRam`): data a mod made, not the game. */
+	public static inline function isModMemory(addr:Int):Bool return ModRam.contains(addr & 0x1FFFFFFF);
+
 	public static function log(what:String):Void {
 		shim.Backend.log(shim.Backend.LOG_INFO, "mod: " + what);
 	}

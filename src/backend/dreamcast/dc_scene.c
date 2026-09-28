@@ -1315,6 +1315,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * primitives is painted over by them — as the overlay was, when it followed the background. */
     draw_profile_overlay();
 #endif
+    draw_mouse_pointer();
     pvr_list_finish();
 
 #if RECOMPSX_DC_PROFILE

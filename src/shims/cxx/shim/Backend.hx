@@ -108,6 +108,7 @@ class Backend {
 	public static inline function keyText(on:Bool):Void BackendNative.bp_key_text(on ? 1 : 0);
 	public static inline function keyNext():Int return BackendNative.bp_key_next();
 	public static inline function requestQuit():Void {
+	public static inline function mouse(field:Int):Int return BackendNative.bp_mouse(field);
 		quitting = true;
 	}
 

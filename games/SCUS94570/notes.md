@@ -3,6 +3,62 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-09-28: The mouse in the menus (mods/mouse, mods/onlinemenu; ADR-0038)
+
+Measured headless (a scripted pad, then a scripted mouse through `kernel.KMouse.update`).
+
+**Units.** Menu records and widgets place things in a 640 x 480 space centred on the screen: the
+widget draw (8001C690h) sets the GTE's screen offset to x times the display's width over 640
+(the `0x66666667` multiply and `>> 8` are a division by 640) and to y halved, for 240 lines. So a
+pointer at display pixel (px, py) of a W x 240 display is at (px * 640 / W - 320, py * 2 - 240).
+A text line's y is its top; letters are about 28 units tall and 20 wide.
+
+**Widgets.** Hung from the menu objects at 800A0E78h + slot * 9Ch (+6Ch the first), linked
+through +5Ch. +0 flags: 10008000h a drawn text line (10000000h the same, hidden — the description
+until it is shown), 12008001h a panel, 11008000h/01008000h models; +4 x — a centred line keeps
+8000h plus its centre (8086h: 134; CHOOSE LEVEL's 7FA1h: -95); +8 y; +6Ch the text; +7Ch the
+state — 0 plain, 2 highlighted, 3 a line not available, 4 a description. There are nine menu objects: they run up to 800A13F4h, slot 0's first widget.
+
+**Which list is up.** OPTIONS is built into slot 4 (records 800B8F20h: title OPTIONS at y -140,
+SOUND -50, CONTROLLER -10, EXIT 30, all centred on 0) while the main menu stays in slot 0 with
+OPTIONS lit; closing it builds nothing — Select Game Type's frame simply runs again — and slot 4
+keeps its widgets. The menu objects do not change either. What does is the menu screen manager's
+current screen (8009F8A4h): every list is built while its screen is current (Select Game Type
+800B8E28h, OPTIONS 800B9510h, the Adventure submenu 800B8E50h, Tournament 800B8E3Ch), so a list
+is live while the screen it was built under is. A torn-down menu (the demo, a match) empties slot
+0.
+
+**The picture screens.** The Battle Mode path is main menu, SELECT NUMBER OF PLAYERS (800B8E3Ch,
+a list; it takes cross only after some 150 frames), CHARACTER SELECT (800B9DF4h, frame handler
+800B6734h), CHOOSE LEVEL (800BA72Ch, 800B7458h), then the match (800BAAB4h). CHARACTER SELECT's
+slot 0 holds the P1 marker (widget 0) and the eight portraits (widgets 4..11) as sprites placed
+from the screen's top left in 640 x 480 units: x 150/240/330/420, y 38/138, each about 70 x 77
+inside a frame 90 x 100. Right and left walk the eight as one ring (7 -> 0 -> 1); the marker
+slides over some ten frames to 1 left of and 2 above the portrait chosen. CHOOSE LEVEL's slot 0
+has the level's name (widget 0), the arrow (widget 1) and the arena's name (widget 6); left and
+right change the arena (CRATE CRUSH -> POLAR PUSH), up and down the level, and the arrow's y is
+-154 + 99 * the level in the centred units — the four thumbnails 135..290 across in those bands,
+the big preview -287..91 across and -2..198 down.
+
+**The choices are indexes.** Each screen keeps its choice as a number its frame handler draws from
+every frame, so a mod writes it (and plays the move sound, 190h) rather than pressing its way
+there: Select Game Type 0..3 at 800B95F0h (with the description timer 800B9624h = 90); SELECT
+NUMBER OF PLAYERS the players 1..4 at 8005A63Ah (game state 8005A614h + 26h; up and down stop at
+1 and at the pads connected, 80051600h — and cross is ignored while it is 0, before any pad is
+seen); the Adventure submenu 0..1 at 800B9628h; OPTIONS 0..2 at 800B9508h; CHARACTER SELECT each
+player's portrait 0..7 at +30h of its record (800B9FD4h + 60h each: +4 its pad, +24h 0 while it
+is still choosing; left/right +-1, up/down +-4, then & 7; its move sound is the word at 800B9CB4h +
+4 * pad); CHOOSE LEVEL the arena at 8005A614h + 36h (0..6, left/right; a change also sets
+800BA744h to 4) and the level at + 37h (up/down, below the arena's count at 800BA324h + 8 * arena
++ 4). The inputs are in 800B5F40h (the portrait), 800B6E0Ch (arena and level), and each list's
+frame handler (800B3F7Ch, 800B42B0h, 800B4910h).
+
+**Input.** The pad reader is 800138A4h (exe): it reads the eight controllers (records at 80051338h
++ i * 58h), leaves the buttons pressed this frame at 80051380h (controller 0's +48h) and counts
+idle frames at 80051604h. The mouse mod adds its presses there right after it. The onlinemenu mod
+had a bug this uncovered: it took any build into another slot as leaving the main menu, so after
+OPTIONS its ONLINE line and the mouse stopped working; only slot 0's builds count now.
+
 ## 2026-09-28: ONLINE — an address only, the game's port, typing, and the demo timer
 
 The address keyboard takes an IPv4 address and nothing else (four numbers 0..255, no leading

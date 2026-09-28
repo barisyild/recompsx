@@ -37,8 +37,9 @@ The runtime's `mod.ModHost` is the whole interface: `hook(addr, fn)` (true from 
 call), `callOriginal` (the hooked function runs as the guest called it, without yielding),
 `call` (any guest function), `onFrame` (every vblank, from `Kernel.onFrame`), `onBoot` (the
 executable loaded, before its first instruction), a bump allocator with `cstring` and `copy`,
-guest memory and pad reads, console settings (`setting`/`setSetting`, ADR-0034) and the
-keyboard's text (`textEntry`/`typed`, ADR-0036). Handlers are static functions held as function
+guest memory and pad reads, console settings (`setting`/`setSetting`, ADR-0034), the
+keyboard's text (`textEntry`/`typed`, ADR-0036) and the mouse (`mouseOver`, `mouseClicks`...,
+ADR-0038). Handlers are static functions held as function
 values, the pattern `Runtime.bindDispatch` already relies on on both targets. The launcher
 installs mods and the kernel calls the frame hook only under `-D recompsx_mods`;
 `scripts/build-web.sh <SERIAL> --mods <ids>` builds the browser bundle with them.

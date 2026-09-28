@@ -1,8 +1,10 @@
 package shim;
 
 import js.Browser;
+import js.html.Element;
 import js.html.Gamepad;
 import js.html.KeyboardEvent;
+import js.html.PointerEvent;
 
 /**
 	The browser's keyboard and gamepads as PlayStation pads, through Haxe's browser externs.
@@ -26,6 +28,13 @@ import js.html.KeyboardEvent;
 	(`KeyboardEvent.key`, so a Turkish keyboard types ş and a French one é), and Backspace, Enter
 	and Escape. Then only the arrows are still the d-pad — typing `s` never presses square too —
 	and a key held when text entry ends becomes a button only when it is pressed again.
+
+	The pointer is the HLE kernel's mouse (`kernel.KMouse`, ADR-0038), over the element the page
+	shows the picture in (`recompsxHost.screen`): both renderers stretch the picture over that
+	element's whole content box, so its edges are the picture's. A position is a fraction of it,
+	0..65535, worked out in plain JavaScript so that no float reaches Haxe; a press counts until
+	the next poll even when it was let go before; and over the picture the right button opens no
+	context menu and the side buttons leave the page's history alone, since they are the game's.
 **/
 class Input {
 	// PS1 bits, active high: backend_c_api.h, bp_pad_buttons.
@@ -59,6 +68,17 @@ class Input {
 	static var typing = false;
 	static var typed:Array<Int> = [];
 
+	/** The pointer as its events leave it; `poll` takes the snapshot the runtime reads. */
+	static var pointerOver = false;
+	static var pointerX = 0;
+	static var pointerY = 0;
+	static var pointerHeld = 0;
+	static var pointerPressed = 0;
+	static var mouseOver = 0;
+	static var mouseX = 0;
+	static var mouseY = 0;
+	static var mouseButtons = 0;
+
 	/** Once per vblank, from `Backend.inputPoll`: a stable snapshot of both pads. */
 	public static function poll():Void {
 		if (Browser.supported) {
@@ -80,7 +100,23 @@ class Input {
 			pad0 = keys | first;
 			pad1 = second;
 			pad1Connected = seen > 1;
+			mouseOver = pointerOver ? 1 : 0;
+			mouseX = pointerX;
+			mouseY = pointerY;
+			mouseButtons = pointerOver ? (pointerHeld | pointerPressed) : 0;
+			pointerPressed = 0;
 		} else {}
+	}
+
+	/** `bp_mouse`'s fields: over the picture, x and y as fractions of it, the buttons held. */
+	public static function mouse(field:Int):Int {
+		return switch (field) {
+			case 0: mouseOver;
+			case 1: mouseX;
+			case 2: mouseY;
+			case 3: mouseButtons;
+			case _: 0;
+		}
 	}
 
 	/** Pad 0 is always there in a page — it is the keyboard — and pad 1 when a second gamepad is. */
@@ -98,7 +134,55 @@ class Input {
 		w.addEventListener("keydown", (e:KeyboardEvent) -> key(e, true));
 		w.addEventListener("keyup", (e:KeyboardEvent) -> key(e, false));
 		// A key let go while the page had no focus never sends its keyup, so forget them all.
-		w.addEventListener("blur", () -> keys = 0);
+		w.addEventListener("blur", () -> {
+			keys = 0;
+			pointerHeld = 0;
+		});
+		final screen:Null<Element> = js.Syntax.code("((globalThis.recompsxHost && globalThis.recompsxHost.screen) || null)");
+		if (screen != null) {
+			screen.addEventListener("pointermove", (e:PointerEvent) -> point(screen, e));
+			screen.addEventListener("pointerdown", (e:PointerEvent) -> press(screen, e, true));
+			screen.addEventListener("pointerup", (e:PointerEvent) -> press(screen, e, false));
+			screen.addEventListener("pointerleave", () -> {
+				pointerOver = false;
+				pointerHeld = 0;
+			});
+			screen.addEventListener("contextmenu", (e:PointerEvent) -> e.preventDefault());
+			// The side buttons are the browser's Back and Forward, taken on the way up.
+			for (kind in ["mousedown", "mouseup", "auxclick"]) {
+				screen.addEventListener(kind, (e:PointerEvent) -> {
+					if (e.button == 3 || e.button == 4) e.preventDefault();
+					else {}
+				});
+			}
+		} else {}
+	}
+
+	/** Where the pointer is, as fractions of the element's content box (0..65535). */
+	static function point(screen:Element, e:PointerEvent):Void {
+		pointerX = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientX - ({0}).getBoundingClientRect().left - ({0}).clientLeft) / ({0}).clientWidth * 65536) | 0))", screen, e);
+		pointerY = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientY - ({0}).getBoundingClientRect().top - ({0}).clientTop) / ({0}).clientHeight * 65536) | 0))", screen, e);
+		pointerOver = true;
+	}
+
+	static function press(screen:Element, e:PointerEvent, down:Bool):Void {
+		point(screen, e);
+		final bit = switch (e.button) {
+			case 0: 1;
+			case 2: 2;
+			case 1: 4;
+			case 3: 8;
+			case 4: 16;
+			case _: 0;
+		}
+		if (bit >= 8) e.preventDefault();
+		else {}
+		if (down) {
+			pointerHeld |= bit;
+			pointerPressed |= bit;
+		} else {
+			pointerHeld &= ~bit;
+		}
 	}
 
 	static function key(e:KeyboardEvent, down:Bool):Void {

@@ -37,6 +37,10 @@ static int g_typing;                       /* bp_key_text: the keyboard types */
 static int g_typed[TYPED_CAP];
 static int g_typed_head, g_typed_count;
 
+static SDL_Rect g_picture;                 /* where bp_present last put the picture */
+static int      g_mouse_over, g_mouse_x, g_mouse_y, g_mouse_buttons;
+static int      g_mouse_pressed;           /* buttons that went down since the last poll */
+
 static FILE* g_files[MAX_FILES];
 static int   g_file_size[MAX_FILES];
 
@@ -196,6 +200,7 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     if (dst_h > win_h) { dst_h = win_h; dst_w = (win_h * 4) / 3; }
 
     const SDL_Rect dst = { (win_w - dst_w) / 2, (win_h - dst_h) / 2, dst_w, dst_h };
+    g_picture = dst;
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
     SDL_RenderCopy(g_renderer, g_texture, &src, &dst);
@@ -340,12 +345,66 @@ int bp_key_next(void) {
     return c;
 }
 
+/* ---- mouse (bp_mouse) -------------------------------------------------------------------------
+ * The pointer over the picture, as a fraction of the rectangle bp_present last drew it in. That
+ * rectangle is in the renderer's pixels and the pointer in the window's points — two pixels to a
+ * point on a high-DPI display — so the pointer is scaled first. A press seen as an event counts
+ * as held until the next poll, so a click shorter than a frame still reaches the machine. */
+
+static int mouse_bit(Uint8 button) {
+    if (button == SDL_BUTTON_LEFT) return 1;
+    if (button == SDL_BUTTON_RIGHT) return 2;
+    if (button == SDL_BUTTON_MIDDLE) return 4;
+    if (button == SDL_BUTTON_X1) return 8;
+    if (button == SDL_BUTTON_X2) return 16;
+    return 0;
+}
+
+static void latch_mouse(void) {
+    int wx = 0, wy = 0, ww = 0, wh = 0, ow = 0, oh = 0;
+    const Uint32 held = SDL_GetMouseState(&wx, &wy);
+    SDL_GetWindowSize(g_window, &ww, &wh);
+    SDL_GetRendererOutputSize(g_renderer, &ow, &oh);
+    const int px = ww > 0 ? (int)((int64_t)wx * ow / ww) : wx;
+    const int py = wh > 0 ? (int)((int64_t)wy * oh / wh) : wy;
+    const SDL_Rect r = g_picture;
+    g_mouse_over = SDL_GetMouseFocus() == g_window && r.w > 0 && r.h > 0
+        && px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+    if (g_mouse_over) {
+        g_mouse_x = (int)((int64_t)(px - r.x) * 65536 / r.w);
+        g_mouse_y = (int)((int64_t)(py - r.y) * 65536 / r.h);
+        int b = g_mouse_pressed;
+        if (held & SDL_BUTTON_LMASK) b |= 1;
+        if (held & SDL_BUTTON_RMASK) b |= 2;
+        if (held & SDL_BUTTON_MMASK) b |= 4;
+        if (held & SDL_BUTTON_X1MASK) b |= 8;
+        if (held & SDL_BUTTON_X2MASK) b |= 16;
+        g_mouse_buttons = b;
+    } else {
+        g_mouse_x = g_mouse_y = g_mouse_buttons = 0;
+    }
+    g_mouse_pressed = 0;
+}
+
+int bp_mouse(int field) {
+    switch (field) {
+        case BP_MOUSE_OVER:    return g_mouse_over;
+        case BP_MOUSE_X:       return g_mouse_x;
+        case BP_MOUSE_Y:       return g_mouse_y;
+        case BP_MOUSE_BUTTONS: return g_mouse_buttons;
+        default:               return 0;
+    }
+}
+
 void bp_input_poll(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_QUIT:
                 g_quit = 1;
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+                g_mouse_pressed |= mouse_bit(e.button.button);
                 break;
             case SDL_KEYDOWN: {
                 const SDL_Keycode k = e.key.keysym.sym;
@@ -405,6 +464,7 @@ void bp_input_poll(void) {
         if (i == 0) b |= g_keyboard_buttons;
         g_pad_buttons[i] = b;
     }
+    if (g_window && g_renderer) latch_mouse();
 }
 
 int      bp_pad_connected(int pad) {

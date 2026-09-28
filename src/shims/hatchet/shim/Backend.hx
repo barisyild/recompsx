@@ -47,6 +47,7 @@ extern class Backend {
 	public static function keyText(on:Bool):Void;
 	public static function keyNext():Int;
 	public static function requestQuit():Void;
+	public static function mouse(field:Int):Int;
 	public static function quitRequested():Bool;
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int;
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int;

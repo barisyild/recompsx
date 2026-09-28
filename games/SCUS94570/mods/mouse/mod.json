@@ -1,0 +1,11 @@
+{
+  "id": "mouse",
+  "title": "The mouse in Crash Bash's menus",
+  "_description": "Point at a line of any of the game's menus and it is selected, click it and it is chosen, right-click or press the side (back) button to go back (ADR-0038). The mod finds the highlighted text line of the list on screen and presses down or up one step a frame until the highlight is under the pointer, then cross — added to the buttons the game read, right after its pad reader, so every screen's own handler does the rest. Screens a mod built (onlinemenu's) are left to that mod.",
+  "entry": "mouse.Mouse",
+  "_hooks": "0x800138a4 in exe: the pad reader, once a game frame; after it, the buttons pressed this frame are at 80051380h. 0x80095bec in boot: the menu builder (slot a0, records a1), to note which screen each slot's list belongs to.",
+  "hooks": [
+    { "_addr": "0x800138a4", "addr": 2147563684, "in": "exe" },
+    { "_addr": "0x80095bec", "addr": 2148097004, "in": "boot" }
+  ]
+}

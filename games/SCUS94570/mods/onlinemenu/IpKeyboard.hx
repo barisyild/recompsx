@@ -26,7 +26,9 @@ import onlinemenu.Game;
 	Where the machine has a keyboard, it types too (`kernel.KKeyboard`, ADR-0036): the keyboard is
 	put into text entry while this is open, so what it types is taken — a digit or '.' as its key
 	would type it, Backspace as '<', Enter as DONE, Escape as CANCEL — and anything else it types
-	is ignored, since this keyboard has no key for it. The pad keeps working beside it.
+	is ignored, since this keyboard has no key for it. The pad keeps working beside it, and so does
+	the mouse (ADR-0038): pointing at a key selects it, a left click presses it, and back (the right
+	button, or the side button) is CANCEL.
 
 	The last address DONE accepted is a console setting (`net.last_address`, kernel.KSettings,
 	ADR-0034), so it outlives the session like a network setting on a console, beside — not
@@ -62,6 +64,7 @@ class IpKeyboard {
 	static inline var ROW0_Y = -26;
 	static inline var ROW_STEP = 36;
 	static inline var KEY_STEP = 40;
+	static inline var WORD_HALF = 70;                    // half of DONE's and CANCEL's width, for the mouse
 
 	public static inline var SETTING = "net.last_address";
 
@@ -144,6 +147,7 @@ class IpKeyboard {
 		restore();
 		open = true;
 		ModHost.textEntry(true);
+		Pointer.sync();
 		accepted = false;
 		kept = false;
 		selected = 0;
@@ -243,6 +247,8 @@ class IpKeyboard {
 			type(ctx, c);
 			c = ModHost.typed();
 		}
+		if (open) pointer(ctx);
+		else {}
 		if (open) paint();
 		else {}
 		return open;
@@ -296,6 +302,36 @@ class IpKeyboard {
 		if (selected == DONE) finish(ctx);
 		else if (selected == CANCEL) close(ctx, false);
 		else press(ctx, types[selected]);
+	}
+
+	/** The mouse: the key under the pointer is selected when it moves there, pressed on a click. */
+	static function pointer(ctx:CpuState):Void {
+		Pointer.read();
+		final k = keyAt(Pointer.x, Pointer.y);
+		if (k >= 0 && k != selected && (Pointer.moved || Pointer.left)) {
+			selected = k;
+			if (!Pointer.left) Game.sound(ctx, Game.SOUND_MOVE);
+			else {}
+		} else {}
+		if (Pointer.left && k >= 0) activate(ctx);
+		else if (Pointer.back) close(ctx, false);
+		else {}
+	}
+
+	/** The key under a point in menu units: a band a row high, as wide as the key's step. */
+	static function keyAt(x:Int, y:Int):Int {
+		var found = -1;
+		if (Pointer.over) {
+			for (k in 0...KEYS) {
+				final top = ROW0_Y + keyRow[k] * ROW_STEP + keyGap(keyRow[k]);
+				var half = WORD_HALF;
+				if (k < CHAR_KEYS) half = KEY_STEP >> 1;
+				else {}
+				if (y >= top - 4 && y < top + ROW_STEP - 4 && x >= keyX[k] - half && x < keyX[k] + half) found = k;
+				else {}
+			}
+		} else {}
+		return found;
 	}
 
 	/** Something typed on the machine's keyboard: taken if one of these keys types it, else ignored. */

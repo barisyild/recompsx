@@ -2,6 +2,7 @@ package onlinemenu;
 
 import core.CpuState;
 import mod.ModHost;
+import shim.IntMath;
 
 /**
 	What the mod knows about Crash Bash's menus, and the few things it asks the game to do.
@@ -90,4 +91,14 @@ class Game {
 	}
 
 	public static inline function record(list:Int, i:Int):Int return (list + i * RECORD) | 0;
+
+	/**
+		The pointer in the menus' own units. A record's x and y are in a 640 x 480 space centred on
+		the screen, which the widget draw (8001C690h) scales to the display it draws on — x times
+		the display's width over 640, y halved for its 240 lines — so the pointer's pixels go back
+		the same way. A text line's y is its top; its letters are about 28 units tall, and 20 wide.
+	**/
+	public static function pointerX():Int return IntMath.div(ModHost.mouseX() * 640, ModHost.pictureWidth()) - 320;
+
+	public static function pointerY():Int return IntMath.div(ModHost.mouseY() * 480, ModHost.pictureHeight()) - 240;
 }

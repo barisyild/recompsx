@@ -80,6 +80,10 @@ int  bp_quit_requested(void);
 enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
 void bp_key_text(int on);
 int  bp_key_next(void);
+/* mouse (ADR-0038): latched by bp_input_poll; over the picture, x/y as fractions 0..65535 of it,
+   buttons held (left, right, middle, back, forward) */
+enum { BP_MOUSE_OVER = 0, BP_MOUSE_X = 1, BP_MOUSE_Y = 2, BP_MOUSE_BUTTONS = 3 };
+int  bp_mouse(int field);
 /* storage: name in [A-Za-z0-9._-]{1,64}; memcards & config — the HLE kernel's console
    settings are one such blob, system.cfg (ADR-0034); the browser keeps them in localStorage */
 int  bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 none */
@@ -153,6 +157,16 @@ entry is on, a backend whose keyboard also plays pad 0 lets only the arrows pres
 it ends becomes a button only when pressed again. The null backend, JVM and Node type nothing,
 and a headless run never drains the queue.
 
+The pointer is the HLE kernel's mouse (`kernel.KMouse`, ADR-0038): `bp_mouse` answers, after
+`bp_input_poll`, whether the pointer is over the picture, where as a fraction of it (0..65535 each
+way — the kernel turns that into the emulated display's pixels), and which buttons are held, a
+press shorter than a poll counted for one. SDL2 keeps the letterbox rectangle `bp_present` drew
+in and scales the window's points to the renderer's pixels (high-DPI); the browser reads pointer
+events over the page's picture element (`recompsxHost.screen`) and keeps the right button's menu
+and the side buttons' history navigation from the page; the Dreamcast integrates a maple mouse's
+motion on its 640 x 480 screen and draws the arrow itself, last in each scene. Null, JVM and Node
+have no mouse; a headless run never samples one.
+
 ## 2.1 Dreamcast and optional hardware drawing
 
 The KallistiOS backend in `src/backend/dreamcast/`, its launcher and `scripts/build-dc.sh` are
@@ -223,8 +237,8 @@ shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliase
 
 `src/runtime/Backend.hx` — the only platform surface the runtime sees:
 `init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/
-keyText/keyNext/quitRequested/storageRead/storageWrite/fileOpen/fileSize/fileRead/fileClose/timeUs/
-log/fatal`.
+keyText/keyNext/mouse/quitRequested/storageRead/storageWrite/fileOpen/fileSize/fileRead/fileClose/
+timeUs/log/fatal`.
 
 `src/shims/cxx/BackendNative.hx` — flat externs in the verified reflaxe.CPP form:
 

@@ -298,6 +298,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 #if RECOMPSX_DC_PROFILE_OVERLAY
         draw_profile_overlay();
 #endif
+        draw_mouse_pointer();
         pvr_list_finish();
     }
     pvr_scene_finish();

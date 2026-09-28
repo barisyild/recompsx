@@ -206,6 +206,7 @@ struct Backend {
     static inline int padAxis(int pad, int axis) { return bp_pad_axis(pad, axis); }
     static inline void keyText(bool on) { bp_key_text(on ? 1 : 0); }
     static inline int keyNext() { return bp_key_next(); }
+    static inline int mouse(int field) { return bp_mouse(field); }
     static inline void requestQuit() { quitting() = true; }
     static inline bool quitRequested() { return bp_quit_requested() != 0; }
     static inline int storageRead(const std::string& name, unsigned char* buf, int len) {
