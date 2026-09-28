@@ -99,7 +99,7 @@ Everything a game can *read* — scanline, field, GPUSTAT bit 31, timer values �
 must not see a value that stopped moving.
 
 Scheduler: fixed-slot event table, no allocation, no sorting: `VBLANK_START, VBLANK_END,
-TIMER0/1/2, SPU_BATCH, CD_EVENT, SIO_BYTE, DMA_IRQ, MEMCARD_OP, PAD_VSYNC_POLL` — each
+TIMER0/1/2, SPU_BATCH, CD_EVENT, SIO_BYTE, DMA_STEP, MEMCARD_OP, PAD_VSYNC_POLL` — each
 `{due:Int, active:Bool}`; cached `minDue` recomputed on schedule/cancel (N≤12 linear scan).
 `pump()` inline: one compare; `Scheduler.run` pops due events in deadline order (ties broken by
 fixed slot index — deterministic), executes side effects (I_STAT bits, CD state, SPU catch-up…),
@@ -492,17 +492,22 @@ hash.
 
 ## 9. DMA
 
-Channels 0 MDECin, 1 MDECout, 2 GPU (modes 1/2), 3 CDROM (0), 4 SPU (1), 5 PIO (log), 6 OTC (0).
+Channels 0 MDECin, 1 MDECout, 2 GPU (modes 1/2; mode 1 both ways, CHCR.0 = 0 reading GPUREAD
+into RAM after GP0(C0h)), 3 CDROM (0), 4 SPU (1), 5 PIO (log), 6 OTC (0).
 MADR bits 0–23; BCR mode0 BC words (0=0x10000) / mode1 BS|BA; CHCR: 0 direction, 1 step(−4),
 8 chopping (accepted, ignored), 9–10 sync mode, 24 busy, 28 trigger. DPCR (reset 0x07654321)
 nibble bit3 = master enable per channel; priority is irrelevant under the instant model
 (program-order). DICR: 0–5 scratch, 15 force-IRQ, 16–22 per-channel enable, 23 master, 24–30 flags
 (W1C), 31 RO = `b15 || (b23 && flags&enables)`; 0→1 of bit31 → I_STAT.3.
 
-**Instant-transfer model**: at (enabled && busy && (mode≠0 || trigger)) with the device ready →
-the full transfer executes synchronously: burst BC words; slice BS×BA; linked-list (ch2 RAM→GPU)
-walks `{count<<24 | next}` headers, submits payload to GP0, terminates on addr bit23, iteration
-cap 1<<20 → log+abort. OTC: back-chain BCR words ending 0xFFFFFF (CHCR fixed except bits
+**Instant-transfer model, but for channel 2's lists**: at (enabled && busy && (mode≠0 ||
+trigger)) with the device ready → the full transfer executes synchronously: burst BC words; slice
+BS×BA. A linked list (ch2 RAM→GPU) is walked over time instead (ADR-0039): `{count<<24 | next}`
+headers, each node read from RAM when the walk reaches it and its payload submitted to GP0, in
+stretches of ~256 cycles on the DMA_STEP slot, at a cycle a word, a cycle a node and the GPU's
+estimated drawing time for what it carries (`Gpu.takeWork`); terminates on addr bit23, gives up
+after 65536 links; CHCR.24 stays set until then. Games write packets into a table already handed
+over, and the hardware draws them if its walk has not passed them (Crash Bash's pause text). OTC: back-chain BCR words ending 0xFFFFFF (CHCR fixed except bits
 24/28/30). CHCR.24 clears at completion; DICR flag + IRQ scheduled at `+64 + (words >> 4)` cycles
 (word-scaled — long GPU lists complete after short ones). MADR updates to the end value. Future
 config knob `dmaPacing=cycles-per-word` reuses the same completion path for DMA-racing titles.

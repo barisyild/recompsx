@@ -103,6 +103,26 @@ class Gpu {
 	static var copyChanged = false;
 
 	/**
+		A VRAM-to-CPU read in flight: GP0(C0h) names a rectangle, and GPUREAD then hands it over
+		two pixels a word, the first in the low halfword, left to right and top to bottom, wrapping
+		within VRAM as an upload does (psx-spx, "VRAM to CPU blit"). GPUSTAT bit 27 is set while
+		pixels remain, and the channel reads the port the same way (`dma.Dma`).
+
+		This is how a game keeps a picture of what it put in VRAM. Crash Bash takes its memory card
+		icon and palette from VRAM when it saves, and with GPUREAD answering only GP1(10h), its
+		saves carried a black palette and an empty icon, which the Dreamcast's VMU showed blank.
+
+		What is read is emulated VRAM: uploads and copies on every path, and drawn pixels only when
+		the software rasteriser draws. A hardware backend's drawn pixels are its own, as for copies.
+	**/
+	static var readPixels = 0;
+	static var readX = 0;
+	static var readY = 0;
+	static var readW = 0;
+	static var readCol = 0;
+	static var readRow = 0;
+
+	/**
 		A backend whose drawn pixels become texels hears of every upload, changed or not
 		(bp_caps(BP_CAP_GPU_UPLOADS), set by the launcher). Its copy of VRAM holds what it drew,
 		which emulated VRAM never does, so an upload that leaves emulated VRAM as it was can still
@@ -166,6 +186,51 @@ class Gpu {
 	/** Primitives actually rasterised, and pixels written. The proof a frame exists. */
 	public static var primitives(default, null) = 0;
 	public static var pixels(default, null) = 0;
+
+	/**
+		How long the primitives accepted since `takeWork` would have kept a PlayStation GPU busy, in
+		CPU cycles — an estimate, for pacing channel 2's list walk (`dma.Dma`), which on hardware
+		waits on the GPU's 16-word FIFO and so moves at the speed the GPU draws. Taken from the
+		geometry every drawing path shares, after the same rejects, so it is the same whether the
+		software rasteriser or a backend draws the picture. The GPU runs at 53.69 MHz to the CPU's
+		33.87: a textured pixel about a GPU clock, 0.63 of a CPU cycle; an untextured one half that;
+		half as much again semi-transparent; a setup cost per primitive. Only what the drawing area
+		lets through is counted — a triangle's area, but no more than its bounding box clipped to
+		the area: counted whole, the floor under a near camera, most of it off screen, made Crash
+		Bash's walks longer than a frame and its hub ran at ten frames a second. A rectangle is its
+		clipped pixels, a fill an eighth of a cycle a pixel, a VRAM copy a cycle. Not a
+		cycle-accurate GPU: a walk roughly as slow as the hardware's is the whole point. Nothing else
+		in the machine reads it.
+	**/
+	static var work = 0;
+	static inline var TRI_SETUP = 16;
+
+	/** The GPU time owed since the last call, which starts owing afresh. */
+	public static inline function takeWork():Int {
+		final w = work;
+		work = 0;
+		return w;
+	}
+
+	/** A triangle's share, from its edge function — twice its area in pixels — and its bounding
+	    box, which is clipped to the drawing area here. */
+	static inline function triangleWork(twiceArea:Int, loX:Int, hiX:Int, loY:Int, hiY:Int):Void {
+		final l = drawAreaTopLeft & 0x3FF;
+		final t = (drawAreaTopLeft >>> 10) & 0x1FF;
+		final r = drawAreaBottomRight & 0x3FF;
+		final b = (drawAreaBottomRight >>> 10) & 0x1FF;
+		final w = (hiX < r ? hiX : r) - (loX > l ? loX : l) + 1;
+		final h = (hiY < b ? hiY : b) - (loY > t ? loY : t) + 1;
+		final box = w > 0 && h > 0 ? w * h : 0;
+		final area = (twiceArea < 0 ? -twiceArea : twiceArea) >> 1;
+		pixelWork(area < box ? area : box, texEnabled);
+	}
+
+	/** `px` pixels drawn: 5/8 of a cycle textured, 5/16 untextured, half again semi-transparent. */
+	static inline function pixelWork(px:Int, textured:Bool):Void {
+		final c = textured ? (px >> 1) + (px >> 3) : (px >> 2) + (px >> 4);
+		work = (work + c + (semiTransparent ? c >> 1 : 0) + TRI_SETUP) | 0;
+	}
 
 	/**
 		Whether primitives are handed to the backend instead of being rasterised here.
@@ -350,6 +415,7 @@ class Gpu {
 		displayRangeH = 0xC60260;
 		displayRangeV = 0x3FC10;
 		readLatch = 0;
+		readPixels = 0;
 		pending = 0;
 		classifyArea();
 	}
@@ -525,8 +591,10 @@ class Gpu {
 		final hiX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
 		final loY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
 		final hiY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
-		if (hiX - loX <= 1023 && hiY - loY <= 511 && edge(x0, y0, x1, y1, x2, y2) != 0) {
+		final e = edge(x0, y0, x1, y1, x2, y2);
+		if (hiX - loX <= 1023 && hiY - loY <= 511 && e != 0) {
 			primitives++;
+			triangleWork(e, loX, hiX, loY, hiY);
 			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
 				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
 				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
@@ -705,6 +773,38 @@ class Gpu {
 		// is known now, but its contents are not yet what the backend would read.
 	}
 
+	/**
+		Arms a VRAM-to-CPU read. psx-spx gives the size as ((n - 1) AND 3FFh) + 1 across and
+		((n - 1) AND 1FFh) + 1 down, so zero is the whole of VRAM either way.
+	**/
+	static function beginRead():Void {
+		readX = packet[1] & 0x3FF;
+		readY = (packet[1] >>> 16) & 0x1FF;
+		readW = (((packet[2] & 0xFFFF) - 1) & 0x3FF) + 1;
+		final h = ((((packet[2] >>> 16) & 0xFFFF) - 1) & 0x1FF) + 1;
+		readCol = 0;
+		readRow = 0;
+		readPixels = readW * h;
+	}
+
+	/** The next word of a read: two pixels, or one and a zero when the rectangle's last is odd. */
+	static function readWord():Int {
+		final lo = readPixel();
+		final hi = readPixels > 0 ? readPixel() : 0;
+		return lo | (hi << 16);
+	}
+
+	static function readPixel():Int {
+		final p = Vram.get(readX + readCol, readY + readRow);
+		readPixels--;
+		readCol++;
+		if (readCol == readW) {
+			readCol = 0;
+			readRow++;
+		} else {}
+		return p;
+	}
+
 	static function push(v:Int):Void {
 		if (packetLen < 32) packet[packetLen] = v;
 		else {}
@@ -725,6 +825,7 @@ class Gpu {
 		else if (op >= 0x60 && op <= 0x7F) drawRect(op);
 		else if (op == 0x02) drawFill();
 		else if (op == 0xA0) beginTransfer();
+		else if (op == 0xC0) beginRead();
 		else if (op == 0x80) copyWithinVram();
 		else {}
 	}
@@ -754,6 +855,7 @@ class Gpu {
 		final dy0 = (packet[2] >>> 16) & 0x1FF;
 		final w = ((packet[3] - 1) & 0x3FF) + 1;
 		final h = (((packet[3] >>> 16) - 1) & 0x1FF) + 1;
+		work = (work + w * h + TRI_SETUP) | 0;
 		copyChanged = false;
 		// Whole rows when the mask bits ask nothing of a pixel and neither run wraps at the right
 		// edge. The hardware copies in increasing order, so a row copied onto itself further
@@ -922,8 +1024,10 @@ class Gpu {
 		final top = y < ay0 ? ay0 : y;
 		final right = x + w > ax1 ? ax1 : x + w;
 		final bottom = y + h > ay1 ? ay1 : y + h;
-		if (left < right && top < bottom) fillRect(left, top, right - left, bottom - top, colour);
-		else {}
+		if (left < right && top < bottom) {
+			pixelWork((right - left) * (bottom - top), textured);
+			fillRect(left, top, right - left, bottom - top, colour);
+		} else {}
 		primitives++;
 	}
 
@@ -935,6 +1039,7 @@ class Gpu {
 		final y = (packet[1] >>> 16) & 0x1FF;
 		final w = ((packet[2] & 0x3FF) + 0xF) & ~0xF;
 		final h = (packet[2] >>> 16) & 0x1FF;
+		work = (work + ((w * h) >> 3) + TRI_SETUP) | 0;
 		fillVram(x, y, w, h, colour);
 		primitives++;
 	}
@@ -1023,9 +1128,11 @@ class Gpu {
 			final hiY = hy0 > hy1 ? (hy0 > hy2 ? hy0 : hy2) : (hy1 > hy2 ? hy1 : hy2);
 			if (hiX - loX > 1023 || hiY - loY > 511) return;
 			else {}
-			if (edge(hx0, hy0, hx1, hy1, hx2, hy2) == 0) return;
+			final he = edge(hx0, hy0, hx1, hy1, hx2, hy2);
+			if (he == 0) return;
 			else {}
 			primitives++;
+			triangleWork(he, loX, hiX, loY, hiY);
 			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
 				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
 				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
@@ -1074,6 +1181,7 @@ class Gpu {
 		final area = edge(x0, y0, x1, y1, x2, y2);
 		if (area == 0) return;
 		else {}
+		triangleWork(area, minX, maxX, minY, maxY);
 		primitives++;
 		if (hw) noteDrawn(minX, minY, maxX, maxY);
 		else {}
@@ -1697,7 +1805,13 @@ class Gpu {
 
 	// ---- reads ------------------------------------------------------------------------------------
 
+	/**
+		GPUREAD: the next word of a VRAM read while one lasts, and after it the last word read,
+		or what GP1(10h) put there.
+	**/
 	public static function readData():Int {
+		if (readPixels > 0) readLatch = readWord();
+		else {}
 		return readLatch;
 	}
 
@@ -1723,8 +1837,11 @@ class Gpu {
 		if (irqPending) s |= 1 << 24;
 		else {}
 		s |= dmaRequestBit();
-		// Never busy: drawing is instant in this model, so readiness is the truthful answer.
-		s |= (1 << 26) | (1 << 27) | (1 << 28);
+		// Never busy: drawing is instant in this model, so readiness is the truthful answer. Bit
+		// 27 is the one that waits on the game: VRAM has words for it while a read lasts.
+		s |= (1 << 26) | (1 << 28);
+		if (readPixels > 0) s |= 1 << 27;
+		else {}
 		s |= dmaDirection << 29;
 		s |= oddLineBit(cycles);
 		return s;

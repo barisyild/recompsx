@@ -2,6 +2,7 @@ package dma;
 
 import core.Irq;
 import core.Runtime;
+import core.Scheduler;
 import gpu.Gpu;
 import mem.Memory;
 import shim.Backend;
@@ -16,8 +17,17 @@ import shim.MemA;
 	its display list into nothing and render an empty screen while looking perfectly healthy —
 	which is exactly what this one did, twenty-nine GP0 words in eight minutes of play.
 
-	Transfers complete instantly. Nothing in the emulated machine can observe the difference: the
-	channel is busy for no emulated time, and a game that polls CHCR bit 24 sees it already clear.
+	Transfers complete instantly — except channel 2's ordering table, which the channel walks a node
+	at a time while the CPU runs on, reading each node from RAM when it gets there. Games write
+	packets into a table they have already handed over, and on hardware those are drawn if the walk
+	has not passed them yet: Crash Bash's pause menu puts its text in that way, and a walk done at
+	the moment the transfer starts drew the boxes and lost the text (as it did in PCSX-ReARMed
+	until "slow linked list walking", which lists this game). The walk costs a cycle a word and a
+	cycle a node, the channel's own rate, plus the time the GPU would take to draw what each node
+	carries (`Gpu.takeWork`): the channel feeds a 16-word FIFO, so on hardware it goes at the speed
+	the GPU draws — at a cycle a word alone, Crash Bash's last menu line was still written after
+	the walk had passed it. Every other transfer is busy for no emulated time, and a game that
+	polls CHCR bit 24 sees it already clear.
 	Register map from psx-spx "DMA Channels" as recorded in docs/specs/runtime.md §7.9.
 **/
 class Dma {
@@ -62,6 +72,9 @@ class Dma {
 		wordsFromCd = 0;
 		wordsToSpu = 0;
 		tablesCleared = 0;
+		listAt = -1;
+		listClock = 0;
+		listLinks = 0;
 	}
 
 	public static inline function contains(p:Int):Bool {
@@ -126,6 +139,9 @@ class Dma {
 
 	static function startIfArmed(ch:Int, v:Int):Void {
 		chcr[ch] = v;
+		// Clearing the start bit stops a list the channel is still walking.
+		if (ch == CH_GPU && listAt >= 0 && (v & CHCR_BUSY) == 0) stopList();
+		else {}
 		if (!enabled(ch)) return;
 		else {}
 		if ((v & CHCR_BUSY) == 0) return;
@@ -146,56 +162,79 @@ class Dma {
 	**/
 	static function run(ch:Int):Void {
 		final sync = (chcr[ch] >>> 9) & 3;
-		if (ch == CH_GPU) toGpu(sync);
-		else if (ch == CH_CDROM) sectorToRam();
-		else if (ch == CH_SPU) ramToSpu();
-		else if (ch == CH_OTC) clearOrderingTable();
-		else unimplementedChannel(ch);
-		finish(ch);
+		if (ch == CH_GPU && sync == 2) startList();
+		else {
+			if (ch == CH_GPU) toGpu();
+			else if (ch == CH_CDROM) sectorToRam();
+			else if (ch == CH_SPU) ramToSpu();
+			else if (ch == CH_OTC) clearOrderingTable();
+			else unimplementedChannel(ch);
+			finish(ch);
+		}
 	}
 
 	/**
 		Channel 2, bracketed for a backend that shows where a frame goes (the Dreamcast's overlay):
 		walking the list, decoding each primitive and handing it to the backend is the drawing
-		that happens inside the emulated frame. 99.9 % of Crash Bash's GP0 words arrive this way,
-		so the direct port writes are left unbracketed rather than marked once a word.
+		that happens inside the emulated frame. 99.9 % of Crash Bash's GP0 words arrive through the
+		list, so the direct port writes are left unbracketed rather than marked once a word.
 	**/
-	static function toGpu(sync:Int):Void {
+	static function toGpu():Void {
 		Backend.profileMark(Backend.PROFILE_GPU, 1);
-		if (sync == 2) walkList();
-		else blockToGpu();
+		blockToGpu();
 		Backend.profileMark(Backend.PROFILE_GPU, 0);
 	}
 
 	/**
-		The ordering table: each node is a header word holding a byte count and the address of the
+		The ordering table: each node is a header word holding a word count and the address of the
 		next node, followed by that many packet words.
 
 		Walked forwards from MADR through the `next` links, which run *backwards* through memory
 		because a game builds its table back to front — nearest last. The terminator is any address
 		with bit 23 set, which is how the BIOS's own `ClearOTagR` ends a table.
+
+		A stretch of `LIST_STEP` cycles at a time (see the class comment): the first when CHCR
+		starts the channel, the rest on `Scheduler.DMA_STEP`, each due when the one before it would
+		have finished — the channel's own clock, so a pump that comes late catches up rather than
+		stretching the walk. Most of an ordering table is empty nodes, which only link on: 71 % of
+		the 4.1 M nodes Crash Bash walks in vblanks 18800-20300; they cost their header's cycle and
+		nothing else. A table that neither ends nor repeats is given up on after 65536 links, the
+		nodes up to there drawn, as before.
 	**/
+	static inline var LIST_STEP = 256;
+
+	/** The node the walk goes on from, or -1 when no list is being walked. */
+	static var listAt = -1;
+	/** When the walk's next stretch is due: its own clock, advanced by what each one cost. */
+	static var listClock = 0;
+	static var listLinks = 0;
+
+	static function startList():Void {
+		listAt = madr[CH_GPU] & 0x1FFFFC;
+		listLinks = 0;
+		listClock = Memory.cycleHint();
+		// What the GPU was given before, through its port, is not this walk's to wait for.
+		Gpu.takeWork();
+		stepList();
+	}
+
+	/** Scheduler.DMA_STEP: the next stretch of the list. */
+	public static function onEvent(ctx:core.CpuState):Void {
+		if (listAt >= 0) stepList();
+		else {}
+	}
+
 	/** Out of line on C++ for the reason `Gpu.polygonHw` gives: inlined into the register write
 	    that starts it, the walk shared one starved frame with everything else in `slowWrite32`. */
 	@:specifier("__attribute__((noinline))")
-	static function walkList():Void {
-		var addr = madr[CH_GPU] & 0x1FFFFC;
-		var guard = 0;
+	static function stepList():Void {
+		Backend.profileMark(Backend.PROFILE_GPU, 1);
 		final ram = Memory.ram();
-		var header = MemA.get32(ram, addr);
-		while (true) {
-			// Most of an ordering table is empty nodes, which only link on: 71 % of the 4.1 M nodes
-			// Crash Bash walks in vblanks 18800-20300. They are followed here, a load and a mask
-			// each, where the full step below cost them its counters and the GPU's entry.
-			while ((header & 0xFF800000) == 0) {
-				addr = header & 0x1FFFFC;
-				header = MemA.get32(ram, addr);
-				guard++;
-				if (guard > 0x10000) {
-					runaway();
-					return;
-				} else {}
-			}
+		var addr = listAt;
+		var spent = 0;
+		var state = LIST_GOING;
+		while (state == LIST_GOING && spent < LIST_STEP) {
+			final header = MemA.get32(ram, addr);
 			final count = (header >>> 24) & 0xFF;
 			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
 			// addresses RAM, wrapping at 2 MB exactly as `Memory.read32`'s decode does for these
@@ -206,20 +245,42 @@ class Dma {
 				Gpu.writeGp0Words(ram, addr + 4, count);
 				wordsToGpu += count;
 			} else {}
-			// Bit 23 of the link marks the end. A table that neither ends nor repeats would
-			// otherwise walk all of RAM.
-			if ((header & 0x800000) != 0) break;
-			else {}
-			addr = header & 0x1FFFFC;
-			header = MemA.get32(ram, addr);
-			guard++;
-			if (guard > 0x10000) {
-				runaway();
-				return;
-			} else {}
+			// The channel's own cycle a word, and however long the GPU takes to draw what it was
+			// handed, since its FIFO holds sixteen words and the channel waits on it.
+			spent += count + 1 + Gpu.takeWork();
+			// Bit 23 of the link marks the end.
+			if ((header & 0x800000) != 0) state = LIST_ENDED;
+			else {
+				listLinks++;
+				if (listLinks > 0x10000) state = LIST_RUNAWAY;
+				else addr = header & 0x1FFFFC;
+			}
 		}
-		listsWalked++;
-		madr[CH_GPU] = 0xFFFFFF;
+		Backend.profileMark(Backend.PROFILE_GPU, 0);
+		listClock = (listClock + spent) | 0;
+		if (state == LIST_GOING) {
+			listAt = addr;
+			Scheduler.scheduleAt(Scheduler.DMA_STEP, listClock);
+		} else endList(state == LIST_ENDED);
+	}
+
+	static inline var LIST_GOING = 0;
+	static inline var LIST_ENDED = 1;
+	static inline var LIST_RUNAWAY = 2;
+
+	static function endList(ended:Bool):Void {
+		listAt = -1;
+		if (ended) {
+			listsWalked++;
+			madr[CH_GPU] = 0xFFFFFF;
+		} else runaway();
+		finish(CH_GPU);
+	}
+
+	/** The game took the start bit back: the walk stops where it is, and nothing more is sent. */
+	static function stopList():Void {
+		listAt = -1;
+		Scheduler.cancelSlot(Scheduler.DMA_STEP);
 	}
 
 	static function runaway():Void {
@@ -232,8 +293,8 @@ class Dma {
 		final blocks = (bcr[CH_GPU] >>> 16) & 0xFFFF;
 		final total = size * (blocks == 0 ? 1 : blocks);
 		var addr = madr[CH_GPU] & 0x1FFFFC;
-		// Direction bit 0: 1 is RAM to device. Reading VRAM back is not carried out yet.
-		if ((chcr[CH_GPU] & 1) == 0) return notReadable();
+		// Direction bit 0: 1 is RAM to device, 0 the other way.
+		if ((chcr[CH_GPU] & 1) == 0) return blockFromGpu(total);
 		else {}
 		final ram = Memory.ram();
 		var i = 0;
@@ -244,7 +305,7 @@ class Dma {
 				addr += used << 2;
 				i += used;
 			} else {
-				inline Gpu.writeGp0(MemA.get32(ram, addr & 0x1FFFFC));   // as walkList
+				inline Gpu.writeGp0(MemA.get32(ram, addr & 0x1FFFFC));   // as stepList
 				addr += 4;
 				i++;
 			}
@@ -308,8 +369,20 @@ class Dma {
 		return "0x" + out;
 	}
 
-	static function notReadable():Void {
-		Runtime.reportOnce(0x6B000001, "DMA read from the GPU, which has no VRAM to give yet");
+	/**
+		Channel 2 the other way: GPUREAD into RAM, which is how a game takes VRAM back after
+		GP0(C0h) — libgpu's StoreImage. Each word is what a read of the port gives, the rectangle's
+		pixels while it lasts and the latch after, and the address steps as CHCR bit 1 says.
+	**/
+	static function blockFromGpu(total:Int):Void {
+		final step = (chcr[CH_GPU] & 2) != 0 ? -4 : 4;
+		final ram = Memory.ram();
+		var addr = madr[CH_GPU] & 0x1FFFFC;
+		for (i in 0...total) {
+			MemA.set32(ram, addr & 0x1FFFFC, Gpu.readData());
+			addr += step;
+		}
+		madr[CH_GPU] = addr & 0xFFFFFF;
 	}
 
 	/**

@@ -25,7 +25,8 @@ class Scheduler {
 	public static inline var SPU_BATCH = 5;
 	public static inline var CD_EVENT = 6;
 	public static inline var SIO_BYTE = 7;
-	public static inline var DMA_IRQ = 8;
+	/** Channel 2's ordering-table walk, a stretch of transfer at a time (`dma.Dma`). */
+	public static inline var DMA_STEP = 8;
 	public static inline var MEMCARD_OP = 9;
 	public static inline var SLOTS = 10;
 
@@ -153,6 +154,7 @@ class Scheduler {
 		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
 		else if (slot == SPU_BATCH) spu.Spu.onBatch(ctx.cycles);
 		else if (slot == SIO_BYTE) sio.Sio0.onEvent(ctx);
+		else if (slot == DMA_STEP) dma.Dma.onEvent(ctx);
 		else if (slot >= TIMER0 && slot <= TIMER2) timers.Timers.onEvent(ctx, slot - TIMER0);
 		else unimplemented(ctx, slot);
 	}

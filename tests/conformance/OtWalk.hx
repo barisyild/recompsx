@@ -5,7 +5,8 @@ import mem.Memory;
 
 /**
 	The DMA2 list walk over ordering tables, and the uploads a list carries: what any faster walk
-	must leave exactly as the node-at-a-time one does (two were tried, ADR-0032).
+	must leave exactly as the node-at-a-time one does (two were tried, ADR-0032) — and what the
+	walk over time leaves once it has finished, the same again.
 
 	Tables cleared by DMA6 (linked downwards) and built as ClearOTag builds them (upwards), their
 	first entry at each position in a cache line, long and short; fills hung on entries at either
@@ -30,9 +31,11 @@ class OtWalk {
 	static inline var PRIMS = 0x80080000;     // the fills hung on them, 16 bytes each
 	static var prims = 0;
 
+	static var ctx:CpuState;
+
 	public static function main():Void {
 		Conf.feedName("OtWalk");
-		final ctx = new CpuState();
+		ctx = new CpuState();
 		Runtime.boot(ctx);
 		reg(0x1F8010F0, 0x08888888);          // DPCR: every channel enabled
 		gp0(0xE3000000);                      // drawing area: all of VRAM
@@ -286,11 +289,16 @@ class OtWalk {
 		return r == 0 ? 0 : (r < 3 ? next(0x8000) | 0x8000 : next(0x8000));
 	}
 
-	/** DMA2 in list mode from `top`, and what it left: lists finished, words sent, MADR, pixels. */
+	/** DMA2 in list mode from `top`, walked to its end (the channel takes a cycle a word), and
+	    what it left: lists finished, words sent, MADR, pixels. */
 	static function walk(top:Int):Void {
 		reg(0x1F8010A0, top & 0xFFFFFF);
 		reg(0x1F8010A4, 0);
 		reg(0x1F8010A8, 0x01000401);          // RAM to device, linked list, start
+		while ((Dma.read(0x1F8010A8) & 0x01000000) != 0) {
+			ctx.cycles = (ctx.cycles + 64) | 0;
+			core.Scheduler.runDue(ctx);
+		}
 		Conf.feed(Dma.listsWalked);
 		Conf.feed(Dma.wordsToGpu);
 		Conf.feed(Dma.read(0x1F8010A0));

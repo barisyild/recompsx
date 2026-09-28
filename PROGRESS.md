@@ -2,6 +2,40 @@
 
 ## Status snapshot
 
+**2026-09-28: VRAM read back to the CPU (GP0 C0h) — Crash Bash's saves carry their icon.** GPUREAD
+hands over a C0h rectangle two pixels a word (the first in the low halfword, wrapping within VRAM,
+a zero beside an odd last pixel), GPUSTAT bit 27 is set while pixels remain, and DMA2 in block
+mode with CHCR.0 = 0 reads the port into RAM (libgpu's StoreImage), where it used to report
+0x6B000001. Crash Bash builds its save's title frame this way. The read returned the latch, zero,
+so saves had a black palette and an empty icon, and the Dreamcast's VMU showed a blank one.
+Verified: new conformance `GpuRead` `beb98405` on JS and reflaxe.CPP; `OtWalk` `e0887e11`, `GpuFill`, `Raster`
+unchanged; Crash Bash 3000 `db892c4b` and Crash 3 9000 `4de78425` on JS unchanged; a save written
+in the browser (build 46425ad9f336) holds a 16-colour palette and two icon frames, the CB logo
+and Crash's face. The VMU package's long description is now the title alone (no "PS1 card:").
+
+**2026-09-28: Channel 2's ordering table is walked over time (ADR-0039) — Crash Bash's pause menus
+have their text.** The pause menu drew its boxes and no text (the owner's report; PCSX-ReARMed's
+"slow linked list walking" names this game). The game writes the text's packets into a table it
+has already handed to DMA2, which on hardware walks it a node at a time behind the GPU's FIFO.
+`dma.Dma` now walks it the same way — each node read from RAM when the walk reaches it, stretches
+of ~256 cycles on the scheduler's `DMA_STEP` (the unused `DMA_IRQ`), a cycle a word, a cycle a
+node, plus the GPU's drawing time estimated from each primitive's geometry on every drawing path
+alike (`Gpu.takeWork`: area capped by the bounding box clipped to the drawing area, 5/8 of a cycle
+a textured pixel, 5/16 untextured, x1.5 semi-transparent, 16 a primitive; fills 1/8, copies 1).
+At the channel's rate alone the walk overtook the game mid-text (PAUSED/CONTINUE/OPTIONS, no QUIT
+GAME; "SHOW RUL"/"SHOW RU" alternating); with unclipped areas the text was whole but walks ran
+13-48 ms and the hub fell to ~10 fps; clipped, walks average 2.5 ms (peak 5.6) and the first 3000
+frames render 1078 flips, as with the instant walk. Verified: conformance `OtWalk` `e0887e11`,
+`BulkPaths`, `GpuFill`, `Raster`, `CardBios` unchanged on JS and reflaxe.CPP, every other
+conformance digest unchanged on JS; GPU words and commands over 3000 frames identical; the owner
+saw the whole pause menu with the unclipped estimate (the clipped one, to confirm). Crash Bash
+3000 `db892c4b` on JS and reflaxe.CPP (was `6bd7b329`: interrupt and event timing moved). Dreamcast:
+`out/dc/crashbash-card-max.cdi` (memory cards, this walk, mods onlinemenu and mouse; loaded image
+10,571,071 bytes) — the owner's test on Flycast/console pending. Crash 3 on JS: 9000
+frames, 4026 flips, `4de78425`; it now reports "interrupt pending but SR.IEc is clear" once
+(frame ~1000) — a DMA2 completion arriving while the game has interrupts off, as on hardware,
+delivered when it turns them back on.
+
 **2026-09-28: Memory cards (ADR-0037) — Crash Bash saves, and keeps 8336 bytes for it.** The
 card in slot 1 (`sio.MemoryCard`) is a whole PlayStation card to the game, formatted as the BIOS
 formats one; slot 2 is empty. Both roads reach it: SIO0 answers at 81h with a Sony card's read,
@@ -1686,6 +1720,14 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] GP0 C0h VRAM read (GPUREAD, GPUSTAT.27, DMA2 GPU->RAM); conformance GpuRead; Crash Bash's
+save now carries its icon and palette (verified in the browser); VMU long description = title. Next: the owner's
+look at the icon on the Dreamcast VMU, once a CDI is built with it (out/dc/crashbash-card-max.cdi predates it).
+
+2026-09-28 [claude] DMA2 ordering tables walked over time with the GPU's estimated drawing time (ADR-0039):
+Crash Bash's pause text drawn; the first estimate (unclipped) dropped the hub to ~10 fps, clipped to the drawing
+area it keeps full speed. Next: the owner's confirmation on the pause menu with the clipped estimate; Crash 3 check.
 
 2026-09-28 [claude] Memory cards (ADR-0037): card model + card format per game (grows/shrinks by block), LLE card
 on SIO0, OpenBIOS card driver/backup unit/bu device (KCard, KBu), FCB/DCB tables in RAM (KDevices), bp_card_* on
