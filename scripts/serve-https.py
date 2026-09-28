@@ -18,7 +18,7 @@ accept it, or install the certificate and trust it (docs/WEB.md).
 
     python3 scripts/serve-https.py [https-port] [--http PORT]     # defaults: 8443, no HTTP
 """
-import http.server, os, socket, ssl, subprocess, sys, threading
+import http, http.server, os, socket, ssl, subprocess, sys, threading, zlib
 
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 web = os.path.join(root, 'web')
@@ -55,18 +55,38 @@ LOCAL = ('localhost', '127.0.0.1', '[::1]')
 
 
 class WebFiles(http.server.SimpleHTTPRequestHandler):
-    """web/'s files. The page and build.json are revalidated on every load: with no Cache-Control,
-    only Last-Modified, a browser caches them by heuristic, and an edited page (it is the host the
-    game talks to) went on serving its old self beside a new bundle. What the page loads is
-    versioned by build.json, so that may stay cached."""
+    """web/'s files. Everything but what build.json versions (a `?v=` URL) is revalidated on
+    every load: with no Cache-Control, only Last-Modified, a browser caches by heuristic, and an
+    edited page (it is the host the game talks to) went on serving its old self beside a new
+    bundle. The game's own files are links — web/boot.exe and web/disc.bin — that get pointed at
+    another game, and a browser kept Crash Bash's executable beside Crash 3's disc and bundle,
+    which then jumped to address zero at boot. A date cannot catch that (the other game's file
+    may be the older one), so every file carries an ETag of its identity — the file the link
+    reaches, its size and its time — and a revalidation that still matches is a 304."""
 
     def __init__(self, *a, **k):
+        self.etag = None
         super().__init__(*a, directory=web, **k)
 
+    def send_head(self):
+        path = self.translate_path(self.path)
+        self.etag = None
+        if os.path.isfile(path):
+            st = os.stat(path)
+            self.etag = '"%x-%x-%x"' % (st.st_size, st.st_mtime_ns,
+                                        zlib.crc32(os.path.realpath(path).encode()))
+            if self.headers.get('If-None-Match') == self.etag:
+                self.send_response(http.HTTPStatus.NOT_MODIFIED)
+                self.end_headers()
+                return None
+        return super().send_head()
+
     def end_headers(self):
-        path = self.path.split('?', 1)[0]
-        if path.endswith('/') or path.endswith('.html') or path.endswith('.json'):
+        if '?' not in self.path:
             self.send_header('Cache-Control', 'no-cache')
+        if self.etag is not None:
+            self.send_header('ETag', self.etag)
+            self.etag = None
         super().end_headers()
 
 

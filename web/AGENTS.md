@@ -25,7 +25,10 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
 - Storage (`bp_storage_*`): the page keeps blobs up to 256 KB in `localStorage` as
   `recompsx:<name>` (base64) — the console settings `system.cfg` (ADR-0034), later memory cards;
   larger ones (the VRAM dump) are only logged. The dev server sends `Cache-Control: no-cache` for
-  the page and build.json, so an edited page is never served stale beside a new bundle.
+  everything but `?v=` URLs, with an ETag of the file's identity (the file a link reaches, its
+  size and time), and the page fetches boot.exe and disc.bin with `cache: 'no-cache'`: pointing
+  those links at another game once left Crash Bash's executable cached beside Crash 3's disc and
+  bundle, which jumped to address zero at boot.
 - Input: `src/shims/js/shim/Input.hx`, browser externs (`js.Browser`, `KeyboardEvent`,
   `Gamepad`), SDL2 key names, the standard gamepad mapping. It also types for the machine's PS/2
   keyboard (ADR-0036, ADR-0040): while text entry is on — while that keyboard is polled —

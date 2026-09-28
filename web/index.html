@@ -112,8 +112,11 @@
     // page re-rendered it on every line, and the runtime writes hundreds a second at boot.
     function writeLog(line) { console.log(line); }
 
+    // Revalidated on every load: boot.exe and disc.bin are the user's files, and pointing them at
+    // another game must not leave the browser's copy of the last one in play (the dev server
+    // answers a still-matching copy with a 304, so the disc is not fetched again for nothing).
     async function fetchBytes(path, label) {
-      const response = await fetch(path);
+      const response = await fetch(path, { cache: 'no-cache' });
       if (!response.ok) throw new Error(`Could not load ${label}: HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length')) || 0;
       if (!response.body || !total) return new Uint8Array(await response.arrayBuffer());
