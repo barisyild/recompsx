@@ -329,7 +329,9 @@ and keep the one that identifies the most functions consistently.
 
   Reachability is safe without `@:keep` (which upstream does not honor): functions referenced
   only from a shard's `dispatch` switch survive `-dce full` — verified in the same spike.
-- Also generated: `GameInfo.hx` (initial pc/gp/sp, load ranges, memfill, exe payload reference),
+- Also generated: `GameInfo.hx` (initial pc/gp/sp, load ranges, memfill, exe payload reference;
+  `SERIAL` and `TITLE`, the product code and name a game's memory card is kept under — game.json's
+  `id` and `title`, else the disc's SYSTEM.CNF or the executable's name, ADR-0037),
   `Overlays.hx` (per overlay: id, VA range, source sectors/file extent, FNV-1a content hash,
   entries) — consumed by runtime CD-tracking activation + hash-fallback.
 - **Overlay call policy**: anything targeting a configured overlay window is dispatched by address,

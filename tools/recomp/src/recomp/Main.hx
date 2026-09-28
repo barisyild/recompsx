@@ -42,6 +42,10 @@ typedef GenInput = {
 	relocSets:Array<RelocSet>,
 	/** The game's config directory, when a config was read: where its mods live (ADR-0033). */
 	?configDir:String,
+	/** The product code (SCUS94570) and the game's name: what its memory card is kept under
+	    (ADR-0037). The code alone, as the name too, when there is no config; "" when neither. */
+	?serial:String,
+	?title:String,
 };
 
 /**
@@ -309,6 +313,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 
 		final program = new Program(universes, exe, limit, optimize, structureRegions,
 			input.relocSets);
+		program.setGame(input.serial != null ? input.serial : "", input.title != null ? input.title : "");
 		// Mods (ADR-0033): only with --mods does anything below change what is written.
 		final mods = modsWanted == null ? [] : modsFor(input, modsWanted);
 		final hooks = [for (m in mods) for (h in m.hooks) h];
@@ -394,15 +399,21 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		return exeAlone(loadExe(path), nameOf(path), seeds);
 	}
 
-	/** An executable with no config: its own entry point and whatever --seed adds. */
-	static function exeAlone(exe:PsxExe, name:String, seeds:Array<String>):GenInput {
+	/**
+		An executable with no config: its own entry point and whatever --seed adds. Its product
+		code is the disc's when there is one, else read from its name — SCUS_945.70 is SCUS94570 —
+		else none, and a game with none keeps no memory card between runs.
+	**/
+	static function exeAlone(exe:PsxExe, name:String, seeds:Array<String>, ?serial:String):GenInput {
 		final hints = [];
 		for (sd in seeds) {
 			final a = parseAddr(sd);
 			hints.push({addr: a, name: 'f_${StringTools.hex(Vaddr.canonRam(a), 8).toLowerCase()}'});
 		}
+		final code = serial != null ? serial : SystemCnf.serialOf(name);
 		return {exe: exe, name: name, seeds: hints, tableHints: [], overlays: [],
-			overlayBytes: new Map(), relocSets: []};
+			overlayBytes: new Map(), relocSets: [], serial: code != null ? code : "",
+			title: code != null ? code : ""};
 	}
 
 	/**
@@ -420,7 +431,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			// Homebrew: local.json names a loose executable and there is no disc at all.
 			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
 				seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
-				overlayBytes: memDumpsOnly(config), relocSets: noDiscReloc(config), configDir: config.dir};
+				overlayBytes: memDumpsOnly(config), relocSets: noDiscReloc(config), configDir: config.dir,
+				serial: config.id, title: config.title};
 		}
 		if (config.discPath == null) {
 			throw new LoaderError('${config.dir}/local.json does not say where the disc is. '
@@ -447,7 +459,8 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		disc.close();
 		return {exe: exe, name: isoName(config.exePath),
 			seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
-			overlayBytes: overlayBytes, relocSets: relocSets, configDir: config.dir};
+			overlayBytes: overlayBytes, relocSets: relocSets, configDir: config.dir,
+			serial: config.id, title: config.title};
 	}
 
 	/**
@@ -490,7 +503,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		final exe = PsxExe.parse(disc.readExtent(found.lba, 0, found.length));
 		disc.close();
-		return exeAlone(exe, isoName(boot), seeds);
+		return exeAlone(exe, isoName(boot), seeds, serial);
 	}
 
 	/** Where a game's committed facts live: `games/SCUS94570/game.json`, from the repository root. */

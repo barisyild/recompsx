@@ -1059,11 +1059,34 @@ class Program {
 
 	// ---- what the loader needs -----------------------------------------------------------------
 
+	/** The product code and the game's name, for GameInfo: its memory card's key (ADR-0037). */
+	public function setGame(serial:String, title:String):Void {
+		gameSerial = serial;
+		gameTitle = title;
+	}
+
+	var gameSerial = "";
+	var gameTitle = "";
+
+	/** A Haxe string literal's inside: printable ASCII, quotes and backslashes escaped. */
+	static function literal(s:String):String {
+		final buf = new StringBuf();
+		for (i in 0...s.length) {
+			final c = s.charCodeAt(i);
+			if (c == '"'.code || c == '\\'.code) buf.add("\\" + String.fromCharCode(c));
+			else buf.add(c >= 0x20 && c < 0x7F ? String.fromCharCode(c) : "?");
+		}
+		return buf.toString();
+	}
+
 	function gameInfoSource():String {
 		final buf = new StringBuf();
 		buf.add(header());
 		buf.add('/** What the executable declares about itself, so the runtime can start it. */\n');
 		buf.add('class GameInfo {\n');
+		buf.add('\t/** The product code the game\'s memory card is kept under, and its name (ADR-0037). */\n');
+		buf.add('\tpublic static inline var SERIAL = "${literal(gameSerial)}";\n');
+		buf.add('\tpublic static inline var TITLE = "${literal(gameTitle)}";\n');
 		buf.add('\tpublic static inline var ENTRY_POINT = ${hex(exe.initialPc)};\n');
 		buf.add('\tpublic static inline var INITIAL_GP  = ${hex(exe.initialGp)};\n');
 		buf.add('\tpublic static inline var LOAD_ADDR   = ${hex(exe.loadAddr)};\n');

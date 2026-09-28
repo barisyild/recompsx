@@ -62,7 +62,9 @@ enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
-enum { BP_PRESENT_24BPP = 1 << 0, BP_PRESENT_INTERLACE = 1 << 1, BP_PRESENT_PAL = 1 << 2 };
+enum { BP_PRESENT_24BPP = 1 << 0, BP_PRESENT_INTERLACE = 1 << 1, BP_PRESENT_PAL = 1 << 2,
+       BP_PRESENT_FAST = 1 << 3 };  /* FAST: memory card sectors are moving (ADR-0037); a backend
+                                       that paces at present need not hold this frame */
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 /* audio: 44100 Hz stereo s16 interleaved; count = stereo frames */
 void bp_audio_push(const int16_t* frames, int frame_count);
@@ -88,6 +90,11 @@ int  bp_mouse(int field);
    settings are one such blob, system.cfg (ADR-0034); the browser keeps them in localStorage */
 int  bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 none */
 int  bp_storage_write(const char* name, const uint8_t* buf, int len); /* 0 ok, -1 fail */
+/* memory cards (ADR-0037): a game's card in recompsx's card format — a 16-byte header and a
+   record (directory frame + 8 KB) per block in use — under its product code; the backend keeps
+   the bytes its own way. len == BP_CARD_HEADER (no blocks) removes the backend's copy. */
+int  bp_card_load(const char* game, uint8_t* buf, int cap);  /* bytes, -1 none */
+int  bp_card_save(const char* game, const char* title, const uint8_t* buf, int len); /* 0/-1 */
 /* disc/file streaming: the runtime CD subsystem reads the user's image through this.
    Backends stay dumb byte-servers; ALL CUE/sector/ISO logic lives in portable Haxe
    (shared/psxdisc). Slots 0..7; the host resolves paths from argv/launch config. */

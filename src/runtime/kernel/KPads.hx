@@ -76,11 +76,25 @@ class KPads {
 		return 1;
 	}
 
-	/** B(14h) StopPAD: the handler comes out. */
+	/** B(14h) StopPAD: the handler comes out — the memory cards' too, since they share it. */
 	public static function stopPad():Int {
 		running = false;
 		return 0;
 	}
+
+	/** OpenBIOS `s_padStarted`, which InitCARD2's argument sets as well as InitPAD: whether the
+	    shared handler reads the pads when it runs. */
+	public static function setReading(on:Bool):Void {
+		initialised = on;
+	}
+
+	/** StartCARD2 and StopCARD2 put the same handler in its chain and take it out (`KCard`). */
+	public static function install(on:Bool):Void {
+		running = on;
+	}
+
+	/** Whether the shared pad and card handler is in its chain. */
+	public static inline function installed():Bool return running;
 
 	/**
 		B(15h) PAD_init(type, buttonDest): InitPAD and StartPAD on buffers of the BIOS's own, and

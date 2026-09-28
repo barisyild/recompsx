@@ -29,6 +29,8 @@
 #include <dc/maple.h>
 #include <dc/maple/controller.h>
 #include <dc/biosfont.h>
+#include <dc/fs_vmu.h>
+#include <dc/vmu_pkg.h>
 #include <dc/sound/sound.h>
 #include <dc/sound/stream.h>
 #include <dc/sound/aica_comm.h>

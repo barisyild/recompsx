@@ -156,11 +156,12 @@ The recompiler routes calls targeting the 0xA0/0xB0/0xC0 stubs (function number 
 
 B0 file API (32 open, 33 lseek, 34 read, 35 write, 36 close, 37 ioctl, 39 isatty, 42/43
 firstfile/nextfile, 44 rename, 45 erase, 41 format) over `cdrom:` (ISO9660 read-only) and
-`bu00:/bu10:` (memcard FS: 15 dir frames, backed by the .mcd image §11); `_bu_init` A0:55,
+`bu00:/bu10:` (`kernel.KBu`, the BIOS's memcard FS over the card in slot 1, §11; firstfile and
+nextfile go through the device table at [150h], `kernel.KDevices`, which libcard patches); `_bu_init` A0:55,
 `_96_init/_96_remove` A0:54/56 (arm the CD BIOS-event path); B0:47/48 AddDrv/DelDrv; A0:96/97
 AddCDROMDevice/AddMemCardDevice; B0:4A–5D card ops (InitCard/StartCard/_card_read/_card_write/
-_card_info/_card_chan/_card_status/_card_wait — async via MEMCARD_OP events delivering
-F4000001/F0000011 events); A0:46–4E GPU helpers (GPU_dw, gpu_send_dma, SendGP1Command, GPU_cw,
+_card_info/_card_chan/_card_status/_card_wait — `kernel.KCard`, from OpenBIOS: queued, a sector
+per slot every second vblank, delivering F4000001/F0000011 events as the BIOS does); A0:46–4E GPU helpers (GPU_dw, gpu_send_dma, SendGP1Command, GPU_cw,
 GPU_cwp, send_gpu_linked_list, GetGPUStatus, gpu_sync) direct against `Gpu`; B0:00/01
 alloc_kernel_memory/free; B0:56/57 GetC0Table/GetB0Table return the materialized table addresses;
 GetSystemInfo canned (verify index semantics in psx-spx kernelbios).
@@ -533,8 +534,15 @@ JOY_MODE, /ACK 170 cycles after a byte and low for 100, IRQ7 on its edge when bi
 a digital pad (ID 5A41h) on each port `sio.Pads` reports, answering every command as 42h; the
 memory card address and empty ports answer FFh with no /ACK; and the kernel pad path, B0:12h-16h
 (`kernel.KPads`, adapted from OpenBIOS sio0/pad.c and driver.c, MIT). Headless runs keep both
-ports empty. Not yet: analog pads and config mode, the multitap, memory cards. Conformance:
-`PadSio`, `PadBios`.
+ports empty. Not yet: analog pads and config mode, the multitap. Conformance: `PadSio`, `PadBios`.
+
+**Memory cards (2026-09-28, ADR-0037)**: one card, in slot 1 (`sio.MemoryCard`); slot 2 is empty.
+It answers at 81h on SIO0 with a Sony card's read, write and ID commands (the table below, the
+late acknowledge of a read's 5Ch included, a write committed at its end byte), and the kernel's
+card functions reach the same image directly (`kernel.KCard`, `kernel.KBu`), keeping the BIOS's
+pace. A game whose card was never kept gets one formatted as the BIOS formats it. Kept per game,
+under its product code, in recompsx's card format: a header and the blocks in use, each at its
+own place. Conformance: `CardFormat`, `CardSio`, `CardBios`, `CardChains`.
 
 **Registers**: 0x1F801040 JOY_DATA (R FIFO / W TX), 0x1044 JOY_STAT (0 TX-ready1, 1 RX-not-empty,
 2 TX-ready2, 7 /ACK level, 9 IRQ), 0x1048 JOY_MODE, 0x104A JOY_CTRL (0 TX en, 1 /JOYn select,
@@ -565,14 +573,19 @@ path above; both read the same Pads snapshot.
 **Memory card protocol**: select 0x81; ID `81 53` → `FLAG 5A 5D 5C 5D 04 00 00 80`; read sector
 `81 52 00 00 MSB LSB …` ⇄ `… 5C 5D MSB LSB data×128 CHK 47` (CHK = XOR); write
 `81 57 … data×128 CHK` ⇄ end byte 0x47 good / 0x4E bad-checksum / 0xFF bad-sector (full per-byte
-duplex table: psx-spx "Memory Card Read/Write Commands" — implement verbatim). FLAG: bit3
-fresh-card (cleared by the first successful write), bit2 last-error. A sector write commits after
-the end byte + a 4_000_000-cycle MEMCARD_OP latency (libcard async events ride on it).
+duplex table: psx-spx "Memory Card Read/Write Commands" — implemented verbatim). FLAG: bit3
+fresh-card (cleared by the first successful write), bit2 last-error (never set: this card's
+writes do not fail). The kernel path completes a sector at the vblank that starts it; libcard's
+async events ride on the vblank, as on hardware.
 
-**Persistence**: raw 128KB `.mcd` (1024×128B, emulator-compatible). Loaded at boot (absent → a
-freshly formatted image); journaled writes flushed sector-granular via atomic replace (temp +
-rename through bp_storage) at write-latency completion and at shutdown. Two slots (bu00/bu10),
-presence config-driven.
+**Persistence (ADR-0037)**: never the raw 128 KB image. `bp_card_save(game, title, bytes, len)`
+takes the card format — 16-byte header ("RXMC", version, block count, block mask, FNV-1a) and a
+record per block in use (its directory frame and its 8 KB) — and `bp_card_load` gives it back;
+each backend keeps it in its own way (PC and Node `<SERIAL>.card`, the browser's localStorage, a
+VMU package with the game's save icon on the Dreamcast). Written back 30 vblanks after the last
+write and at exit, and not at all when unchanged; a card with no blocks in use removes the
+backend's copy. Frames presented while sectors move carry BP_PRESENT_FAST, so the host need not
+hold them to the video rate. Headless runs get a blank card and keep nothing.
 
 ## 12. Debug & diagnostics
 

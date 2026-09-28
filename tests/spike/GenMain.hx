@@ -24,6 +24,10 @@ class GenMain {
 		core.Cooperative.bind(FnTable.dispatch);
 		#end
 		kernel.Kernel.haltAt = headlessFrames();
+		// The game's memory card in slot 1, kept under its product code (ADR-0037) — except in a
+		// headless run, whose card is blank and goes nowhere, so a digest stays a function of the
+		// disc and the frame count.
+		sio.MemoryCard.insert(GameInfo.SERIAL, GameInfo.TITLE, kernel.Kernel.haltAt == 0);
 		// Which windows this game loads code into. After boot, because it fills in state the
 		// runtime clears on the way up.
 		Overlays.register();
@@ -113,6 +117,8 @@ class GenMain {
 	}
 
 	static function report(ctx:CpuState):Void {
+		// What the game saved since its card last went back to the backend.
+		sio.MemoryCard.flush();
 		#if recompsx_insns
 		shim.Backend.log(shim.Backend.LOG_INFO, "insns " + Runtime.insns + " | blocks "
 			+ Runtime.blocks + " | dispatches " + Runtime.dispatches);

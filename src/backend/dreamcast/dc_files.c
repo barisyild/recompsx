@@ -157,6 +157,137 @@ int bp_storage_write(const char* name, const uint8_t* buf, int len) {
     return 0;
 }
 
+/* ---- memory cards (ADR-0037) -------------------------------------------------------------------
+ * The runtime hands over a game's card in the card format — a header and the blocks the game's
+ * saves occupy, 8336 bytes for a one-block game — and it is kept as it comes: <game>.card where
+ * saves go as files (/pc, /sd), and on a VMU a package of the Dreamcast's own format, named by the
+ * game's product code, which the console's file manager lists under the game's own save icon.
+ * A VMU has 200 blocks of 512 bytes, so it holds a card of up to twelve PlayStation blocks; past
+ * that the write fails, and saying so is better than half-writing it. The package's CRC is what
+ * catches a VMU write a power cut interrupted: such a card fails to load, and the game finds a
+ * blank one. A card with nothing on it is no file at all. */
+
+#define CARD_RECORD BP_CARD_RECORD    /* a block's directory frame and its 8 KB */
+
+static int card_file(const char* game, char* out, size_t len) {
+    if(!game || !*game) return 0;
+    for(const char* p = game; *p; p++) {
+        if(!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9'))) return 0;
+    }
+    if(g_storage_is_vmu) snprintf(out, len, "%.12s", game);   /* a VMU name is 12 characters */
+    else snprintf(out, len, "%s.card", game);
+    return 1;
+}
+
+/* The VMU icon: the game's own, from the first of its saves on the card — the 16x16 frames of
+ * that file's title block doubled to the VMU's 32x32, a pixel's left half in the high nibble
+ * rather than the low, and its palette from the PlayStation's 15-bit colours to ARGB4444, with
+ * colour 0000h transparent as it is on the PlayStation. A card with no save on it yet gets a
+ * plain card. Returns the number of frames: the PlayStation animates up to three, as a VMU does. */
+static int card_icon(const uint8_t* card, int len, uint16_t* pal, uint8_t* icons) {
+    for(int at = BP_CARD_HEADER; at + CARD_RECORD <= len; at += CARD_RECORD) {
+        const uint8_t* t = card + at + 0x80;   /* the block's first frame: its title, for a head */
+        if(card[at] != 0x51 || t[0] != 'S' || t[1] != 'C') continue;
+        const int frames = (t[2] >= 0x11 && t[2] <= 0x13) ? t[2] - 0x10 : 1;
+        for(int i = 0; i < 16; i++) {
+            const int c = t[0x60 + 2 * i] | (t[0x61 + 2 * i] << 8);
+            pal[i] = c == 0 ? 0 : (uint16_t)(0xF000 | (((c >> 1) & 0xF) << 8) | (((c >> 6) & 0xF) << 4)
+                                             | ((c >> 11) & 0xF));
+        }
+        for(int f = 0; f < frames; f++) {
+            const uint8_t* src = t + 0x80 * (1 + f);
+            for(int y = 0; y < 32; y++) {
+                for(int x = 0; x < 16; x++) {
+                    const int two = src[(y >> 1) * 8 + (x >> 1)];
+                    const int px = (x & 1) ? two >> 4 : two & 0xF;
+                    icons[f * 512 + y * 16 + x] = (uint8_t)((px << 4) | px);
+                }
+            }
+        }
+        return frames;
+    }
+    for(int i = 0; i < 16; i++) pal[i] = 0;
+    pal[1] = 0xFFFF;
+    pal[2] = 0xF358;
+    for(int y = 0; y < 32; y++) {
+        for(int x = 0; x < 16; x++) {
+            const int in = y >= 4 && y < 28 && x >= 3 && x < 13;
+            const int edge = y == 4 || y == 27 || x == 3 || x == 12;
+            const int px = !in ? 0 : (edge ? 1 : 2);
+            icons[y * 16 + x] = (uint8_t)((px << 4) | px);
+        }
+    }
+    return 1;
+}
+
+int bp_card_load(const char* game, uint8_t* buf, int cap) {
+    char name[32], path[256];
+    if(!card_file(game, name, sizeof(name))) return -1;
+    if(!g_storage_is_vmu) return bp_storage_read(name, buf, cap);
+    if(!storage_path(name, path, sizeof(path))) return -1;
+
+    /* O_META: the file as it is on the VMU, header and all; the package is ours to parse. */
+    const file_t f = fs_open(path, O_RDONLY | O_META);
+    if(f == FILEHND_INVALID) return -1;
+    const size_t size = fs_total(f);
+    uint8_t* raw = (size > 0 && size <= 200 * 512) ? malloc(size) : NULL;
+    int ok = raw && fs_read(f, raw, size) == (ssize_t)size;
+    fs_close(f);
+    vmu_pkg_t pkg;
+    ok = ok && vmu_pkg_parse(raw, size, &pkg) == 0 && pkg.data_len >= BP_CARD_HEADER && pkg.data_len <= cap;
+    if(ok) shz_memcpy(buf, pkg.data, (size_t)pkg.data_len);
+    else bp_log(BP_LOG_WARN, "memory card: the VMU's copy is damaged — the game gets a blank card");
+    const int got = ok ? pkg.data_len : -1;
+    free(raw);
+    return got;
+}
+
+int bp_card_save(const char* game, const char* title, const uint8_t* buf, int len) {
+    char name[32], path[256], msg[96];
+    if(!card_file(game, name, sizeof(name))) return -1;
+    if(len <= BP_CARD_HEADER) {
+        if(storage_path(name, path, sizeof(path))) fs_unlink(path);
+        return 0;
+    }
+    if(!g_storage_is_vmu) return bp_storage_write(name, buf, len);
+    if(!storage_path(name, path, sizeof(path))) return -1;
+
+    static uint8_t icons[3 * 512];
+    vmu_pkg_t pkg;
+    memset(&pkg, 0, sizeof(pkg));
+    /* The header's fields are 16, 32 and 16 characters, and vmu_pkg_build copies what it is
+     * given without a limit of its own. */
+    const char* shown = title && *title ? title : game;
+    snprintf(pkg.desc_short, sizeof(pkg.desc_short), "%.16s", shown);
+    snprintf(pkg.desc_long, sizeof(pkg.desc_long), "%.32s", shown);
+    snprintf(pkg.app_id, sizeof(pkg.app_id), "recompsx");
+    pkg.icon_cnt = card_icon(buf, len, pkg.icon_pal, icons);
+    pkg.icon_anim_speed = 10;
+    pkg.icon_data = icons;
+    pkg.eyecatch_type = VMUPKG_EC_NONE;
+    pkg.data_len = len;
+    pkg.data = buf;
+
+    uint8_t* out = NULL;
+    int out_size = 0;
+    int ok = vmu_pkg_build(&pkg, &out, &out_size) == 0;
+    if(ok) {
+        const file_t f = fs_open(path, O_WRONLY | O_TRUNC | O_META);
+        ok = f != FILEHND_INVALID;
+        if(ok) {
+            ok = fs_write(f, out, (size_t)out_size) == (ssize_t)out_size;
+            ok = (fs_close(f) == 0) && ok;   /* the VMU is written at close */
+        }
+    }
+    free(out);
+    if(!ok) {
+        snprintf(msg, sizeof(msg), "memory card: not written to the VMU (%d free blocks needed)",
+                 (out_size + 511) / 512);
+        bp_log(BP_LOG_WARN, msg);
+    }
+    return ok ? 0 : -1;
+}
+
 /* ---- disc / file streaming --------------------------------------------------------------------
  * These read the *PlayStation's* disc image, which on this machine is an ordinary file — on the
  * GD-ROM at /cd, on the development host at /pc, or on a mass-storage card. The Dreamcast's own

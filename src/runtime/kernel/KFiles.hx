@@ -16,9 +16,10 @@ import shim.RawMem;
 	has linked its own rather than the kernel's, so this is often the only place a game says
 	anything about itself.
 
-	The device set here is honest about what exists. The TTY is real. `cdrom:` and `bu00:` report
-	and fail, because the disc and card layers are not built, and a failed open is something games
-	handle — a silent wrong answer is not.
+	The device set here is honest about what exists: the TTY, `cdrom:` — a mounted image, or a
+	directory of files extracted from one — and the memory cards, `bu00:` and `bu10:`, whose files
+	`KBu` keeps. Anything else fails to open, and says which name it was: a failed open is
+	something games handle, a silent wrong answer is not.
 
 	Function numbers from psx-spx "BIOS Function Summary": the same calls appear on both vectors,
 	A0(00h..05h) and B0(32h..37h), which is why both route here.
@@ -30,6 +31,7 @@ class KFiles {
 	static inline var DEV_NONE = 0;
 	static inline var DEV_TTY = 1;
 	static inline var DEV_CD = 2;
+	static inline var DEV_BU = 3;
 
 	static var kind:Array<Int>;
 
@@ -105,16 +107,17 @@ class KFiles {
 		kind[0] = DEV_TTY;   // stdin, which never has anything to give
 		kind[1] = DEV_TTY;   // stdout
 		kind[2] = DEV_TTY;   // stderr
+		searchFd = -1;
 		ttyBytes = 0;
 	}
 
 	/** Dispatch for the file range of either vector. False if `fn` is not one of ours. */
 	public static function callA0(ctx:CpuState, fn:Int):Bool {
-		if (fn == 0x00) ctx.v0 = open(ctx.a0, ctx.a1);
+		if (fn == 0x00) ctx.v0 = open(ctx, ctx.a0, ctx.a1);
 		else if (fn == 0x01) ctx.v0 = lseek(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x02) ctx.v0 = read(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x03) ctx.v0 = write(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x04) ctx.v0 = close(ctx.a0);
+		else if (fn == 0x02) ctx.v0 = read(ctx, ctx.a0, ctx.a1, ctx.a2);
+		else if (fn == 0x03) ctx.v0 = write(ctx, ctx.a0, ctx.a1, ctx.a2);
+		else if (fn == 0x04) ctx.v0 = close(ctx, ctx.a0);
 		else if (fn == 0x07) ctx.v0 = isatty(ctx.a0);
 		else if (fn == 0x09) ctx.v0 = putc(ctx.a0, ctx.a1);
 		else return false;
@@ -122,15 +125,130 @@ class KFiles {
 	}
 
 	public static function callB0(ctx:CpuState, fn:Int):Bool {
-		if (fn == 0x32) ctx.v0 = open(ctx.a0, ctx.a1);
+		if (fn == 0x32) ctx.v0 = open(ctx, ctx.a0, ctx.a1);
 		else if (fn == 0x33) ctx.v0 = lseek(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x34) ctx.v0 = read(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x35) ctx.v0 = write(ctx.a0, ctx.a1, ctx.a2);
-		else if (fn == 0x36) ctx.v0 = close(ctx.a0);
+		else if (fn == 0x34) ctx.v0 = read(ctx, ctx.a0, ctx.a1, ctx.a2);
+		else if (fn == 0x35) ctx.v0 = write(ctx, ctx.a0, ctx.a1, ctx.a2);
+		else if (fn == 0x36) ctx.v0 = close(ctx, ctx.a0);
 		else if (fn == 0x39) ctx.v0 = isatty(ctx.a0);
+		else if (fn >= 0x41 && fn <= 0x46) return cardCall(ctx, fn);
 		else return false;
 		return true;
 	}
+
+	/**
+		B(41h) format, B(42h) firstfile, B(43h) nextfile, B(44h) rename, B(45h) erase and B(46h)
+		undelete, when they name a card; false for any other device, which the kernel reports.
+	**/
+	static function cardCall(ctx:CpuState, fn:Int):Bool {
+		var ours = true;
+		if (fn == 0x43) {
+			if (searchFd >= 0 && Memory.read32(KDevices.fcb(searchFd) + KDevices.FCB_DEVICE) == KDevices.dcb(KDevices.BU))
+				ctx.v0 = KDevices.nextFile(ctx, KDevices.fcb(searchFd), ctx.a0);
+			else ours = false;
+		} else if (!parseDevice(ctx.a0) || parsedDevice != "bu") ours = false;
+		else if (fn == 0x41) ctx.v0 = KBu.format(ctx, parsedId);
+		else if (fn == 0x42) ctx.v0 = firstFile(ctx);
+		else if (fn == 0x44) ctx.v0 = renameOnCard(ctx);
+		else if (fn == 0x45) ctx.v0 = freeFcb() ? KBu.erase(ctx, parsedId, parsedFile) : tooManyOpen();
+		else {
+			Runtime.reportOnce(0xB0046, "B0(46h) undelete — not in the BIOS's behaviour we follow; says 0");
+			ctx.v0 = 0;
+		}
+		return ours;
+	}
+
+	/**
+		B(42h) firstfile on a card, as OpenBIOS `firstFile` (fileio/filesystem.c, MIT): the search
+		FCB is the first free one, found once and kept — and not marked as taken, the BIOS's slip —
+		and the device's firstfile slot is called with it (`KDevices`).
+	**/
+	static function firstFile(ctx:CpuState):Int {
+		if (searchFd < 0) {
+			for (fd in 0...MAX_FD) {
+				if (searchFd < 0 && kind[fd] == DEV_NONE && Memory.read32(KDevices.fcb(fd)) == 0) searchFd = fd;
+				else {}
+			}
+		} else {}
+		var result = 0;
+		if (searchFd < 0) Kernel.lastError = 0x18;
+		else {
+			final f = KDevices.fcb(searchFd);
+			Memory.write32(f + KDevices.FCB_DEVICE_ID, parsedId);
+			Memory.write32(f + KDevices.FCB_DEVICE, KDevices.dcb(KDevices.BU));
+			result = KDevices.firstFile(ctx, KDevices.BU, f, parsedFile, ctx.a1);
+		}
+		return result;
+	}
+
+	/** The FCB firstfile and nextfile search with, OpenBIOS `g_firstFile`; -1 before the first. */
+	static var searchFd = -1;
+
+	static function renameOnCard(ctx:CpuState):Int {
+		final id = parsedId;
+		final from = parsedFile;
+		var result = 0;
+		if (!parseDevice(ctx.a1) || parsedDevice != "bu") {
+			Kernel.lastError = 0x13;
+			result = 0;
+		} else result = KBu.rename(ctx, id, from, parsedId, parsedFile);
+		return result;
+	}
+
+	/** Whether an FCB is free for erase's temporary use: with all sixteen open, it fails. */
+	static function freeFcb():Bool {
+		var free = false;
+		for (fd in 3...MAX_FD) free = free || kind[fd] == DEV_NONE;
+		return free;
+	}
+
+	static function tooManyOpen():Int {
+		Kernel.lastError = 0x18;
+		return 0;
+	}
+
+	/** B(55h) _get_error(fd): a card file's own error; for the others, the last one. */
+	public static function errorOf(fd:Int):Int {
+		var e = -1;
+		if (valid(fd)) e = kind[fd] == DEV_BU ? KBu.errorOf(fd) : Kernel.lastError;
+		else {}
+		return e;
+	}
+
+	// ---- device names ------------------------------------------------------------------------------
+
+	/**
+		OpenBIOS `splitFilepathAndFindDevice` (fileio/misc.c, MIT): leading spaces skipped, the
+		device's name up to the colon, and the digits at its end read as a port — decimal digits
+		at hex place values, so "bu10" is 10h. False when there is no colon.
+	**/
+	static function parseDevice(p:Int):Bool {
+		var at = p;
+		while (Memory.read8u(at) == 0x20) at++;
+		var name = "";
+		var id = 0;
+		var digits = false;
+		var c = Memory.read8u(at);
+		var n = 0;
+		while (c != 0x3A && c != 0 && n < 32) {
+			final digit = c >= 0x30 && c <= 0x39;
+			if (digit || digits) {
+				digits = true;
+				id = ((id << 4) + (digit ? c - 0x30 : 0)) | 0;
+			} else name += String.fromCharCode(c);
+			at++;
+			n++;
+			c = Memory.read8u(at);
+		}
+		parsedDevice = name;
+		parsedId = id;
+		parsedFile = (at + 1) | 0;
+		return c == 0x3A;
+	}
+
+	static var parsedDevice = "";
+	static var parsedId = 0;
+	static var parsedFile = 0;
 
 	// ---- the calls -----------------------------------------------------------------------------
 
@@ -140,11 +258,27 @@ class KFiles {
 		A failing open is a normal thing for a game to meet and handle. Returning a descriptor that
 		then reads zeroes would be worse: the game would believe it had its data.
 	**/
-	static function open(nameAddr:Int, mode:Int):Int {
+	static function open(ctx:CpuState, nameAddr:Int, mode:Int):Int {
 		if (isTty(nameAddr)) return allocate(DEV_TTY);
+		else if (parseDevice(nameAddr) && parsedDevice == "bu") return openOnCard(ctx, mode);
 		else if (imageMounted) return openInImage(nameOf(nameAddr));
 		else if (discDir != "") return openOnDisc(nameOf(nameAddr));
 		else return unknownDevice(nameAddr);
+	}
+
+	/** A file on a card: `KBu` opens it, or the descriptor goes back and the error is the game's. */
+	static function openOnCard(ctx:CpuState, mode:Int):Int {
+		final fd = allocate(DEV_BU);
+		if (fd < 0) {
+			Kernel.lastError = 0x18;
+			return -1;
+		} else {}
+		if (!KBu.open(ctx, fd, parsedId, parsedFile, mode)) {
+			release(fd);
+			Kernel.lastError = KBu.errorOf(fd);
+			return -1;
+		} else {}
+		return fd;
 	}
 
 	/**
@@ -201,13 +335,13 @@ class KFiles {
 	}
 
 	static function notOnDisc(fd:Int, name:String):Int {
-		kind[fd] = DEV_NONE;
+		release(fd);
 		Runtime.reportOnce(0x59200000 + name.length, "not on the disc: " + name);
 		return -1;
 	}
 
 	static function closeAndFail(fd:Int):Int {
-		kind[fd] = DEV_NONE;
+		release(fd);
 		Runtime.reportOnce(0x59300000, "no backend file slot left for a disc read");
 		return -1;
 	}
@@ -253,9 +387,14 @@ class KFiles {
 		return -1;
 	}
 
+	/**
+		The first descriptor free both here and in its FCB in RAM (`KDevices`): a game may take an
+		FCB itself — libcard marks firstfile's as used, which the BIOS forgets to — and the BIOS
+		looks at the FCB's flags, not at anything of ours.
+	**/
 	static function allocate(dev:Int):Int {
 		for (fd in 3...MAX_FD) {
-			if (kind[fd] == DEV_NONE) return take(fd, dev);
+			if (kind[fd] == DEV_NONE && Memory.read32(KDevices.fcb(fd)) == 0) return take(fd, dev);
 			else {}
 		}
 		Runtime.reportOnce(0x59FFFFFF, "all " + MAX_FD + " file descriptors are in use");
@@ -264,24 +403,50 @@ class KFiles {
 
 	static function take(fd:Int, dev:Int):Int {
 		kind[fd] = dev;
+		Memory.write32(KDevices.fcb(fd) + KDevices.FCB_FLAGS, 1);
+		Memory.write32(KDevices.fcb(fd) + KDevices.FCB_DEVICE,
+			KDevices.dcb(dev == DEV_TTY ? KDevices.TTY : (dev == DEV_CD ? KDevices.CDROM : KDevices.BU)));
 		return fd;
 	}
 
-	static function close(fd:Int):Int {
+	static function release(fd:Int):Void {
+		kind[fd] = DEV_NONE;
+		Memory.write32(KDevices.fcb(fd) + KDevices.FCB_FLAGS, 0);
+	}
+
+	static function close(ctx:CpuState, fd:Int):Int {
 		if (!valid(fd)) return -1;
+		else if (kind[fd] == DEV_BU) return closeOnCard(ctx, fd);
 		else {}
 		if (kind[fd] == DEV_CD && slot[fd] >= 0) releaseSlot(fd);
 		else {}
 		// The three the BIOS opened stay open, exactly as a C runtime's do.
-		if (fd >= 3) kind[fd] = DEV_NONE;
+		if (fd >= 3) release(fd);
 		else {}
 		return 0;
 	}
 
-	static function write(fd:Int, src:Int, len:Int):Int {
+	/** psxclose: the descriptor is freed either way, and fd is the answer when the device agreed. */
+	static function closeOnCard(ctx:CpuState, fd:Int):Int {
+		final ok = KBu.close(ctx, fd);
+		release(fd);
+		if (!ok) Kernel.lastError = KBu.errorOf(fd);
+		else {}
+		return ok ? fd : -1;
+	}
+
+	static function write(ctx:CpuState, fd:Int, src:Int, len:Int):Int {
 		if (!valid(fd)) return -1;
 		else if (kind[fd] == DEV_TTY) return writeTty(src, len);
+		else if (kind[fd] == DEV_BU) return onCard(KBu.write(ctx, fd, src, len), fd);
 		else return -1;
+	}
+
+	/** A card transfer's answer, with the descriptor's error made the last one when it failed. */
+	static function onCard(result:Int, fd:Int):Int {
+		if (result < 0) Kernel.lastError = KBu.errorOf(fd);
+		else {}
+		return result;
 	}
 
 	static function writeTty(src:Int, len:Int):Int {
@@ -306,8 +471,9 @@ class KFiles {
 		RAM: the destination is an emulated address and may not be RAM at all. Slow, and it does not
 		matter — a game loads a few megabytes once per level, not per frame.
 	**/
-	static function read(fd:Int, dst:Int, len:Int):Int {
+	static function read(ctx:CpuState, fd:Int, dst:Int, len:Int):Int {
 		if (!valid(fd)) return -1;
+		else if (kind[fd] == DEV_BU) return onCard(KBu.read(ctx, fd, dst, len), fd);
 		else if (kind[fd] != DEV_CD) return 0;         // the TTY has nothing to give
 		else return readDisc(fd, dst, len);
 	}
@@ -359,6 +525,7 @@ class KFiles {
 
 	static function lseek(fd:Int, offset:Int, whence:Int):Int {
 		if (!valid(fd)) return -1;
+		else if (kind[fd] == DEV_BU) return KBu.lseek(fd, offset, whence);
 		else if (kind[fd] != DEV_CD) return notSeekable();
 		else return seekDisc(fd, offset, whence);
 	}

@@ -215,6 +215,12 @@ struct Backend {
     static inline int storageWrite(const std::string& name, unsigned char* buf, int len) {
         return bp_storage_write(name.c_str(), buf, len);
     }
+    static inline int cardLoad(const std::string& game, unsigned char* buf, int cap) {
+        return bp_card_load(game.c_str(), buf, cap);
+    }
+    static inline int cardSave(const std::string& game, const std::string& title, unsigned char* buf, int len) {
+        return bp_card_save(game.c_str(), title.c_str(), buf, len);
+    }
     static inline int fileOpen(int slot, const std::string& path) { return bp_file_open(slot, path.c_str()); }
     static inline int fileSize(int slot) { return bp_file_size(slot); }
     static inline int fileRead(int slot, int offset, unsigned char* buf, int len) {

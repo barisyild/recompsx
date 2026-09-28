@@ -520,6 +520,31 @@ int bp_storage_write(const char* name, const uint8_t* buf, int len) {
     return 0;
 }
 
+/* ---- memory cards --------------------------------------------------------------------------
+ * <game>.card beside the other saves, in the card format as the runtime hands it over (ADR-0037),
+ * through bp_storage_write's temporary file and rename. A card with nothing on it is no file. */
+static int card_name(const char* game, char* out, size_t len) {
+    if (!game || !*game) return 0;
+    snprintf(out, len, "%s.card", game);
+    return 1;
+}
+
+int bp_card_load(const char* game, uint8_t* buf, int cap) {
+    char name[64];
+    if (!card_name(game, name, sizeof(name))) return -1;
+    return bp_storage_read(name, buf, cap);
+}
+
+int bp_card_save(const char* game, const char* title, const uint8_t* buf, int len) {
+    char name[64], path[1200];
+    (void)title;
+    if (!card_name(game, name, sizeof(name))) return -1;
+    if (len > BP_CARD_HEADER) return bp_storage_write(name, buf, len);
+    if (!storage_path(name, path, sizeof(path))) return -1;
+    remove(path);
+    return 0;
+}
+
 /* ---- disc / file streaming ---------------------------------------------------------------- */
 
 int bp_file_open(int slot, const char* path) {

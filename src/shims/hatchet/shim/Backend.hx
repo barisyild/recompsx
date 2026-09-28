@@ -14,6 +14,7 @@ extern class Backend {
 	public static inline var PRESENT_24BPP:Int = 1;
 	public static inline var PRESENT_INTERLACE:Int = 2;
 	public static inline var PRESENT_PAL:Int = 4;
+	public static inline var PRESENT_FAST:Int = 8;
 	public static inline var PROFILE_SPU:Int = 0;
 	public static inline var PROFILE_GTE:Int = 1;
 	public static inline var PROFILE_GPU:Int = 2;
@@ -51,6 +52,8 @@ extern class Backend {
 	public static function quitRequested():Bool;
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int;
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int;
+	public static function cardLoad(game:String, buf:RawBuf, cap:Int):Int;
+	public static function cardSave(game:String, title:String, buf:RawBuf, len:Int):Int;
 	public static function fileOpen(slot:Int, path:String):Int;
 	public static function fileSize(slot:Int):Int;
 	public static function fileRead(slot:Int, offset:Int, buf:RawBuf, len:Int):Int;

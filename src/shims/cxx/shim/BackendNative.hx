@@ -69,6 +69,11 @@ extern function bp_storage_read(name:ConstCharPtr, buf:Ptr<UInt8>, len:Int):Int;
 @:include("backend_c_api.h") @:topLevel
 extern function bp_storage_write(name:ConstCharPtr, buf:Ptr<UInt8>, len:Int):Int;
 
+@:include("backend_c_api.h") @:topLevel
+extern function bp_card_load(game:ConstCharPtr, buf:Ptr<UInt8>, cap:Int):Int;
+@:include("backend_c_api.h") @:topLevel
+extern function bp_card_save(game:ConstCharPtr, title:ConstCharPtr, buf:Ptr<UInt8>, len:Int):Int;
+
 @:include("backend_c_api.h") @:topLevel extern function bp_file_open(slot:Int, path:ConstCharPtr):Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_file_size(slot:Int):Int;
 @:include("backend_c_api.h") @:topLevel

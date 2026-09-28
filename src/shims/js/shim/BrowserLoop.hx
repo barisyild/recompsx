@@ -7,7 +7,7 @@ class BrowserLoop {
 			while (step()) {}
 			return;
 		} else {}
-		js.Syntax.code("(function(step, frameMs) {
+		js.Syntax.code("(function(step, frameMs, fast) {
 			const host = globalThis.recompsxHost;
 			let base = {0}, t0 = performance.now(), active = true;
 			function frames() { return {0}; }
@@ -46,7 +46,9 @@ class BrowserLoop {
 				// so that pacing, switched back on, resumes from now rather than racing to clear
 				// the backlog. Pacing is presentation (golden rule 3): the emulated machine sees
 				// the same cycles in the same order either way.
-				const unpaced = host && host.unpaced;
+				// A frame the runtime marked as not worth holding (a memory card transfer, ADR-0037)
+				// goes as with the speed limit off.
+				const unpaced = (host && host.unpaced) || fast();
 				if (unpaced || (start - t0) - (frames() - base) * frameMs > 1000) { base = frames(); t0 = start; }
 				const budget = unpaced ? 14 : 8;
 				while (performance.now() - start < budget) {
@@ -57,7 +59,9 @@ class BrowserLoop {
 				schedule();
 			}
 			state('running'); schedule();
-		})({2}, {3} * 1000 / 33868800)", gpu.Scanout.frames, core.Cooperative.yields,
-			step, core.TimeBase.cyclesPerFrame());
+		})({2}, {3} * 1000 / 33868800, {4})", gpu.Scanout.frames, core.Cooperative.yields,
+			step, core.TimeBase.cyclesPerFrame(), isFast);
 	}
+
+	static function isFast():Bool return Backend.fast;
 }

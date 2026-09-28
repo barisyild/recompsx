@@ -45,13 +45,15 @@ class Scanout {
 		else {}
 		if ((mode & 0x08) != 0) flags |= Backend.PRESENT_PAL;
 		else {}
+		if (kernel.KCard.moving) flags |= Backend.PRESENT_FAST;
+		else {}
 		Backend.present(Vram.data, x, y, width(mode), height(mode), flags);
 		frames++;
 	}
 
 	/** Display off still needs saying: a black screen is a picture, and a stale one is a lie. */
 	static function blank():Void {
-		Backend.present(Vram.data, 0, 0, 0, 0, 0);
+		Backend.present(Vram.data, 0, 0, 0, 0, kernel.KCard.moving ? Backend.PRESENT_FAST : 0);
 		frames++;
 	}
 

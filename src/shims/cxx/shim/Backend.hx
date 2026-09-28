@@ -25,6 +25,7 @@ class Backend {
 	public static inline var PRESENT_24BPP     = 1;
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;
+	public static inline var PRESENT_FAST      = 8;
 
 	public static inline function init(title:String):Int
 		return BackendNative.bp_init(ConstCharPtr.fromString(title));
@@ -121,6 +122,14 @@ class Backend {
 
 	public static inline function storageWrite(name:String, buf:RawBuf, len:Int):Int
 		return BackendNative.bp_storage_write(ConstCharPtr.fromString(name), RawMem.u8Ptr(buf), len);
+
+	/** The game's memory card in the card format (ADR-0037), into `buf`: its length, or -1. */
+	public static inline function cardLoad(game:String, buf:RawBuf, cap:Int):Int
+		return BackendNative.bp_card_load(ConstCharPtr.fromString(game), RawMem.u8Ptr(buf), cap);
+
+	public static inline function cardSave(game:String, title:String, buf:RawBuf, len:Int):Int
+		return BackendNative.bp_card_save(ConstCharPtr.fromString(game), ConstCharPtr.fromString(title),
+			RawMem.u8Ptr(buf), len);
 
 	public static inline function fileOpen(slot:Int, path:String):Int
 		return BackendNative.bp_file_open(slot, ConstCharPtr.fromString(path));

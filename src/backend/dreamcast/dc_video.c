@@ -378,6 +378,13 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
  * 59.94 Hz, or 50 Hz for a PAL display mode. The time spent holding is not the emulator's: it is
  * shown as `pace` and kept out of `emu`. */
 static void pace_present(int flags) {
+    /* A memory card transfer (ADR-0037): nothing to watch, so nothing to hold for. The deadline
+     * is reset, so the frame after it is held from now rather than racing to catch up. */
+    if(flags & BP_PRESENT_FAST) {
+        pump_audio();
+        bp_pace_frame(0);
+        return;
+    }
 #if RECOMPSX_DC_PROFILE
     const uint64_t a = bp_time_us();
 #endif

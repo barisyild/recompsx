@@ -85,6 +85,14 @@ int bp_storage_write(const char* name, const uint8_t* buf, int len) {
     (void)name; (void)buf; (void)len; return -1;
 }
 
+/* No card is kept either: every run starts with a blank one, as a headless run does. */
+int bp_card_load(const char* game, uint8_t* buf, int cap) {
+    (void)game; (void)buf; (void)cap; return -1;
+}
+int bp_card_save(const char* game, const char* title, const uint8_t* buf, int len) {
+    (void)game; (void)title; (void)buf; (void)len; return -1;
+}
+
 /* Files do work here: a headless run still needs to read a disc image. */
 static FILE* g_files[8];
 static int   g_file_size[8];

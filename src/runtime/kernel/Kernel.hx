@@ -31,8 +31,11 @@ class Kernel {
 		KFiles.init();
 		KThreads.init();
 		KTables.init();
+		KDevices.init();
 		KTimers.init();
 		KPads.init();
+		KCard.init();
+		KBu.init();
 		KKeyboard.init();
 		// Every table is built here rather than at its declaration: reflaxe emits a statement
 		// block at namespace scope for a static initialised with a comprehension, which is not
@@ -66,6 +69,7 @@ class Kernel {
 		// The C library occupies most of this table; ask it first and fall through if it declines.
 		if (KLib.call(ctx, fn)) return;
 		else if (KFiles.callA0(ctx, fn)) return;
+		else if (KCard.callA0(ctx, fn)) return;
 		else {}
 		// InitHeap(addr, size): the game gives the kernel a region of its own RAM to allocate in.
 		if (fn == 0x39) KHeap.init(ctx.a0, ctx.a1);
@@ -82,42 +86,17 @@ class Kernel {
 		else if (fn == 0x52) ctx.v0 = ctx.sp;                       // GetSysSp
 		else if (fn == 0x06 || fn == 0x3A) exitGame(ctx);
 		else if (fn == 0x54 || fn == 0x71) ctx.v0 = cdDeviceInit();
-		else if (fn == 0x55 || fn == 0x70) ctx.v0 = buInit();
 		else if (fn == 0x56 || fn == 0x72) ctx.v0 = removeCdDevice();
 		else if (fn == 0x40 || fn == 0x4F || fn == 0x50 || fn == 0x53) systemError(ctx, 0xA0, fn);
-		else if (fn == 0xAB) ctx.v0 = cardInfo(ctx);
 		else if (returnsZero(fn)) ctx.v0 = 0;
 		else reportCall(ctx, 0xA0, fn);
 	}
-
-	/**
-		`_card_info(port)` — is there a card in that slot, and is it readable?
-
-		Asynchronous on hardware: the call queues a query and returns immediately, and the answer
-		arrives later as an event on the card classes — done, error, or timed out. A game does not
-		wait on the return value; it waits on the event, which is why answering only the call and
-		never delivering anything leaves a game waiting forever for something it was told to
-		expect.
-
-		There are no memory cards (`sio.Sio0` answers nothing at their address), so the answer is
-		a timeout — the same one a real machine gives for a slot with no card in it.
-		Both classes get it, because a game may listen on either and Crash Bash opened all four
-		specs on both.
-	**/
-	static function cardInfo(ctx:CpuState):Int {
-		noteOnce(0xA00AB, "A0(ABh) _card_info — no card in the slot, so the query times out");
-		KEvents.post(KEvents.CLASS_BU, SPEC_TIMEOUT);
-		KEvents.post(KEvents.CLASS_CARD, SPEC_TIMEOUT);
-		return 1;
-	}
-
-	/** `EvSpTIMOUT`, the spec a card query reports when the slot answers nothing. */
-	static inline var SPEC_TIMEOUT = 0x0100;
 
 	// ---- B0 ------------------------------------------------------------------------------------
 
 	static function b0(ctx:CpuState, fn:Int):Void {
 		if (KFiles.callB0(ctx, fn)) return;
+		else if (KCard.callB0(ctx, fn)) return;
 		else {}
 		if (fn == 0x07) ctx.v0 = deliverEvent(ctx);
 		else if (fn == 0x08) ctx.v0 = KEvents.open(ctx, ctx.a0, ctx.a1, ctx.a2, ctx.a3);
@@ -128,7 +107,6 @@ class Kernel {
 		else if (fn == 0x0D) ctx.v0 = KEvents.disable(ctx, ctx.a0);
 		else if (fn == 0x20) ctx.v0 = undeliverEvent(ctx);
 		else if (fn == 0x19) ctx.v0 = hookEntry(ctx);
-		else if (fn == 0x4A || fn == 0x4B) ctx.v0 = cardInit(fn);
 		else if (fn == 0x5B) ctx.v0 = changeClearPad(ctx);
 		else if (fn == 0x12) ctx.v0 = KPads.initPad(ctx.a0, ctx.a1, ctx.a2, ctx.a3);
 		else if (fn == 0x13) ctx.v0 = KPads.startPad();
@@ -152,7 +130,7 @@ class Kernel {
 		else if (fn == 0x48) ctx.v0 = delDrv(ctx);
 		else if (fn == 0x49) ctx.v0 = printDevices();
 		else if (fn == 0x54) ctx.v0 = lastError;
-		else if (fn == 0x55) ctx.v0 = lastError;
+		else if (fn == 0x55) ctx.v0 = KFiles.errorOf(ctx.a0);
 		else if (fn == 0x56) ctx.v0 = KTables.c0Table();
 		else if (fn == 0x57) ctx.v0 = KTables.b0Table();
 		else if (fn == 0x59) ctx.v0 = testDevice(ctx);
@@ -191,7 +169,7 @@ class Kernel {
 		else if (fn == 0x13) ctx.v0 = flushStdInOut();
 		else if (fn == 0x19) ioAbort(ctx);
 		else if (fn == 0x1A) ctx.v0 = setCardFindMode(ctx);
-		else if (fn == 0x1D) ctx.v0 = cardFindMode;
+		else if (fn == 0x1D) ctx.v0 = KBu.findMode;
 		else if (fn == 0x1C) ctx.v0 = installed("AdjustA0Table");
 		else if (fn >= 0x0E && fn <= 0x11) ctx.v0 = 0;
 		else if (fn == 0x14) ctx.v0 = 0;
@@ -431,11 +409,10 @@ class Kernel {
 		Runtime.reportOnce(0x5D000001, "_ioabort — the kernel gave up on an I/O operation");
 	}
 
-	static var cardFindMode = 0;
-
+	/** C(1Ah) set_card_find_mode(mode): 0 finds files, 1 deleted ones (`KBu`). */
 	static function setCardFindMode(ctx:CpuState):Int {
-		final was = cardFindMode;
-		cardFindMode = ctx.a0;
+		final was = KBu.findMode;
+		KBu.findMode = ctx.a0;
 		return was;
 	}
 
@@ -470,29 +447,6 @@ class Kernel {
 			noteOnce(0xB0019, "B0(19h) HookEntryInt — game installed an exception hook at "
 				+ hex8(ctx.a0) + ", resuming at " + hex8(mem.Memory.read32(ctx.a0))
 				+ " with sp " + hex8(mem.Memory.read32(ctx.a0 + 4)));
-		} else {}
-		return 0;
-	}
-
-	/**
-		`_bu_init` and the card starters.
-
-		Registering devices that do not exist yet. They report themselves as handled rather than
-		missing, because a game calling them is doing normal setup, not asking for anything: the
-		work only begins when it opens a `bu00:` file, and that is where the honest failure is.
-	**/
-	/** `_bu_init` — the same for the memory card, which lives on the serial port. */
-	static function buInit():Int {
-		Irq.unmask(Irq.SIO0);
-		noteOnce(0xA0070, "A0(70h) _bu_init — memory card device registered, SIO0 unmasked");
-		return 0;
-	}
-
-	static function cardInit(fn:Int):Int {
-		final noteKey = 0xB0000 | fn;
-		if (!Runtime.alreadyReported(noteKey)) {
-			noteOnce(noteKey, (fn == 0x4A ? "B0(4Ah) InitCARD2" : "B0(4Bh) StartCARD2")
-				+ " — no card layer yet");
 		} else {}
 		return 0;
 	}
@@ -565,6 +519,8 @@ class Kernel {
 		// Crash Bandicoot: Warped's hand-written routines do — is only safe because of that. On the
 		// interrupted $sp, a 1 kHz timer callback wrote its frame wherever that register pointed.
 		ctx.sp = EXCEPTION_STACK_TOP;
+		// The memory card driver, which StartCARD2 put in the same chain-2 handler as the pads'.
+		KCard.onInterrupt(ctx, atEntry);
 		KHandlers.runChains(ctx);
 
 		// The game's own epilogue runs BEFORE the kernel acknowledges anything.
@@ -669,6 +625,8 @@ class Kernel {
 		// VRAM and two registers: it cannot change what the machine does, so a headless target
 		// dropping it on the floor stays bit-identical to one drawing it.
 		gpu.Scanout.present();
+		// A card the game has finished writing goes back to the backend (ADR-0037).
+		sio.MemoryCard.tick();
 		heartbeat(ctx);
 		#if recompsx_mods
 		// A mod's frame work (ADR-0033), at the one moment every target agrees the machine is at.

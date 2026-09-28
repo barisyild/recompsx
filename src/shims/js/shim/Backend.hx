@@ -38,6 +38,7 @@ class Backend {
 	public static inline var PRESENT_24BPP     = 1;
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;
+	public static inline var PRESENT_FAST      = 8;
 
 	static var args:Array<String> = [];
 	static var quit = false;
@@ -142,7 +143,12 @@ class Backend {
 		gets the same BGR555 halfwords the GPU wrote, because the moment this shim starts turning
 		them into RGBA it becomes a second renderer that can disagree with the first.
 	**/
+	/** The last present asked not to be held to the video rate (PRESENT_FAST); `BrowserLoop`
+	    runs such frames as it runs them with the speed limit off. */
+	public static var fast = false;
+
 	public static function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void {
+		fast = (flags & PRESENT_FAST) != 0;
 		if (!hosted()) return;
 		else {}
 		js.Syntax.code("{0}.present({1}.u8, {2}, {3}, {4}, {5}, {6})",
@@ -236,6 +242,34 @@ class Backend {
 		js.Syntax.code("require('fs').writeFileSync({0}, Buffer.from({1}.u8.buffer, 0, {2}))",
 			name, buf, len);
 		return 0;
+	}
+
+	/**
+		The game's memory card in the card format (ADR-0037): the page's, from its local storage, or
+		under Node `<game>.card` beside the program. Its length, or -1 when there is none.
+	**/
+	public static function cardLoad(game:String, buf:RawBuf, cap:Int):Int {
+		var n = -1;
+		if (hosted()) {
+			n = js.Syntax.code("(typeof {0}.cardLoad === 'function' ? {0}.cardLoad({1}, {2}.u8.subarray(0, {3})) : -1)",
+				host(), game, buf, cap);
+		} else {
+			n = storageRead(game + ".card", buf, cap);
+		}
+		return n;
+	}
+
+	/** The card back to the host; one with no blocks on it (16 bytes) removes the host's copy. */
+	public static function cardSave(game:String, title:String, buf:RawBuf, len:Int):Int {
+		var n = -1;
+		if (hosted()) {
+			n = js.Syntax.code("(typeof {0}.cardSave === 'function' ? {0}.cardSave({1}, {2}, {3}.u8.subarray(0, {4})) : -1)",
+				host(), game, title, buf, len);
+		} else {
+			n = js.Syntax.code("(function (fs, name, from) { if (from.length <= 16) { if (fs.existsSync(name)) fs.unlinkSync(name); return 0; } const tmp = name + '.tmp'; fs.writeFileSync(tmp, from); fs.renameSync(tmp, name); return 0; })(require('fs'), {0}, {1}.u8.subarray(0, {2}))",
+				game + ".card", buf, len);
+		}
+		return n;
 	}
 
 	// ---- file slots ---------------------------------------------------------------------------

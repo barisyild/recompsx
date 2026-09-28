@@ -342,9 +342,9 @@
             status.dataset.yields = yields;
           },
           log(level, line) { writeLog(line); },
-          // The backend's storage (bp_storage_*): the console's settings (system.cfg) and, one day,
-          // memory card images, kept in this browser under the page's origin. A blob past 256 KB
-          // — the one-off VRAM dump — is only reported.
+          // The backend's storage (bp_storage_*): the console's settings (system.cfg), kept in this
+          // browser under the page's origin. A blob past 256 KB — the one-off VRAM dump — is only
+          // reported.
           storageRead(name, into) {
             let text = null;
             try { text = localStorage.getItem('recompsx:' + name); } catch (error) { return -1; }
@@ -360,6 +360,29 @@
             for (let i = 0; i < bytes.length; i += 0x8000) raw += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
             try { localStorage.setItem('recompsx:' + name, btoa(raw)); writeLog(`[file] ${name}: ${bytes.length} bytes kept`); }
             catch (error) { writeLog(`[file] ${name}: not kept (${error.message})`); }
+          },
+          // Memory cards (bp_card_*, ADR-0037): each game's card under its product code, in the
+          // card format the runtime builds — a header and the blocks its saves occupy, so a
+          // one-block game keeps 8 KB here, and a game with nothing saved keeps nothing.
+          cardLoad(game, into) {
+            let text = null;
+            try { text = localStorage.getItem(`recompsx:card:${game}`); } catch (error) { return -1; }
+            if (text === null) return -1;
+            const raw = atob(text);
+            if (raw.length > into.length) return -1;
+            for (let i = 0; i < raw.length; i++) into[i] = raw.charCodeAt(i);
+            return raw.length;
+          },
+          cardSave(game, title, bytes) {
+            const key = `recompsx:card:${game}`;
+            try {
+              if (bytes.length <= 16) { localStorage.removeItem(key); writeLog(`[card] ${title}: nothing saved, nothing kept`); return 0; }
+              let raw = '';
+              for (let i = 0; i < bytes.length; i += 0x8000) raw += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+              localStorage.setItem(key, btoa(raw));
+            } catch (error) { writeLog(`[card] ${title}: not kept (${error.message})`); return -1; }
+            writeLog(`[card] ${title}: ${bytes.length} bytes kept`);
+            return 0;
           }
         };
         const script = document.createElement('script');

@@ -19,8 +19,8 @@
         "offset": 72833024,
         "length": 387072
       },
-      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game; 0x80086d88, 0x8008ab50 and 0x8008a810, reached in the battle Battle Mode starts; 0x8009020c on the way into Adventure mode.",
-      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324, 2148035976, 2148051792, 2148050960, 2148073996],
+      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game; 0x80086d88, 0x8008ab50 and 0x8008a810, reached in the battle Battle Mode starts; 0x8009020c on the way into Adventure mode; 0x800923fc from the save screen, once a memory card is there.",
+      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324, 2148035976, 2148051792, 2148050960, 2148073996, 2148082684],
       "hashWords": 64
     },
     {
@@ -90,7 +90,7 @@
     }
   ],
 
-  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first. 0x80040540, 0x80040584 and 0x80040910 are libpad's per-port handlers (its port records at 0x8007765c, F0h apart), reached through pointers only once a controller answers: with the port empty they never ran. 0x8001e824, 0x8001e838 and 0x8001e848 are the menu screen manager's three ways of naming the next screen, three-instruction leaves in a row with no prologue for the sweep to find; the frontend overlay calls 0x8001e848 when a Select Game Type choice is made, which nothing did until controllers existed, and without it cross played its sound and the menu stayed. Walking on reported 0x80015284 (character select, ra 0x800b75c8); 0x80026d00, 0x80025ae4, 0x80027f7c, 0x8002c29c, 0x8002c290 and 0x8002321c inside the battle Battle Mode starts; 0x8001dcd4 and 0x80015984 on the way into Adventure mode.",
+  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first. 0x80040540, 0x80040584 and 0x80040910 are libpad's per-port handlers (its port records at 0x8007765c, F0h apart), reached through pointers only once a controller answers: with the port empty they never ran. 0x8001e824, 0x8001e838 and 0x8001e848 are the menu screen manager's three ways of naming the next screen, three-instruction leaves in a row with no prologue for the sweep to find; the frontend overlay calls 0x8001e848 when a Select Game Type choice is made, which nothing did until controllers existed, and without it cross played its sound and the menu stayed. Walking on reported 0x80015284 (character select, ra 0x800b75c8); 0x80026d00, 0x80025ae4, 0x80027f7c, 0x8002c29c, 0x8002c290 and 0x8002321c inside the battle Battle Mode starts; 0x8001dcd4 and 0x80015984 on the way into Adventure mode. The last three, 0x8002d294, 0x800150e8 and 0x8002d0c8, the boot overlay calls from its save and load screens, which run only once there is a memory card to save to.",
   "functionHints": [
     2147564692,
     2147566472,
@@ -158,7 +158,10 @@
     2147664528,
     2147627548,
     2147605716,
-    2147572100
+    2147572100,
+    2147668628,
+    2147569896,
+    2147668168
   ],
   "jumpTableHints": [],
   "nativeReplacements": [],

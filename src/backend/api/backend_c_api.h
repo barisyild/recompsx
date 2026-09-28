@@ -57,7 +57,12 @@ const char* bp_arg(int index);   /* NULL if out of range */
 enum {
     BP_PRESENT_24BPP     = 1 << 0,
     BP_PRESENT_INTERLACE = 1 << 1,
-    BP_PRESENT_PAL       = 1 << 2
+    BP_PRESENT_PAL       = 1 << 2,
+    /* The frame need not be held to the video rate: the emulated machine is moving memory card
+     * sectors, a sector every second vblank as the BIOS does, and nothing else is going on that a
+     * player would watch (ADR-0037). A backend that paces at present lets such a frame go at once,
+     * so a save takes a fraction of a second rather than several. Emulated time is unchanged. */
+    BP_PRESENT_FAST      = 1 << 3
 };
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 
@@ -213,11 +218,6 @@ enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
 void bp_key_text(int on);
 int  bp_key_next(void);
 
-/* ---- storage -----------------------------------------------------------------------------
- * Memory card images and configuration. `name` is restricted to [A-Za-z0-9._-]{1,64}; the
- * backend decides where that lives. Writes must be atomic from the caller's point of view:
- * a crash mid-write must not leave a half-written memory card. */
-int bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 if absent */
 /* ---- mouse ---------------------------------------------------------------------------------
  * The host's pointer over the picture, which the HLE kernel offers games and mods
  * (kernel.KMouse, ADR-0038). bp_input_poll latches it with the pads; then bp_mouse answers:
@@ -238,7 +238,31 @@ enum { BP_MOUSE_OVER = 0, BP_MOUSE_X = 1, BP_MOUSE_Y = 2, BP_MOUSE_BUTTONS = 3 }
 
 int bp_mouse(int field);
 
+/* ---- storage -----------------------------------------------------------------------------
+ * Configuration and other small blobs. `name` is restricted to [A-Za-z0-9._-]{1,64}; the
+ * backend decides where that lives. Writes must be atomic from the caller's point of view:
+ * a crash mid-write must not leave a half-written file. */
+int bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 if absent */
 int bp_storage_write(const char* name, const uint8_t* buf, int len); /* 0 ok, -1 fail */
+
+/* ---- memory cards ------------------------------------------------------------------------
+ * A game's memory card, in recompsx's card format (ADR-0037), never as a raw 128 KB image: a
+ * 16-byte header and, for each block the game's saves occupy, that block's directory frame and
+ * its 8 KB. A card is as large as what the game keeps on it — 8336 bytes for one block, 16 more
+ * with nothing on it — and it grows and shrinks as the game saves and deletes. The runtime
+ * builds and reads the format; the backend keeps the bytes under the game's product code
+ * (`game`, [A-Z0-9]{1,16}, e.g. SCUS94570) in whatever its target keeps things in. `title` is
+ * the game's name, for the host's own save manager; a backend that shows an icon may take the
+ * game's own from the card (ADR-0037 has the layout).
+ * Load returns the bytes read, or -1 when there is no card for this game. Save returns 0 or -1,
+ * and must be atomic as bp_storage_write is, or else detectably damaged when interrupted (the
+ * runtime then finds no card, and the game a blank one). Saving a card with no blocks on it —
+ * len == BP_CARD_HEADER — removes the backend's copy: a game that keeps nothing takes no space. */
+#define BP_CARD_HEADER 16
+#define BP_CARD_RECORD (128 + 8192)
+#define BP_CARD_MAX    (BP_CARD_HEADER + 15 * BP_CARD_RECORD)
+int bp_card_load(const char* game, uint8_t* buf, int cap);
+int bp_card_save(const char* game, const char* title, const uint8_t* buf, int len);
 
 /* ---- disc / file streaming ---------------------------------------------------------------
  * The CD subsystem reads the user's disc image through these. Backends are dumb byte servers:

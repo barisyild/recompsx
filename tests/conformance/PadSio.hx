@@ -13,7 +13,8 @@ import sio.Sio0;
 	What has to agree on both targets is the whole conversation: each answer, the status bits
 	around it, and the acknowledge that drives the next byte — late enough that a driver clearing
 	IRQ7 after its write does not lose it, and never after the last byte. Then the cases that must
-	answer nothing: the empty port, the memory card address, and a conversation cut by /CS.
+	answer nothing: the empty port, the card address of an empty card slot (the card itself is
+	`CardSio`'s), and a conversation cut by /CS.
 **/
 class PadSio {
 	static inline var DR = 0x1F801040;
@@ -93,7 +94,7 @@ class PadSio {
 		Conf.expect("and never acknowledges", acknowledged(), 0);
 		Sio0.write16(CTRL, 0);
 
-		// No memory cards yet: the card address on port 1 is answered by nobody.
+		// No card in slot 1: the card address on port 1 is answered by nobody.
 		Sio0.write16(CTRL, TXEN | DTR | DSRIEN);
 		Conf.expect("the card address answers Hi-Z", exchange(0x81), 0xFF);
 		Conf.expect("and nobody acknowledges it", acknowledged(), 0);

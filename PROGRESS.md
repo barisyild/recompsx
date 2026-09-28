@@ -2,6 +2,36 @@
 
 ## Status snapshot
 
+**2026-09-28: Memory cards (ADR-0037) — Crash Bash saves, and keeps 8336 bytes for it.** The
+card in slot 1 (`sio.MemoryCard`) is a whole PlayStation card to the game, formatted as the BIOS
+formats one; slot 2 is empty. Both roads reach it: SIO0 answers at 81h with a Sony card's read,
+write and ID commands (late 5Ch acknowledge included), and the kernel's card functions are
+OpenBIOS's driver, backup unit and `bu` device translated (`kernel.KCard`, `kernel.KBu`, MIT,
+attributed) — InitCARD2..`_card_wait`, `_bu_init`, `_card_info`/`_load`/`_auto`, open with
+create and async, read/write/close/lseek/erase/rename/format/firstfile/nextfile, a sector per
+slot every second vblank, HwCARD/SwCARD events as the BIOS delivers them. The kernel's FCBs
+([140h]) and device table ([150h]) are now in RAM (`kernel.KDevices`), function pointers as
+BIOS-window stubs: libcard swaps bu's firstfile for its own and calls the original back, and
+without the table Crash Bash waited forever for the card event only that detour makes. What is
+kept is recompsx's card format under the product code (`GameInfo.SERIAL`): a 16-byte header and
+each block in use with its directory frame, at its own place — no per-game config, no 128 KB
+image; nothing at all for a game that saved nothing. Backends: PC/Node `<SERIAL>.card`, the
+browser's localStorage, the Dreamcast `<SERIAL>.card` on /pc or /sd or a VMU package with the
+game's own save icon (12 blocks fit), null none (`bp_card_load/save`). Frames presented while
+sectors move carry `BP_PRESENT_FAST`, and the browser and the Dreamcast do not hold them.
+Crash Bash's boot overlay calls three executable functions from its save screens the analysis
+never found (8002D294h, 800150E8h, 8002D0C8h, each starting right after another's `jr ra` with
+no prologue — the kind next-up 0 is about) and an
+overlay entry (800923FCh): game.json hints. Verified: conformance `CardFormat` `f6536b8c`,
+`CardSio` `69461681`, `CardBios` `b4d75c0b` and `CardChains` `844db8da` (files created into
+each other's holes, a chain through blocks 1, 4 and 5, the card format growing and shrinking a
+block at a time, two restarts through the format) on JS and reflaxe.CPP; every other conformance
+digest unchanged; in the browser the owner saved to slot 1 and the page kept 8336 bytes (one
+block, `BASCUS-94570`, "SC" with a two-frame icon), which came back after a reload; check.sh
+clean (42 ABI functions); the Dreamcast's dc_files.c and dc_video.c compile clean with kos-cc
+-Wall -Wextra. Crash Bash 3000 `6bd7b329` on JS and reflaxe.CPP (was `0e180c28`: the game finds
+a card now).
+
 **2026-09-28: The mouse (ADR-0038) — Crash Bash's menus answer to it.** `bp_mouse` in the backend
 ABI (over the picture, x and y as fractions 0..65535 of it, left/right/middle/back/forward held,
 quick clicks latched), implemented by SDL2 (letterbox rectangle, high-DPI points), the browser
@@ -1620,6 +1650,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
+- **Open: I_MASK.7 (SIO0) after `_bu_init`.** The kernel has unmasked SIO0 there since e468132
+  ("_bu_init does the same for SIO0"), and games that drive their pads through SIO0 have run
+  with it. OpenBIOS's card driver unmasks it only while a transfer runs and masks it again at the
+  end, so after `_bu_init` it would be masked. Kept as it was (ADR-0037); a retail fixture or a
+  DuckStation read of I_MASK after `_bu_init` would settle it.
+
 - **Resolved (2026-09-28): the CDIs stopped at a black screen on a real BIOS.** Booted from the
   disc — on the console, and in Demul and Flycast with a real BIOS — the playable CDIs showed the
   Dreamcast logo and then nothing, while the same ELF ran under dcload and Flycast's HLE BIOS hid
@@ -1650,6 +1686,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Memory cards (ADR-0037): card model + card format per game (grows/shrinks by block), LLE card
+on SIO0, OpenBIOS card driver/backup unit/bu device (KCard, KBu), FCB/DCB tables in RAM (KDevices), bp_card_* on
+PC/null/Dreamcast (VMU package)/browser/Node, BP_PRESENT_FAST; conformance CardFormat/Sio/Bios/Chains; Crash Bash
+saves in the browser. Next: Crash Bash's pause-menu text (DMA2 list walked over time).
 
 2026-09-28 [claude] Mouse (ADR-0038): bp_mouse on SDL2, browser, Dreamcast (drawn arrow), null; kernel.KMouse;
 mods/mouse drives the game's lists, onlinemenu its own screens; onlinemenu's slot bug (OPTIONS) fixed. Dreamcast

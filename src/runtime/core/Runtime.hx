@@ -99,6 +99,7 @@ class Runtime {
 		cd.Iso9660.init();
 		cd.Cdrom.init();
 		sio.Pads.init();
+		sio.MemoryCard.init();
 		sio.Sio0.init();
 		timers.Timers.init();
 		dma.Dma.init();
@@ -290,7 +291,11 @@ class Runtime {
 		if (p == 0xA0 || p == 0xB0 || p == 0xC0) return kernel.Kernel.call(ctx, p, ctx.t1);
 		else {}
 		final index = kernel.KTables.callAt(addr);
+		final device = kernel.KDevices.callAt(addr);
 		if (index >= 0) kernelStub(ctx, index);
+		// A device's function, through the pointer a game saved from the device table before it put
+		// one of its own there (kernel.KDevices).
+		else if (device >= 0 && kernel.KDevices.callStub(ctx, device)) {}
 		// Target AND caller, as the failure-mode policy always required (docs/specs/tool.md §6.8).
 		// The address-less form hid N distinct misses behind one identical line — and an
 		// unresolved call is a black hole: it does nothing, silently, so whatever side effects

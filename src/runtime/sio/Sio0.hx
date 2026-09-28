@@ -3,6 +3,8 @@ package sio;
 import core.CpuState;
 import core.Irq;
 import core.Scheduler;
+import shim.RawBuf;
+import shim.RawMem;
 
 /**
 	SIO0 — the serial port the controllers and memory cards live on, and a digital pad on it.
@@ -14,9 +16,10 @@ import core.Scheduler;
 
 	What is plugged in comes from `Pads`, latched once per vblank: a digital pad (SCPH-1080) on
 	each port the backend reports, answering the standard read — address 01h, then ID 5A41h and two
-	bytes of buttons, active low. An empty port, and the memory card address (81h, no cards yet),
-	answer every byte with FFh and never acknowledge: that is how libpad and libcard see nothing
-	there and move on, and it is all the port did before controllers existed.
+	bytes of buttons, active low. The memory card in slot 1 (`MemoryCard`) answers at 81h with the
+	read, write and ID commands a Sony card has. An empty port, and the card address of an empty
+	slot, answer every byte with FFh and never acknowledge: that is how libpad and libcard see
+	nothing there and move on.
 
 	A digital pad answers every command as it answers 42h (read). It has no configuration mode, so a
 	library probing for one (43h) is handed the digital ID and settles for a digital pad.
@@ -48,6 +51,9 @@ class Sio0 {
 	**/
 	static inline var ACK_DELAY = 170;
 	static inline var ACK_LENGTH = 100;
+	/** A Sony card acknowledges the sixth byte of a read — its 5Ch — about 31000 cycles late
+	    (psx-spx, "Memory Card Read/Write Commands"); other makers' cards do not. */
+	static inline var ACK_LATE = 31000;
 
 	// What the one deadline in Scheduler.SIO_BYTE means at the moment.
 	static inline var IDLE = 0;
@@ -58,6 +64,7 @@ class Sio0 {
 	// Who answered the current selection's address byte.
 	static inline var NOBODY = 0;
 	static inline var PAD = 1;
+	static inline var CARD = 2;
 
 	static var mode = 0;
 	static var control = 0;
@@ -76,9 +83,20 @@ class Sio0 {
 	static var device = NOBODY;
 	/** The pad's buttons as of its address byte, so that one transfer reports one moment. */
 	static var latched = 0;
-	/** The answer to the byte on the wire, and whether the device acknowledges it. */
+	/** The answer to the byte on the wire, and whether the device acknowledges it, and when. */
 	static var reply = 0xFF;
 	static var acks = false;
+	static var ackExtra = 0;
+
+	// The card's side of a command: which one, its sector, the running checksum, the byte the host
+	// sent before this one — the "(pre)" psx-spx says a card echoes — and a write's 128 bytes,
+	// which reach the card only once its checksum has been checked.
+	static var cardCommand = 0;
+	static var cardSector = 0;
+	static var cardSum = 0;
+	static var cardPrev = 0;
+	static var cardGood = false;
+	static var staging:RawBuf;
 
 	/** Bytes the game has pushed out, counted because a probe is the first sign of pad interest. */
 	public static var bytesExchanged(default, null) = 0;
@@ -88,6 +106,7 @@ class Sio0 {
 		mode = 0;
 		control = 0;
 		baud = 0;
+		staging = RawMem.alloc(MemoryCard.FRAME);
 		clearTransfer();
 		bytesExchanged = 0;
 	}
@@ -243,12 +262,14 @@ class Sio0 {
 
 	/** What the selected device answers the byte `v` with, and whether it acknowledges it. */
 	static function answer(v:Int):Void {
+		ackExtra = 0;
 		if ((control & CR_DTR) == 0) {
 			reply = 0xFF;
 			acks = false;
 		} else {
 			if (step == 0) address(v);
 			else if (device == PAD) padByte();
+			else if (device == CARD) cardByte(v);
 			else {
 				reply = 0xFF;
 				acks = false;
@@ -263,6 +284,10 @@ class Sio0 {
 		if (v == 0x01 && Pads.isConnected(port)) {
 			device = PAD;
 			latched = Pads.buttonsOf(port);
+			reply = 0xFF;
+			acks = true;
+		} else if (v == 0x81 && MemoryCard.isPresent(port)) {
+			device = CARD;
 			reply = 0xFF;
 			acks = true;
 		} else {
@@ -292,6 +317,114 @@ class Sio0 {
 		}
 	}
 
+	/**
+		The memory card after its address (psx-spx, "Memory Card Read/Write Commands"): the
+		command byte is answered with FLAG, then a read (52h) is 5Ah 5Dh, the sector's two bytes
+		echoed, 5Ch 5Dh, the sector confirmed, its 128 bytes, the checksum and 47h; a write (57h)
+		takes the sector, 128 bytes and their checksum, echoing each byte a step late, and ends
+		with 5Ch 5Dh and 47h — or 4Eh for a bad checksum, FFh for a sector past 3FFh; the ID
+		command (53h) answers 5Ah 5Dh 5Ch 5Dh 04h 00h 00h 80h. The checksum is the sector's two
+		bytes and the data XORed together. A read of a sector past 3FFh confirms FFFFh and stops.
+		Any other command is answered with FLAG and nothing after it.
+	**/
+	static function cardByte(v:Int):Void {
+		if (step == 1) {
+			cardCommand = v;
+			reply = MemoryCard.flagByte();
+			acks = v == 0x52 || v == 0x57 || v == 0x53;
+		} else if (cardCommand == 0x52) cardRead(v);
+		else if (cardCommand == 0x57) cardWrite(v);
+		else cardId();
+		cardPrev = v;
+	}
+
+	static function cardRead(v:Int):Void {
+		final bad = cardSector > MemoryCard.LAST_SECTOR;
+		acks = true;
+		if (step == 2) reply = 0x5A;
+		else if (step == 3) reply = 0x5D;
+		else if (step == 4) reply = 0x00;
+		else if (step == 5) {
+			cardSector = (cardPrev << 8) | v;
+			reply = cardPrev;
+		} else if (step == 6) {
+			reply = 0x5C;
+			ackExtra = ACK_LATE;
+		} else if (step == 7) reply = 0x5D;
+		else if (step == 8) {
+			reply = bad ? 0xFF : (cardSector >> 8) & 0xFF;
+			cardSum = reply;
+		} else if (step == 9) {
+			reply = bad ? 0xFF : cardSector & 0xFF;
+			cardSum ^= reply;
+			acks = !bad;
+		} else if (step < 138 && !bad) {
+			reply = MemoryCard.read8(cardSector, step - 10);
+			cardSum ^= reply;
+		} else if (step == 138 && !bad) reply = cardSum;
+		else if (step == 139 && !bad) {
+			reply = 0x47;
+			acks = false;
+		} else {
+			reply = 0xFF;
+			acks = false;
+		}
+	}
+
+	static function cardWrite(v:Int):Void {
+		acks = true;
+		if (step == 2) reply = 0x5A;
+		else if (step == 3) reply = 0x5D;
+		else if (step == 4) reply = 0x00;
+		else if (step == 5) {
+			cardSector = (cardPrev << 8) | v;
+			cardSum = cardPrev ^ v;
+			reply = cardPrev;
+		} else if (step < 134) {
+			RawMem.set8(staging, step - 6, v);
+			cardSum ^= v;
+			reply = cardPrev;
+		} else if (step == 134) {
+			cardGood = v == (cardSum & 0xFF);
+			reply = cardPrev;
+		} else if (step == 135) reply = 0x5C;
+		else if (step == 136) reply = 0x5D;
+		else if (step == 137) {
+			reply = cardEnd();
+			acks = false;
+		} else {
+			reply = 0xFF;
+			acks = false;
+		}
+	}
+
+	/** A write's end byte, and the write itself when it is one the card takes. */
+	static function cardEnd():Int {
+		var end = 0x47;
+		if (cardSector > MemoryCard.LAST_SECTOR) end = 0xFF;
+		else if (!cardGood) end = 0x4E;
+		else MemoryCard.writeFrame(cardSector, staging, 0);
+		return end;
+	}
+
+	static function cardId():Void {
+		acks = true;
+		if (step == 2) reply = 0x5A;
+		else if (step == 3) reply = 0x5D;
+		else if (step == 4) reply = 0x5C;
+		else if (step == 5) reply = 0x5D;
+		else if (step == 6) reply = 0x04;
+		else if (step == 7) reply = 0x00;
+		else if (step == 8) reply = 0x00;
+		else if (step == 9) {
+			reply = 0x80;
+			acks = false;
+		} else {
+			reply = 0xFF;
+			acks = false;
+		}
+	}
+
 	// ---- the deadline --------------------------------------------------------------------------
 
 	/** Scheduler.SIO_BYTE: a byte has arrived, or the device's /ACK falls, or it rises again. */
@@ -306,7 +439,7 @@ class Sio0 {
 		rx = reply;
 		if (acks) {
 			phase = ACK_DUE;
-			Scheduler.scheduleAt(Scheduler.SIO_BYTE, (ctx.cycles + ACK_DELAY) | 0);
+			Scheduler.scheduleAt(Scheduler.SIO_BYTE, (ctx.cycles + ACK_DELAY + ackExtra) | 0);
 		} else {
 			phase = IDLE;
 			startQueued();
