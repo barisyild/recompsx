@@ -125,7 +125,13 @@ recompiled — jalr may reach them). Function extent = `[entry, max reachable bl
 `jr ra`+slot, unconditional jump with no internal successor, or call to config-marked
 `noReturn`. An overlay's entry hint is read before it is believed (`Discovery.plausibleEntry`):
 up to 32 words must decode with no branch in a delay slot, and the reading stops after the delay
-slot of a `jr` or `j`, since what follows a returned function may be data. **Overlap/multi-entry policy**: entries inside another function's extent → both
+slot of a `jr` or `j`, since what follows a returned function may be data. **Calls from overlays
+feed the base**: after the overlays are analysed, every `jal` target of theirs that lies in the
+executable, outside every overlay window, in a word the base pass left unclaimed and readable
+as code (`plausibleEntry`) becomes a seed, and the base is analysed again with them
+(`Main.calledFromOverlays`). A function only an overlay calls — a library's BIOS stub wrapper
+such as libcard's `_card_info`, used only by a save screen — is otherwise never traced, and the
+overlay's call finds nothing at run time. **Overlap/multi-entry policy**: entries inside another function's extent → both
 kept, shared blocks duplicated into each (always correct; avoids fragile function splitting —
 same policy as N64Recomp). Entries must be 4-aligned (hard error otherwise); zero-word/nop
 padding classified `padding`.

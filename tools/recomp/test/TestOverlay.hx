@@ -288,6 +288,77 @@ class TestOverlay {
 			}
 			Assert.isTrue(refused, "an unfillable fingerprint is a build error, not silence");
 		}
+
+		overlayOnlyCallee();
+	}
+
+	/**
+		A function of the executable that only an overlay calls.
+
+		The base pass never sees a call to it, so without `Main.calledFromOverlays` the overlay's
+		call finds nothing at run time. The shape is the one that hid Crash Bandicoot: Warped's
+		memory card: libcard's `_card_info` wrapper, a BIOS stub after another function's padding,
+		with no prologue for the sweep to find, called only from a save screen in an overlay.
+	**/
+	static function overlayOnlyCallee():Void {
+		final stub = BASE + 0x200;
+		final w = [];
+		final total = ((WINDOW + WINDOW_BYTES) - BASE) >> 2;
+		for (i in 0...total) w.push(NOP);
+		w[0] = jal(BASE + 0x100);
+		w[1] = NOP;
+		w[2] = JR_RA;
+		w[3] = NOP;
+		w[64] = ADDU_V0_ZZ;                  // 0x80010100, which the entry calls
+		w[65] = JR_RA;
+		w[66] = NOP;
+		w[128] = 0x240A00A0;                 // 0x80010200: addiu $t2, $zero, 0xA0
+		w[129] = 0x01400008;                 //             jr $t2
+		w[130] = 0x240900AB;                 //             addiu $t1, $zero, 0xAB (_card_info)
+		final exe = exeOf(words(w));
+
+		final ow = [for (i in 0...32) NOP];
+		ow[0] = jal(stub);                   // the stub, which only this overlay calls
+		ow[1] = NOP;
+		ow[2] = jal(BASE + 0x104);           // the middle of a traced function: not an entry
+		ow[3] = NOP;
+		ow[4] = jal(WINDOW + 0x40);          // its own window: its own function
+		ow[5] = NOP;
+		ow[6] = JR_RA;
+		ow[7] = NOP;
+		ow[16] = ADDU_V0_ZZ;
+		ow[17] = JR_RA;
+		ow[18] = NOP;
+		final bytes = words(ow);
+
+		final input:recomp.Main.GenInput = {exe: exe, name: "test", seeds: [], tableHints: [],
+			overlays: [overlayConfig("c")], overlayBytes: new Map(), relocSets: []};
+		final cfg = input.overlays[0];
+		final first = recomp.Main.analyseBase(input, []);
+		final image = Image.ofExeWithOverlay("test:c", exe, bytes, cfg.loadAddr);
+		final d = new Discovery(image, cfg.loadAddr, cfg.endAddr(), true);
+		d.addSeed(WINDOW, "ovl_entry", Confidence.Entry);
+		d.run();
+		final overlay = new Universe(cfg, image, d, bytes);
+		final reached = recomp.Main.calledFromOverlays(
+			[new Universe(null, first.image, first, null), overlay], first, input.overlays);
+
+		Assert.group("overlay: an executable function only an overlay calls is found");
+		{
+			Assert.isTrue(!first.functions.exists(stub), "the base pass alone does not find it");
+			Assert.equals(reached.length, 1, "one entry comes back from the overlay's calls");
+			Assert.equals(reached[0], stub, "the stub, and not the middle of a traced function");
+			final again = recomp.Main.analyseBase(input, reached);
+			Assert.isTrue(again.functions.exists(stub), "the base pass seeded with it traces it");
+			final files = writeAndRead(new Program([new Universe(null, again.image, again, null), overlay], exe),
+				"out/_tooltest_overlay3");
+			final c = files.get("Ovl_c_01_80020000.hx");
+			Assert.isTrue(c != null, "overlay c's shard was written");
+			Assert.isTrue(c.indexOf("Fns_00_80010000.f_80010200(ctx)") >= 0,
+				"and the overlay calls it directly");
+			Assert.isTrue(c.indexOf("FnTable.run(ctx, 0x80010200)") < 0,
+				"instead of dispatching to an address nothing answers");
+		}
 	}
 
 	/** One overlay whose declared fingerprint is longer than its bytes. */

@@ -6,6 +6,7 @@ import recomp.analysis.Confidence;
 import recomp.analysis.Coverage;
 import recomp.analysis.Discovery;
 import recomp.analysis.Image;
+import recomp.analysis.Kind;
 import recomp.codegen.Emitter;
 import recomp.codegen.Program;
 import recomp.codegen.ModOutput;
@@ -299,17 +300,20 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 
 		final exe = input.exe;
-		final base = Image.ofExe(input.name, exe);
-		final discovery = new Discovery(base);
-		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
-		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
-		// had named them.
-		for (h in input.seeds) discovery.addSeed(h.addr, h.name, Confidence.Entry);
-		for (t in input.tableHints) discovery.addTableHint(t.jrAddr, t.tableBase, t.count, t.targets);
-		discovery.run();
-
-		final universes = [new Universe(null, base, discovery, null)];
+		var discovery = analyseBase(input, []);
+		final universes = [new Universe(null, discovery.image, discovery, null)];
 		for (o in input.overlays) universes.push(analyseOverlay(input, exe, o));
+		// Functions of the executable that only an overlay calls. The base pass never saw a call to
+		// them, so it never traced them, and the overlay's call finds nothing there at run time ("no
+		// function at"). Library stubs are the usual case: a save screen in an overlay calls
+		// libcard's `_card_info` wrapper, which nothing in the executable itself calls — Crash
+		// Bandicoot: Warped then said no memory card was inserted. The base is analysed again with
+		// them as seeds, as if a `jal` in the executable had named them.
+		final reached = calledFromOverlays(universes, discovery, input.overlays);
+		if (reached.length > 0) {
+			discovery = analyseBase(input, reached);
+			universes[0] = new Universe(null, discovery.image, discovery, null);
+		} else {}
 
 		final program = new Program(universes, exe, limit, optimize, structureRegions,
 			input.relocSets);
@@ -358,6 +362,58 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		final mods = ModConfig.select(input.configDir, which);
 		if (mods.length == 0) Sys.println('--mods $which: ${input.configDir}/mods has none');
 		return mods;
+	}
+
+	/**
+		The executable's own pass: its entry point, the config's hints and tables, and `extra`, the
+		entries only overlays call (see `calledFromOverlays`).
+	**/
+	public static function analyseBase(input:GenInput, extra:Array<Int>):Discovery {
+		final exe = input.exe;
+		final discovery = new Discovery(Image.ofExe(input.name, exe));
+		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
+		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
+		// had named them.
+		for (h in input.seeds) discovery.addSeed(h.addr, h.name, Confidence.Entry);
+		for (a in extra) discovery.addSeed(a, Discovery.defaultName(a), Confidence.Called);
+		for (t in input.tableHints) discovery.addTableHint(t.jrAddr, t.tableBase, t.count, t.targets);
+		discovery.run();
+		return discovery;
+	}
+
+	/**
+		Addresses in the executable that overlays reach with a `jal` and the base pass did not find.
+
+		Only where the executable's bytes are certain — outside every overlay window, since a call
+		into another overlay's window means that overlay's code, not what the executable has there —
+		and only in words the base pass left unclaimed, which read as code: a call into the middle
+		of a traced function, or into data, is not a new entry. Sorted, so the output does not
+		depend on map order.
+	**/
+	public static function calledFromOverlays(universes:Array<Universe>, base:Discovery,
+			overlays:Array<OverlayConfig>):Array<Int> {
+		final found:Map<Int, Bool> = [];
+		for (i in 1...universes.length) {
+			for (fn in universes[i].discovery.functions) {
+				for (c in fn.calls) {
+					if (c.indirect || c.target == 0) continue;
+					final t = Vaddr.canonRam(c.target);
+					if (found.exists(t) || base.functions.exists(t) || inAnyWindow(t, overlays)) continue;
+					if (base.image.kindAt(t) != Kind.Unknown || !base.plausibleEntry(t)) continue;
+					found.set(t, true);
+				}
+			}
+		}
+		final out = [for (t in found.keys()) t];
+		out.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
+		return out;
+	}
+
+	static function inAnyWindow(addr:Int, overlays:Array<OverlayConfig>):Bool {
+		for (o in overlays) {
+			if (addr >= Vaddr.canonRam(o.loadAddr) && addr < Vaddr.canonRam(o.endAddr())) return true;
+		}
+		return false;
 	}
 
 	/**

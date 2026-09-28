@@ -2,6 +2,18 @@
 
 ## Status snapshot
 
+**2026-09-28: Crash 3 sees its memory card — executable functions only an overlay calls are
+found.** LOAD GAME said "MEMORY CARD IS NOT INSERTED IN MEMORY CARD SLOT 1.": the warp overlay's
+save screens call libcard's `_card_info` and `_card_load` wrappers, BIOS stubs at 8005B618h and
+8005B628h that nothing in the executable calls, so the base pass never traced them and the call
+found no function. The tool now feeds every overlay `jal` target in the executable that the base
+pass left unclaimed back to it as a seed (`Main.calledFromOverlays`, games/SCUS94244/notes.md):
+Crash 3 +16 functions, Crash Bash +8. Verified: tools/recomp tests (496, a new one for this);
+headless Crash 3 with a scripted pad reads the card directory and shows LOAD GAME with four
+EMPTY slots; digests unchanged (Crash 3 9000 `4de78425`, Crash Bash 3000 `db892c4b`). Also: the
+Dreamcast CDIs now carry the game's product code as the disc serial (`mkdcdisc -s`), since
+Flycast keys its per-game VMU by it and a hash-derived serial gave every build an empty VMU.
+
 **2026-09-28: The PS1's own mouse, keyboard and internet (ADR-0040) — no custom input API left.**
 Mods reach three official devices on controller ports of their own (`ModHost.plugMouse`,
 `plugKeyboard`, `plugIMode`; `ModHost.exchange` moves the bytes as SIO0 would): the Sony Mouse
@@ -1075,6 +1087,8 @@ found by asking the machine what it actually did, one register write at a time.
    prologue sweep and surfaces only as a runtime "no function at" when first called. A pass that
    tries the word after every function end as a candidate leaf (decodes cleanly, reaches its own
    `jr ra` within a few instructions, touches no unknown state) would find them at gen time.
+   Those an overlay calls are found since 2026-09-28 (`Main.calledFromOverlays`: Crash 3's libcard
+   stubs); what remains are the ones reached only through pointers.
 **Dreamcast, sh4zam candidates (surveyed 2026-09-28; judged on hardware, not Flycast).** sh4zam is
 float maths and memory/cache/store-queue routines; nothing in the runtime or the generated code is
 float, and the backend has no libm call, so its maths has nothing to replace — the ground is
@@ -1754,6 +1768,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Crash 3's memory card: overlay-only callees (libcard's _card_info/_card_load stubs)
+are now fed from overlay jal targets into the base analysis (Main.calledFromOverlays + tool test); CDIs
+packaged with -s <SERIAL> so Flycast's per-game VMU survives rebuilds. Next: the owner's save test in
+out/dc/crash3-periph-max.cdi; the pointer-reached prologue-less leaves (next-up 0).
 
 2026-09-28 [claude] The PS1's own peripherals (ADR-0040): Sony Mouse, PS/2 keyboard (Lightspan protocol),
 i-mode adaptor + libimode, KIMode as the phone/centre over new bp_http_* (SDL2/Dreamcast sockets, browser

@@ -42,7 +42,11 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
   takes minutes). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
   memory: run one at a time.
 - CDI: copy `build-dc-max/SYMS.BIN` into the data directory, then
-  `mkdcdisc -q --allow-overwrite -N -e <elf> -D <data dir> -n "<name>" -a recompsx -o <cdi>`.
+  `mkdcdisc -q --allow-overwrite -N -e <elf> -D <data dir> -n "<name>" -a recompsx -s <SERIAL> -o <cdi>`.
+  `-s` is the game's product code (SCUS94570): the disc's serial, which Flycast keys its per-game
+  VMU by (Per Game VMU A1, on by default). Without it mkdcdisc makes one from a hash of the boot
+  binary, so every build gets a new, empty VMU and saves seem to vanish. The BIOS, with no disc,
+  shows the shared VMU (`vmu_save_A1.bin`), not a game's.
 - Data directories under `out/dc/` hold `BOOT.EXE`, `DISC.BIN`, `SYMS.BIN` and `RECOMPSX.CFG`
   (the command line: `--video-hw --audio-hw [--dc-overlay]`; profiling adds
   `--dc-bench=FROM:TO --dc-rxprof`). Bench windows: Crash 3 `4700:5000` (attract demo), Crash Bash

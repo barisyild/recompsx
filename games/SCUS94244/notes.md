@@ -5,6 +5,24 @@ parts of the machine Crash Bash never leaned on: a 1 kHz root counter, hand-writ
 borrows `$sp` as a general register, computed jumps into unrolled loops, and an interpreter
 (GOOL) whose opcode table lives in the scratchpad.
 
+## 2026-09-28: The memory card was "not inserted" — libcard stubs only the warp overlay calls
+
+LOAD GAME answered "MEMORY CARD IS NOT INSERTED IN MEMORY CARD SLOT 1." on every target. The game
+drives its pad on SIO0 itself, but its cards through the BIOS (libcard): InitCARD2 and StartCARD2
+at boot, then from the warp overlay's save screens `_bu_init`, `_card_info` (A0 ABh), `_new_card`,
+`_card_write`, `_card_read` and `_card_load` (A0 ACh). The wrappers for `_card_info` and
+`_card_load` are three-instruction BIOS stubs in the executable at 0x8005B618 and 0x8005B628
+(`addiu $t2, $zero, 0xA0; jr $t2; addiu $t1, $zero, 0xAB`), after padding and with no prologue,
+and nothing in the executable calls them: only the overlay does. The base pass never traced them,
+so the overlay's `jal` found no function ("no function at 0x8005b618, ra=0x8006fb0c") and the game
+took the missing answer for an empty slot. Fixed in the tool, for every game: an overlay's `jal`
+targets in the executable that the base pass left unclaimed are fed back to it as seeds
+(`Main.calledFromOverlays`; tools/recomp test "an executable function only an overlay calls").
+Crash 3 gains 16 functions (1025 -> 1041) and Crash Bash 8 (1026 -> 1034). Measured headless with a
+scripted pad (DOWN, CROSS on the title menu at frame ~3650): READING MEMORY CARD DIRECTORY, then
+LOAD GAME with four EMPTY slots. Digests without input are unchanged (Crash 3 9000 `4de78425`,
+Crash Bash 3000 `db892c4b`): nothing reaches those calls until a card screen opens.
+
 ## Disc and executable, verified 2026-09-26
 
 | Field | Value |
