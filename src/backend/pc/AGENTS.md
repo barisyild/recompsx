@@ -21,6 +21,8 @@ Read this when the work touches `src/backend/pc/`, `scripts/build-pc.sh` or
   rectangle; X1/X2 are the side buttons. `bp_mouse_pointer`: the system cursor while the machine
   has no pointer, the art of `src/backend/api/pointer_art.h` as a color cursor while its mouse is
   polled, and no cursor while the kernel says a pad is in use.
+- QUIT (`bp_exit_to_menu`, ADR-0041): the desktop is the host's menu — `bp_shutdown`, then
+  `exit(0)`. The runtime has written the memory card back before it calls this.
 - Network (`bp_http_*`, ADR-0040): the i-mode centre's HTTP requests over non-blocking TCP —
   POSIX sockets, Winsock on Windows — resolved with `getaddrinfo`, connected in the background
   (`poll` + `SO_ERROR`), the request sent as the socket takes it and the response read raw until

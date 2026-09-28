@@ -184,7 +184,8 @@ class IpKeyboard {
 
 	static function layOut(menu:Int):Void {
 		// Templates, by their place in the mod's menu list: 0 the panel, 1 a line, 5 the
-		// description, 6 the title, 7 the title bar, 9 the end.
+		// description, 6 the title, 7 the title bar, and the list's end (OnlineMenu.END_RECORD —
+		// not a number of its own: it moves whenever the menu gains a line, as it did for QUIT).
 		panel(ENTRY_BOX, menu, BOX_X0, BOX_X1, -90, -48);
 		panel(KEY_PANEL, menu, BOX_X0, BOX_X1, -40, 124);
 		Game.copyRecord(records, BAR, menu, 7);
@@ -195,7 +196,7 @@ class IpKeyboard {
 		for (k in 0...KEYS) {
 			text(FIRST_KEY + k, menu, 1, keyX[k], ROW0_Y + keyRow[k] * ROW_STEP + keyGap(keyRow[k]), label[k]);
 		}
-		Game.copyRecord(records, RECORDS - 1, menu, 9);
+		Game.copyRecord(records, RECORDS - 1, menu, OnlineMenu.END_RECORD);
 	}
 
 	/** The address last accepted, as the console keeps it; nothing if it is not one. */

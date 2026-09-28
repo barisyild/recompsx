@@ -40,6 +40,8 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   `src/backend/api/pointer_art.h`), and `cursor: none` while the kernel says a pad is in use;
   before that the page's own cursor. The browser tool's `hover` and `left_click` are real pointer
   events and reach it. `Input.attach` applies the state a mod set before the page attached.
+- QUIT (`bp_exit_to_menu`, ADR-0041): `recompsxHost.exitToMenu` in `index.html` reloads the page,
+  which is its start screen; the memory card is already in local storage. Node ends the program.
 - Network (`bp_http_*`, ADR-0040): `recompsxHost.httpOpen/httpRead/httpClose` in `index.html`
   send the i-mode centre's raw HTTP request with `fetch` — its method, the headers a page may set
   (never Host, Content-Length, Connection or User-Agent) and its body, to `http://host:port/path`

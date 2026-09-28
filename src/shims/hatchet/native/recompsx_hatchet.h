@@ -213,6 +213,7 @@ struct Backend {
     static inline void httpClose(int handle) { bp_http_close(handle); }
     static inline void requestQuit() { quitting() = true; }
     static inline bool quitRequested() { return bp_quit_requested() != 0; }
+    static inline void exitToMenu() { bp_exit_to_menu(); }
     static inline int storageRead(const std::string& name, unsigned char* buf, int len) {
         return bp_storage_read(name.c_str(), buf, len);
     }

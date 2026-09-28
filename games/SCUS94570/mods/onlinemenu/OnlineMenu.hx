@@ -28,6 +28,11 @@ import mod.ModHost;
 	button or the side button that means Back is triangle. Pointing moves the selection only when the pointer moves, so a mouse left
 	resting on a line never fights the pad.
 
+	QUIT, a line below OPTIONS, leaves the game for the host's own menu (`ModHost.exitToMenu`: the
+	Dreamcast's BIOS menu, the desktop, the page's start screen), the memory card kept first. The
+	game keeps OPTIONS selected under it and hears none of its keys: down from OPTIONS and cross
+	on QUIT are the mod's, and up from QUIT is the game's own down from TOURNAMENT to OPTIONS.
+
 	Cross on ONLINE opens an address keyboard in the look of the game's ENTER NAME screen
 	(`IpKeyboard`), in this same menu slot; DONE keeps the address and tries to connect to it on
 	the game's own port (`Online`), CANCEL leaves it, and both come back here with ONLINE
@@ -65,16 +70,25 @@ class OnlineMenu {
 	static inline var LINES = 8;
 	static inline var BATTLE_LINE = 2;
 	static inline var DESC_WIDGET = 5;
-	// Ours: the same eight, ONLINE, the terminator.
+	// Ours: the same eight, ONLINE, QUIT, the terminator.
 	static inline var ONLINE_WIDGET = 8;
-	static inline var OUR_RECORDS = 10;
+	static inline var QUIT_WIDGET = 9;
+	static inline var OUR_RECORDS = 11;
+	/** The list's end (a record of type 0), which a screen built from these records copies to end its own. */
+	public static inline var END_RECORD = OUR_RECORDS - 1;
+	static inline var OPTIONS_RECORD = 4;
 
-	// The choice as the player sees it.
+	// The choice as the player sees it: 0 adventure, 1 battle, ONLINE, 3 tournament, OPTIONS, QUIT.
 	static inline var ONLINE = 2;
+	static inline var OPTIONS = 4;
+	static inline var QUIT = 5;
+	static inline var CHOICES = 6;
 
 	public static var records(default, null) = 0;
 	static var onlineText = 0;
 	static var aboutText = 0;
+	static var quitText = 0;
+	static var quitAbout = 0;
 	static var resultText = 0;
 	/** The online result `resultText` says (Online.IDLE.. ). */
 	static var shown = 0;
@@ -102,6 +116,8 @@ class OnlineMenu {
 		records = ModHost.alloc(OUR_RECORDS * RECORD);
 		onlineText = ModHost.cstring("ONLINE");
 		aboutText = ModHost.cstring("play against friends\nover the internet");
+		quitText = ModHost.cstring("QUIT");
+		quitAbout = ModHost.cstring("exit to the system menu");
 		resultText = ModHost.alloc(48);
 		onMain = false;
 		IpKeyboard.boot();
@@ -147,17 +163,22 @@ class OnlineMenu {
 
 	static function layOut():Void {
 		copyRecord(0, 0);
-		ModHost.write16(records + PANEL_HEIGHT, ModHost.read16s(records + PANEL_HEIGHT) + STEP);
+		ModHost.write16(records + PANEL_HEIGHT, ModHost.read16s(records + PANEL_HEIGHT) + 2 * STEP);
 		for (i in 1...LINES) copyRecord(i, i);
 		// TOURNAMENT, OPTIONS and the description move down a line; ONLINE takes TOURNAMENT's.
-		lower(3);
-		lower(4);
-		lower(DESC_WIDGET);
+		lower(3, STEP);
+		lower(OPTIONS_RECORD, STEP);
+		lower(DESC_WIDGET, 2 * STEP);
 		copyRecord(ONLINE_WIDGET, BATTLE_LINE);
 		ModHost.write32(records + ONLINE_WIDGET * RECORD + RECORD_TEXT, onlineText);
 		ModHost.write16(records + ONLINE_WIDGET * RECORD + RECORD_Y,
 			ModHost.read16s(MAIN_RECORDS + 3 * RECORD + RECORD_Y));
-		copyRecord(OUR_RECORDS - 1, LINES);   // the game's terminator
+		// QUIT, a line under OPTIONS.
+		copyRecord(QUIT_WIDGET, BATTLE_LINE);
+		ModHost.write32(records + QUIT_WIDGET * RECORD + RECORD_TEXT, quitText);
+		ModHost.write16(records + QUIT_WIDGET * RECORD + RECORD_Y,
+			ModHost.read16s(records + OPTIONS_RECORD * RECORD + RECORD_Y) + STEP);
+		copyRecord(END_RECORD, LINES);        // the game's terminator
 	}
 
 	static function copyRecord(to:Int, from:Int):Void {
@@ -166,9 +187,9 @@ class OnlineMenu {
 		}
 	}
 
-	static function lower(i:Int):Void {
+	static function lower(i:Int, by:Int):Void {
 		final at = records + i * RECORD + RECORD_Y;
-		ModHost.write16(at, ModHost.read16s(at) + STEP);
+		ModHost.write16(at, ModHost.read16s(at) + by);
 	}
 
 	/** Select Game Type's frame: the keyboard's while it is up, the menu's around the game's. */
@@ -236,6 +257,14 @@ class OnlineMenu {
 			if ((edges & PAD_UP) != 0) ModHost.write32(SELECTION, 2);
 			else ModHost.write32(SELECTION, 1);
 			pass = edges & ~PAD_CROSS;
+		} else if (before == QUIT) {
+			// Under QUIT the game stays on OPTIONS: up is the game's own down from TOURNAMENT
+			// (2 -> 3), and down and cross are ours.
+			final up = (edges & PAD_UP) != 0;
+			ModHost.write32(SELECTION, up ? 2 : 3);
+			pass = (edges & ~(PAD_UP | PAD_DOWN | PAD_CROSS)) | (up ? PAD_DOWN : 0);
+		} else if (before == OPTIONS) {
+			pass = edges & ~PAD_DOWN;               // down from OPTIONS is QUIT: ours
 		} else {}
 		final selBefore = ModHost.read32(SELECTION);
 		ModHost.write32(PAD_EDGES, pass);
@@ -243,11 +272,18 @@ class OnlineMenu {
 		ModHost.write32(PAD_EDGES, real);
 
 		final sel = ModHost.read32(SELECTION);
-		choice = next(before, sel, sel != selBefore, edges);
+		if (before == QUIT) choice = (edges & PAD_UP) != 0 ? OPTIONS : QUIT;
+		else if (before == OPTIONS && (edges & PAD_DOWN) != 0) jump(ctx, QUIT);
+		else choice = next(before, sel, sel != selBefore, edges);
 		if (choice == ONLINE && before == ONLINE && (edges & PAD_CROSS) != 0) {
 			// The keyboard replaces the menu in its slot; this frame's highlight is its own.
 			Game.sound(ctx, Game.SOUND_SELECT);
 			IpKeyboard.show(ctx, records);
+		} else if (choice == QUIT && before == QUIT && (edges & PAD_CROSS) != 0) {
+			Game.sound(ctx, Game.SOUND_SELECT);
+			ModHost.log("onlinemenu: QUIT, to the host's menu");
+			ModHost.exitToMenu();
+			show(sel);
 		} else {
 			if (choice != before) message = aboutText;
 			else {}
@@ -274,13 +310,13 @@ class OnlineMenu {
 		return extra;
 	}
 
-	/** The line (the player's 0..4) under the pointer: inside the panel, within a line's band. */
+	/** The line (the player's 0..5) under the pointer: inside the panel, within a line's band. */
 	static function lineAt(x:Int, y:Int):Int {
 		var found = -1;
 		final x0 = ModHost.read16s(records + RECORD_X0);
 		final x1 = ModHost.read16s(records + RECORD_X1);
 		if (Pointer.over && x >= x0 && x <= x1) {
-			for (c in 0...5) {
+			for (c in 0...CHOICES) {
 				final top = ModHost.read16s(records + lineRecord(c) * RECORD + RECORD_Y);
 				if (y >= top - 3 && y < top + STEP - 3) found = c;
 				else {}
@@ -289,9 +325,9 @@ class OnlineMenu {
 		return found;
 	}
 
-	/** Which of our records holds the player's line `c`: ONLINE is the ninth, the others in order. */
+	/** Which of our records holds the player's line `c`: ONLINE the ninth, QUIT the tenth, the rest in order. */
 	static inline function lineRecord(c:Int):Int {
-		return c == ONLINE ? ONLINE_WIDGET : (c < ONLINE ? c + 1 : c);
+		return c == ONLINE ? ONLINE_WIDGET : (c == QUIT ? QUIT_WIDGET : (c < ONLINE ? c + 1 : c));
 	}
 
 	/** Selects line `c` as the game's own up and down would: its sound, its description. */
@@ -299,6 +335,7 @@ class OnlineMenu {
 		choice = c;
 		var sel = c;
 		if (c == ONLINE) sel = BATTLE_LINE - 1;       // the game stays on BATTLE; show() moves the highlight
+		else if (c == QUIT) sel = OPTIONS - 1;        // and on OPTIONS under QUIT
 		else if (c > ONLINE) sel = c - 1;
 		else {}
 		ModHost.write32(SELECTION, sel);
@@ -319,15 +356,17 @@ class OnlineMenu {
 		return c;
 	}
 
-	/** The highlight on the player's line, and ONLINE's own description. */
+	/** The highlight on the player's line, and ONLINE's and QUIT's own descriptions. */
 	static function show(sel:Int):Void {
 		final widgets = ModHost.read32(MENUS + 0x6C);
-		if (choice == ONLINE) {
+		if (choice == ONLINE || choice == QUIT) {
 			ModHost.write32(widgets + (sel + 1) * WIDGET + WIDGET_STATE, 0);
-			ModHost.write32(widgets + ONLINE_WIDGET * WIDGET + WIDGET_STATE, 2);
-			ModHost.write32(widgets + DESC_WIDGET * WIDGET + WIDGET_TEXT, message);
+			ModHost.write32(widgets + ONLINE_WIDGET * WIDGET + WIDGET_STATE, choice == ONLINE ? 2 : 0);
+			ModHost.write32(widgets + QUIT_WIDGET * WIDGET + WIDGET_STATE, choice == QUIT ? 2 : 0);
+			ModHost.write32(widgets + DESC_WIDGET * WIDGET + WIDGET_TEXT, choice == ONLINE ? message : quitAbout);
 		} else {
 			ModHost.write32(widgets + ONLINE_WIDGET * WIDGET + WIDGET_STATE, 0);
+			ModHost.write32(widgets + QUIT_WIDGET * WIDGET + WIDGET_STATE, 0);
 		}
 	}
 }

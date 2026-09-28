@@ -26,6 +26,10 @@ const char* bp_arg(int index) { return (index >= 0 && index < g_argc) ? g_argv[i
 int  bp_init(const char* title) { (void)title; return 0; }
 void bp_shutdown(void) {}
 
+void bp_exit_to_menu(void) {
+    exit(0);
+}
+
 int bp_caps(int cap_id) {
     switch (cap_id) {
         case BP_CAP_MAX_PADS: return 4;   /* pads are simulated from replay data, not hardware */

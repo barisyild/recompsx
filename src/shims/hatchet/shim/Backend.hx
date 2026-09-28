@@ -54,6 +54,7 @@ extern class Backend {
 	public static function httpClose(handle:Int):Void;
 	public static function requestQuit():Void;
 	public static function quitRequested():Bool;
+	public static function exitToMenu():Void;
 	public static function storageRead(name:String, buf:RawBuf, len:Int):Int;
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int;
 	public static function cardLoad(game:String, buf:RawBuf, cap:Int):Int;

@@ -92,6 +92,11 @@ CDI from `out/dc/`. Report Flycast numbers with that caveat, never as the verdic
   (`bp_mouse_pointer`: the machine's mouse is polled, no pad in use). In Flycast the host mouse
   and keyboard must be assigned to the same maple port as the Dreamcast Mouse and Keyboard
   devices, or those hear nothing.
+- QUIT (`bp_exit_to_menu`, ADR-0041): the BIOS menu — the hardware stopped where it stands (as
+  `arch_abort` does), `irq_shutdown()`, then `syscall_system_bios_menu()`. Not KallistiOS's own
+  exit (`arch_exit` with the menu exit path): it shuts maple and the CD down under the running
+  vblank handler and disc thread, hangs or crashes, and the disc reboots. Under Flycast's HLE BIOS
+  there is no menu to go to; with a real BIOS it is the Dreamcast's own.
 - Network (`dc_net.c`, `bp_http_*`, ADR-0040): the i-mode centre's HTTP requests over
   KallistiOS's TCP. The network comes up at the first request, not at boot — `net_init` (the
   broadband or LAN adaptor, DHCP or the flashrom's settings) in a thread of its own while the

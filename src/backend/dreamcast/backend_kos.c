@@ -26,6 +26,7 @@
  */
 
 #include "dc_internal.h"
+#include <dc/syscalls.h>
 
 /* What KallistiOS should bring up before main() runs. INIT_DEFAULT covers the maple bus (so
  * controllers and the VMU filesystem exist), the GD-ROM with its ISO9660 driver (so /cd exists)
@@ -391,4 +392,24 @@ void bp_fatal(const char* msg) {
     bp_log(BP_LOG_ERROR, msg);
     bp_shutdown();
     arch_exit();
+}
+
+/* The BIOS menu, left from a program that is still running: its disc thread reading, its vblank
+ * handler reading maple, its sound streaming. KallistiOS's own exit (arch_set_exit_path + arch_exit)
+ * tears those subsystems down under them — maple before the vblank handlers, the CD under the
+ * reading thread — and does not get there: under Flycast with a real BIOS a test program that
+ * busy hung on the way out, and the game rebooted its disc. So the hardware is stopped where it
+ * stands, as arch_abort does, with nothing freed and nothing left to run; the BIOS's own SR and VBR
+ * go back (irq_shutdown); and syscall_system_bios_menu() takes over, the BIOS starting the
+ * hardware again itself. The same test program reached the menu this way. The runtime has written
+ * the memory card back before this. */
+void bp_exit_to_menu(void) {
+    bp_log(BP_LOG_INFO, "exit to the BIOS menu");
+    irq_disable();
+    PVR_SET(PVR_RESET, PVR_RESET_ALL);
+    PVR_SET(PVR_RESET, PVR_RESET_NONE);
+    maple_dma_stop();
+    spu_disable();
+    irq_shutdown();
+    syscall_system_bios_menu();
 }

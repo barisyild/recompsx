@@ -443,6 +443,12 @@
           },
           httpClose(handle) {
             if (this.http) this.http.delete(handle);
+          },
+          // A game's QUIT (bp_exit_to_menu): the page's own start screen. The memory card is
+          // already in local storage; loading the page again drops the running machine whole.
+          exitToMenu() {
+            writeLog('[menu] the game quit: back to the start screen');
+            location.reload();
           }
         };
         const script = document.createElement('script');

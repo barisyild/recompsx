@@ -245,6 +245,13 @@ class ModHost {
 	/** The buttons held on a port, PS1 layout, active high — what the game will read this frame. */
 	public static inline function buttons(port:Int):Int return sio.Pads.buttonsOf(port);
 
+	/**
+		The game quits — a menu's QUIT: its memory card kept, then the host's own menu (the
+		Dreamcast's BIOS menu, the desktop, the page's start screen; `kernel.Kernel.exitToMenu`).
+		Nothing happens in a headless run.
+	**/
+	public static inline function exitToMenu():Void kernel.Kernel.exitToMenu();
+
 	// ---- controllers of the mod's own (ADR-0040) --------------------------------------------------
 	//
 	// The machine's own peripherals, each on a controller port that is the mod's alone — the game

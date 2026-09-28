@@ -246,6 +246,16 @@ class Backend {
 	public static function quitRequested():Bool return quit;
 
 	/**
+		The host's own menu (bp_exit_to_menu): the page goes back to its start screen, and a program
+		under Node ends.
+	**/
+	public static function exitToMenu():Void {
+		quit = true;
+		if (hosted()) js.Syntax.code("(typeof {0}.exitToMenu === 'function' && {0}.exitToMenu())", host());
+		else js.Syntax.code("(typeof process !== 'undefined' && process.exit(0))");
+	}
+
+	/**
 		Reads a kept blob: the page's (its local storage), or under Node a file beside the program,
 		where `storageWrite` puts it. -1 when there is none.
 	**/

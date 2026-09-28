@@ -40,7 +40,8 @@ executable loaded, before its first instruction), a bump allocator with `cstring
 guest memory and pad reads, console settings (`setting`/`setSetting`, ADR-0034), and the PS1's
 own devices on controller ports of the mod's (`plugMouse`, `plugKeyboard`, `plugIMode`, each
 spoken to with `exchange`, byte for byte — the Sony Mouse, a PS/2 keyboard, the i-mode adaptor;
-ADR-0040, which replaced the keyboard and mouse calls of ADR-0036 and ADR-0038). Handlers are
+ADR-0040, which replaced the keyboard and mouse calls of ADR-0036 and ADR-0038), and
+`exitToMenu` for a QUIT (ADR-0041). Handlers are
 static functions held as function
 values, the pattern `Runtime.bindDispatch` already relies on on both targets. The launcher
 installs mods and the kernel calls the frame hook only under `-D recompsx_mods`;

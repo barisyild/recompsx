@@ -57,6 +57,9 @@ extern "C" {
 /* lifecycle */
 int  bp_init(const char* title);      /* 0 ok, nonzero fatal failure */
 void bp_shutdown(void);
+void bp_exit_to_menu(void);           /* QUIT (ADR-0041): the host's own menu — the Dreamcast's
+                                         BIOS menu, the desktop, the page's start; the runtime has
+                                         kept the memory card first */
 enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4,
        BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6 };
 int  bp_caps(int cap_id);
@@ -275,7 +278,7 @@ shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliase
 
 `src/runtime/Backend.hx` — the only platform surface the runtime sees:
 `init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/
-keyText/keyNext/mouse/mousePointer/httpOpen/httpRead/httpClose/quitRequested/storageRead/
+keyText/keyNext/mouse/mousePointer/httpOpen/httpRead/httpClose/quitRequested/exitToMenu/storageRead/
 storageWrite/fileOpen/fileSize/fileRead/fileClose/
 timeUs/log/fatal`.
 

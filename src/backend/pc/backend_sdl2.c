@@ -141,6 +141,12 @@ void bp_shutdown(void) {
     SDL_Quit();
 }
 
+/* The desktop is the host's menu: the program exits. */
+void bp_exit_to_menu(void) {
+    bp_shutdown();
+    exit(0);
+}
+
 int bp_caps(int cap_id) {
     switch (cap_id) {
         case BP_CAP_MAX_PADS:        return MAX_PADS;

@@ -185,6 +185,12 @@ is shown with the table's text for the selection. Each frame it sets every line 
 to 0 and the selected one's (selection + 1) to 2 — the highlight. Cross switches on the
 selection (next screens 800B8EC0h, 800B8EA4h, 800B8ED4h; OPTIONS through 8001E838h).
 
+**QUIT** (ADR-0041) is a tenth record in the mod's list, a line under OPTIONS (y 126 with ONLINE
+in; the panel's bottom and the description each a line lower, the description at y 198 — one
+line of text still fits above the screen's bottom, two would not). The game keeps selection 3
+under it: down from OPTIONS and cross are the mod's, up is the game's own down from TOURNAMENT
+(selection 2 -> 3), so OPTIONS comes back with the game's sound and "CHANGE THE OPTIONS".
+
 In the attract loop (no input) the menu is built at about frames 1980, 6660 and 15600. A scripted
 pad in a headless run shows the game's own cross on BATTLE MODE doing nothing there, with or
 without the mod — the attract menu does not take it.

@@ -30,6 +30,14 @@ extern "C" {
 int  bp_init(const char* title);
 void bp_shutdown(void);
 
+/* Leaves the program for the host's own menu, as a console game's QUIT does: the Dreamcast's BIOS
+ * menu (its hardware stopped where it stands, then the BIOS's menu call), the desktop (the program
+ * exits), a page's start screen. The runtime has kept what it keeps — the memory card — before it calls this, and a
+ * backend shuts itself down here as bp_shutdown does. A host that cannot leave at once (a page)
+ * may return; nothing of the program runs after that. The kernel calls it for a mod
+ * (ModHost.exitToMenu), and never in a headless run. */
+void bp_exit_to_menu(void);
+
 enum {
     BP_CAP_MAX_PADS         = 0,
     BP_CAP_HAS_AUDIO        = 1,

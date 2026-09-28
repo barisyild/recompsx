@@ -248,6 +248,22 @@ class Kernel {
 	}
 
 	/**
+		The machine leaves for the host's own menu — a mod's QUIT (`ModHost.exitToMenu`): the memory
+		card kept first, then bp_exit_to_menu (the Dreamcast's BIOS menu, the desktop, the page's
+		start screen). This is the host's, not a PS1 function: the PS1's own exit() above runs on,
+		because during bring-up a game that calls it has usually gone wrong. A headless run has no
+		host menu, and runs on too.
+	**/
+	public static function exitToMenu():Void {
+		if (haltAt == 0) {
+			sio.MemoryCard.flush();
+			Backend.exitToMenu();
+		} else {
+			Runtime.note("exit to the host's menu: not in a headless run");
+		}
+	}
+
+	/**
 		The GPU helpers, A0(46h..4Eh).
 
 		They are thin: the kernel writes a word to a GPU port and returns. Written through the

@@ -124,6 +124,9 @@ class Backend {
 
 	public static inline function quitRequested():Bool return BackendNative.bp_quit_requested() != 0;
 
+	/** The host's own menu (bp_exit_to_menu): the Dreamcast's BIOS menu, the desktop. */
+	public static inline function exitToMenu():Void BackendNative.bp_exit_to_menu();
+
 	public static inline function storageRead(name:String, buf:RawBuf, len:Int):Int
 		return BackendNative.bp_storage_read(ConstCharPtr.fromString(name), RawMem.u8Ptr(buf), len);
 

@@ -2,6 +2,19 @@
 
 ## Status snapshot
 
+**2026-09-28: QUIT in Crash Bash's main menu (ADR-0041) — back to the host's own menu.** A line
+under OPTIONS, added to Select Game Type's list the way ONLINE is; cross (or a click) on it has the
+kernel write the memory card back and call the new `bp_exit_to_menu`: the Dreamcast's BIOS menu
+(the hardware stopped where it stands, then `syscall_system_bios_menu`; KallistiOS's own exit to
+the menu rebooted the disc from the running game, and a busy test program hung in it; Crash
+Bash quitting during its Universal logo reached the BIOS menu and stayed there, under the Flycast
+fork with a real BIOS),
+the desktop (SDL2, null), the page's start screen (a reload), Node and the JVM ending. Mods call
+`ModHost.exitToMenu()`; the PS1's own `exit()` still only reports. Verified headless with a
+scripted pad: five downs reach QUIT with "EXIT TO THE SYSTEM MENU", up returns to OPTIONS with the
+game's own "CHANGE THE OPTIONS", cross logs the request (a headless run goes on); check.sh (47 ABI
+functions); test.sh (JS) with the demo at `329de455`.
+
 **2026-09-28: Crash 3 sees its memory card — executable functions only an overlay calls are
 found.** LOAD GAME said "MEMORY CARD IS NOT INSERTED IN MEMORY CARD SLOT 1.": the warp overlay's
 save screens call libcard's `_card_info` and `_card_load` wrappers, BIOS stubs at 8005B618h and
@@ -1768,6 +1781,10 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] QUIT under OPTIONS in Crash Bash's main menu (ADR-0041): bp_exit_to_menu on every backend
+(Dreamcast: KallistiOS exit path to the BIOS menu), Kernel.exitToMenu keeps the card first, ModHost.exitToMenu;
+headless walk verified. Next: the owner's test of QUIT on the Dreamcast (out/dc/crashbash-periph-max.cdi).
 
 2026-09-28 [claude] Crash 3's memory card: overlay-only callees (libcard's _card_info/_card_load stubs)
 are now fed from overlay jal targets into the base analysis (Main.calledFromOverlays + tool test); CDIs
