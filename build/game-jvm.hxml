@@ -1,0 +1,18 @@
+# build/game-jvm.hxml — a recompiled game, on the JVM: headless, like JavaScript under Node.
+#
+# Haxe's JVM target needs the hxjava haxelib, which the project's own repository does not carry
+# (setup.sh installs only reflaxe): install it there with `haxelib install hxjava`, or point
+# HAXELIB_PATH at a repository that has it — this build uses no other library.
+#
+#   HAXELIB_PATH=<repo with hxjava> haxe build/game-jvm.hxml
+#   java -jar out/_gen/game.jar <exe> <disc.bin> --headless-hash N
+#
+# Run `recompsx gen` first; this compiles whatever is in out/gen.
+build/common.hxml
+-cp src/runtime
+-cp src/shims/jvm
+-cp out/gen
+-cp tests/spike
+-main GenMain
+--jvm out/_gen/game.jar
+-dce full

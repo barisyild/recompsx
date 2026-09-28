@@ -1782,6 +1782,11 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-28 [claude] JVM shim (src/shims/jvm, build/game-jvm.hxml; a parallel session's) committed with the
+PRESENT_FAST and cardLoad/cardSave it lacked (no card kept, as null): all 38 conformance tests on the JVM give
+JavaScript's digests (hxjava from a scratch haxelib repo; the project's .haxelib has none). Next: a whole game on
+the JVM (backend.md §6, function splitting).
+
 2026-09-28 [claude] Crash Bash warp room: circle froze the character — boot 8008671Ch and adventure 800C2F60h/
 800C013Ch were pointer-only entries, and the boss pad's message needed boot 80090248h (now hints; headless walk
 into the hub, circle, every pad, nothing unimplemented);
