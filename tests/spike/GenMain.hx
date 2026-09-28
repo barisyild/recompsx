@@ -43,6 +43,13 @@ class GenMain {
 		if (shim.Backend.argCount() >= 2) mountDisc(shim.Backend.arg(1));
 		else {}
 
+		#if recompsx_mods
+		// The mods `gen --mods` built in (ADR-0033): installed, then booted with the executable in
+		// RAM and the disc mounted, before the first instruction.
+		ModList.install();
+		mod.ModHost.boot(ctx);
+		#end
+
 		// Hardware drawing, if this host asked for it and its backend can actually do it. Both
 		// halves are required: the flag alone is a wish, and the capability alone is a facility
 		// nobody asked to use. Headless digests always use the deterministic software renderer.
@@ -70,6 +77,8 @@ class GenMain {
 		if (kernel.Kernel.haltAt == 0 && hasFlag("--video-hw")) {
 			if (shim.Backend.caps(4) != 0) {
 				gpu.Gpu.hw = true;
+				// A backend that samples what it drew must hear of every upload (BP_CAP_GPU_UPLOADS).
+				gpu.Gpu.reportUploads = shim.Backend.caps(6) != 0;
 				shim.Backend.gpuVram(gpu.Vram.data);
 				shim.Backend.log(shim.Backend.LOG_INFO, "video: primitives go to the backend");
 			} else {

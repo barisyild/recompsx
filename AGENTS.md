@@ -11,7 +11,14 @@ game whose failures drive the work order. Nothing game-specific ever goes in too
 src/runtime; per-game facts live in games/<SERIAL>/game.json (+ syms.txt, notes.md), keyed by
 the product code on the disc, upper case, no punctuation: games/SCUS94570 is Crash Bash, and
 games/SCUS94244 is Crash Bandicoot: Warped. If a fix would only work for one game, it belongs in
-config, not in code.
+config, not in code. Code that *extends* a game — a mod — lives with it, in
+games/<SERIAL>/mods/<id> (ADR-0033), and reaches the game only through `mod.ModHost`.
+
+**Online is never netplay (ADR-0035).** No lockstep, rollback, input exchange or savestate sync —
+ever. Online play is written per game: a lobby in the game's own UI and a game-level protocol in
+the game's mod, over one network service in the HLE kernel ("PS1 Pro") with a transport per
+target, so consoles, web and desktop play together. Never propose netplay as a design. A player
+types only an address; each game's port is fixed in its mod.
 
 **Platforms: consoles are the point.** PS2 and derivatives (PSP, Dreamcast, GameCube/Wii,
 Switch) plus JVM follow by implementing one C header (src/backend/api/backend_c_api.h) and one
@@ -65,6 +72,8 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
     ./scripts/recompsx.sh gen <disc.cue>   # disc -> Haxe in out/gen; SYSTEM.CNF's product code
                                            # picks games/<SERIAL>/game.json when there is one
     ./scripts/recompsx.sh gen SCUS94570    # the same, the disc named by games/SCUS94570/local.json
+    ./scripts/recompsx.sh gen SCUS94570 --mods <ids|all>   # with the game's mods; compile the
+                                           # result with -D recompsx_mods (ADR-0033)
     haxe build/game-js.hxml && node out/_gen/game.js <exe> <disc.bin>   # run it (JS = reference)
     haxe build/game-cpp.hxml && ./scripts/build-pc.sh _gen --null       # the same, reflaxe.CPP
     <run> --headless-hash 600    # stop at frame 600, print one digest; the cross-target compare

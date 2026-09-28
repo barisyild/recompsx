@@ -32,6 +32,11 @@ static int      g_pad_type[MAX_PADS];
 static uint32_t g_keyboard_buttons;        /* merged into pad 0 */
 static int      g_quit;
 
+#define TYPED_CAP 64                       /* a power of two */
+static int g_typing;                       /* bp_key_text: the keyboard types */
+static int g_typed[TYPED_CAP];
+static int g_typed_head, g_typed_count;
+
 static FILE* g_files[MAX_FILES];
 static int   g_file_size[MAX_FILES];
 
@@ -286,6 +291,55 @@ static uint32_t controller_buttons(SDL_GameController* c) {
 
 static uint8_t axis_to_byte(Sint16 v) { return (uint8_t)(((int)v + 32768) >> 8); }
 
+/* ---- keyboard as text (bp_key_text, bp_key_next) --------------------------------------------
+ * While text entry is on, characters come from SDL_TEXTINPUT — the host's layout and input
+ * method have already made them, so a Turkish keyboard types ş and a compose sequence arrives
+ * whole — and the three editing keys from SDL_KEYDOWN. The keyboard's pad keys are then only
+ * the arrows, and Escape cancels rather than quits. */
+
+static int is_arrow(SDL_Keycode k) {
+    return k == SDLK_UP || k == SDLK_DOWN || k == SDLK_LEFT || k == SDLK_RIGHT;
+}
+
+static void typed_push(int c) {
+    if (g_typed_count < TYPED_CAP) {
+        g_typed[(g_typed_head + g_typed_count) & (TYPED_CAP - 1)] = c;
+        g_typed_count++;
+    }
+}
+
+/* SDL_TEXTINPUT's UTF-8 as code points; a malformed sequence is skipped, not guessed at. */
+static void typed_utf8(const char* text) {
+    const unsigned char* p = (const unsigned char*)text;
+    while (*p) {
+        int cp = 0, n = 0;
+        if (p[0] < 0x80)                { cp = p[0];        n = 1; }
+        else if ((p[0] & 0xE0) == 0xC0) { cp = p[0] & 0x1F; n = 2; }
+        else if ((p[0] & 0xF0) == 0xE0) { cp = p[0] & 0x0F; n = 3; }
+        else if ((p[0] & 0xF8) == 0xF0) { cp = p[0] & 0x07; n = 4; }
+        else { p++; continue; }
+        int i = 1;
+        while (i < n && (p[i] & 0xC0) == 0x80) { cp = (cp << 6) | (p[i] & 0x3F); i++; }
+        if (i == n) typed_push(cp);
+        p += i;
+    }
+}
+
+void bp_key_text(int on) {
+    g_typing = on != 0;
+    g_typed_head = g_typed_count = 0;
+    if (g_typing) SDL_StartTextInput();
+    else SDL_StopTextInput();
+}
+
+int bp_key_next(void) {
+    if (g_typed_count == 0) return -1;
+    const int c = g_typed[g_typed_head];
+    g_typed_head = (g_typed_head + 1) & (TYPED_CAP - 1);
+    g_typed_count--;
+    return c;
+}
+
 void bp_input_poll(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -293,12 +347,26 @@ void bp_input_poll(void) {
             case SDL_QUIT:
                 g_quit = 1;
                 break;
-            case SDL_KEYDOWN:
-                if (e.key.keysym.sym == SDLK_ESCAPE) g_quit = 1;
-                g_keyboard_buttons |= key_to_button(e.key.keysym.sym);
+            case SDL_KEYDOWN: {
+                const SDL_Keycode k = e.key.keysym.sym;
+                /* A held key's button went down with its first press; repeats press nothing, so a
+                 * key held when text entry ends becomes a button only when pressed again. */
+                if (g_typing) {
+                    if (k == SDLK_BACKSPACE) typed_push(BP_KEY_BACKSPACE);
+                    else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) typed_push(BP_KEY_ENTER);
+                    else if (k == SDLK_ESCAPE) typed_push(BP_KEY_ESCAPE);
+                    if (is_arrow(k) && !e.key.repeat) g_keyboard_buttons |= key_to_button(k);
+                } else if (!e.key.repeat) {
+                    if (k == SDLK_ESCAPE) g_quit = 1;
+                    g_keyboard_buttons |= key_to_button(k);
+                }
                 break;
+            }
             case SDL_KEYUP:
                 g_keyboard_buttons &= ~key_to_button(e.key.keysym.sym);
+                break;
+            case SDL_TEXTINPUT:
+                if (g_typing) typed_utf8(e.text.text);
                 break;
             case SDL_CONTROLLERDEVICEADDED: {
                 const int i = e.cdevice.which;

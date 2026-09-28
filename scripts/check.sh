@@ -15,9 +15,10 @@ FAIL=0
 fail() { printf '\033[31mVIOLATION\033[0m %s\n' "$*" >&2; FAIL=1; }
 ok()   { printf '\033[32m  ok\033[0m %s\n' "$*"; }
 
-# Directories holding code bound by the portable subset (runtime + shims + shared + generated).
+# Directories holding code bound by the portable subset (runtime + shims + shared + generated),
+# and every game's mods, which ship inside the same program (ADR-0033).
 PORTABLE_DIRS=()
-for d in src/runtime src/shims shared tools/recomp/src; do
+for d in src/runtime src/shims shared tools/recomp/src games/*/mods; do
   [ -d "$d" ] && PORTABLE_DIRS+=("$d")
 done
 
@@ -56,7 +57,7 @@ if [ -d src/runtime ]; then
   # awk strips, grep matches. Keeping the regex in grep is deliberate: awk's `\<` word boundaries
   # are a GNU extension and silently match nothing on the BSD awk macOS ships, which turned this
   # from a check that cried wolf into one that saw nothing at all.
-  hits="$(find src/runtime -name '*.hx' -print0 2>/dev/null \
+  hits="$(find src/runtime $(ls -d games/*/mods 2>/dev/null) -name '*.hx' -print0 2>/dev/null \
           | xargs -0 awk '
               { line = $0
                 if (inblock) {
@@ -74,9 +75,9 @@ if [ -d src/runtime ]; then
           | grep -E '(^|[^A-Za-z0-9_])(throw|try)([^A-Za-z0-9_]|$)' \
           | grep -v 'portable-ok' || true)"
   if [ -n "$hits" ]; then
-    fail "throw/try in src/runtime:"; echo "$hits" >&2
+    fail "throw/try in src/runtime or a mod:"; echo "$hits" >&2
   else
-    ok "no throw/try in src/runtime"
+    ok "no throw/try in src/runtime and mods"
   fi
 fi
 

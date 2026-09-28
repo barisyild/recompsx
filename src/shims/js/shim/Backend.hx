@@ -73,6 +73,9 @@ class Backend {
 	public static function caps(capId:Int):Int {
 		if (capId == 0) return 4;
 		else if (capId == 4) return hasGpu() ? 1 : 0;
+		// The page's WebGL renderer samples what it drew (web/gpu-webgl.js), so it must hear of
+		// every upload, not only of those that changed emulated VRAM (BP_CAP_GPU_UPLOADS).
+		else if (capId == 6) return hasGpu() ? 1 : 0;
 		else return 0;
 	}
 
@@ -197,13 +200,30 @@ class Backend {
 	public static function padType(pad:Int):Int return Input.connected(pad) ? 1 : 0;
 	public static function padButtons(pad:Int):Int return Input.buttons(pad);
 	public static function padAxis(pad:Int, axis:Int):Int return 0x80;
+	/** The page's keyboard as text (shim.Input); under Node nothing is ever typed. */
+	public static function keyText(on:Bool):Void Input.textEntry(on);
+	public static function keyNext():Int return Input.nextTyped();
 	public static function requestQuit():Void {
 		quit = true;
 	}
 
 	public static function quitRequested():Bool return quit;
 
-	public static function storageRead(name:String, buf:RawBuf, len:Int):Int return -1;
+	/**
+		Reads a kept blob: the page's (its local storage), or under Node a file beside the program,
+		where `storageWrite` puts it. -1 when there is none.
+	**/
+	public static function storageRead(name:String, buf:RawBuf, len:Int):Int {
+		var n = -1;
+		if (hosted()) {
+			n = js.Syntax.code("(typeof {0}.storageRead === 'function' ? {0}.storageRead({1}, {2}.u8.subarray(0, {3})) : -1)",
+				host(), name, buf, len);
+		} else {
+			n = js.Syntax.code("(function (fs, name, into) { if (!fs.existsSync(name)) return -1; const b = fs.readFileSync(name); const k = Math.min(b.length, into.length); into.set(b.subarray(0, k)); return k; })(require('fs'), {0}, {1}.u8.subarray(0, {2}))",
+				name, buf, len);
+		}
+		return n;
+	}
 
 	/** Writes a blob beside the program. Used by the VRAM dump, which is how a frame is looked at. */
 	public static function storageWrite(name:String, buf:RawBuf, len:Int):Int {

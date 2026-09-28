@@ -33,6 +33,7 @@ class Kernel {
 		KTables.init();
 		KTimers.init();
 		KPads.init();
+		KKeyboard.init();
 		// Every table is built here rather than at its declaration: reflaxe emits a statement
 		// block at namespace scope for a static initialised with a comprehension, which is not
 		// valid C++ — and nothing may allocate after boot anyway.
@@ -668,6 +669,11 @@ class Kernel {
 		// dropping it on the floor stays bit-identical to one drawing it.
 		gpu.Scanout.present();
 		heartbeat(ctx);
+		#if recompsx_mods
+		// A mod's frame work (ADR-0033), at the one moment every target agrees the machine is at.
+		if (mod.ModHost.active) mod.ModHost.frame(ctx);
+		else {}
+		#end
 		if (haltAt > 0 && vblankCount >= haltAt) ctx.unwindToken = UNWIND_HALT;
 		else {}
 	}

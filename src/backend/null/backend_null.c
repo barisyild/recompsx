@@ -71,6 +71,10 @@ uint32_t bp_pad_buttons(int pad) { (void)pad; return 0u; }
 int      bp_pad_axis(int pad, int axis) { (void)pad; (void)axis; return 0x80; }
 int      bp_quit_requested(void) { return 0; }
 
+/* No keyboard: text entry is accepted and nothing is ever typed. */
+void bp_key_text(int on) { (void)on; }
+int  bp_key_next(void) { return -1; }
+
 int bp_storage_read(const char* name, uint8_t* buf, int len) {
     (void)name; (void)buf; (void)len; return -1;
 }

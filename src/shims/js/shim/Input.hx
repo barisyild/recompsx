@@ -20,6 +20,12 @@ import js.html.KeyboardEvent;
 
 	The Gamepad API may be missing — browsers withhold it from pages that are not a secure
 	context, which a page served to the LAN over plain HTTP is not — and the keyboard still works.
+
+	The keyboard also types, for the HLE kernel's keyboard (`kernel.KKeyboard`, ADR-0036), while
+	text entry is on (`textEntry`): each key's character as the player's own layout makes it
+	(`KeyboardEvent.key`, so a Turkish keyboard types ş and a French one é), and Backspace, Enter
+	and Escape. Then only the arrows are still the d-pad — typing `s` never presses square too —
+	and a key held when text entry ends becomes a button only when it is pressed again.
 **/
 class Input {
 	// PS1 bits, active high: backend_c_api.h, bp_pad_buttons.
@@ -47,6 +53,11 @@ class Input {
 	static var pad0 = 0;
 	static var pad1 = 0;
 	static var pad1Connected = false;
+
+	static inline var TYPED_CAPACITY = 64;
+	/** Whether the keyboard types (`Backend.keyText`), and what it typed, oldest first. */
+	static var typing = false;
+	static var typed:Array<Int> = [];
 
 	/** Once per vblank, from `Backend.inputPoll`: a stable snapshot of both pads. */
 	public static function poll():Void {
@@ -91,12 +102,71 @@ class Input {
 	}
 
 	static function key(e:KeyboardEvent, down:Bool):Void {
-		final b = keyBit(e.code);
+		var b = keyBit(e.code);
+		if (typing && down) {
+			final c = typedBy(e);
+			if (c >= 0) {
+				// What a key types is the field's, not the page's: no find-as-you-type, no scrolling
+				// on space.
+				e.preventDefault();
+				if (typed.length < TYPED_CAPACITY) typed.push(c);
+				else {}
+			} else {}
+			if (!isArrow(b)) b = 0;
+			else {}
+		} else if (down && e.repeat) {
+			// A held key's button went down with its first press; its repeats press nothing more,
+			// and a key held since text entry ended stays a key until it is pressed again.
+			b = 0;
+		} else {}
 		if (b != 0) {
 			// The d-pad keys would scroll the page, and Enter would press whatever has focus.
 			e.preventDefault();
 			keys = down ? (keys | b) : (keys & ~b);
 		} else {}
+	}
+
+	/**
+		What a key typed: a Unicode code point, or 8, 10, 27 for Backspace, Enter and Escape (the
+		backend ABI's BP_KEY_*); -1 for a key that types nothing (Shift, F1, a dead key waiting for
+		its letter) and for the browser's own shortcuts. AltGr — which Windows reports as Ctrl+Alt
+		— still types: it is how many layouts reach '@'.
+	**/
+	static function typedBy(e:KeyboardEvent):Int {
+		final k = e.key;
+		final shortcut = (e.ctrlKey || e.metaKey) && !e.getModifierState("AltGraph");
+		var c = -1;
+		if (k == null || shortcut || e.isComposing) c = -1;
+		else if (k == "Backspace") c = 8;
+		else if (k == "Enter") c = 10;
+		else if (k == "Escape") c = 27;
+		else {
+			// One character, not the name of a key: one UTF-16 unit, or two for a surrogate pair.
+			final cp:Int = js.Syntax.code("({0}.codePointAt(0) | 0)", k);
+			final units = cp >= 0x10000 ? 2 : 1;
+			if (k.length == units) c = cp;
+			else {}
+		}
+		return c;
+	}
+
+	static inline function isArrow(b:Int):Bool return b == UP || b == DOWN || b == LEFT || b == RIGHT;
+
+	/** Text entry on or off (`Backend.keyText`); what was typed and not read is dropped. */
+	public static function textEntry(on:Bool):Void {
+		typing = on;
+		typed = [];
+	}
+
+	/** The next thing typed, oldest first, or -1 (`Backend.keyNext`). */
+	public static function nextTyped():Int {
+		var c = -1;
+		if (typed.length > 0) {
+			final v = typed.shift();
+			if (v != null) c = v;
+			else {}
+		} else {}
+		return c;
 	}
 
 	static function keyBit(code:String):Int {

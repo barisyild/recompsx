@@ -3,6 +3,102 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-09-28: ONLINE — an address only, the game's port, typing, and the demo timer
+
+The address keyboard takes an IPv4 address and nothing else (four numbers 0..255, no leading
+zeros): the port is the game's own, 9457 (`onlinemenu.Online.PORT`, ADR-0035), and DONE tries it
+at that address — today it says "no network yet", since the kernel has no network service. Where
+the machine has a keyboard it types into the field too (ADR-0036): digits and '.', Backspace,
+Enter for DONE, Escape for CANCEL; every other character is ignored, as the game's keyboard has
+no key for it.
+
+**The demo timer.** The executable's pad reader (80013974h) counts frames with no pad input at
+80051604h and zeroes it on any press; Select Game Type's frame handler calls 800B39C8h first,
+which past 900 (`slti 385h`) resets it and starts the attract demo (8001E588h, with the fade
+object 8009F644h). The count runs once per game frame — the menus run at 30 fps, so about 30 s.
+Typing is no pad input, so a player typing an address let it run on, and back in the menu the
+handler's first call started the demo at once. The keyboard holds 80051604h at zero while it is
+open, and gives the field up (text entry off, nothing kept) if the game builds any other screen
+under it. Verified headless: 2,400 frames at the keyboard, Enter, and the demo 1,861 frames later —
+the full wait.
+
+## 2026-09-28: Cross in the menus did nothing — the screen manager's leaves, and a fourth stage block
+
+With controllers the menus could be walked for the first time, and cross on Select Game Type played
+its sound and stayed. The frontend names the next screen through the menu screen manager at
+8009F8A4h: +0 the current screen, +4 the next, +8 the one before, +0Ch a
+state. 8001E848h sets the next (state 0), 8001E838h and 8001E824h the same with states 1 and 2 —
+three-instruction leaves in a row, with no prologue for the sweep to find, so the stage overlay's
+`jal 8001E848h` reached nothing ("no function at 0x8001e848", ra 800B5380h). The manager's update
+(8001E610h, from 80092EDCh through the boot overlay's per-frame callback) switches when a next
+screen is set and the fade object at 8009F644h (value, speed, steps) is idle or has made three
+steps; it runs every frame, so the missing setter was the whole fault.
+
+Walking on into a battle (cross on every screen: two presses down, then cross, player count,
+character, arena) reported, one round at a time: 80015284h (character select, ra 800B75C8h), the
+stage overlay's 800B544Ch (a screen's exit), a fourth block in the 800B32B4h window —
+CRASHBSH.DAT sector 28382, 71680 bytes, entries 800BB370h, 800BB360h, 800BB1B4h, now overlay
+`stage4` — boot's 80086D88h, 8008AB50h, 8008A810h, and the executable's 80026D00h, 80025AE4h,
+80027F7Ch, 8002C29Ch, 8002C290h, 8002321Ch. After them a 16,000-frame run through that battle
+reaches nothing missing. The attract loop never takes these paths: its digests are unchanged
+(3000 `654669df`, 9000 `fda4764f`, 30000 `2d1ca4b6`).
+
+**Adventure mode** walked the same way (cross on ADVENTURE MODE, NEW GAME, the player count and
+the character) loads the adventure hub block — CRASHBSH.DAT sector 28136, 86,016 bytes at
+800B32B4h, now overlay `adventure` — and reported, one round at a time, fourteen of its entries,
+boot's 8009020Ch and the executable's 8001DCD4h and 80015984h. On the way the frame loop at
+80027110h called address 0: a callee that was missing had been skipped, the mode descriptor in s0
+did not survive it, and the loop read its render pointer from address 8. With the entries in, the
+hub (mode descriptor 800BCC04h) runs 14,000 frames with nothing missing. Saving (ENTER NAME) is
+reached from inside the hub by walking; it was not scripted.
+
+**The name keyboard** (for the onlinemenu mod's address keyboard, which imitates it): ENTER NAME,
+DONE and CANCEL live in the adventure overlay, CRASHBSH.DAT sector 28136 (86,016 bytes), loaded in
+the same 800B32B4h window as the menus — so it is never resident beside them. Its keys are a table
+of 16-byte entries from 800BD5D4h: the label (A..Z, '@' drawn as a square, '<' drawn as the
+delete arrow), navigation words, and x, y in a 7 x 4 grid 40 units apart; DONE and CANCEL follow
+as records at 800BD790h. Menu fonts 0 and 1 carry `!%',-.0-9:<>@A-Za-z` (no '_').
+
+## 2026-09-28: The main menu (Select Game Type), read for the onlinemenu mod
+
+Measured on the disc and in headless runs; used by `mods/onlinemenu` (ADR-0033).
+
+**The menus are data.** The frontend overlay `stage` (800B32B4h, CRASHBSH.DAT sector 28178)
+opens with its strings (ADVENTURE MODE 800B333Ch, BATTLE MODE 800B334Ch, TOURNAMENT 800B3358h,
+OPTIONS 800B3364h, SELECT GAME TYPE 800B3370h; the four descriptions from 800B32B8h, pointed to
+by the table at 800B8508h). Each screen is a list of 36-byte records, ending at a record whose
+type is below 2:
+
+| offset | meaning |
+|---|---|
+| +0 | type: 3 a text line, 4 a panel or bar, 0 the end |
+| +4 | halfword: flags/x (8086h for the menu lines, 8000h for a title) |
+| +6 | halfword: y (the main menu's lines at -44, -10, 24, 58: 34 apart) |
+| +8, +A | a panel's other extent (the main panel: -70, 114) |
+| +14 | the text |
+| +18 | the widget's initial state (4 for the description) |
+
+Select Game Type is 800B8518h: panel, the four lines, the description (y 130, text empty until
+set), the title, the title bar, the end. The player-count menu follows at 800B865Ch.
+
+**Building.** `boot`'s 80095BECh (slot a0, records a1) builds a screen: menu objects at
+800A0E78h + slot * 9Ch, their widgets (+6Ch) 0A8h bytes each, one per record, contiguous and
+linked through +5Ch. 800952F8h fills them: a text widget takes flags 10008000h (8000h: shown),
+x (+4), y (+8), text (+6Ch) and state (+7Ch); its draw function is 8001C448h.
+
+**Screens** are {enter, frame, exit} triples from 800B8E28h (Select Game Type: 800B5614h,
+800B3CA8h, the shared exit 800B57BCh), in sequences such as 800B8EA0h; 800B5360h moves to the
+next. The frame handler 800B3CA8h reads the buttons pressed this frame at 80051380h (10h up,
+40h down, 4000h cross), keeps the selection 0..3 at 800B95F0h, plays sound 190h on a move and
+starts the description timer (800B9624h, 90 frames); while it runs the description widget (5)
+is shown with the table's text for the selection. Each frame it sets every line widget's state
+to 0 and the selected one's (selection + 1) to 2 — the highlight. Cross switches on the
+selection (next screens 800B8EC0h, 800B8EA4h, 800B8ED4h; OPTIONS through 8001E838h).
+
+In the attract loop (no input) the menu is built at about frames 1980, 6660 and 15600. A scripted
+pad in a headless run shows the game's own cross on BATTLE MODE doing nothing there, with or
+without the mod — the attract menu does not take it.
+
 ## 2026-09-25: the third mini-game, and where the cutscene's sound comes from
 
 **stage3.** At about frame 18060 of the attract loop (after Select Game Type) `boot` calls

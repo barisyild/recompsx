@@ -14,6 +14,7 @@ class TestMain {
 		TestDecoder.run();
 		TestDiscovery.run();
 		TestOverlay.run();
+		TestMods.run();
 		TestRelocatable.run();
 		TestCodegen.run();
 		Sys.exit(Assert.summary());

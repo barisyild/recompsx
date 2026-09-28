@@ -18,7 +18,7 @@ accept it, or install the certificate and trust it (docs/WEB.md).
 
     python3 scripts/serve-https.py [https-port] [--http PORT]     # defaults: 8443, no HTTP
 """
-import functools, http.server, os, socket, ssl, subprocess, sys, threading
+import http.server, os, socket, ssl, subprocess, sys, threading
 
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 web = os.path.join(root, 'web')
@@ -54,11 +54,24 @@ if not (os.path.exists(cert) and os.path.exists(key)):
 LOCAL = ('localhost', '127.0.0.1', '[::1]')
 
 
-class LocalOrRedirect(http.server.SimpleHTTPRequestHandler):
-    """HTTP: this machine gets the files, everyone else the HTTPS address of the same host."""
+class WebFiles(http.server.SimpleHTTPRequestHandler):
+    """web/'s files. The page and build.json are revalidated on every load: with no Cache-Control,
+    only Last-Modified, a browser caches them by heuristic, and an edited page (it is the host the
+    game talks to) went on serving its old self beside a new bundle. What the page loads is
+    versioned by build.json, so that may stay cached."""
 
     def __init__(self, *a, **k):
         super().__init__(*a, directory=web, **k)
+
+    def end_headers(self):
+        path = self.path.split('?', 1)[0]
+        if path.endswith('/') or path.endswith('.html') or path.endswith('.json'):
+            self.send_header('Cache-Control', 'no-cache')
+        super().end_headers()
+
+
+class LocalOrRedirect(WebFiles):
+    """HTTP: this machine gets the files, everyone else the HTTPS address of the same host."""
 
     def redirect_target(self):
         host = self.headers.get('Host') or ip
@@ -77,8 +90,7 @@ class LocalOrRedirect(http.server.SimpleHTTPRequestHandler):
     do_HEAD = do_GET
 
 
-secure = http.server.ThreadingHTTPServer(('0.0.0.0', https_port),
-                                          functools.partial(http.server.SimpleHTTPRequestHandler, directory=web))
+secure = http.server.ThreadingHTTPServer(('0.0.0.0', https_port), WebFiles)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(cert, key)
 secure.socket = context.wrap_socket(secure.socket, server_side=True)

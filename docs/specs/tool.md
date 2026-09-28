@@ -403,8 +403,8 @@ entryHints[]}`, `functionHints[] {addr, name, isFunction, noReturn, loadDelayAcc
 `relocatable[] {id, files[], entryMarker, unit, hashWords}` (position-independent code the game
 loads anywhere, compiled from the disc and recognised by content — ADR-0025),
 `jumpTableHints[] {jrAddr, tableBase, count} | {jrAddr, targets[]}`, `nativeReplacements[] {addr, haxeFn}` (escape
-hatch + modding hook — registered in FnTable instead of generated code; original still analyzed
-for coverage), `setjmpFns[]/longjmpFns[]` (→ `Runtime.setjmp/longjmp` per the unwind design),
+hatch — registered in FnTable instead of generated code; original still analyzed for coverage;
+not implemented: modding is ADR-0033's mods, `gen --mods`, whose hooks cover replacement), `setjmpFns[]/longjmpFns[]` (→ `Runtime.setjmp/longjmp` per the unwind design),
 `symsFile`, `mapFile`. Addresses are decimal u32 in JSON (no hex in JSON); the tool prints hex
 everywhere. `memdump` source covers compressed overlays: the user captures the post-decompression
 RAM region once (external emulator dump) and keeps it **local and gitignored** — overlay bytes are

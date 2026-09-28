@@ -6,6 +6,7 @@ same pinned toolchain as the other targets; `scripts/build-web.sh` sources `scri
 ```sh
 ./scripts/setup.sh                     # once per checkout
 ./scripts/build-web.sh SCUS94570        # also accepts games/<SERIAL>/game.json
+./scripts/build-web.sh SCUS94570 --mods onlinemenu   # with mods from games/SCUS94570/mods (ADR-0033)
 python3 scripts/serve-https.py 8443 --http 8000
 ```
 

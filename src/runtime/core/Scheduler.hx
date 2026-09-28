@@ -159,7 +159,9 @@ class Scheduler {
 
 	static function onVblankStart(ctx:CpuState):Void {
 		// The controllers first: a game reads them from its vblank handler, which this wakes.
+		// What was typed on the host's keyboard comes in at the same point (ADR-0036).
 		sio.Pads.sample();
+		kernel.KKeyboard.sample();
 		Irq.raise(ctx, Irq.VBLANK);
 		// The frame counter belongs here, at the event, not where the kernel delivers it.
 		//

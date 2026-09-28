@@ -115,6 +115,35 @@ class Program {
 		return base.shards.has(a) ? base.shards.classOf(a) : null;
 	}
 
+	/**
+		Mods' hooks (ADR-0033), handed to the emitters before anything is written: a hook scoped to
+		an overlay goes to that overlay's universe, one scoped to "exe" to the executable's, and an
+		unscoped one to every universe — the same address is a different function in each overlay
+		that shares a window. Relocatable code takes none: it has no address until it runs.
+	**/
+	public function setHooks(hooks:Array<recomp.config.ModConfig.ModHook>):Void {
+		for (h in hooks) {
+			if (h.scope != null && !Lambda.exists(universes, u -> scopeOf(u) == h.scope)) {
+				throw new recomp.loader.LoaderError('a mod hooks ${Vaddr.hex(h.addr)} in "${h.scope}", '
+					+ 'which is neither "exe" nor an overlay of this game');
+			}
+		}
+		for (u in universes) {
+			final set:Map<Int, Bool> = [];
+			for (h in hooks) if (h.scope == null || h.scope == scopeOf(u)) set.set(h.addr, true);
+			u.emitter.hooks = set;
+		}
+	}
+
+	/** After `writeTo`: the hooks no emitted function begins at — a wrong address, or code the
+	    analysis never found (a function hint would find it). */
+	public function unmatchedHooks(hooks:Array<recomp.config.ModConfig.ModHook>):Array<recomp.config.ModConfig.ModHook> {
+		return [for (h in hooks) if (!Lambda.exists(universes, u -> (h.scope == null
+			|| h.scope == scopeOf(u)) && u.emitter.hooked.exists(h.addr))) h];
+	}
+
+	static function scopeOf(u:Universe):String return u.isBase() ? "exe" : u.overlay.id;
+
 	function inSomeWindow(addr:Int):Bool {
 		for (u in universes) if (u.contains(addr)) return true;
 		return false;

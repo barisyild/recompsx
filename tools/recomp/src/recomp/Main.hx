@@ -8,6 +8,8 @@ import recomp.analysis.Discovery;
 import recomp.analysis.Image;
 import recomp.codegen.Emitter;
 import recomp.codegen.Program;
+import recomp.codegen.ModOutput;
+import recomp.config.ModConfig;
 import recomp.loader.LoaderError;
 import recomp.loader.PsxExe;
 import recomp.mips.Decoder;
@@ -38,6 +40,8 @@ typedef GenInput = {
 	overlayBytes:Map<String, Bytes>,
 	/** Relocatable code (ADR-0025), found and traced while the disc was open. */
 	relocSets:Array<RelocSet>,
+	/** The game's config directory, when a config was read: where its mods live (ADR-0033). */
+	?configDir:String,
 };
 
 /**
@@ -98,7 +102,7 @@ usage:
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
 
-  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions]
+  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions] [--mods <id,id | all>]
       Emit a recompiled program. Given a disc image, its SYSTEM.CNF names the executable
       and its product code, and games/<code>/game.json, when there is one, supplies the
       overlays and hints; without one the executable alone is compiled. Given a code or a
@@ -106,6 +110,8 @@ usage:
       executable, seeds come from --seed.
       --no-opt keeps block dispatch, without fusion or forwarding, for differential testing.
       --no-regions keeps simple loops but disables region reductions.
+      --mods builds in the named mods from games/<code>/mods (ADR-0033): their hooks are
+      emitted, their sources copied beside the program; compile with -D recompsx_mods.
 
 exit codes: 0 ok · 2 usage · 3 could not load the input");
 	}
@@ -257,6 +263,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		var limit = 0;
 		var optimize = true;
 		var structureRegions = true;
+		var modsWanted:Null<String> = null;
 		var i = 1;
 		while (i < args.length) {
 			switch (args[i]) {
@@ -265,6 +272,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				case "--seed" if (i + 1 < args.length): seeds.push(args[i + 1]); i++;
 				case "--no-opt": optimize = false;
 				case "--no-regions": structureRegions = false;
+				case "--mods" if (i + 1 < args.length): modsWanted = args[i + 1]; i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
 					return EXIT_USAGE;
@@ -301,7 +309,24 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 
 		final program = new Program(universes, exe, limit, optimize, structureRegions,
 			input.relocSets);
+		// Mods (ADR-0033): only with --mods does anything below change what is written.
+		final mods = modsWanted == null ? [] : modsFor(input, modsWanted);
+		final hooks = [for (m in mods) for (h in m.hooks) h];
+		if (mods.length > 0) program.setHooks(hooks);
 		program.writeTo(outDir);
+		ModOutput.clean(outDir);
+		if (mods.length > 0) {
+			final missed = program.unmatchedHooks(hooks);
+			if (missed.length > 0) {
+				throw new LoaderError('no function begins at ' + [for (h in missed)
+					Vaddr.hex(h.addr) + (h.scope != null ? ' in "${h.scope}"' : '')].join(", ")
+					+ ' — a mod hooks it. Check the address, or add it as a function hint so the '
+					+ 'analysis finds it.');
+			}
+			final files = ModOutput.write(outDir, mods);
+			for (m in mods) Sys.println(m.describe());
+			Sys.println('wrote $files mod files; build with -D recompsx_mods');
+		}
 
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
 		Sys.println('${Lambda.count(discovery.functions)} functions, '
@@ -317,6 +342,17 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			Sys.println('${program.deduplicated} function bodies shared between universes');
 		}
 		return EXIT_OK;
+	}
+
+	/** The mods `--mods` asked for, from the config the input was read through. */
+	static function modsFor(input:GenInput, which:String):Array<ModConfig> {
+		if (input.configDir == null) {
+			throw new LoaderError('--mods needs a game config: mods live in games/<SERIAL>/mods, and '
+				+ 'this input was read without one');
+		}
+		final mods = ModConfig.select(input.configDir, which);
+		if (mods.length == 0) Sys.println('--mods $which: ${input.configDir}/mods has none');
+		return mods;
 	}
 
 	/**
@@ -384,7 +420,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 			// Homebrew: local.json names a loose executable and there is no disc at all.
 			return {exe: loadExe(config.exeFile), name: nameOf(config.exeFile),
 				seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
-				overlayBytes: memDumpsOnly(config), relocSets: noDiscReloc(config)};
+				overlayBytes: memDumpsOnly(config), relocSets: noDiscReloc(config), configDir: config.dir};
 		}
 		if (config.discPath == null) {
 			throw new LoaderError('${config.dir}/local.json does not say where the disc is. '
@@ -411,7 +447,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		disc.close();
 		return {exe: exe, name: isoName(config.exePath),
 			seeds: config.functionHints, tableHints: config.tableHints, overlays: config.overlays,
-			overlayBytes: overlayBytes, relocSets: relocSets};
+			overlayBytes: overlayBytes, relocSets: relocSets, configDir: config.dir};
 	}
 
 	/**

@@ -102,6 +102,17 @@ class Gpu {
 	static var xferChanged = false;
 	static var copyChanged = false;
 
+	/**
+		A backend whose drawn pixels become texels hears of every upload, changed or not
+		(bp_caps(BP_CAP_GPU_UPLOADS), set by the launcher). Its copy of VRAM holds what it drew,
+		which emulated VRAM never does, so an upload that leaves emulated VRAM as it was can still
+		replace what the backend drew there: Crash Bash clears nearly all of VRAM with a 511x511
+		rectangle before its menu and uploads its font again, and the browser, never told, kept the
+		black and drew no text. Copies are not included: the runtime copies emulated VRAM, and an
+		unchanged copy reported would lay stale pixels over drawn ones.
+	**/
+	public static var reportUploads = false;
+
 	// The texture and blend state last handed to a hardware backend, packed. The ABI latches that
 	// state until the next call, so it is sent only when it differs — a quad's second triangle
 	// never needs it, and runs of primitives from one page and palette do not either.
@@ -566,7 +577,7 @@ class Gpu {
 		// past tense, and a backend that copies the region on hearing of it (the browser's)
 		// must hear of it after the words are in. Telling it at the header, as this used to,
 		// handed it the palette that was there before the upload.
-		if (xferLeft == 0 && hw && xferChanged) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		if (xferLeft == 0 && hw && (xferChanged || reportUploads)) Backend.gpuDirty(xferX, xferY, xferW, xferH);
 		else {}
 	}
 
@@ -613,7 +624,7 @@ class Gpu {
 		}
 		xferLeft -= words;
 		wordsReceived = (wordsReceived + words) | 0;
-		if (xferLeft == 0 && hw && xferChanged) Backend.gpuDirty(xferX, xferY, xferW, xferH);
+		if (xferLeft == 0 && hw && (xferChanged || reportUploads)) Backend.gpuDirty(xferX, xferY, xferW, xferH);
 		else {}
 		return words;
 	}

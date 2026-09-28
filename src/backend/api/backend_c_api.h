@@ -36,7 +36,8 @@ enum {
     BP_CAP_HAS_STORAGE      = 2,
     BP_CAP_PREFERRED_SCALE  = 3,
     BP_CAP_GPU_DRAW         = 4,   /* nonzero: this backend can rasterise primitives itself */
-    BP_CAP_SPU_VOICES       = 5    /* nonzero: this backend can play the SPU's voices itself */
+    BP_CAP_SPU_VOICES       = 5,   /* nonzero: this backend can play the SPU's voices itself */
+    BP_CAP_GPU_UPLOADS      = 6    /* nonzero: report every upload through bp_gpu_dirty (below) */
 };
 int  bp_caps(int cap_id);
 
@@ -108,7 +109,18 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
 
 /* Emulated VRAM changed under this rectangle — an upload or a VRAM-to-VRAM copy. Anything the
- * backend cached from that region (decoded textures, palettes) is now stale. */
+ * backend cached from that region (decoded textures, palettes) is now stale.
+ *
+ * Only writes that changed a pixel are reported: games upload the same palettes and pieces again
+ * and again, and a backend whose textures mirror emulated VRAM loses nothing by not hearing of
+ * them. A backend whose drawn pixels become texels (the browser's: it samples what primitives
+ * drew) does lose something — an upload that restores what emulated VRAM never lost still
+ * replaces what the backend drew over it. Crash Bash clears nearly all of VRAM with one 511x511
+ * rectangle before its menu and uploads its font again; unreported, the browser kept the
+ * rectangle's black under the font and drew no text. Such a backend answers
+ * bp_caps(BP_CAP_GPU_UPLOADS) nonzero and hears of every CPU-to-VRAM upload. Copies stay
+ * reported only when they changed something: the runtime copies emulated VRAM, which lacks what
+ * the backend drew, so an unchanged copy reported would put stale pixels over drawn ones. */
 void bp_gpu_dirty(int x, int y, int w, int h);
 
 /* The drawing area, both corners inclusive, as GP0(E3h)/(E4h) set it. Triangles are drawn only
@@ -178,6 +190,28 @@ int      bp_pad_type(int pad);
 uint32_t bp_pad_buttons(int pad);          /* PS1 bit layout, active high, low 16 bits */
 int      bp_pad_axis(int pad, int axis);   /* 0=LX 1=LY 2=RX 3=RY; 0..255, centre 128 */
 int      bp_quit_requested(void);
+
+/* ---- keyboard ------------------------------------------------------------------------------
+ * The host's keyboard as text: a device the PS1 never had, which the HLE kernel offers games
+ * and mods (kernel.KKeyboard, ADR-0036). A target that has a keyboard — a PC, a browser, a
+ * Dreamcast with its keyboard plugged in — passes on what is typed; one that has none types
+ * nothing, and everything that reads it still works.
+ *
+ * bp_key_text(1) starts text entry, bp_key_text(0) ends it; it starts off. While it is on the
+ * keyboard types rather than plays: what it types goes to a queue, and a backend that also
+ * plays a pad with the keyboard lets only the arrow keys still press the d-pad, so that a
+ * letter typed is never a button pressed as well. While it is off nothing is queued, and
+ * anything still queued is dropped when it changes.
+ *
+ * bp_key_next returns the next thing typed, or -1 when nothing is waiting: a character as a
+ * Unicode code point — whatever the host's own layout and input method made of the keys — or
+ * one of the three editing keys below. The runtime drains it right after bp_input_poll, so what
+ * was typed reaches the machine once per vblank, as buttons do. Which characters mean anything
+ * is for the reader to decide; a backend passes on everything the host can type. */
+enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
+
+void bp_key_text(int on);
+int  bp_key_next(void);
 
 /* ---- storage -----------------------------------------------------------------------------
  * Memory card images and configuration. `name` is restricted to [A-Za-z0-9._-]{1,64}; the

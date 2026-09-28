@@ -1,6 +1,7 @@
-/* dc_input.c — maple controllers as PlayStation pads, and the reset combo. */
+/* dc_input.c — maple controllers as PlayStation pads, the reset combo, and a keyboard as text. */
 
 #include "dc_internal.h"
+#include <dc/maple/keyboard.h>
 
 /* ---- input state ---------------------------------------------------------------------------- */
 
@@ -137,4 +138,43 @@ int bp_pad_type(int pad) {
 int bp_pad_axis(int pad, int axis) {
     if(pad < 0 || pad >= MAX_PADS || axis < 0 || axis > 3) return 0x80;
     return g_pad_axes[pad][axis];
+}
+
+/* ---- keyboard as text (bp_key_text, bp_key_next) -------------------------------------------------
+ * A Dreamcast keyboard on any port types while text entry is on (backend_c_api.h). KallistiOS
+ * queues its presses, repeats included, and translates each by the keyboard's own region into
+ * ISO-8859-1 — the first 256 code points of Unicode, so a translated key already is what
+ * bp_key_next returns. Enter comes as 13 (10 with Shift), Escape as 27, Backspace as 8; a key KOS
+ * cannot translate comes back as its key code shifted up a byte, and of those only the keypad's
+ * Enter means anything here. The keyboard is never a pad, so nothing else changes while typing;
+ * without one, nothing is typed. */
+
+static int g_typing;
+
+static maple_device_t* keyboard(void) {
+#if RECOMPSX_DC_PROFILE
+    /* A profiling run measures the same frames every time: nothing typed, as no pad pressed. */
+    if(g_rxprof) return NULL;
+#endif
+    return maple_enum_type(0, MAPLE_FUNC_KEYBOARD);
+}
+
+void bp_key_text(int on) {
+    g_typing = on != 0;
+    /* What was pressed before the field opened is not typed into it. */
+    maple_device_t* kbd = keyboard();
+    if(kbd) while(kbd_queue_pop(kbd, true) != KBD_QUEUE_END) {}
+}
+
+int bp_key_next(void) {
+    maple_device_t* kbd = g_typing ? keyboard() : NULL;
+    if(!kbd) return -1;
+    for(;;) {
+        const int k = kbd_queue_pop(kbd, true);
+        if(k == KBD_QUEUE_END) return -1;
+        if(k == 13) return BP_KEY_ENTER;
+        if(k < 0x100) return k;   /* the kernel drops what is not a character (Tab, say) */
+        if((k >> 8) == KBD_KEY_PAD_ENTER) return BP_KEY_ENTER;
+        /* an arrow, a function key: nothing typed — on to the next */
+    }
 }

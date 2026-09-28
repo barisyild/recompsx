@@ -105,6 +105,15 @@ class Emitter {
 	**/
 	public var dynamicCall = "Runtime.call";
 
+	/**
+		Function entries a mod hooks (ADR-0033), set by `Program` from the manifests `gen --mods`
+		was given. Null — the build without mods — emits exactly what it always has.
+	**/
+	public var hooks:Null<Map<Int, Bool>> = null;
+
+	/** Which hooked entries were emitted, so `gen` can refuse a hook that matched nothing. */
+	public final hooked:Map<Int, Bool> = [];
+
 	public function new(image:Image, discovery:Discovery, optimize:Bool = true, structureRegions:Bool = true) {
 		this.image = image;
 		this.discovery = discovery;
@@ -194,6 +203,7 @@ class Emitter {
 		buf.add('\t\t} else {}\n\t\t#else\n');
 		buf.add(PUMP_ENTRY);
 		buf.add('\t\t#end\n');
+		if (hooks != null && !relocatable && hooks.exists(fn.entry)) emitModEntry(buf, fn.entry);
 		if (leafUsed != null) for (r in leafUsed) buf.add('\t\tvar ${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
 
 		// Even a one-block CFG needs a loop if it has an edge to itself.
@@ -466,6 +476,23 @@ class Emitter {
 			? '\tcore.Cooperative.suspendAt(ctx, ${continuationId()}, $entry, $entryPump, rbase$ra);\n'
 			: '\tcore.Cooperative.suspend(ctx, ${continuationId()}, $entry, $entryPump$ra);\n'));
 		buf.add(ind + '\treturn;\n' + ind + '} else {}\n' + ind + '#end\n');
+	}
+
+	/**
+		A mod's hook at a function's entry (ADR-0033). After the entry pump, so the machine is where
+		an ordinary call finds it; before a leaf copies registers into locals, so the hook reads the
+		arguments from CpuState and anything it writes there is what the body starts from. Only a
+		call enters: a frame resumed at a later block has been through here already, and so has a
+		cooperative resume anywhere but the entry's own checkpoint (`entryPump`), which suspends
+		before this line and so runs it on resuming.
+	**/
+	function emitModEntry(buf:StringBuf, addr:Int):Void {
+		hooked.set(addr, true);
+		buf.add('\t\t#if recompsx_cooperative\n');
+		buf.add('\t\tif (entry == 0 && entryPump && mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
+		buf.add('\t\t#else\n');
+		buf.add('\t\tif (entry == 0 && mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
+		buf.add('\t\t#end\n');
 	}
 
 	function emitPump(buf:StringBuf, ind:String, entry:Int):Void {

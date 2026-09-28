@@ -60,6 +60,8 @@ extern function bp_audio_push(frames:Ptr<Int16>, frameCount:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_pad_buttons(pad:Int):UInt32;
 @:include("backend_c_api.h") @:topLevel extern function bp_pad_axis(pad:Int, axis:Int):Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_quit_requested():Int;
+@:include("backend_c_api.h") @:topLevel extern function bp_key_text(on:Int):Void;
+@:include("backend_c_api.h") @:topLevel extern function bp_key_next():Int;
 
 @:include("backend_c_api.h") @:topLevel
 extern function bp_storage_read(name:ConstCharPtr, buf:Ptr<UInt8>, len:Int):Int;

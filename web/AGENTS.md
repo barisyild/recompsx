@@ -16,8 +16,24 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   stores the bit a write would: cleared unless "set", set in a subtracting primitive's blending
   pass). Drawn tiles are converted back into `vramTex` when a primitive samples them. The page
   loads the renderer under its own version from `build.json`.
+- Because drawn pixels become texels, the renderer must hear of every upload, not only of those
+  that changed emulated VRAM: the shim answers `BP_CAP_GPU_UPLOADS` (capability 6) and the
+  runtime then reports them all (`Gpu.reportUploads`). Without it Crash Bash's menu lost all its
+  text after the attract loop's cutscene: a 511x511 rectangle clears VRAM under the font, the game
+  uploads the same font again, emulated VRAM (never cleared — the rectangle was ours) did not
+  change, and `vramTex` kept the black.
+- Storage (`bp_storage_*`): the page keeps blobs up to 256 KB in `localStorage` as
+  `recompsx:<name>` (base64) — the console settings `system.cfg` (ADR-0034), later memory cards;
+  larger ones (the VRAM dump) are only logged. The dev server sends `Cache-Control: no-cache` for
+  the page and build.json, so an edited page is never served stale beside a new bundle.
 - Input: `src/shims/js/shim/Input.hx`, browser externs (`js.Browser`, `KeyboardEvent`,
-  `Gamepad`), SDL2 key names, the standard gamepad mapping.
+  `Gamepad`), SDL2 key names, the standard gamepad mapping. It also types for the HLE keyboard
+  (ADR-0036): while text entry is on, `KeyboardEvent.key` goes to a queue and only the arrows
+  stay pad buttons. Synthetic key events reach it, but a pad press must outlast a vblank — and a
+  hidden pane throttles rAF to about one frame a second, so hold presses for over a second there.
+- Mods (ADR-0033): `./scripts/build-web.sh <SERIAL> --mods <id,id | all>` builds the game with
+  `games/<SERIAL>/mods/<id>` in (`-D recompsx_mods`); `build.json` lists them. Without the flag
+  the bundle is the unmodded game.
 - Build and serve: `./scripts/build-web.sh <SERIAL>` writes `out/_web` and links `web/`;
   `python3 scripts/serve-https.py` serves it (a LAN address needs https for WebKit's JIT). In an
   agent session, preview it with the browser pane; the page's Start button boots the game, the

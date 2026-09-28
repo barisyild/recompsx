@@ -339,7 +339,25 @@
             status.dataset.yields = yields;
           },
           log(level, line) { writeLog(line); },
-          storageWrite(name, bytes) { writeLog(`[file] ${name}: ${bytes.length} bytes`); }
+          // The backend's storage (bp_storage_*): the console's settings (system.cfg) and, one day,
+          // memory card images, kept in this browser under the page's origin. A blob past 256 KB
+          // — the one-off VRAM dump — is only reported.
+          storageRead(name, into) {
+            let text = null;
+            try { text = localStorage.getItem('recompsx:' + name); } catch (error) { return -1; }
+            if (text === null) return -1;
+            const raw = atob(text);
+            const n = Math.min(raw.length, into.length);
+            for (let i = 0; i < n; i++) into[i] = raw.charCodeAt(i);
+            return n;
+          },
+          storageWrite(name, bytes) {
+            if (bytes.length > 262144) { writeLog(`[file] ${name}: ${bytes.length} bytes, not kept`); return; }
+            let raw = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) raw += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            try { localStorage.setItem('recompsx:' + name, btoa(raw)); writeLog(`[file] ${name}: ${bytes.length} bytes kept`); }
+            catch (error) { writeLog(`[file] ${name}: not kept (${error.message})`); }
+          }
         };
         const script = document.createElement('script');
         script.src = `game.js?v=${encodeURIComponent(buildInfo.version)}`;

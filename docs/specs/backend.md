@@ -58,7 +58,7 @@ extern "C" {
 int  bp_init(const char* title);      /* 0 ok, nonzero fatal failure */
 void bp_shutdown(void);
 enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4,
-       BP_CAP_SPU_VOICES = 5 };
+       BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6 };
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
@@ -75,7 +75,13 @@ int  bp_pad_type(int pad);
 uint32_t bp_pad_buttons(int pad);            /* PS1 bit layout, low 16 bits */
 int  bp_pad_axis(int pad, int axis);         /* 0=LX 1=LY 2=RX 3=RY; 0..255 center 128 */
 int  bp_quit_requested(void);
-/* storage: name in [A-Za-z0-9._-]{1,64}; memcards & config */
+/* keyboard as text (ADR-0036): typed only while text entry is on; then only the arrows of a
+   keyboard that also plays a pad still press it. Next: a code point or BP_KEY_*, -1 when none */
+enum { BP_KEY_BACKSPACE = 8, BP_KEY_ENTER = 10, BP_KEY_ESCAPE = 27 };
+void bp_key_text(int on);
+int  bp_key_next(void);
+/* storage: name in [A-Za-z0-9._-]{1,64}; memcards & config — the HLE kernel's console
+   settings are one such blob, system.cfg (ADR-0034); the browser keeps them in localStorage */
 int  bp_storage_read(const char* name, uint8_t* buf, int len);        /* bytes read, -1 none */
 int  bp_storage_write(const char* name, const uint8_t* buf, int len); /* 0 ok, -1 fail */
 /* disc/file streaming: the runtime CD subsystem reads the user's image through this.
@@ -135,6 +141,18 @@ key (`KeyboardEvent.code`), and the Gamepad API in the W3C standard mapping, thr
 browser externs (`shim.Input`); under Node no pad is connected. The Dreamcast backend reads maple
 controllers (`dc_input.c`); the null backend has none.
 
+The keyboard also types, for the HLE kernel's keyboard (`kernel.KKeyboard`, ADR-0036). A reader —
+a mod's text field — turns text entry on (`bp_key_text(1)`) while it is open; right after
+`bp_input_poll` the runtime drains `bp_key_next` into the kernel's queue, so typing arrives once
+per vblank like the buttons. What comes out is whatever the host's layout and input method made:
+SDL2's `SDL_TEXTINPUT` (UTF-8, decoded) on the desktop, `KeyboardEvent.key` in the browser, a
+maple keyboard's KallistiOS queue translated by its region (ISO-8859-1, which is Unicode's first
+256 code points) on the Dreamcast; Backspace, Enter and Escape come as `BP_KEY_*`. While text
+entry is on, a backend whose keyboard also plays pad 0 lets only the arrows press it, so a typed
+`s` is never square as well, and the desktop's Escape cancels instead of quitting; a key held when
+it ends becomes a button only when pressed again. The null backend, JVM and Node type nothing,
+and a headless run never drains the queue.
+
 ## 2.1 Dreamcast and optional hardware drawing
 
 The KallistiOS backend in `src/backend/dreamcast/`, its launcher and `scripts/build-dc.sh` are
@@ -172,7 +190,11 @@ under three quarters of the picture either way, and a GP0(02h) fill meeting neit
 by the core into emulated VRAM and reported through `bp_gpu_dirty` — a game making a texture for
 itself, such as Crash 3's shadow ([ADR-0030](../decisions/ADR-0030-offscreen-drawing-is-state.md)).
 A fill the backend does draw arrives under `bp_gpu_mask(0, 0)`, since the hardware ignores the mask
-bits for it. The original decision and its measurements are preserved as
+bits for it. `bp_gpu_dirty` reports only writes that changed emulated VRAM, except to a backend
+answering `BP_CAP_GPU_UPLOADS` nonzero, which hears of every CPU-to-VRAM upload: its drawn pixels
+become texels (the browser's WebGL renderer), and an upload that restores what emulated VRAM never
+lost still replaces what it drew — Crash Bash's menu font after the 511x511 clear, which the
+browser otherwise drew as nothing. The original decision and its measurements are preserved as
 [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md) (renumbered from that branch's
 ADR-0008 to preserve main's machine-IR decision).
 
@@ -201,7 +223,8 @@ shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliase
 
 `src/runtime/Backend.hx` — the only platform surface the runtime sees:
 `init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/
-quitRequested/storageRead/storageWrite/fileOpen/fileSize/fileRead/fileClose/timeUs/log/fatal`.
+keyText/keyNext/quitRequested/storageRead/storageWrite/fileOpen/fileSize/fileRead/fileClose/timeUs/
+log/fatal`.
 
 `src/shims/cxx/BackendNative.hx` — flat externs in the verified reflaxe.CPP form:
 

@@ -19,8 +19,8 @@
         "offset": 72833024,
         "length": 387072
       },
-      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game.",
-      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324],
+      "_entryHints": "Reached through the game's own pointer tables: 0x80092bdc, 0x80092ba0, 0x80092b7c. The next four are addresses the runtime reported missing while the overlay was resident — 0x80084788, 0x8008670c, 0x8008ab48, 0x80093270. Then 0x80086f78 and 0x80086714, reached from the third mini-game; 0x80086d88, 0x8008ab50 and 0x8008a810, reached in the battle Battle Mode starts; 0x8009020c on the way into Adventure mode.",
+      "entryHints": [2147989500, 2148002588, 2148026248, 2148034316, 2148034572, 2148051784, 2148074140, 2148084604, 2148084640, 2148084700, 2148086384, 2148036472, 2148034324, 2148035976, 2148051792, 2148050960, 2148073996],
       "hashWords": 64
     },
     {
@@ -52,7 +52,7 @@
         "length": 32768
       },
       "_entryHints": "0x800b5244, 0x800b5218, 0x800b51ec, and 0x800b5ac0 which the runtime reported missing.",
-      "entryHints": [2148225516, 2148225560, 2148225604, 2148227692, 2148227732, 2148227776],
+      "entryHints": [2148225516, 2148225560, 2148225604, 2148227692, 2148227732, 2148227776, 2148226124],
       "hashWords": 64
     },
     {
@@ -65,10 +65,32 @@
       "_entryHints": "0x800c0b94, which the runtime reported missing (called from 0x80078d10 in boot), and the seven callbacks it stores into the table at 0x8005aa70: 0x800b36cc, 0x800b3b20, 0x800b40ac, 0x800c0b7c, 0x800c0b84, 0x800bfd9c, 0x800b9728.",
       "entryHints": [2148273044, 2148218572, 2148219680, 2148221100, 2148273020, 2148273028, 2148269468, 2148243240, 2148271968, 2148224764, 2148272756],
       "hashWords": 64
+    },
+    {
+      "id": "stage4",
+      "_note": "The fourth block in the 0x800b32b4 window: the battle Battle Mode starts with its defaults, reached by pressing cross through Select Game Type, the player count, the character and the arena. The runtime reported it missing (no code at 0x800bb370, called from 0x80078d10 in boot): CRASHBSH.DAT sector 28382, so offset (28382 - 236) * 2048.",
+      "_loadAddr": "0x800b32b4",
+      "loadAddr": 2148217524,
+      "length": 71680,
+      "source": { "kind": "discFile", "path": "\\CRASHBSH\\CRASHBSH.DAT;1", "offset": 57643008, "length": 71680 },
+      "_entryHints": "0x800bb370, 0x800bb360 and 0x800bb1b4, which the runtime reported missing.",
+      "entryHints": [2148250480, 2148250464, 2148250036],
+      "hashWords": 64
+    },
+    {
+      "id": "adventure",
+      "_note": "Adventure mode's hub in the 0x800b32b4 window: warp rooms, their messages, saving (ENTER NAME, its key table at 0x800bd5d4, DONE and CANCEL) and the credits. Reached by cross on ADVENTURE MODE, NEW GAME, the player count and the character; the runtime reported it missing (no code at 0x800b4e1c, called from 0x80078d10 in boot): CRASHBSH.DAT sector 28136, so offset (28136 - 236) * 2048.",
+      "_loadAddr": "0x800b32b4",
+      "loadAddr": 2148217524,
+      "length": 86016,
+      "source": { "kind": "discFile", "path": "\\CRASHBSH\\CRASHBSH.DAT;1", "offset": 57139200, "length": 86016 },
+      "_entryHints": "0x800b4e1c, 0x800b7e0c, 0x800b8098, 0x800b7e04, then 0x800b86ac, 0x800b8148, 0x800b5248, 0x800b5230, 0x800b5260, 0x800b7d7c, 0x800b8174, 0x800b821c, 0x800b8224 and 0x800b822c, one round at a time as the runtime reported them, walking into the hub with cross.",
+      "entryHints": [2148224540, 2148236812, 2148237464, 2148236804, 2148239020, 2148237640, 2148225608, 2148225584, 2148225632, 2148236668, 2148237684, 2148237852, 2148237860, 2148237868],
+      "hashWords": 64
     }
   ],
 
-  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first. 0x80040540, 0x80040584 and 0x80040910 are libpad's per-port handlers (its port records at 0x8007765c, F0h apart), reached through pointers only once a controller answers: with the port empty they never ran.",
+  "_functionHints": "Entry points nothing calls statically. Six of them are one family: the handler table at 0x80058B00, sixteen bytes a record with the function pointer first, dispatched from 0x8002001c. Reading the whole table at once beat adding its members one cutscene at a time. Others: libcd and the game's own OS layer reach these through pointer tables the analysis cannot read, so the runtime finds them by missing them and they are fed back here. Decimal, per the schema rule; the hex is in notes.md. The eight at 0x8004718c..0x80047218 are the card-event callbacks the game registers with OpenEvent; nothing calls them statically, so they only surface once the events are actually delivered. 0x80030a00 and 0x80030a08 are two more slots of the table at [0x8006794c]: three one-line functions in a row, of which the sweep found only the first. 0x80040540, 0x80040584 and 0x80040910 are libpad's per-port handlers (its port records at 0x8007765c, F0h apart), reached through pointers only once a controller answers: with the port empty they never ran. 0x8001e824, 0x8001e838 and 0x8001e848 are the menu screen manager's three ways of naming the next screen, three-instruction leaves in a row with no prologue for the sweep to find; the frontend overlay calls 0x8001e848 when a Select Game Type choice is made, which nothing did until controllers existed, and without it cross played its sound and the menu stayed. Walking on reported 0x80015284 (character select, ra 0x800b75c8); 0x80026d00, 0x80025ae4, 0x80027f7c, 0x8002c29c, 0x8002c290 and 0x8002321c inside the battle Battle Mode starts; 0x8001dcd4 and 0x80015984 on the way into Adventure mode.",
   "functionHints": [
     2147564692,
     2147566472,
@@ -124,7 +146,19 @@
     2147774940,
     2147774960,
     2147774980,
-    2147775000
+    2147775000,
+    2147608612,
+    2147608632,
+    2147608648,
+    2147570308,
+    2147642624,
+    2147637988,
+    2147647356,
+    2147664540,
+    2147664528,
+    2147627548,
+    2147605716,
+    2147572100
   ],
   "jumpTableHints": [],
   "nativeReplacements": [],

@@ -368,6 +368,9 @@ class Memory {
 		else if (isSio(p)) return inline sio.Sio0.read8(p);
 		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 3) << 3)) & 0xFF;
 		else if (isRom(p)) return inline romRead8(p);
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) return mod.ModRam.read8(p);   // mods' memory (ADR-0033)
+		#end
 		else return unmapped8();
 	}
 
@@ -432,6 +435,9 @@ class Memory {
 		else if (spu.Spu.contains(p)) return inline spu.Spu.read16(p);
 		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 2) << 3)) & 0xFFFF;
 		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8);
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) return mod.ModRam.read16(p);
+		#end
 		else return unmapped8();
 	}
 
@@ -462,6 +468,9 @@ class Memory {
 		else if (p == CACHE_CONTROL_REG) return cacheControl;
 		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8)
 			| ((inline romRead8(p + 2)) << 16) | ((inline romRead8(p + 3)) << 24);
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) return mod.ModRam.read32(p);
+		#end
 		else return unmapped8();
 	}
 
@@ -489,6 +498,9 @@ class Memory {
 		else if (isCdrom(p)) inline cd.Cdrom.write8(p, v, cycleHint());
 		else if (isSio(p)) inline sio.Sio0.write8(p, v);
 		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFF, 0xFF);
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) mod.ModRam.write8(p, v);
+		#end
 		else unmappedAccesses++;
 	}
 
@@ -513,6 +525,9 @@ class Memory {
 		else if (isCdrom(p)) inline cdHalfWrite(p, v & 0xFFFF);
 		else if (spu.Spu.contains(p)) inline spu.Spu.write16(p, v & 0xFFFF);
 		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) mod.ModRam.write16(p, v);
+		#end
 		else unmappedAccesses++;
 	}
 
@@ -528,6 +543,9 @@ class Memory {
 		// register a game uses to enable the scratchpad, and one that read back zero after being
 		// written would be a machine no game has ever run on.
 		else if (p == CACHE_CONTROL_REG) cacheControl = v;
+		#if recompsx_mods
+		else if (mod.ModRam.contains(p)) mod.ModRam.write32(p, v);
+		#end
 		else unmappedAccesses++;
 	}
 

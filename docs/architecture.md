@@ -90,7 +90,8 @@ and audio on every platform and every target.
 - No `Float` anywhere in runtime or generated code.
 - Host time (`bp_time_us`) paces presentation only and never reaches emulated state. Host audio
   consumption never back-pressures the emulated timeline.
-- Inputs are latched once per emulated VBlank (replay/netplay-friendly by construction).
+- Inputs are latched once per emulated VBlank (replay-friendly by construction). Online play is
+  never netplay: it is built per game over the HLE kernel's network service (ADR-0035).
 - All RAM/VRAM/SPU-RAM is explicitly zero-initialized; no host randomness; no dependence on
   map iteration order.
 - Verified by `--headless-hash N`: FNV-1a over scanout and audio per frame folded into a

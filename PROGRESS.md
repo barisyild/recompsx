@@ -2,6 +2,99 @@
 
 ## Status snapshot
 
+**2026-09-28: The host's keyboard types (ADR-0036); ONLINE takes an address only and tries the
+game's port.** A keyboard-as-text group in the backend ABI (`bp_key_text`, `bp_key_next`: Unicode
+code points as the host's layout makes them, plus Backspace/Enter/Escape), implemented by SDL2
+(`SDL_TEXTINPUT`), the browser (`KeyboardEvent.key`), the Dreamcast (a maple keyboard's KOS queue)
+and null; `kernel.KKeyboard` drains it once per vblank after the pads into a 64-entry queue, never
+in a digest run; mods reach it through `ModHost.textEntry`/`typed`. While text entry is on, only the
+arrows of a keyboard that plays pad 0 still press it. onlinemenu: the keyboard lost ':' — a player
+types an IPv4 address only, the port is the game's (9457, `Online.PORT`, recorded in ADR-0035) and
+DONE tries it ("no network yet" until the kernel has a network service); typed digits and '.' go
+in, Backspace/Enter/Escape delete, finish, cancel, anything else is ignored. Found testing: typing
+is no pad input, so the game's idle counter (80051604h) ran on and the attract demo started as the
+menu came back; the keyboard holds it at zero and gives the field up if the game leaves the menu.
+Verified: conformance `Keyboard` `6dc16bae` on JS and reflaxe.CPP (`Settings` now `929d4dc2`,
+IP-only data); SDL2 and Dreamcast input compile clean; check.sh (39 ABI functions per backend),
+tool tests 489, test.sh JS gate `329de455`; headless: 2,400 frames at the keyboard, Enter, demo
+1,861 frames later; the owner typed an address in the browser. Crash Bash 3000 `654669df`, 9000
+`fda4764f` unchanged.
+
+**2026-09-28: Console settings in the HLE kernel (ADR-0034) — ONLINE remembers the last address.**
+`kernel.KSettings` keeps named values for the console in `system.cfg` (`key=value`, 4 KB) through
+`bp_storage_*`: shared by every game and mod, never inside a game's save (memory cards are not
+emulated yet anyway), untouched by headless digest runs. `ModHost.setting`/`setSetting` for mods;
+onlinemenu keeps `net.last_address` on DONE and opens the keyboard on it (CANCEL leaves it). The
+browser's host now implements storage in `localStorage` (`recompsx:<name>`, base64, blobs <= 256
+KB; the VRAM dump is only logged) and the shim reads it back (Node: the files it writes). The dev
+server sends `Cache-Control: no-cache` for the page and build.json — the first test ran an old,
+heuristically cached index.html beside the new bundle. Verified: conformance `Settings`
+`90ccce70` on JS and reflaxe.CPP; in the browser 1.1.1.1 accepted, kept as
+`net.last_address=1.1.1.1`, and back in the keyboard after a reload and a fresh boot. Default
+builds unchanged (Crash Bash 3000 `654669df`, 9000 `fda4764f`; test.sh passes).
+
+**2026-09-28: Cross works in Crash Bash's menus; Battle Mode and Adventure mode walked in; ONLINE's
+address keyboard.** Cross on Select Game Type played its sound and stayed: the menu screen
+manager's "next screen" setter (8001E848h) and its two neighbours are three-instruction leaves the
+prologue sweep never finds, and the stage overlay's call reached nothing — no controller had ever
+pressed cross before. Hinted (with 8001E838h, 8001E824h), then Battle Mode and Adventure mode
+walked with a scripted pad (a temporary mod pressing cross on every screen), feeding the runtime's
+reports back round by round (scratchpad closeloop): 11 executable functions, 4 boot and 1 stage
+entries, and two new overlays — `stage4` (sector 28382, 71,680 bytes: the battle Battle Mode
+starts) and `adventure` (sector 28136, 86,016 bytes: the hub, saving, ENTER NAME, credits; 14
+entries). Both walks then run 14,000-16,000 frames with nothing missing; the attract loop's digests
+are unchanged (3000 `654669df`, 9000 `fda4764f`, 30000 `2d1ca4b6`). Found on the way: a missing
+callee skipped in Adventure mode left the frame loop's mode descriptor at 0 and it called address
+0 — gone with the entries. `mods/onlinemenu`: cross on ONLINE opens an address keyboard in the
+look of the game's ENTER NAME screen (the real one lives in the adventure overlay, never resident
+with the menus, and is not touched): title bar ENTER IP ADDRESS, an entry box, keys 1-7 / 8 9 0 .
+: and '<' (the name keyboard's delete) 40 units apart, DONE and CANCEL; d-pad, cross, triangle
+back, square delete, start done; the address is validated (four numbers 0..255, optional :port)
+and kept for the network service the HLE kernel will offer. Built in Select Game Type's own slot
+from mod-memory records, right of the character; verified headless (typing 1.1.1.1 and DONE) and
+in the browser. The sweep's blind spot — prologue-less leaves after another function's `jr ra` —
+will keep surfacing one report at a time; a tool pass for it is in Next up.
+
+**2026-09-28: The browser's WebGL renderer hears of every upload (`BP_CAP_GPU_UPLOADS`) — Crash
+Bash's menu text after the cutscene.** With WebGL on, every visit to Select Game Type after the
+attract loop's Uka Uka cutscene drew no text (unmodded too; software rendering was right). Measured
+in the page: the text primitives were submitted, sampling the 4-bit font at VRAM rows 496..511
+(x 176..335, CLUT 1008,350), and there `vramTex` held zeros (2130 of 2560 texels; 1575 differing
+from emulated VRAM) — transparent, so every texel was discarded. Cause: at frame ~15060 the game
+clears VRAM with one 511x511 rectangle (drawing area the whole of VRAM), which under hardware
+drawing reaches only the renderer, then uploads its font again, glyph by glyph. Emulated VRAM had
+never lost the font, so since 6db381f ("report a VRAM write only when it changed a pixel", for the
+Dreamcast's texture cache) those uploads were never reported, and the renderer — whose drawn
+pixels become texels — kept the rectangle's black. A backend answering capability 6 now hears of
+every CPU-to-VRAM upload (`Gpu.reportUploads`, set by the launcher); the JS shim answers it for the
+page's renderer, the C backends do not (Dreamcast unchanged). Copies stay change-only: the runtime
+copies emulated VRAM, which lacks drawn pixels, so reporting an unchanged copy (Crash Bash's 2x1
+self-copy every flip) would lay stale pixels over drawn ones. After: the same visit shows the text
+(font area 0 mismatches), ~2.6 extra reports a frame (~1300 pixels). Headless digests unchanged
+(3000 `654669df`, 9000 `fda4764f`); GpuFill/Raster agree on both targets; test.sh passes.
+
+**2026-09-28: Mods — per-game Haxe that extends a recompiled game (ADR-0033); Crash Bash gets
+ONLINE under BATTLE MODE.** A mod is `games/<SERIAL>/mods/<id>/`: `mod.json` (hooked guest
+functions by address, scoped to an overlay or "exe"; optional `memory`/`heap`) and sources in
+package `<id>`. `recompsx gen --mods <ids|all>` emits one line at each hooked entry — after the
+entry pump, only for a real call: `if (entry == 0 [&& entryPump] && mod.ModHost.enter(ctx, a))
+return;` — refuses hooks no function begins at, copies the sources and writes `ModList`. Without
+`--mods` the generator's output is byte-identical to HEAD's (diffed on Crash Bash). Runtime
+`mod.ModHost`: hook (pass, answer, or wrap with `callOriginal`), `call`, onFrame (from
+`Kernel.onFrame`), onBoot, a heap with `cstring`/`copy`, guest memory and pads; `mod.ModRam` gives
+mods memory past 2 MB at physical 1F000000h (expansion region 1, guest 9F000000h), decoded in the
+memory map's slow path just before "unmapped" — all under `-D recompsx_mods`, so default builds are
+unchanged: Crash Bash 3000 `654669df`, 9000 `fda4764f`. `scripts/build-web.sh <SERIAL> --mods <ids>`;
+check.sh now also holds `games/*/mods` to the portable subset. Tests: tool 489 checks (5 new mod
+groups), conformance `ModHooks` `02036850` on JS and reflaxe.CPP. `mods/onlinemenu`: hands the
+menu builder (boot 80095BECh) a ten-record list in mod memory (ONLINE appended as widget 8,
+TOURNAMENT/OPTIONS/description a line lower, panel +34) and wraps Select Game Type's frame
+handler (stage 800B3CA8h) so the game's own up/down land right; cross on ONLINE shows "online
+play is coming soon". Verified headless with a scripted pad (every move, highlight and
+description) and in the browser (the user). The menu's structure is in games/SCUS94570/notes.md.
+Found on the way, not a mod bug: with WebGL on, every visit to the menu after the Uka Uka cutscene
+drew no text at all — unmodded too. Fixed the same day (next entry).
+
 **2026-09-28: the runtime moves memory in runs (`shim.Bulk`, ADR-0032).** `shim.Bulk` — copy, equal,
 fill16, prefetch; sh4zam on the Dreamcast through `native/recompsx_bulk.h`, the C library elsewhere,
 `copyWithin` and typed-array loops on JavaScript — sits under VRAM-to-VRAM copies by rows (mask
@@ -858,6 +951,11 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
+0. **Find prologue-less leaf functions.** A three-instruction leaf right after another function's
+   `jr ra` + delay slot (Crash Bash's 8001E824h/838h/848h, 8002C290h/29Ch) is invisible to the
+   prologue sweep and surfaces only as a runtime "no function at" when first called. A pass that
+   tries the word after every function end as a candidate leaf (decodes cleanly, reaches its own
+   `jr ra` within a few instructions, touches no unknown state) would find them at gen time.
 **Dreamcast, sh4zam candidates (surveyed 2026-09-28; judged on hardware, not Flycast).** sh4zam is
 float maths and memory/cache/store-queue routines; nothing in the runtime or the generated code is
 float, and the backend has no libm call, so its maths has nothing to replace — the ground is
@@ -1532,10 +1630,34 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-09-28 [claude] HLE keyboard as text (ADR-0036: bp_key_text/next on SDL2, browser, Dreamcast, null;
+kernel.KKeyboard; conformance Keyboard on both targets). onlinemenu: IP only, port 9457 per game, typing,
+the demo timer held while the keyboard is open. Next: the HLE network service — first its browser transport
+(WebSocket/WebRTC; a browser cannot listen), then Crash Bash's lobby.
+
 2026-09-28 [claude] Real-BIOS black screen fixed: the Dreamcast profile overlay polled the BIOS font lock during
 G1 DMA; its glyphs are now cached at init. Found in Flycast with the real BIOS (serial console via rxprof, PC
 histogram of the hang). Next: memory cards (per-game blocks, a save format per target), once the mods and
 settings work is committed.
+
+2026-09-28 [claude] ADR-0034: kernel.KSettings (system.cfg via bp_storage), ModHost.setting; browser storage in
+localStorage; dev server no-cache for the page. onlinemenu keeps and restores net.last_address (verified across a
+reload). Next: memory card emulation on the same storage; ONLINE's HLE network service.
+
+2026-09-28 [claude] Menus: cross did nothing (8001E848h, a prologue-less leaf, never found); hinted, then Battle
+and Adventure walked by scripted pad with reports fed back (11 exe functions, boot/stage entries, overlays stage4
+and adventure); attract digests unchanged. onlinemenu: ONLINE opens an ENTER NAME-style address keyboard.
+Next: a sweep for prologue-less leaves after `jr ra`; ONLINE's HLE network service.
+
+2026-09-28 [claude] WebGL lost Crash Bash's menu text after the cutscene: unchanged font uploads went unreported
+(6db381f) after a 511x511 clear only the renderer drew. BP_CAP_GPU_UPLOADS (6): backends whose drawn pixels become
+texels hear of every upload; JS shim answers it, C backends do not. Verified in the page (font area 0 mismatches,
+text back); digests unchanged. Next: copies of drawn pixels (a bp_gpu_copy) if a game needs them.
+
+2026-09-28 [claude] Mods (ADR-0033): gen --mods hooks, mod.ModHost/ModRam (memory past 2 MB at 9F000000h),
+build-web --mods, games/SCUS94570/mods/onlinemenu (ONLINE under BATTLE MODE). Default output and digests
+unchanged; ModHooks agrees on JS and reflaxe.CPP. Next: what ONLINE does; a whole-game C++ build with
+-D recompsx_mods.
 
 2026-09-28 [claude] ADR-0032 revised after Flycast: OT walk node by node again (line runs +9 % on Crash 3's
 dense table), list uploads word by word (they cost the walk 12 %), short fills as halfword stores. Crash 3

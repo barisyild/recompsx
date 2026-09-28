@@ -1,0 +1,11 @@
+{
+  "id": "onlinemenu",
+  "title": "ONLINE in Select Game Type",
+  "_description": "Adds ONLINE under BATTLE MODE in the main menu, and behind it an address keyboard in the look of the game's ENTER NAME screen. The menu is data: the game builds it from a list of 36-byte records, so the mod hands the builder a longer list, steers the frame handler's selection around the new line, and builds the keyboard in the same slot from records of its own. The game's own name keyboard (adventure overlay) is never touched. How the menu works is in ../../notes.md, 'The main menu'.",
+  "entry": "onlinemenu.OnlineMenu",
+  "_hooks": "0x80095bec in boot: the menu builder, (slot a0, records a1). 0x800b3ca8 in stage: Select Game Type's frame handler.",
+  "hooks": [
+    { "_addr": "0x80095bec", "addr": 2148097004, "in": "boot" },
+    { "_addr": "0x800b3ca8", "addr": 2148220072, "in": "stage" }
+  ]
+}
