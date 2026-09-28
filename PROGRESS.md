@@ -2,6 +2,19 @@
 
 ## Status snapshot
 
+**2026-09-28: Dreamcast — a frame drawn across a vblank is no longer shown in two halves.** The
+owner saw Crash 3's first level flicker on Flycast from one point of the level on: the sky alone,
+the lower half black, Crash on his log over black. The cause was ADR-0039's list walk. It takes
+emulated time, so a vblank can come while the GPU is half way through a frame. VRAM does not care,
+but the Dreamcast shows the primitives it received since the last present, and it split the frame.
+Found by loading the owner's save state into the Flycast fork, whose new `RXWATCH_*` hook logs
+`present_frame`'s arguments and chosen words at every call. 63 of 600 presents came mid-walk, and
+17 of 240 screenshots were torn. The scanout now marks such a present `BP_PRESENT_DRAWING` (a new
+ABI flag, `Dma.listWalking`). The Dreamcast keeps its last picture up and lets the rest of the list
+join the frame, for at most three presents in a row. With the same hold applied by the hook to the
+same state, 0 of 240 were torn. The attract loop's demos never cross a vblank (0 of 20000 frames on
+JS, walks at most 11 ms), which is why nothing had shown it. Crash 3 9000 is still `4de78425`.
+
 **2026-09-28: A model of the SH-4's timing — the console's frame time without a console.** No
 emulator models what makes the recompiled code slow on a Dreamcast (Flycast read Crash 3's title
 screen 1.6x fast, Demul 1.44x), so the profiling Flycast fork gained one
@@ -1759,6 +1772,16 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
+- **Open (2026-09-28): the Dreamcast build diverged between identical Flycast runs.** One save
+  state was run three times in the fork's interpreter, with no pad pressed and no change to the
+  program. The first 203 presents matched. After that, two runs parted at present 203 and a third
+  at 253, by a few hundred CPU cycles at a walk's start and then in the scene itself.
+  Disc reads are synchronous and the audio path is written to leave game state alone, so the
+  first suspects are host input reaching the window (Flycast maps the keyboard to the pad, and
+  the fork's window takes focus) and anything else the backend returns into emulated state. The
+  next step is a run with the fork's input cut off. If it still diverges, it is a golden-rule-3
+  leak on the Dreamcast.
+
 - **Open: I_MASK.7 (SIO0) after `_bu_init`.** The kernel has unmasked SIO0 there since e468132
   ("_bu_init does the same for SIO0"), and games that drive their pads through SIO0 have run
   with it. OpenBIOS's card driver unmasks it only while a transfer runs and masks it again at the
@@ -1795,6 +1818,12 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-28 [claude] Crash 3 flickered on the Dreamcast when ADR-0039's list walk crossed a vblank (the frame went
+out in two halves): BP_PRESENT_DRAWING from the scanout while Dma walks a list, and the Dreamcast holds its last
+picture (HOLD_MAX 3). Proven from the owner's Flycast save state (fork RXWATCH hook: 17/240 torn -> 0/240); the
+owner reports it fixed. Dispatchers with nothing inlined and no lastSlot/dispatches stores, under the SH-4 model:
+40.2 ms a frame against 39.2 (title 3300..4050) — not kept. Next: the Dreamcast run-to-run divergence (Blockers).
 
 2026-09-28 [claude] SH-4 timing model in the profiling Flycast fork (rx_cache: caches, operand stalls, uncached
 costs; RXCACHE=1, build-rxcache): Crash 3's title screen 39.2 ms a frame vs the console's 39.3 (Flycast 24.4,

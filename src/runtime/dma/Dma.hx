@@ -209,6 +209,10 @@ class Dma {
 	static var listClock = 0;
 	static var listLinks = 0;
 
+	/** A list is being walked: the frame the GPU is drawing is not finished. Only presentation
+	    reads it (Scanout's PRESENT_DRAWING); nothing that runs the machine does. */
+	public static inline function listWalking():Bool return listAt >= 0;
+
 	static function startList():Void {
 		listAt = madr[CH_GPU] & 0x1FFFFC;
 		listLinks = 0;

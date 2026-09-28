@@ -201,6 +201,13 @@ void draw_quad(int sw, int sh) {
 
 /* ---- presenting a frame: the scene (dc_scene.c) or the software picture, paced -------------- */
 
+/* Presents in a row that kept the last picture up because the GPU was still drawing
+ * (BP_PRESENT_DRAWING), and how many of them a frame is given. A walk is a few milliseconds and
+ * crosses one vblank at most; the bound is for a game whose GPU never rests at a vblank, which
+ * gets a torn picture every fourth vblank rather than none. */
+static int g_held;
+#define HOLD_MAX 3
+
 static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags) {
     if(!g_ready) return;
 
@@ -225,9 +232,19 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 
     const int blank = (sw <= 0 || sh <= 0);
 
+    /* The GPU is still walking this frame's list (ADR-0039): what is recorded is its first part,
+     * and the rest arrives after this vblank. Built now, the frame went out in two halves, a
+     * vblank each — in Crash 3's village the sky and the far hills, then the near half on black,
+     * or only the sky and then everything but it. So the last picture stays up, as a skipped
+     * present keeps it, and what the walk still draws joins this frame. */
+    const int hold = (flags & BP_PRESENT_DRAWING) && g_cmd_count > 0 && !g_frame_shown
+                     && g_held < HOLD_MAX;
+    g_held = hold ? g_held + 1 : 0;
+    flags &= ~BP_PRESENT_DRAWING;
+
     static int shown_x = -1, shown_y = -1, shown_w = -1, shown_h = -1, shown_flags = -1;
-    if(!g_scene_dirty && g_frame_shown && sx == shown_x && sy == shown_y && sw == shown_w
-       && sh == shown_h && flags == shown_flags) {
+    if(hold || (!g_scene_dirty && g_frame_shown && sx == shown_x && sy == shown_y && sw == shown_w
+                && sh == shown_h && flags == shown_flags)) {
 #if RECOMPSX_DC_PROFILE
         g_prof_skipped++;
         g_prof_end = bp_time_us();

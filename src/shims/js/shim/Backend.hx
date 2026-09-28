@@ -39,6 +39,7 @@ class Backend {
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;
 	public static inline var PRESENT_FAST      = 8;
+	public static inline var PRESENT_DRAWING   = 16;
 
 	static var args:Array<String> = [];
 	static var quit = false;

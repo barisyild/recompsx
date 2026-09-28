@@ -70,7 +70,14 @@ enum {
      * sectors, a sector every second vblank as the BIOS does, and nothing else is going on that a
      * player would watch (ADR-0037). A backend that paces at present lets such a frame go at once,
      * so a save takes a fraction of a second rather than several. Emulated time is unchanged. */
-    BP_PRESENT_FAST      = 1 << 3
+    BP_PRESENT_FAST      = 1 << 3,
+    /* The GPU was still walking a DMA list when this vblank came (ADR-0039): the frame being
+     * drawn is unfinished. VRAM and the rectangle shown are exactly what the PlayStation has, so
+     * a backend that shows VRAM ignores this. A backend that shows the primitives it was handed
+     * since the last present (hardware drawing, the Dreamcast's) keeps its last picture up and
+     * lets the rest of the list join the same one; closing it here shows a frame in two halves,
+     * a vblank each — the far half, then the near half on black. */
+    BP_PRESENT_DRAWING   = 1 << 4
 };
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 

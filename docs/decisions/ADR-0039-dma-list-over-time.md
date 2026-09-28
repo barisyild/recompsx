@@ -90,3 +90,14 @@ leaves every register and every drawn pixel exactly as the instant walk did.
   hardware.
 - A game that depends on the GPU's real speed more finely than this, for example one that polls
   GPUSTAT's ready bits mid-list (always ready here), is not served by it. GPUSTAT is unchanged.
+- A vblank can now come in the middle of a walk. VRAM does not care, since a double-buffered game
+  draws into the buffer it is not showing. The Dreamcast's hardware drawing does care: it shows
+  the primitives it received since the last present, and it split such a frame across two
+  vblanks. In Crash 3's village that meant the sky and the far hills, then the near half on
+  black, or the sky alone and then everything but the sky. The owner found it on Flycast (2026-09-28): 17
+  of 240 frames were torn from their save state, and 63 of 600 presents came mid-walk. The
+  scanout therefore says so, as `BP_PRESENT_DRAWING`. A backend that draws the primitives it is
+  handed keeps its last picture up and lets the rest of the list join the frame, for at most
+  three vblanks in a row (`dc_video.c`). With that hold applied to the same state, no frame was
+  torn. The attract loop's demos never meet this (0 of 20000 frames on JS, walks at most
+  11 ms): whether a walk crosses a vblank depends on where in its frame a game starts it.

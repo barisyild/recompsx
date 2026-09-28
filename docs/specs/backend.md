@@ -66,8 +66,11 @@ int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
 enum { BP_PRESENT_24BPP = 1 << 0, BP_PRESENT_INTERLACE = 1 << 1, BP_PRESENT_PAL = 1 << 2,
-       BP_PRESENT_FAST = 1 << 3 };  /* FAST: memory card sectors are moving (ADR-0037); a backend
-                                       that paces at present need not hold this frame */
+       BP_PRESENT_FAST = 1 << 3,     /* FAST: memory card sectors are moving (ADR-0037); a backend
+                                        that paces at present need not hold this frame */
+       BP_PRESENT_DRAWING = 1 << 4 };/* DRAWING: a DMA list is still being drawn (ADR-0039); a
+                                        backend showing the primitives it was handed must not
+                                        close its picture on this present */
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 /* audio: 44100 Hz stereo s16 interleaved; count = stereo frames */
 void bp_audio_push(const int16_t* frames, int frame_count);

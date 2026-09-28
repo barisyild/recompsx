@@ -47,6 +47,12 @@ class Scanout {
 		else {}
 		if (kernel.KCard.moving) flags |= Backend.PRESENT_FAST;
 		else {}
+		// Channel 2 walks a list over time (ADR-0039), so a vblank can come while the GPU is half
+		// way through a frame. What VRAM shows is not affected — a double-buffered game is drawing
+		// into the buffer it does not show — but a backend drawing the primitives it is handed
+		// must not close its picture here, or the frame is shown in two halves.
+		if (dma.Dma.listWalking()) flags |= Backend.PRESENT_DRAWING;
+		else {}
 		Backend.present(Vram.data, x, y, width(mode), height(mode), flags);
 		frames++;
 	}

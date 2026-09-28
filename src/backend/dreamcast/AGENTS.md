@@ -112,6 +112,10 @@ so it is not tuned for. The instruction-cache fill is what the result hangs on (
   4bpp pages are mirrored (`page4_mirror`) with palettes in 64 banks of 16, addressed by content;
   what does not fit is baked (`bake_slot`, 64x64 patches on `BAKE_STEP` boundaries). Anything
   that writes emulated VRAM reaches here as `bp_gpu_dirty`, which evicts by page and palette.
+- A present carrying `BP_PRESENT_DRAWING` came while the runtime was still walking a DMA list
+  (ADR-0039). If the frame has unshown primitives, it is not built: the last picture stays up,
+  and what the walk still draws joins this frame, for at most `HOLD_MAX` presents in a row.
+  Built there, a frame went out in two halves, a vblank each (Crash 3's village, Flycast).
 - `screen_origin` decides which buffer a primitive draws into; the runtime's off-screen rule
   (`gpu.Gpu.offscreen`, ADR-0030) is the same rule, so off-screen drawing never arrives here.
 - Semi-transparency: modes 0/1/3 as PVR blends; B-F as three passes; mixed-CLUT primitives split

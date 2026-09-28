@@ -26,6 +26,7 @@ class Backend {
 	public static inline var PRESENT_INTERLACE = 2;
 	public static inline var PRESENT_PAL       = 4;
 	public static inline var PRESENT_FAST      = 8;
+	public static inline var PRESENT_DRAWING   = 16;
 
 	public static inline function init(title:String):Int
 		return BackendNative.bp_init(ConstCharPtr.fromString(title));
