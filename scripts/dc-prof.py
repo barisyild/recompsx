@@ -18,7 +18,10 @@ each watched function, its callers by the return address.
 
 A profile recorded under the cache model (scripts/dc-flycast-model.sh) has <prof.txt>.cache beside
 it, and each function's time is then split into what it waited for: instruction-cache fills,
-operand-cache fills, operand dependencies and uncached accesses (the rest is issue).
+operand-cache fills, operand dependencies and uncached accesses (the rest is issue). With
+<prof.txt>.cache.fa as well, the misses fully associative caches of the same sizes would have had,
+two more columns give the fills that were conflicts (direct-mapped minus fully associative): the
+part of each fill column that placing code and data decides.
 """
 import bisect
 import os
@@ -65,6 +68,24 @@ def load_costs(path):
             a, im, om, dep, ext = line.split()
             costs[int(a, 16)] = (int(im) * fill[0], int(om) * fill[1], int(dep), int(ext))
     return costs
+
+
+def load_fa(path):
+    """<prof.txt>.cache.fa: per instruction address, the instruction and operand misses fully
+    associative LRU caches of the same sizes had; None without one."""
+    if not os.path.exists(path):
+        return None
+    fa, fill = {}, (0, 0)
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#"):
+                m = re.search(r"ifill (\d+) ofill (\d+)", line)
+                if m:
+                    fill = (int(m.group(1)), int(m.group(2)))
+                continue
+            a, im, om = line.split()
+            fa[int(a, 16)] = (int(im) * fill[0], int(om) * fill[1])
+    return fa
 
 
 def load_symbols(nm, elf):
@@ -121,24 +142,36 @@ def main():
           f"({cycles / 200e6 * 1000:.0f} ms of a 200 MHz SH-4), host {meta.get('wall_s', 0):.1f} s")
     print(f"outside RAM {meta.get('other', 0)}, outside any symbol {unknown}")
     costs = load_costs(prof + ".cache")
+    fa = load_fa(prof + ".cache.fa") if costs is not None else None
     per_cost = {}
     if costs is not None:
         for addr, c in costs.items():
             k = bisect.bisect_right(starts, addr) - 1
             if k >= 0 and addr < ends[k]:
-                p = per_cost.setdefault(k, [0, 0, 0, 0])
+                p = per_cost.setdefault(k, [0, 0, 0, 0, 0, 0])
                 for i in range(4):
                     p[i] += c[i]
-        sums = [sum(p[i] for p in per_cost.values()) / 200e3 for i in range(4)]
-        print(f"cache model: ifill {sums[0]:.0f} ofill {sums[1]:.0f} dep {sums[2]:.0f} ext {sums[3]:.0f} ms")
-        print(f"{'share':>6} {'ms@200MHz':>9} {'ifill':>6} {'ofill':>6} {'dep':>6} {'ext':>5}  function")
+                p[4] += c[0]
+                p[5] += c[1]
+        for addr, c in (fa or {}).items():
+            k = bisect.bisect_right(starts, addr) - 1
+            if k >= 0 and addr < ends[k]:
+                p = per_cost.setdefault(k, [0, 0, 0, 0, 0, 0])
+                p[4] -= c[0]
+                p[5] -= c[1]
+        sums = [sum(p[i] for p in per_cost.values()) / 200e3 for i in range(6)]
+        conf = f" (conflicts: ifill {sums[4]:.0f} ofill {sums[5]:.0f})" if fa is not None else ""
+        print(f"cache model: ifill {sums[0]:.0f} ofill {sums[1]:.0f} dep {sums[2]:.0f} ext {sums[3]:.0f} ms{conf}")
+        extra = f" {'iconf':>6} {'oconf':>6}" if fa is not None else ""
+        print(f"{'share':>6} {'ms@200MHz':>9} {'ifill':>6} {'ofill':>6} {'dep':>6} {'ext':>5}{extra}  function")
     else:
         print(f"{'share':>6} {'ms@200MHz':>9}  function")
     for k, count in sorted(per_fn.items(), key=lambda kv: -kv[1])[:top]:
         split = ""
         if costs is not None:
-            p = per_cost.get(k, [0, 0, 0, 0])
-            split = " " + " ".join(f"{v / 200e3:{w}.1f}" for v, w in zip(p, (6, 6, 6, 5)))
+            p = per_cost.get(k, [0, 0, 0, 0, 0, 0])
+            widths = (6, 6, 6, 5, 6, 6) if fa is not None else (6, 6, 6, 5)
+            split = " " + " ".join(f"{v / 200e3:{w}.1f}" for v, w in zip(p, widths))
         print(f"{100.0 * count / total:5.1f}% {count * slice_ / 200e3:9.1f}{split}  {names[k]}")
     def name_of(addr):
         k = bisect.bisect_right(starts, addr) - 1

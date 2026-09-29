@@ -65,8 +65,37 @@ one known lean: the GTE, `cmdRtps` 138 against 109 — the console's figure is o
 so it is not tuned for. The instruction-cache fill is what the result hangs on (+12 cycles is
 +19 %, the operand fill +5 %). It runs at about a third of real time: to present 4050 is ~20 min.
 
+**Placement moves the frame more than most changes do.** Both caches are direct-mapped, so where the
+linker puts each function, and each hot object, decides which of them evict each other. The model
+also counts the misses fully associative LRU caches of the same sizes would have had
+(`<prof>.cache.fa`); direct-mapped minus fully associative is the part placement decides, and
+`dc-prof.py` shows it per function as `iconf`/`oconf`. Measured 2026-09-29 on the title screen:
+- The same sources with the functions in other places read 35.1 and 39.4 ms a frame. The fully
+  associative costs were the same to 0.2 ms; the conflicts were 9.1 and 13.6 ms.
+- At 35.1 ms, 6.9 of the 10.1 ms of instruction fills are conflicts, and 2.2 of the 4.0 ms of
+  operand fills.
+
+So a change is judged per function, on the fully associative columns as well as the frame, and
+never by one build's frame total against another's.
+
+**So the hot code is placed (ADR-0043).** `build-dc.sh` applies `games/<SERIAL>/dc-placement.txt`
+at every link. That puts Crash 3's title screen at 29.5 ms a frame under the model, against 35.1
+without it. To make a placement, or remake one when the hot code has changed much:
+1. Build, and make a bench image of it (`--dc-rxprof --dc-bench=FROM:TO` in its RECOMPSX.CFG).
+2. Run the model with a trace: `scripts/dc-flycast-model.sh <image> <out.txt> RXTRACE=48000000`.
+   That writes `<out.txt>.cache.itrace`, the instruction entering each new line (192 MB).
+3. `scripts/dc-layout.py sections <build>/recompsx.map > sections.txt`.
+4. Build the simulator with `cc -O2 -o sim scripts/dc-icache-sim.c -lpthread`, then run
+   `./sim opt <trace> sections.txt 120 2 12000000 colours.txt`.
+5. `scripts/dc-layout.py export <build>/recompsx.map colours.txt` gives the placement file. Keep
+   the header saying where it came from.
+
+Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim <part>
+<sections>`, with `sections <map> <placed map>` once it is linked; then confirm under the model.
+
 - Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`; the link
-  takes minutes). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
+  takes minutes, twice when the game has a placement; `--no-placement` links once, as the linker
+  lays it out). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
   memory: run one at a time.
 - CDI: copy `build-dc-max/SYMS.BIN` into the data directory, then
   `mkdcdisc -q --allow-overwrite -N -e <elf> -D <data dir> -n "<name>" -a recompsx -s <SERIAL> -o <cdi>`.

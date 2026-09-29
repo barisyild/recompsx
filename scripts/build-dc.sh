@@ -6,6 +6,9 @@
 #   --run          upload and start it with $KOS_LOADER when the build succeeds
 #   --build-type   CMake build type (default Release; MinSizeRel is the one to reach for when
 #                  the binary will not fit in 16 MB alongside 3.5 MB of emulated machine)
+#   --placement F  place the hot code as F says (scripts/dc-layout.py) instead of the game's own
+#                  games/<SERIAL>/dc-placement.txt, which is used when there is one
+#   --no-placement leave the code where the linker puts it
 #   --max          the fastest build: Release (-O3) with link-time optimisation, and without
 #                  exceptions or RTTI, which no generated or runtime code uses (checked: no
 #                  throw, try, dynamic_cast or typeid in either transpiler's output), plus the
@@ -29,11 +32,14 @@ TARGET="_demo"
 RUN=0
 MAX=0
 BUILD_TYPE="Release"
+PLACEMENT=auto
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)        RUN=1 ;;
     --build-type) shift; BUILD_TYPE="${1:?--build-type needs a value}" ;;
     --max)        MAX=1 ;;
+    --placement)  shift; PLACEMENT="${1:?--placement needs a file}" ;;
+    --no-placement) PLACEMENT=none ;;
     *)            TARGET="$1" ;;
   esac
   shift
@@ -81,11 +87,46 @@ if [ "$MAX" = 1 ]; then
 fi
 
 cp build/templates/CMakeLists.txt "$DIR/CMakeLists.txt"
-cmake -S "$DIR" -B "$BUILD" -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
-  -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-  -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
-cmake --build "$BUILD"
+configure() {
+  cmake -S "$DIR" -B "$BUILD" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DRECOMPSX_DC_ORDER="$1" \
+    -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
+}
+
+# The hot code's placement for the 8 KB direct-mapped instruction cache (ADR-0043): the game's own
+# unless one is named or none is wanted. It is worth more than most code changes — Crash 3's title
+# screen went from 35.1 to 29.5 ms a frame under the cache model — and it costs a second link.
+if [ "$PLACEMENT" = auto ]; then
+  SERIAL="$(sed -n 's/.*SERIAL = "\([A-Z0-9]*\)".*/\1/p' "$DIR/gen/GameInfo.hx" 2>/dev/null | head -1)"
+  PLACEMENT=""
+  if [ -n "$SERIAL" ] && [ -f "games/$SERIAL/dc-placement.txt" ]; then PLACEMENT="games/$SERIAL/dc-placement.txt"; fi
+elif [ "$PLACEMENT" = none ]; then
+  PLACEMENT=""
+fi
+ORDER="$BUILD/placement"
+if [ -n "$PLACEMENT" ]; then
+  # The first link keeps the last build's order: where a section goes does not change its size,
+  # and sizes are all a plan is made from. When the plan it gives is that same order, it is done.
+  if [ -f "$ORDER/order.ld" ]; then configure "$(pwd)/$ORDER"; else configure ""; fi
+  cmake --build "$BUILD"
+  rm -rf "$ORDER.new"
+  python3 scripts/dc-layout.py place "$BUILD/recompsx.map" "$PLACEMENT" "$ORDER.new"
+  if cmp -s "$ORDER.new/order.ld" "$ORDER/order.ld" 2>/dev/null && cmp -s "$ORDER.new/pad.s" "$ORDER/pad.s"; then
+    rm -rf "$ORDER.new"
+  else
+    rm -rf "$ORDER"
+    mv "$ORDER.new" "$ORDER"
+    configure "$(pwd)/$ORDER"
+    cmake --build "$BUILD"
+  fi
+  python3 scripts/dc-layout.py check "$BUILD/recompsx.map" "$ORDER/plan.txt" \
+    || echo "warning: the hot code is not where $PLACEMENT puts it — see ADR-0043"
+else
+  configure ""
+  cmake --build "$BUILD"
+fi
 
 ELF="$BUILD/recompsx.elf"
 echo "built $ELF ($(du -h "$ELF" | cut -f1) on disk)"

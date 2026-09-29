@@ -7,7 +7,8 @@
 # quits at the end of the range.
 #
 # The build is a local Flycast clone on branch recompsx-prof (GPL-2.0; it stays outside this
-# repository). FLYCAST_PROF points at its binary; FLYCAST_PROF_HOME is the HOME it runs with, so
+# repository). VSync is off, as in dc-flycast-model.sh: an unseen window's swap can wait forever.
+# FLYCAST_PROF points at its binary; FLYCAST_PROF_HOME is the HOME it runs with, so
 # it never reads or writes the user's own Flycast settings. --callers names functions (substrings
 # of their demangled names, comma-separated) whose callers are to be counted too.
 set -euo pipefail
@@ -34,6 +35,6 @@ fi
 mkdir -p "$FLYCAST_PROF_HOME"
 rm -f "$out"
 HOME="$FLYCAST_PROF_HOME" RXPROF_OUT="$out" RXPROF_TIMEOUT="${RXPROF_TIMEOUT:-1500}" RXPROF_CALLERS="$callers" \
-  "$FLYCAST_PROF" "$cdi" > "${out%.txt}.log" 2>&1 || true
+  "$FLYCAST_PROF" -config config:rend.vsync=no "$cdi" > "${out%.txt}.log" 2>&1 || true
 grep -a '^rxprof' "${out%.txt}.log" || true
 [ -s "$out" ] || { echo "no profile written — see ${out%.txt}.log"; exit 1; }

@@ -145,6 +145,19 @@ if(RECOMPSX_BACKEND STREQUAL "dreamcast")
   # time is free and, on this target, not optional.
   target_compile_options(recompsx PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(recompsx PRIVATE -Wl,--gc-sections)
+  # The link map: scripts/dc-layout.py reads each function's section and size from it.
+  target_link_options(recompsx PRIVATE "-Wl,-Map=${CMAKE_BINARY_DIR}/recompsx.map")
+  # The hot code placed for the instruction cache (scripts/dc-layout.py place, which build-dc.sh
+  # runs from games/<SERIAL>/dc-placement.txt): the ordering file, and the padding sections it
+  # names, kept through --gc-sections. A new ordering relinks (LINK_DEPENDS).
+  if(RECOMPSX_DC_ORDER)
+    target_sources(recompsx PRIVATE "${RECOMPSX_DC_ORDER}/pad.s")
+    target_link_options(recompsx PRIVATE "-Wl,--section-ordering-file=${RECOMPSX_DC_ORDER}/order.ld")
+    file(READ "${RECOMPSX_DC_ORDER}/keep.txt" RECOMPSX_DC_KEEP)
+    separate_arguments(RECOMPSX_DC_KEEP)
+    target_link_options(recompsx PRIVATE ${RECOMPSX_DC_KEEP})
+    set_property(TARGET recompsx APPEND PROPERTY LINK_DEPENDS "${RECOMPSX_DC_ORDER}/order.ld")
+  endif()
   # sh4zam (vendor/sh4zam, pinned): the backend's std replacements and SH4 intrinsics — the rule
   # in src/backend/dreamcast/AGENTS.md. Its headers, and its one assembly file in BACKEND_SRC.
   target_include_directories(recompsx PRIVATE "${RECOMPSX_ROOT}/vendor/sh4zam/include")

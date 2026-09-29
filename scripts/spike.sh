@@ -75,4 +75,14 @@ else
   say "  multi-statement branches still deleted without an else (upstream defect 8)"
 fi
 
+say "spike: fnptr (a static function's address, with no std::function on the way)"
+rm -rf out/_spike/fnptr
+haxe build/spike-fnptr.hxml
+grep -q '(void\*)(&Targets::a)' out/_spike/fnptr/src/*.cpp \
+  || { echo "FAIL: a static function no longer reaches the splice as its C++ name"; exit 1; }
+clang++ "${CXXFLAGS[@]}" -Iout/_spike/fnptr/include -Itests/spike/fnptr out/_spike/fnptr/src/*.cpp \
+  -x c++ tests/spike/fnptr/fnptr_table.c -o out/_spike/fnptr/fnptr
+out/_spike/fnptr/fnptr | grep -q 'v=127' || { echo "FAIL: calls through kept addresses"; exit 1; }
+say "  addresses taken, kept and called: OK"
+
 printf '\033[32mspike.sh: clean\033[0m\n'

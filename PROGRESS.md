@@ -2,6 +2,57 @@
 
 ## Status snapshot
 
+**2026-09-29: Dreamcast — the hot code placed for the instruction cache (ADR-0043): Crash 3's title
+screen 35.1 → 29.5 ms a frame under the cache model.** Most instruction fills were conflicts, and
+they are now placed away:
+- **What was wrong:** 68 % of instruction fills were conflicts, decided by where the linker left
+  each function.
+- **The trace:** the model records the instruction entering each new line (`RXTRACE`).
+- **The simulator:** `scripts/dc-icache-sim.c` replays a trace against a candidate placement; its
+  `opt` mode gives the most fetched sections the colours that miss least.
+- **The build:** `scripts/dc-layout.py` turns the colours into an ordering file with padding for
+  `--section-ordering-file`. `build-dc.sh` applies `games/<SERIAL>/dc-placement.txt` at every link
+  and checks it against the map: two links, the second skipped when nothing moved.
+
+Crash 3's placement came from 48 M entries of the title screen. `opt` used the first 12 M (120
+sections, two rounds). On the other 36 M, which it had not seen, misses fell 59 % and conflicts
+87 %. Under the model:
+- the frame went from 35.1 to 29.5 ms: emu 18.0 → 13.6, gte 4.6 → 4.1, build 5.4 → 4.8;
+- instruction fills went from 10.1 to 4.1 ms, and operand fills rose 0.5 ms, because constants
+  move with their code.
+
+The data keeps its colours: .text grows by 507,904 bytes, a multiple of 16 KB, and the loaded image
+is 10.97 MB. A first placement that balanced sample heat over the colours won 0.3 ms and lost 0.7.
+The CDIs `out/dc/crash3-placed-max.cdi` and `crash3-unplaced-max.cdi` are the same sources, placed
+and not, for a console to judge. check.sh passes.
+
+**2026-09-29: Dreamcast — placement, not the dispatcher, decides the frame.** Two dispatcher
+changes were measured under the cache model on Crash 3's title screen (presents 3300..4050), and
+both were set aside:
+- **Nothing inlined into the dispatchers, no diagnostic stores:** 40.2 against 39.2 ms a frame.
+  Instruction fills fell 0.85 ms, and operand fills rose 1.9 ms: each switch reads its jump table
+  and its callees' addresses from the code's constant pool through the operand cache.
+- **FnTable's kept answers holding the function's address, called directly (C++ only):** the
+  switches' own time went, but the functions LTO had inlined into them now run as separate copies
+  and cost the same. The fully associative costs fell only 0.2 ms, and the frame read 39.4 against
+  35.1 from placement alone.
+
+The patches are not kept. A reflaxe.CPP fact is: a static function reaches a native splice as its
+C++ name (tests/spike/fnptr, in spike.sh).
+
+The model now also counts what fully associative LRU caches of the same sizes would miss (the
+fork, `<prof>.cache.fa`; `dc-prof.py` shows `iconf`/`oconf`). At 35.1 ms, 9 ms is conflicts:
+6.9 ms of instruction fills and 2.2 ms of operand fills. Two links of the same sources differed by
+4.3 ms, all of it conflicts. So builds are compared per function and on the fully associative
+columns, not by the frame total (src/backend/dreamcast/AGENTS.md, Measuring).
+
+Other facts from the work:
+- The title screen makes about 2,600 dynamic calls a vblank, 99.9 % FAST hits, to 33 targets.
+- The Flycast scripts turn VSync off. With the window out of sight, the OpenGL swap waited forever
+  on the thread that starts the game.
+
+Next up item 00 is the placement work.
+
 **2026-09-29: The multitap (ADR-0042) — four players, on by default.** A Multitap (SCPH-1070)
 is in port 1 (`sio.Multitap`) with the host's four pads in slots A-D. It follows psx-spx:
 - a read answers for slot A, so a game without tap support sees an ordinary pad;
@@ -1144,6 +1195,14 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
+00. **Dreamcast placement, the follow-ups (ADR-0043).**
+   1. Confirm it on hardware: `out/dc/crash3-placed-max.cdi` against
+      `out/dc/crash3-unplaced-max.cdi`, the same sources. The model reads the title screen at 29.5
+      against 35.1 ms a frame; the console read crash3-periph-max at 39.3.
+   2. Crash Bash's placement: a traced model run of its bench window (18800:20300), then
+      `dc-icache-sim opt` (src/backend/dreamcast/AGENTS.md, Measuring).
+   3. The operand side. Constants moving with their code cost 0.5 ms, and the hot data is placed by
+      nobody: 2 ms of operand conflicts a frame remain.
 0. **Find prologue-less leaf functions.** A three-instruction leaf right after another function's
    `jr ra` + delay slot (Crash Bash's 8001E824h/838h/848h, 8002C290h/29Ch) is invisible to the
    prologue sweep and surfaces only as a runtime "no function at" when first called. A pass that
@@ -1841,6 +1900,16 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-09-29 [claude] Hot code placed for the SH-4 I-cache (ADR-0043): model traces (RXTRACE), dc-icache-sim.c
+(replay + colour search), dc-layout.py (ordering file + padding), build-dc.sh two-pass link from
+games/SCUS94244/dc-placement.txt. Crash 3 title 35.1 -> 29.5 ms a frame under the model (I-conflicts -86 %).
+Next: confirm on a console (placed/unplaced CDIs); Crash Bash's placement; the operand side.
+
+2026-09-29 [claude] Dispatcher measured under the cache model and set aside (no-inline 40.2 vs 39.2 ms; direct
+addresses neutral once inlined bodies are counted). Model gained fully associative shadows: 9 of Crash 3's 35 ms
+title frame is cache conflicts, and two links of the same sources differ by 4.3 ms. dc-prof.py iconf/oconf, VSync off
+in the Flycast scripts, spike fnptr. Next: hot-code placement (Next up 00).
 
 2026-09-29 [claude] The multitap (ADR-0042): sio.Multitap in port 1, the host's pads 0-3 in slots A-D, psx-spx's
 request table (slot A / long / garbage), 02h-04h and 81h-84h, pad 1 in port 2 until the tap is used; KPads through
