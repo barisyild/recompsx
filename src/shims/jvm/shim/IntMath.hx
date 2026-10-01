@@ -17,6 +17,12 @@ class IntMath {
 	public static inline function mod(a:Int, b:Int):Int return a % b;
 
 	public static inline function mul(a:Int, b:Int):Int return a * b;
+	/** Bits 63..32 of the signed 64-bit product: MIPS MULT's HI. */
+	public static inline function mulHi(a:Int, b:Int):Int return (Int64.ofInt(a) * Int64.ofInt(b)).high;
+	/** The same, both operands unsigned: MULTU's HI. */
+	public static inline function mulHiU(a:Int, b:Int):Int
+		return (unsigned(a) * unsigned(b)).high;
+	static inline function unsigned(v:Int):Int64 return Int64.make(0, v);
 
 	public static inline function divPow2Trunc(a:Int, shift:Int):Int
 		return a < 0 ? -((-a) >> shift) : (a >> shift);

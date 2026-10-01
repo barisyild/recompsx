@@ -4,6 +4,7 @@ import recomp.Vaddr;
 import recomp.analysis.Discovery;
 import recomp.analysis.Func;
 import recomp.analysis.Image;
+import recomp.mips.Op;
 import recomp.loader.PsxExe;
 import recomp.codegen.Shards;
 import recomp.codegen.Shards.Shard;
@@ -74,6 +75,7 @@ class Program {
 		for (u in universes) {
 			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
+			u.emitter.writesOf = a -> writesFor(u, a);
 			u.emitter.dynamicCall = "FnTable.run";
 		}
 		for (r in this.relocSets) {
@@ -82,6 +84,7 @@ class Program {
 				unit.emitter.relocatable = true;
 				unit.emitter.dynamicCall = "FnTable.run";
 				unit.emitter.staticTargetOf = a -> staticTargetFor(universes[0], a);
+				unit.emitter.writesOf = a -> writesFor(universes[0], a);
 			}
 		}
 		checkFingerprintsDistinct();
@@ -113,6 +116,120 @@ class Program {
 		if (inSomeWindow(a)) return null;
 		final base = universes[0];
 		return base.shards.has(a) ? base.shards.classOf(a) : null;
+	}
+
+	/** The universe whose function a direct call from `from` to `a` runs (staticTargetFor's rule),
+	    or null for a call by address. */
+	function calleeUniverse(from:Universe, a:Int):Null<Universe> {
+		if (!from.isBase() && from.shards.has(a)) return from;
+		if (inSomeWindow(a)) return null;
+		return universes[0].shards.has(a) ? universes[0] : null;
+	}
+
+	/**
+		What a direct call from `from` to `addr` may write: a register mask, bit n for $n, of every
+		register the function or anything it calls directly may write — Emitter.ALL_REGS for a call
+		by address, and for a function that makes one itself, traps (syscall, break, an
+		instruction that can raise an overflow), jumps somewhere it cannot follow (a register jump
+		other than a return, a jump table's default, a BIOS vector) or carries a mod's hook, since
+		the hook may change anything. What an interrupt taken inside does is not counted: the
+		kernel gives the interrupted registers back as it found them (ADR-0029's premise for a
+		leaf's locals). Computed once, for every universe together, on the first question.
+
+		Used by the function spans' liveness (Emitter.planFspanLiveness): after a call, only the
+		spans on registers the callee may write are taken again. Crash Bandicoot: Warped's model
+		loop calls its vertex decoder at every vertex, and the decoder never writes the register
+		the loop reads its model through.
+	**/
+	function writesFor(from:Universe, addr:Int):Int {
+		final a = Vaddr.canonRam(addr);
+		final u = calleeUniverse(from, a);
+		if (u == null) return Emitter.ALL_REGS;
+		else {}
+		if (u.writes == null) computeWrites();
+		else {}
+		return u.writes.exists(a) ? u.writes.get(a) : Emitter.ALL_REGS;
+	}
+
+	function computeWrites():Void {
+		final all = Emitter.ALL_REGS;
+		// Per function: its own writes, and the (universe, address) of each function it calls.
+		final own:Array<Map<Int, Int>> = [];
+		final edges:Array<Map<Int, Array<{u:Int, a:Int}>>> = [];
+		for (ui in 0...universes.length) {
+			final u = universes[ui];
+			u.writes = [];
+			final ownU:Map<Int, Int> = [];
+			final edgesU:Map<Int, Array<{u:Int, a:Int}>> = [];
+			final hooked = u.emitter.hooks;
+			for (entry in u.discovery.functions.keys()) {
+				final fn = u.discovery.functions.get(entry);
+				if (!u.shards.has(Vaddr.canonRam(entry))) continue;
+				else {}
+				var mask = 0;
+				final calls:Array<{u:Int, a:Int}> = [];
+				if (hooked != null && hooked.exists(fn.entry)) mask = all;
+				else {}
+				final ir = new recomp.ir.FunctionIR(fn, u.image);
+				inline function callTo(t:Int):Void {
+					final ta = Vaddr.canonRam(t);
+					final cu = calleeUniverse(u, ta);
+					if (cu == null) mask = all;
+					else calls.push({u: universes.indexOf(cu), a: ta});
+				}
+				for (block in ir.blocks) {
+					for (x in block.instructions) {
+						mask |= (x.writes : Int);
+						final op = x.decoded.op;
+						if (op == Op.SYSCALL || op == Op.BREAK || x.effects.has(recomp.ir.Effect.TRAP)
+								|| x.effects.has(recomp.ir.Effect.UNKNOWN)) mask = all;
+						else {}
+					}
+					final tr = block.transfer;
+					if (tr == null) continue;
+					else {}
+					final d = tr.decoded;
+					if (d.op == Op.JAL || d.op == Op.BLTZAL || d.op == Op.BGEZAL) callTo(d.target);
+					else if (d.op == Op.J) {
+						if (!ir.byAddress.exists(d.target)) callTo(d.target);   // a tail call
+						else {}
+					} else if (d.isRegisterJump) {
+						if (d.rs == 31) {
+							final ra = d.op == Op.JR ? u.discovery.raJumpOf(fn.entry, d.addr) : null;
+							if (ra != null && !ir.byAddress.exists(ra)) callTo(ra);
+							else {}
+						} else if (d.op == Op.JR && fn.registerReturns.exists(d.addr)) {}
+						else mask = all;      // a call or jump through a register, a table's default
+					} else {}
+				}
+				ownU.set(Vaddr.canonRam(fn.entry), mask);
+				edgesU.set(Vaddr.canonRam(fn.entry), calls);
+			}
+			own.push(ownU);
+			edges.push(edgesU);
+		}
+		// The least fixed point: a function writes what it writes and what its callees write.
+		for (ui in 0...universes.length) for (k in own[ui].keys()) universes[ui].writes.set(k, own[ui].get(k));
+		var changed = true;
+		while (changed) {
+			changed = false;
+			for (ui in 0...universes.length) {
+				final w = universes[ui].writes;
+				for (k in edges[ui].keys()) {
+					var m = w.get(k);
+					if (m == all) continue;
+					else {}
+					for (c in edges[ui].get(k)) {
+						final cw = universes[c.u].writes;
+						m |= cw.exists(c.a) ? cw.get(c.a) : all;
+					}
+					if (m != w.get(k)) {
+						w.set(k, m);
+						changed = true;
+					} else {}
+				}
+			}
+		}
 	}
 
 	/**
@@ -236,7 +353,7 @@ class Program {
 		if (owner != null) {
 			deduplicated++;
 			return '\t/** Identical to `${owner}.${fn.name}`; one body serves both. */\n'
-				+ '\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n'
+				+ '\tpublic static function ${fn.name}(ctx:core.Ctx, entry:Int = 0):Void {\n'
 				+ '\t\t${owner}.${fn.name}(ctx, entry);\n'
 				+ '\t}\n';
 		}
@@ -313,7 +430,41 @@ class Program {
 		buf.add('\tThese rows are the executable\'s. Code the game loads from its disc lives in\n');
 		buf.add('\t`Overlays`, whose windows shadow these addresses while they are resident.\n');
 		buf.add('**/\n');
+		// C++ only (`cxx`, reflaxe.CPP's define): the executable's functions as a native array of
+		// pointers, in handle order, so a kept answer (`FAST`) can hold an index into it and a call
+		// through a register goes straight to its function — not through this class's switch on
+		// the shard and the shard's switch on the slot, which with their prologues were most of a
+		// dynamic call. A function value in Haxe would be a heap-allocated std::function (ADR-0002);
+		// this is a C array the compiler fills at link time. Other targets keep the switches.
+		final exe = universes[0].shards.shards;
+		final fnRefs = [for (sh in exe) for (f in sh.functions) '&${sh.className}::${f.name}'];
+		// Last, the empty state of the CpuState's last answer (`run`): its address is odd, which no
+		// table answers, and this asks the long way, as a miss does.
+		buf.add('@:cppFileCode("typedef void (*RecompsxFn)(core::CpuState*, int);\\n'
+			+ 'static void recompsx_unanswered(core::CpuState* ctx, int entry) { (void)entry; core::Runtime::callOnce(ctx, ctx->_callAt); }\\n'
+			+ 'static const RecompsxFn recompsx_fns[] = {\\n');
+		var col = 0;
+		for (r in fnRefs) {
+			buf.add(r + ',');
+			col++;
+			if (col % 4 == 0) buf.add('\\n');
+			else {}
+		}
+		buf.add('&recompsx_unanswered,\\n};\\n")\n');
 		buf.add('class FnTable {\n');
+		buf.add('\t/** `recompsx_unanswered`\'s place in the native pointer array (C++): after every function. */\n');
+		buf.add('\tstatic inline var NONE:Int = ${fnRefs.length};\n\n');
+		// Where each executable shard starts in that array: flat = SHARD_BASE[shard] + slot.
+		var maxShard = -1;
+		for (sh in exe) if (sh.index > maxShard) maxShard = sh.index;
+		final bases = [for (_ in 0...maxShard + 1) -1];
+		var next = 0;
+		for (sh in exe) {
+			bases[sh.index] = next;
+			next += sh.functions.length;
+		}
+		buf.add('\t/** Where each of the executable\'s shards starts in the native pointer array (C++). */\n');
+		buf.add('\tstatic final SHARD_BASE:Array<Int> = [${bases.join(", ")}];\n\n');
 
 		buf.add('\t/** Block addresses, ascending. */\n');
 		buf.add('\tstatic final ADDRS:Array<Int> = [\n');
@@ -354,9 +505,13 @@ class Program {
 		return row;
 	}
 
-	/** Routes a handle to the shard that owns it, entering at block `entry`. */
+	/** Routes a handle to the shard that owns it, entering at block `entry`. The count is a
+	    diagnostic, kept where the instruction counts are (`recompsx_insns`): on the SH-4 it was
+	    a literal-pool address, a load and a store on every dynamic call. */
 	public static function dispatch(handle:Int, entry:Int, ctx:CpuState):Void {
+		#if recompsx_insns
 		Runtime.dispatches++;
+		#end
 		final slot = handle & 0xFFFFF;
 		switch (handle >>> 20) {
 ");
@@ -392,23 +547,50 @@ class Program {
 		`Runtime.call`, its out-of-line body, the `std::function` and `call` — four frames, each
 		saving registers its cold paths need. On a Dreamcast that was about 150 instructions for
 		every dynamic call, 7% of a frame of Crash Bandicoot: Warped.
+
+		Nothing to test before the lookup. The table is built by `init`, before any guest code
+		runs. And no token can be pending: a generated caller has returned or cleared at every
+		point that may raise one (after each call, pump and trap), and `Runtime.call`, the other way
+		in (`bindRun`), tests before it gets here. Both tests were here too, a load and a branch
+		each on every dynamic call — 2.8 % of Crash 3's generated code between them.
 	**/
 	public static function run(ctx:CpuState, addr:Int):Void {
-		if (ctx.unwindToken != 0) return;
-		else {}
-		if (!flatReady) buildFlat();
-		else {}
 		var target = addr;
 		while (true) {
+			#if cxx
+			// The last answer first (CpuState._callAt): a compare in a line that is always in the
+			// cache, where FAST's slot is wherever the address puts it.
+			if (shim.MemA.likely(ctx._callAt == target)) FnPtr.call(ctx._callFn, ctx, ctx._callBlock);
+			else runFast(ctx, target);
+			#else
 			final at = ((target >>> 2) & 1023) << 4;
 			if (shim.MemA.get32(FAST, at) == target) dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
 			else Runtime.callOnce(ctx, target);
+			#end
 			if (ctx.unwindToken != Runtime.TAIL) return;
 			else {}
 			ctx.unwindToken = 0;
 			target = ctx.tailTarget;
 		}
 	}
+
+	#if cxx
+	/** `run` when the address is not the last one: FAST's answer, kept in the CpuState as the last
+	    one, or the long way. Out of line, so a call site `run` is inlined into carries the compare
+	    and the call, not the table. */
+	@:specifier(\"__attribute__((noinline))\")
+	static function runFast(ctx:CpuState, target:Int):Void {
+		final at = ((target >>> 2) & 1023) << 4;
+		if (shim.MemA.get32(FAST, at) == target) {
+			final fn = shim.MemA.get32(FAST, at + 12);
+			final block = shim.MemA.get32(FAST, at + 8);
+			ctx._callAt = target;
+			ctx._callFn = fn;
+			ctx._callBlock = block;
+			FnPtr.call(fn, ctx, block);
+		} else Runtime.callOnce(ctx, target);
+	}
+	#end
 
 	/**
 		Runs the code at an address. Used for everything the analysis left dynamic.
@@ -449,10 +631,14 @@ class Program {
 		return true;
 	}
 
+	/** A kept answer: the address, its handle and block, and (the spare word) the function's place
+	    in the native pointer array, which `run` calls through on C++. Only the executable's rows
+	    are kept, and every one of those has a place there. */
 	static function keep(at:Int, addr:Int, handle:Int, block:Int):Void {
 		shim.MemA.set32(FAST, at, addr);
 		shim.MemA.set32(FAST, at + 4, handle);
 		shim.MemA.set32(FAST, at + 8, block);
+		shim.MemA.set32(FAST, at + 12, SHARD_BASE[handle >>> 20] + (handle & 0xFFFFF));
 	}
 
 	/** Whether an address is a function entry rather than a block inside one. Diagnostics only. */
@@ -461,6 +647,14 @@ class Program {
 		return row >= 0 && shim.MemA.get32(BLOCKS_F, row << 2) == 0;
 	}
 }
+
+#if cxx
+/** A call through `recompsx_fns`, the array FnTable's C++ file defines (its `@:cppFileCode`). */
+private extern class FnPtr {
+	@:nativeFunctionCode(\"(recompsx_fns[({arg0})](({arg1}), ({arg2})))\")
+	public static function call(index:Int, ctx:CpuState, entry:Int):Void;
+}
+#end
 ");
 		return buf.toString();
 	}
@@ -504,7 +698,21 @@ class Program {
 			shim.MemA.set32(FAST, i << 4, ((i + 1) & 1023) << 2);
 			i++;
 		}
+		#if cxx
+		// And the one the machine's CpuState keeps (`run`).
+		forgetLast(mem.Memory.machine);
+		#end
 	}
+
+	#if cxx
+	/** The CpuState's last answer emptied: an odd address, which no table answers, and
+	    `recompsx_unanswered`, which asks the long way if one is ever called there. */
+	static function forgetLast(m:CpuState):Void {
+		m._callAt = 1;
+		m._callFn = NONE;
+		m._callBlock = 0;
+	}
+	#end
 
 	/** Initialize before guest execution; subsequent calls allocate nothing. */
 	public static function init():Void {

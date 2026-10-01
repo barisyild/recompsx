@@ -6,6 +6,8 @@ import core.TimeBase;
 import shim.Backend;
 import shim.MemA;
 import shim.RawBuf;
+import shim.RawMem;
+import shim.GpuFile;
 
 /**
 	The GPU's register file: the two ports at 1F801810h and 1F801814h, and the state behind them.
@@ -24,6 +26,10 @@ import shim.RawBuf;
 	  poll it to find the field, and a stored value would need a scanline event to update it — this
 	  way the answer is always current and costs one division.
 **/
+// The hot state (shim.GpuFile) must be declared wherever a GPU access is inlined — ioWrite32
+// takes writeGp0 into Memory — and reflaxe does not carry an extern's include along an inlining
+// chain; Gte does the same for its register file.
+@:headerCode("#include \"recompsx_arena.h\"")
 class Gpu {
 	// GP0(E1h) — texture page and drawing attributes, mirrored in GPUSTAT bits 0..10.
 	static var texPage = 0;
@@ -45,10 +51,14 @@ class Gpu {
 	static var irqPending = false;
 
 	// Drawing area and offset. Kept because games read them back through GP1(10h).
-	static var drawAreaTopLeft = 0;
+	static var drawAreaTopLeft(get, set):Int;
+	static inline function get_drawAreaTopLeft():Int return GpuFile.get(7);
+	static inline function set_drawAreaTopLeft(v:Int):Int { GpuFile.set(7, v); return v; }
 	static var drawAreaBottomRight = 0;
 	static var drawOffset = 0;
-	static var textureWindow = 0;
+	static var textureWindow(get, set):Int;
+	static inline function get_textureWindow():Int return GpuFile.get(6);
+	static inline function set_textureWindow(v:Int):Int { GpuFile.set(6, v); return v; }
 
 	// Display origin and ranges, which the scanout will want.
 	static var displayStart = 0;
@@ -69,11 +79,17 @@ class Gpu {
 		Deterministic, and the first evidence that a game is drawing at all — a title screen that
 		submits nothing is a different problem from one that submits and shows nothing.
 	**/
-	public static var wordsReceived(default, null) = 0;
-	public static var commandsReceived(default, null) = 0;
+	public static var wordsReceived(get, set):Int;
+	static inline function get_wordsReceived():Int return GpuFile.get(34);
+	static inline function set_wordsReceived(v:Int):Int { GpuFile.set(34, v); return v; }
+	public static var commandsReceived(get, set):Int;
+	static inline function get_commandsReceived():Int return GpuFile.get(35);
+	static inline function set_commandsReceived(v:Int):Int { GpuFile.set(35, v); return v; }
 
 	/** How many words of the command in progress are still expected. */
-	static var pending = 0;
+	static var pending(get, set):Int;
+	static inline function get_pending():Int return GpuFile.get(31);
+	static inline function set_pending(v:Int):Int { GpuFile.set(31, v); return v; }
 
 	/**
 		A CPU-to-VRAM transfer in flight: GP0(A0h) is a header followed by raw pixel data, and the
@@ -86,7 +102,9 @@ class Gpu {
 		is what this did, renders a game that draws nothing as a game that shows nothing — and the
 		two look identical from outside.
 	**/
-	static var xferLeft = 0;
+	static var xferLeft(get, set):Int;
+	static inline function get_xferLeft():Int return GpuFile.get(32);
+	static inline function set_xferLeft(v:Int):Int { GpuFile.set(32, v); return v; }
 	static var xferX = 0;
 	static var xferY = 0;
 	static var xferW = 0;
@@ -136,10 +154,65 @@ class Gpu {
 	// The texture and blend state last handed to a hardware backend, packed. The ABI latches that
 	// state until the next call, so it is sent only when it differs — a quad's second triangle
 	// never needs it, and runs of primitives from one page and palette do not either.
-	static var sentA = -1;
-	static var sentB = -1;
-	static var sentWindow = -1;
-	static var sentArea = -1;
+	static var sentA(get, set):Int;
+	static inline function get_sentA():Int return GpuFile.get(20);
+	static inline function set_sentA(v:Int):Int { GpuFile.set(20, v); return v; }
+	static var sentB(get, set):Int;
+	static inline function get_sentB():Int return GpuFile.get(21);
+	static inline function set_sentB(v:Int):Int { GpuFile.set(21, v); return v; }
+	static var sentWindow(get, set):Int;
+	static inline function get_sentWindow():Int return GpuFile.get(19);
+	static inline function set_sentWindow(v:Int):Int { GpuFile.set(19, v); return v; }
+	static var sentArea(get, set):Int;
+	static inline function get_sentArea():Int return GpuFile.get(22);
+	static inline function set_sentArea(v:Int):Int { GpuFile.set(22, v); return v; }
+
+	// What the triangle path last sent, by the raw words it came from rather than packed: a
+	// triangle with the same page, palette, flags and drawing area as the last one skips packing
+	// them, which it did for every triangle. `sentTp` of -2 is "nothing sent by a triangle since":
+	// rectHw sends a state of its own and sets it, so the next triangle compares packed again.
+	static var sentTp(get, set):Int;
+	static inline function get_sentTp():Int return GpuFile.get(2);
+	static inline function set_sentTp(v:Int):Int { GpuFile.set(2, v); return v; }
+	static var sentClut(get, set):Int;
+	static inline function get_sentClut():Int return GpuFile.get(3);
+	static inline function set_sentClut(v:Int):Int { GpuFile.set(3, v); return v; }
+	static var sentFlags(get, set):Int;
+	static inline function get_sentFlags():Int return GpuFile.get(4);
+	static inline function set_sentFlags(v:Int):Int { GpuFile.set(4, v); return v; }
+	static var sentAreaWord(get, set):Int;
+	static inline function get_sentAreaWord():Int return GpuFile.get(5);
+	static inline function set_sentAreaWord(v:Int):Int { GpuFile.set(5, v); return v; }
+
+	// Decoded where the words that hold them are written (GP0(E3h)-(E5h), GP1(00h)), for the
+	// triangle path, which decoded them for every primitive: the drawing area's corners and the
+	// drawing offset, sign-extended.
+	static var areaL(get, set):Int;
+	static inline function get_areaL():Int return GpuFile.get(10);
+	static inline function set_areaL(v:Int):Int { GpuFile.set(10, v); return v; }
+	static var areaT(get, set):Int;
+	static inline function get_areaT():Int return GpuFile.get(11);
+	static inline function set_areaT(v:Int):Int { GpuFile.set(11, v); return v; }
+	static var areaR(get, set):Int;
+	static inline function get_areaR():Int return GpuFile.get(12);
+	static inline function set_areaR(v:Int):Int { GpuFile.set(12, v); return v; }
+	static var areaB(get, set):Int;
+	static inline function get_areaB():Int return GpuFile.get(13);
+	static inline function set_areaB(v:Int):Int { GpuFile.set(13, v); return v; }
+	static var offsetX(get, set):Int;
+	static inline function get_offsetX():Int return GpuFile.get(8);
+	static inline function set_offsetX(v:Int):Int { GpuFile.set(8, v); return v; }
+	static var offsetY(get, set):Int;
+	static inline function get_offsetY():Int return GpuFile.get(9);
+	static inline function set_offsetY(v:Int):Int { GpuFile.set(9, v); return v; }
+	// The raw attribute setTexPage and setClut decoded last (-1 after a reset): a primitive naming
+	// the page and palette the last one named skips both decodes.
+	static var tpKey(get, set):Int;
+	static inline function get_tpKey():Int return GpuFile.get(0);
+	static inline function set_tpKey(v:Int):Int { GpuFile.set(0, v); return v; }
+	static var clutKey(get, set):Int;
+	static inline function get_clutKey():Int return GpuFile.get(1);
+	static inline function set_clutKey(v:Int):Int { GpuFile.set(1, v); return v; }
 
 	/** Pixels delivered by upload rather than by rasterisation. */
 	public static var uploaded(default, null) = 0;
@@ -161,13 +234,27 @@ class Gpu {
 		numbers and the portable subset has no structs to pass them in. Set immediately before
 		`triangle`, read only inside it.
 	**/
-	static var texEnabled = false;
-	static var texRaw = false;
-	static var texDepth = 0;        // 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct
-	static var texBaseX = 0;        // in halfwords
-	static var texBaseY = 0;
-	static var clutX = 0;
-	static var clutY = 0;
+	static var texEnabled(get, set):Bool;
+	static inline function get_texEnabled():Bool return GpuFile.get(16) != 0;
+	static inline function set_texEnabled(v:Bool):Bool { GpuFile.set(16, v ? 1 : 0); return v; }
+	static var texRaw(get, set):Bool;
+	static inline function get_texRaw():Bool return GpuFile.get(17) != 0;
+	static inline function set_texRaw(v:Bool):Bool { GpuFile.set(17, v ? 1 : 0); return v; }
+	static var texDepth(get, set):Int;        // 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct
+	static inline function get_texDepth():Int return GpuFile.get(25);
+	static inline function set_texDepth(v:Int):Int { GpuFile.set(25, v); return v; }
+	static var texBaseX(get, set):Int;        // in halfwords
+	static inline function get_texBaseX():Int return GpuFile.get(23);
+	static inline function set_texBaseX(v:Int):Int { GpuFile.set(23, v); return v; }
+	static var texBaseY(get, set):Int;
+	static inline function get_texBaseY():Int return GpuFile.get(24);
+	static inline function set_texBaseY(v:Int):Int { GpuFile.set(24, v); return v; }
+	static var clutX(get, set):Int;
+	static inline function get_clutX():Int return GpuFile.get(26);
+	static inline function set_clutX(v:Int):Int { GpuFile.set(26, v); return v; }
+	static var clutY(get, set):Int;
+	static inline function get_clutY():Int return GpuFile.get(27);
+	static inline function set_clutY(v:Int):Int { GpuFile.set(27, v); return v; }
 
 	/**
 		Whether the primitive blends with what is already there, and how.
@@ -176,15 +263,23 @@ class Gpu {
 		itself through its own texpage word. Whether blending happens at all is the command's own
 		bit 1, and for a textured pixel the texel gets the final say through its bit 15.
 	**/
-	static var semiMode = 0;
-	static var semiTransparent = false;
+	static var semiMode(get, set):Int;
+	static inline function get_semiMode():Int return GpuFile.get(28);
+	static inline function set_semiMode(v:Int):Int { GpuFile.set(28, v); return v; }
+	static var semiTransparent(get, set):Bool;
+	static inline function get_semiTransparent():Bool return GpuFile.get(18) != 0;
+	static inline function set_semiTransparent(v:Bool):Bool { GpuFile.set(18, v ? 1 : 0); return v; }
 
 	/** The command word and its parameters, gathered until the packet is whole. */
 	static var packet:Array<Int>;
-	static var packetLen = 0;
+	static var packetLen(get, set):Int;
+	static inline function get_packetLen():Int return GpuFile.get(33);
+	static inline function set_packetLen(v:Int):Int { GpuFile.set(33, v); return v; }
 
 	/** Primitives actually rasterised, and pixels written. The proof a frame exists. */
-	public static var primitives(default, null) = 0;
+	public static var primitives(get, set):Int;
+	static inline function get_primitives():Int return GpuFile.get(15);
+	static inline function set_primitives(v:Int):Int { GpuFile.set(15, v); return v; }
 	public static var pixels(default, null) = 0;
 
 	/**
@@ -202,7 +297,9 @@ class Gpu {
 		cycle-accurate GPU: a walk roughly as slow as the hardware's is the whole point. Nothing else
 		in the machine reads it.
 	**/
-	static var work = 0;
+	static var work(get, set):Int;
+	static inline function get_work():Int return GpuFile.get(14);
+	static inline function set_work(v:Int):Int { GpuFile.set(14, v); return v; }
 	static inline var TRI_SETUP = 16;
 
 	/** The GPU time owed since the last call, which starts owing afresh. */
@@ -215,10 +312,7 @@ class Gpu {
 	/** A triangle's share, from its edge function — twice its area in pixels — and its bounding
 	    box, which is clipped to the drawing area here. */
 	static inline function triangleWork(twiceArea:Int, loX:Int, hiX:Int, loY:Int, hiY:Int):Void {
-		final l = drawAreaTopLeft & 0x3FF;
-		final t = (drawAreaTopLeft >>> 10) & 0x1FF;
-		final r = drawAreaBottomRight & 0x3FF;
-		final b = (drawAreaBottomRight >>> 10) & 0x1FF;
+		final l = areaL, t = areaT, r = areaR, b = areaB;
 		final w = (hiX < r ? hiX : r) - (loX > l ? loX : l) + 1;
 		final h = (hiY < b ? hiY : b) - (loY > t ? loY : t) + 1;
 		final box = w > 0 && h > 0 ? w * h : 0;
@@ -248,7 +342,9 @@ class Gpu {
 		reference target cannot take this path even by accident. Headless digest runs therefore
 		never see it. See docs/decisions/ADR-0011.
 	**/
-	public static var hw = false;
+	public static var hw(get, set):Bool;
+	static inline function get_hw():Bool return GpuFile.get(29) != 0;
+	static inline function set_hw(v:Bool):Bool { GpuFile.set(29, v ? 1 : 0); return v; }
 
 	/**
 		Hardware mode: the drawing area is VRAM no picture is made of, so what is drawn there is
@@ -268,7 +364,9 @@ class Gpu {
 		shown for the first time is not. The Dreamcast backend's screen_origin decides the same
 		from the same rectangles, so what it would decline to draw is what this draws.
 	**/
-	static var offscreen = false;
+	static var offscreen(get, set):Bool;
+	static inline function get_offscreen():Bool return GpuFile.get(30) != 0;
+	static inline function set_offscreen(v:Bool):Bool { GpuFile.set(30, v ? 1 : 0); return v; }
 
 	// The last two distinct rectangles the scanout presented, newest first. See `shown`.
 	static var shownX0 = 0;
@@ -366,13 +464,30 @@ class Gpu {
 	}
 
 	public static function init():Void {
+		// The register file starts zeroed; these start elsewhere.
+		tpKey = -1;
+		clutKey = -1;
+		sentTp = -2;
+		sentClut = -2;
+		sentFlags = -2;
+		sentAreaWord = -2;
+		sentWindow = -1;
+		sentA = -1;
+		sentB = -1;
+		sentArea = -1;
+		wrapped = RawMem.alloc(48);
 		packet = [for (_ in 0...32) 0];
 		vx = [for (_ in 0...4) 0];
 		vy = [for (_ in 0...4) 0];
 		vc = [for (_ in 0...4) 0];
 		vu = [for (_ in 0...4) 0];
 		vv = [for (_ in 0...4) 0];
-		opCount = [for (_ in 0...256) 0];
+		opCount = RawMem.alloc(256 << 2);
+		wholeWords = RawMem.alloc(0x60 << 2);
+		for (k in 0...0x60) {
+			final op = 0x20 + k;
+			MemA.set32(wholeWords, k << 2, op <= 0x3F ? polygonWords(op) : (op >= 0x60 ? rectangleWords(op) : -1));
+		}
 		Vram.init();
 		shownX0 = 0;
 		shownY0 = 0;
@@ -407,8 +522,16 @@ class Gpu {
 		drawAreaTopLeft = 0;
 		drawAreaBottomRight = 0;
 		drawOffset = 0;
+		areaL = 0;
+		areaT = 0;
+		areaR = 0;
+		areaB = 0;
+		offsetX = 0;
+		offsetY = 0;
 		textureWindow = 0;
 		semiMode = 0;
+		tpKey = -1;
+		clutKey = -1;
 		semiTransparent = false;
 		displayStart = 0;
 		// The retail defaults: a 320x240 window in the middle of the visible area.
@@ -468,16 +591,18 @@ class Gpu {
 
 	/** Parameter words of a packet `writeGp0Words` takes whole — polygons, rectangles — or -1. */
 	static inline function wholeParameters(op:Int):Int {
-		return (op >= 0x20 && op <= 0x3F) ? polygonWords(op)
-			: ((op >= 0x60 && op <= 0x7F) ? rectangleWords(op) : -1);
+		return (op >= 0x20 && op <= 0x7F) ? MemA.get32(wholeWords, (op - 0x20) << 2) : -1;
 	}
+
+	/** wholeParameters for GP0 20h-7Fh, from polygonWords and rectangleWords at init: a load where
+		it was the arithmetic, at every command a list walk sends. Lines (40h-5Fh) are -1. */
+	static var wholeWords:RawBuf;
 
 	/** What `writeGp0` does over a command word and its `n` parameters, in one pass. */
 	static function wholePacket(ram:RawBuf, at:Int, op:Int, n:Int):Void {
 		wordsReceived += n + 1;
 		commandsReceived++;
-		if (opCount != null) opCount[op]++;
-		else {}
+		MemA.set32(opCount, op << 2, MemA.get32(opCount, op << 2) + 1);
 		packetLen = n + 1;
 		if (hw && !offscreen && op < 0x60) polygonHw(ram, at, op);
 		else wholeToPacket(ram, at, op, n);
@@ -490,17 +615,17 @@ class Gpu {
 	}
 
 	/**
-		A polygon packet on the hardware path, read straight from RAM into locals.
+		A polygon packet on the hardware path, read straight from RAM.
 
 		drawPolygon and triangle serve the software rasteriser, whose arrays, winding and giant
 		span loops a backend never needs: on the Dreamcast every hardware triangle paid the whole
 		rasteriser's prologue and a packet copy on the way to two backend calls, ~535 cycles a
-		triangle in Ballistix. This reads the same words in the same order and leaves the same
-		state behind — palette, page, flags and the primitive count — and hands the same
-		triangles over, with the texture state only when it changed (sendState). `packet` is not
-		filled: nothing reads it before the next command overwrites it. An untextured vertex
-		passes u = v = 0 where the software arrays held whatever the last textured one left;
-		backends do not read them for an untextured primitive.
+		triangle in Ballistix. This reads the same words and leaves the same state behind —
+		palette, page, flags and the primitive count — and hands the same triangles over, with
+		the texture state only when it changed (sendState). `packet` is not filled: nothing reads
+		it before the next command overwrites it. An untextured vertex passes u = v = 0 where the
+		software arrays held whatever the last textured one left; backends do not read them for
+		an untextured primitive.
 
 		Kept out of line on C++ (`noinline`). Left to itself the compiler inlined this, the list
 		walk and the DMA register write into one function — `slowWrite32`, 9 KB — and on the SH-4
@@ -510,95 +635,101 @@ class Gpu {
 	**/
 	@:specifier("__attribute__((noinline))")
 	static function polygonHw(ram:RawBuf, at:Int, op:Int):Void {
-		final gouraud = (op & 0x10) != 0;
+		// Every word of the packet from one base, when the packet cannot wrap at the end of RAM
+		// (a polygon is at most twelve words): a load each, where the index masked for the wrap
+		// was an add, a mask and a load a word. A packet that could wrap is copied out first.
+		var src = ram;
+		var at0 = at & 0x1FFFFC;
+		if (MemA.unlikely(at0 > 0x1FFFFC - 44)) {
+			for (k in 0...12) MemA.set32(wrapped, k << 2, MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC));
+			src = wrapped;
+			at0 = 0;
+		} else {}
 		final textured = (op & 0x04) != 0;
-		final w0 = MemA.get32(ram, at & 0x1FFFFC);
-		final flat = w0 & 0xFFFFFF;
-		var i = 1;
-		// vertex 0
-		final p0 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-		i++;
-		var t0 = 0;
+		// A vertex after the first is its colour word with gouraud, its position and its texture
+		// word when textured: `step` bytes on from the one before.
+		final step = (1 + (textured ? 1 : 0) + ((op & 0x10) != 0 ? 1 : 0)) << 2;
+		final first = at0 + 4;      // vertex 0's position word
+		// The palette and the page decode only when they are not the ones decoded last: the
+		// palette rides on vertex 0's texture word, the page on vertex 1's.
 		if (textured) {
-			t0 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-			i++;
-		} else {}
-		// vertex 1
-		var c1 = flat;
-		if (gouraud) {
-			c1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
-			i++;
-		} else {}
-		final p1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-		i++;
-		var t1 = 0;
-		if (textured) {
-			t1 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-			i++;
-		} else {}
-		// vertex 2
-		var c2 = flat;
-		if (gouraud) {
-			c2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
-			i++;
-		} else {}
-		final p2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-		i++;
-		var t2 = 0;
-		if (textured) {
-			t2 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-			i++;
-		} else {}
-		if (textured) {
-			setClut(t0 >>> 16);
-			setTexPage(t1 >>> 16);
+			final ca = MemA.get32(src, first + 4) >>> 16;
+			if ((ca & 0x7FFF) != clutKey) setClut(ca);
+			else {}
+			final tp = MemA.get32(src, first + step + 4) >>> 16;
+			if ((tp & 0x1FF) != tpKey) setTexPage(tp);
+			else {}
 		} else {}
 		texEnabled = textured;
 		texRaw = (op & 0x01) != 0;
 		semiTransparent = (op & 0x02) != 0;
-		final x0 = sx(p0), y0 = sy(p0), x1 = sx(p1), y1 = sy(p1), x2 = sx(p2), y2 = sy(p2);
-		triHw(x0, y0, flat, t0 & 0xFF, (t0 >>> 8) & 0xFF,
-			x1, y1, c1, t1 & 0xFF, (t1 >>> 8) & 0xFF,
-			x2, y2, c2, t2 & 0xFF, (t2 >>> 8) & 0xFF);
-		if ((op & 0x08) != 0) quadHw(ram, at, i, gouraud, textured, flat, x1, y1, c1, t1, x2, y2, c2, t2);
+		// One copy per kind of vertex (gouraud, textured) was tried, to take every test of `op`
+		// out of the triangle: 0.13 ms a frame slower on Crash 3, the four copies' code the cost.
+		triPacket(src, at0, first, first + step, first + (step << 1), op);
+		// A quad's second triangle is (1, 2, 3), as drawPolygon draws it.
+		if ((op & 0x08) != 0) triPacket(src, at0, first + step, first + (step << 1), first + step * 3, op);
 		else {}
 	}
 
-	/** A quad's fourth vertex and its second triangle, (1, 2, 3) as drawPolygon draws it. */
-	static function quadHw(ram:RawBuf, at:Int, i0:Int, gouraud:Bool, textured:Bool, flat:Int,
-			x1:Int, y1:Int, c1:Int, t1:Int, x2:Int, y2:Int, c2:Int, t2:Int):Void {
-		var i = i0;
-		var c3 = flat;
-		if (gouraud) {
-			c3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC) & 0xFFFFFF;
-			i++;
-		} else {}
-		final p3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-		i++;
-		var t3 = 0;
-		if (textured) t3 = MemA.get32(ram, (at + (i << 2)) & 0x1FFFFC);
-		else {}
-		triHw(x1, y1, c1, t1 & 0xFF, (t1 >>> 8) & 0xFF,
-			x2, y2, c2, t2 & 0xFF, (t2 >>> 8) & 0xFF,
-			sx(p3), sy(p3), c3, t3 & 0xFF, (t3 >>> 8) & 0xFF);
-	}
+	/** The copy of a packet that could wrap at the end of RAM (polygonHw). */
+	static var wrapped:RawBuf;
 
-	/** triangle's hardware branch on explicit vertices: the same two rejects, count and calls. */
-	static inline function triHw(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
-			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
-			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {
+	/**
+		One triangle of a polygon packet, its vertices named by the offsets of their position
+		words in `src`: the same two rejects, count and calls as `triangle`.
+
+		Only the positions are read before the rejects; each vertex's colour and texture word is
+		read where the backend takes it. On the SH-4 this function's registers are the cost: the
+		packet's nine or so words held from the top through the tests, the work estimate and the
+		state compare, beside six coordinates and a bounding box, spilled to a stack frame too
+		large for a displacement — Crash 3's triangles ran ~445 cycles each here. A vertex's
+		colour is the word before its position with gouraud (vertex 0's is the command word, which
+		is exactly there), the command word's otherwise; its texture word is the one after, and
+		read always — for an untextured packet that is a word of the packet or the one after it,
+		within the twelve polygonHw made sure of — then dropped. Reading the positions again
+		there, rather than holding them through triState's call, was tried: 0.06 ms slower. So
+		was the backend's half in a function of its own (noinline, the positions read again):
+		0.06 ms slower too (docs/perf/dreamcast-ledger.md, E-035).
+	**/
+	static inline function triPacket(src:RawBuf, at0:Int, a:Int, b:Int, c:Int, op:Int):Void {
+		final pa = MemA.get32(src, a), pb = MemA.get32(src, b), pc = MemA.get32(src, c);
+		final x0 = sx(pa), y0 = sy(pa), x1 = sx(pb), y1 = sy(pb), x2 = sx(pc), y2 = sy(pc);
 		final loX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
 		final hiX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
 		final loY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
 		final hiY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
 		final e = edge(x0, y0, x1, y1, x2, y2);
-		if (hiX - loX <= 1023 && hiY - loY <= 511 && e != 0) {
+		if (MemA.likely(hiX - loX <= 1023 && hiY - loY <= 511 && e != 0)) {
 			primitives++;
 			triangleWork(e, loX, hiX, loY, hiY);
-			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode,
-				(texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0),
-				textureWindow, drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
-			Backend.gpuTri(x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
+			triState();
+			final gouraud = (op & 0x10) != 0;
+			final tm = (op & 0x04) != 0 ? 0xFFFF : 0;
+			final t0 = MemA.get32(src, a + 4) & tm;
+			final t1 = MemA.get32(src, b + 4) & tm;
+			final t2 = MemA.get32(src, c + 4) & tm;
+			Backend.gpuTri(x0, y0, MemA.get32(src, gouraud ? a - 4 : at0) & 0xFFFFFF, t0 & 0xFF, t0 >>> 8,
+				x1, y1, MemA.get32(src, gouraud ? b - 4 : at0) & 0xFFFFFF, t1 & 0xFF, t1 >>> 8,
+				x2, y2, MemA.get32(src, gouraud ? c - 4 : at0) & 0xFFFFFF, t2 & 0xFF, t2 >>> 8);
+		} else {}
+	}
+
+	/**
+		sendState for a triangle, compared by the words its state came from: the page and palette
+		attributes decoded last, the flags, the texture window and the drawing area. When they
+		are the ones the last triangle sent, nothing changed; otherwise sendState compares packed
+		as before, so what reaches the backend is what it always was.
+	**/
+	static inline function triState():Void {
+		final flags = (texEnabled ? 1 : 0) | (semiTransparent ? 2 : 0) | (texRaw ? 4 : 0);
+		if (tpKey != sentTp || clutKey != sentClut || flags != sentFlags
+				|| textureWindow != sentWindow || drawAreaTopLeft != sentAreaWord) {
+			sentTp = tpKey;
+			sentClut = clutKey;
+			sentFlags = flags;
+			sentAreaWord = drawAreaTopLeft;
+			sendState(texBaseX, texBaseY, texDepth, clutX, clutY, semiMode, flags, textureWindow,
+				areaL, areaT);
 		} else {}
 	}
 
@@ -916,16 +1047,12 @@ class Gpu {
 	}
 
 	static inline function sx(word:Int):Int {
-		// 11-bit signed, plus the drawing offset.
-		return signed11(word & 0x7FF) + signed11(drawOffset & 0x7FF);
+		// 11-bit signed, plus the drawing offset (decoded when GP0(E5h) set it).
+		return ((word << 21) >> 21) + offsetX;
 	}
 
 	static inline function sy(word:Int):Int {
-		return signed11((word >>> 16) & 0x7FF) + signed11((drawOffset >>> 11) & 0x7FF);
-	}
-
-	static inline function signed11(v:Int):Int {
-		return (v & 0x400) != 0 ? v - 0x800 : v;
+		return ((word << 5) >> 21) + offsetY;
 	}
 
 	static function drawPolygon(op:Int):Void {
@@ -972,6 +1099,7 @@ class Gpu {
 	static function setClut(attr:Int):Void {
 		clutX = (attr & 0x3F) << 4;
 		clutY = (attr >>> 6) & 0x1FF;
+		clutKey = attr & 0x7FFF;
 	}
 
 	/** The texture page a primitive names for itself, in the same layout GP0(E1h) uses. */
@@ -980,6 +1108,7 @@ class Gpu {
 		texBaseY = ((attr >>> 4) & 1) << 8;
 		semiMode = (attr >>> 5) & 3;
 		texDepth = (attr >>> 7) & 3;
+		tpKey = attr & 0x1FF;
 	}
 
 	/**
@@ -1556,6 +1685,7 @@ class Gpu {
 	static function rectHw(x:Int, y:Int, w:Int, h:Int, colour:Int):Void {
 		sendState(0, 0, 0, 0, 0, semiMode, semiTransparent ? 2 : 0, 0,
 			drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF);
+		sentTp = -2;        // the next triangle compares packed again (triState)
 		// The ABI's colour is 24-bit BGR, as a triangle's is; `colour` is the 15-bit word VRAM
 		// holds. Widened, not taken from the command: a rectangle is not dithered, so the five
 		// bits per channel VRAM keeps are exactly what the hardware shows. Handing the 15-bit
@@ -1679,17 +1809,16 @@ class Gpu {
 	**/
 	/** How many of each GP0 opcode arrived. A drawable command that never becomes a primitive is
 		a rasteriser dropping work, which looks exactly like a game that draws nothing. */
-	public static var opCount:Array<Int>;
+	public static var opCount:RawBuf;
 
 	static function command(v:Int):Void {
 		final op = v >>> 24;
-		if (opCount != null) opCount[op]++;
-		else {}
+		MemA.set32(opCount, op << 2, MemA.get32(opCount, op << 2) + 1);
 		if (op == 0xE1) setDrawMode(v);
 		else if (op == 0xE2) textureWindow = v & 0xFFFFF;
 		else if (op == 0xE3) setDrawArea(v, drawAreaBottomRight);
 		else if (op == 0xE4) setDrawArea(drawAreaTopLeft, v);
-		else if (op == 0xE5) drawOffset = v & 0x3FFFFF;
+		else if (op == 0xE5) setDrawOffset(v);
 		else if (op == 0xE6) setMaskBits(v);
 		else if (op == 0x1F) raiseIrq();
 		else if (op == 0x00 || op == 0x01 || (op >= 0x03 && op <= 0x1E)) {}   // NOPs
@@ -1701,9 +1830,20 @@ class Gpu {
 		the software rasteriser does; without that, a double-buffered game's geometry reaches
 		past its drawing buffer into the buffer on screen.
 	**/
+	/** GP0(E5h): X in bits 0-10 and Y in 11-21, both signed. */
+	static function setDrawOffset(v:Int):Void {
+		drawOffset = v & 0x3FFFFF;
+		offsetX = (drawOffset << 21) >> 21;
+		offsetY = (drawOffset << 10) >> 21;
+	}
+
 	static function setDrawArea(topLeft:Int, bottomRight:Int):Void {
 		drawAreaTopLeft = topLeft & 0xFFFFF;
 		drawAreaBottomRight = bottomRight & 0xFFFFF;
+		areaL = drawAreaTopLeft & 0x3FF;
+		areaT = (drawAreaTopLeft >>> 10) & 0x1FF;
+		areaR = drawAreaBottomRight & 0x3FF;
+		areaB = (drawAreaBottomRight >>> 10) & 0x1FF;
 		if (hw) Backend.gpuClip(drawAreaTopLeft & 0x3FF, (drawAreaTopLeft >>> 10) & 0x1FF,
 			drawAreaBottomRight & 0x3FF, (drawAreaBottomRight >>> 10) & 0x1FF);
 		else {}

@@ -32,6 +32,20 @@ class TestCodegen {
 		d.run(false);
 		final emitter = new Emitter(image, d, optimized);
 		emitter.staticTargetOf = a -> d.functions.exists(a) ? cls : null;
+		// Program's write summaries, for the leaves a fixture calls: what they write, and every
+		// register for a function that calls anything itself.
+		emitter.writesOf = a -> {
+			final f = d.functions.get(a);
+			if (f == null) return Emitter.ALL_REGS;
+			else {}
+			var m = 0;
+			for (b in new recomp.ir.FunctionIR(f, image).blocks) for (x in b.instructions) {
+				if (x.effects.has(recomp.ir.Effect.CALL)) return Emitter.ALL_REGS;
+				else {}
+				m |= (x.writes : Int);
+			}
+			return m;
+		};
 		final order = [for (a in d.functions.keys()) a];
 		order.sort((a, b) -> a - b);
 		var first = "";
@@ -141,7 +155,7 @@ class TestCodegen {
 			imm(0x23, 11, 29, -4), imm(9, 29, 29, -4),
 			imm(0x23, 12, 29, 0), JR, 0]);
 		// A GTE command word is decoded at build time: RTPS with sf=1, then a word no operation owns.
-		final gte = add("gteDirect", [0x4a180001, 0x4a000002, JR, 0]);
+		final gte = add("gteDirect", [0x4a180001, 0x4a000002, 0x4a000006, JR, 0]);
 		final dead = add("deadWrites", [
 			imm(9, 8, 0, 1), imm(9, 8, 0, 2), imm(9, 2, 8, 3)]);
 		// libetc's VSync, hand-assembled: a timeout in a stack slot, a counter polled through a1
@@ -189,11 +203,40 @@ class TestCodegen {
 			imm(9, 3, 0, 9), JR, 0,
 			JR, imm(9, 3, 0, 7),
 			JR, alu(0x21, 2, 3, 0)]);
+		// A pointer walked through memory: two loads a turn through a0, then a0 += 8. The step
+		// moves a0's span (Memory.spanStep) instead of taking it again.
+		final walk = add("pointerWalk", [alu(0x21, 2, 0, 0),
+			imm(0x23, 8, 4, 0), imm(0x23, 9, 4, 4), imm(9, 4, 4, 8), alu(0x21, 2, 2, 8),
+			imm(9, 5, 5, -1), imm(7, 0, 5, -6), alu(0x21, 2, 2, 9), JR, 0]);
+		// A call through a register the function built from a constant: guessed, and called
+		// directly under a compare when optimizing; the callee writes only t3 and v1, so the span
+		// on a0 the caller reads through after the call is not taken again on that arm.
+		final gc = next;
+		final guessed = add("guessedCall", [imm(15, 23, 0, (gc + 48) >>> 16), imm(13, 23, 23, (gc + 48) & 0xffff),
+			imm(0x23, 8, 4, 0), imm(0x23, 9, 4, 4), alu(9, 31, 23, 0), 0,
+			imm(0x23, 10, 4, 8), alu(0x21, 2, 8, 9), alu(0x21, 2, 2, 10), JR, 0, 0,
+			imm(9, 11, 0, 5), JR, alu(0x21, 3, 11, 0)], [48]);
 		if (check) {
+			Assert.equals(walk.indexOf('Memory.spanStep(') >= 0, opt, "a stepped pointer keeps its span");
+			Assert.equals(guessed.indexOf('== 0x${StringTools.hex(gc + 48, 8).toLowerCase()})) {') >= 0
+				|| guessed.indexOf('== ${gc + 48})) {') >= 0 || guessed.indexOf('== 0x${StringTools.hex(gc + 48, 8)})) {') >= 0, opt,
+				"a register call to the function it was built from goes there directly, under a compare");
+			final fast = guessed.indexOf('CodegenOptimized.f_');
+			final slow = guessed.indexOf('} else {', fast);
+			Assert.equals(fast >= 0 && slow > fast && guessed.substring(fast, slow).indexOf('Memory.span(') < 0
+				&& guessed.indexOf('Memory.span(', slow) > slow, opt,
+				"a span the callee cannot change is kept on the direct arm, taken again on the other");
 			Assert.isTrue(loop.indexOf(opt ? 'var a0 = ctx.a0' : 'ctx.a0') >= 0, "a leaf keeps its registers in locals when optimizing");
 			Assert.isTrue(stale.indexOf('var v1') < 0 && stale.indexOf('ctx.v1 = 5;') >= 0, "a function that calls keeps them in CpuState");
 			Assert.equals(loop.indexOf('switch (bb)') < 0, opt, "linear loop uses native control flow");
-			Assert.isTrue(loop.indexOf('ctx.cycles = (ctx.cycles +') >= 0, "cycles wrap on both targets");
+			Assert.isTrue(loop.indexOf(opt ? 'cyc = (cyc +' : 'ctx.cycles = (ctx.cycles +') >= 0, "cycles wrap on both targets");
+			// An optimized function counts in its local `cyc`: CpuState has it before a call and
+			// the function reads it back after, and a load's slow path is handed it.
+			Assert.equals(nonlocal.indexOf('var cyc = ctx.cycles;') >= 0, opt, "the clock in a local when optimizing");
+			Assert.equals(nonlocal.indexOf('ctx.cycles = cyc;\n') >= 0 && nonlocal.indexOf('cyc = ctx.cycles;\n') >= 0, opt,
+				"the clock written before a call and read back after it");
+			Assert.equals(nonlocal.indexOf('Memory.read32t(') >= 0 || nonlocal.indexOf('Memory.read32f(') >= 0, opt,
+				"a load's slow path is handed the clock");
 			Assert.equals(fused.indexOf('Ops.multLo(ctx') >= 0, opt, "fused signed multiply low");
 			Assert.equals(fused.indexOf('Ops.multHi(ctx') >= 0, opt, "fused signed multiply high");
 			Assert.equals(fused.indexOf('Ops.multuLo(ctx') >= 0, opt, "fused unsigned multiply low");
@@ -211,9 +254,11 @@ class TestCodegen {
 			Assert.equals(multi.indexOf('switch (bb)') < 0, opt, "multi-block loop needs no dispatcher");
 			Assert.equals(multi.indexOf('; break;') >= 0, opt, "loop exit records its target and breaks");
 			Assert.isTrue(dead.indexOf('t0 = 2;') >= 0, "live pure write retained");
-			Assert.isTrue(gte.indexOf('Gte.cmdRtps(12, false);') >= 0, "known GTE command called by name");
+			Assert.equals(gte.indexOf('Gte.cmdRtps(12, false);') >= 0, !opt, "known GTE command called by name");
+			Assert.equals(gte.indexOf('gte.GteQuick.rtps(12, false);') >= 0, opt, "RTPS runs at its call site when optimizing");
 			Assert.isTrue(gte.indexOf('Gte.execute(ctx, 0x00000002);') >= 0, "unknown GTE command falls back to execute");
-			Assert.equals(idle.indexOf('core.IdleLoop.untilEvent(ctx.cycles, ctx.nextEvent, ') >= 0, opt, "idle loop prologue when optimizing");
+			Assert.equals(gte.indexOf('gte.GteQuick.nclip();') >= 0, opt, "NCLIP runs at its call site when optimizing");
+			Assert.equals(idle.indexOf('core.IdleLoop.untilEvent(cyc, ctx.nextEvent, ') >= 0, opt, "idle loop prologue when optimizing");
 			Assert.equals(idle.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "idle loop counter exit");
 			Assert.equals(reload.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "stored-and-reloaded counter exit");
 			Assert.equals(reload.indexOf('idle_v0 = idleStored;') >= 0, opt, "a reload yields the stored count in the dry turn");

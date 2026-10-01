@@ -191,6 +191,33 @@ class Codegen {
 		else CodegenReference.staleAcrossCalls(ctx);
 	}
 
+	/** A pointer walked two words a turn (Memory.spanStep): from `start`, `turns` turns, over
+	    words that are their own addresses' low halves plus `salt`, so a word read from the wrong
+	    place changes the sum. */
+	static function runPointerWalk(ctx:CpuState, opt:Bool, start:Int, turns:Int, salt:Int):Void {
+		reset(ctx);
+		for (k in 0...turns * 2) {
+			final a = (start + (k << 2)) | 0;
+			Memory.write32(a, ((a & 0xFFFF) + salt) | 0);
+		}
+		ctx.a0 = start;
+		ctx.a1 = turns;
+		if (opt) CodegenOptimized.pointerWalk(ctx);
+		else CodegenReference.pointerWalk(ctx);
+	}
+
+	/** A call through a register the fixture sets to its callee: direct under a guard when
+	    optimized, with the span the caller reads through kept across it (Emitter.jalrGuess). */
+	static function runGuessedCall(ctx:CpuState, opt:Bool):Void {
+		reset(ctx);
+		ctx.a0 = 0x80040100;
+		Memory.write32(0x80040100, 10);
+		Memory.write32(0x80040104, 20);
+		Memory.write32(0x80040108, 30);
+		if (opt) CodegenOptimized.guessedCall(ctx);
+		else CodegenReference.guessedCall(ctx);
+	}
+
 	static function runDeadWrites(ctx:CpuState, opt:Bool):Void {
 		reset(ctx);
 		if (opt) CodegenOptimized.deadWrites(ctx);
@@ -299,6 +326,21 @@ class Codegen {
 		runDeadWrites(b, true);
 		compare(a, b);
 		Conf.expect("dead-write result", b.v0, 5);
+		// Through RAM, then across the end of RAM into its first mirror (the step leaves the
+		// region, the next turn takes the span again from the new value), then the scratchpad.
+		for (w in [[0x80040200, 5, 7], [0x801FFFF0, 3, 11], [0x1F800100, 4, 13]]) {
+			runPointerWalk(a, false, w[0], w[1], w[2]);
+			runPointerWalk(b, true, w[0], w[1], w[2]);
+			compare(a, b);
+			var sum = 0;
+			for (k in 0...w[1] * 2) sum = (sum + Memory.read32((w[0] + (k << 2)) | 0)) | 0;
+			Conf.expect("a walked pointer reads every word", b.v0, sum);
+		}
+		runGuessedCall(a, false);
+		runGuessedCall(b, true);
+		compare(a, b);
+		Conf.expect("reads through the kept span after a guessed call", b.v0, 60);
+		Conf.expect("the guessed callee ran", b.v1, 5);
 		for (normal in [false, true]) {
 			runNonlocal(a, false, normal);
 			runNonlocal(b, true, normal);

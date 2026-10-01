@@ -15,11 +15,61 @@
 #include "backend_c_api.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int          g_argc;
 static const char** g_argv;
 
-void bp_set_args(int argc, const char** argv) { g_argc = argc; g_argv = argv; }
+/* `--gpu-hash N`: this backend says it draws (BP_CAP_GPU_DRAW), so a run with `--video-hw` takes
+ * the runtime's hardware path, and every bp_gpu_* call folds its arguments into one FNV-1a hash,
+ * printed when the run ends at its Nth present. Two builds that print the same hash handed a
+ * backend the same primitives and state in the same order: how a change to that path is shown to
+ * change nothing. (`--headless-hash` cannot stop it: a run that hashes emulated VRAM never takes
+ * the hardware path, since the backend then draws what the software rasteriser would have.) */
+static int      g_gpu_hashing, g_gpu_frames;
+static long     g_gpu_presents, g_gpu_stop;
+/* FNV-1a's offset basis with its last digit missing (14695981039346656037): kept, since every hash
+ * recorded so far was made from it, and the JavaScript shim's `--gpu-hash` starts from it too. */
+static uint64_t g_gpu_hash = 1469598103934665603ull;
+static uint64_t g_gpu_calls;
+static uint64_t g_gpu_trace;      /* `--gpu-hash-trace N`: the first N calls printed, value by value */
+
+static void gpu_mix(int v) {
+    if (g_gpu_calls <= g_gpu_trace) printf(" %d", v);
+    for (int k = 0; k < 4; k++) {
+        g_gpu_hash ^= (uint64_t)((unsigned)v >> (8 * k) & 0xFFu);
+        g_gpu_hash *= 1099511628211ull;
+    }
+}
+static void gpu_call(int tag) {
+    g_gpu_calls++;
+    if (g_gpu_calls <= g_gpu_trace) printf("\ngpu-call %llu:", (unsigned long long)g_gpu_calls);
+    gpu_mix(tag);
+}
+static void gpu_hash_report(void) {
+    printf("[info] gpu-stream hash %016llx over %llu calls\n",
+           (unsigned long long)g_gpu_hash, (unsigned long long)g_gpu_calls);
+    fflush(stdout);
+}
+
+void bp_set_args(int argc, const char** argv) {
+    g_argc = argc; g_argv = argv;
+    /* `--gpu-hash-frames` as well: the running hash at every present, one line each, to find the
+     * first frame at which two builds — two targets — hand the backend different things. */
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--gpu-hash-frames") == 0) g_gpu_frames = 1;
+        if (strcmp(argv[i], "--gpu-hash-trace") == 0 && i + 1 < argc)
+            g_gpu_trace = strtoull(argv[i + 1], NULL, 10);
+    }
+    for (int i = 0; i < argc; i++)
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'g' && argv[i][3] == 'p'
+            && argv[i][4] == 'u' && argv[i][5] == '-' && argv[i][6] == 'h' && argv[i][7] == 'a'
+            && argv[i][8] == 's' && argv[i][9] == 'h' && argv[i][10] == 0 && !g_gpu_hashing) {
+            g_gpu_hashing = 1;
+            g_gpu_stop = i + 1 < argc ? strtol(argv[i + 1], NULL, 10) : 0;
+            atexit(gpu_hash_report);
+        }
+}
 int  bp_arg_count(void) { return g_argc; }
 const char* bp_arg(int index) { return (index >= 0 && index < g_argc) ? g_argv[index] : NULL; }
 
@@ -33,37 +83,59 @@ void bp_exit_to_menu(void) {
 int bp_caps(int cap_id) {
     switch (cap_id) {
         case BP_CAP_MAX_PADS: return 4;   /* pads are simulated from replay data, not hardware */
+        case BP_CAP_GPU_DRAW: return g_gpu_hashing;
         default:              return 0;
     }
 }
 
 void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags) {
     (void)vram; (void)sx; (void)sy; (void)sw; (void)sh; (void)flags;
+    if (g_gpu_hashing && g_gpu_stop > 0) {
+        ++g_gpu_presents;
+        if (g_gpu_frames)
+            printf("gpu-frame %ld %016llx %llu\n", g_gpu_presents, (unsigned long long)g_gpu_hash,
+                   (unsigned long long)g_gpu_calls);
+        if (g_gpu_presents >= g_gpu_stop) exit(0);
+    }
 }
 
-/* No rasteriser here, and bp_caps says so, so the runtime never calls these. They exist because
- * the ABI is the contract and a backend answers all of it. */
+/* No rasteriser here, and bp_caps says so, so the runtime never calls these — unless `--gpu-hash`
+ * asked for their stream to be hashed (above). They exist because the ABI is the contract and a
+ * backend answers all of it. */
 void bp_gpu_vram(const uint16_t* vram) { (void)vram; }
 void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
                   int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
                   int draw_x, int draw_y) {
-    (void)tex_base_x; (void)tex_base_y; (void)tex_depth;
-    (void)clut_x; (void)clut_y; (void)semi_mode; (void)flags; (void)tex_window;
-    (void)draw_x; (void)draw_y;
+    if (!g_gpu_hashing) return;
+    gpu_call(2); gpu_mix(tex_base_x); gpu_mix(tex_base_y); gpu_mix(tex_depth); gpu_mix(clut_x);
+    gpu_mix(clut_y); gpu_mix(semi_mode); gpu_mix(flags); gpu_mix(tex_window); gpu_mix(draw_x);
+    gpu_mix(draw_y);
 }
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2) {
-    (void)x0; (void)y0; (void)c0; (void)u0; (void)v0;
-    (void)x1; (void)y1; (void)c1; (void)u1; (void)v1;
-    (void)x2; (void)y2; (void)c2; (void)u2; (void)v2;
+    if (!g_gpu_hashing) return;
+    gpu_call(1); gpu_mix(x0); gpu_mix(y0); gpu_mix(c0); gpu_mix(u0); gpu_mix(v0);
+    gpu_mix(x1); gpu_mix(y1); gpu_mix(c1); gpu_mix(u1); gpu_mix(v1);
+    gpu_mix(x2); gpu_mix(y2); gpu_mix(c2); gpu_mix(u2); gpu_mix(v2);
 }
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
-    (void)x; (void)y; (void)w; (void)h; (void)bgr; (void)semi; (void)semi_mode;
+    if (!g_gpu_hashing) return;
+    gpu_call(3); gpu_mix(x); gpu_mix(y); gpu_mix(w); gpu_mix(h); gpu_mix(bgr); gpu_mix(semi);
+    gpu_mix(semi_mode);
 }
-void bp_gpu_dirty(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
-void bp_gpu_clip(int x0, int y0, int x1, int y1) { (void)x0; (void)y0; (void)x1; (void)y1; }
-void bp_gpu_mask(int set_bit, int check_bit) { (void)set_bit; (void)check_bit; }
+void bp_gpu_dirty(int x, int y, int w, int h) {
+    if (!g_gpu_hashing) return;
+    gpu_call(4); gpu_mix(x); gpu_mix(y); gpu_mix(w); gpu_mix(h);
+}
+void bp_gpu_clip(int x0, int y0, int x1, int y1) {
+    if (!g_gpu_hashing) return;
+    gpu_call(5); gpu_mix(x0); gpu_mix(y0); gpu_mix(x1); gpu_mix(y1);
+}
+void bp_gpu_mask(int set_bit, int check_bit) {
+    if (!g_gpu_hashing) return;
+    gpu_call(6); gpu_mix(set_bit); gpu_mix(check_bit);
+}
 
 void bp_audio_push(const int16_t* frames, int frame_count) { (void)frames; (void)frame_count; }
 int  bp_audio_buffered(void) { return 0; }

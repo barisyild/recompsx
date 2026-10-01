@@ -9,7 +9,7 @@ const uint16_t* g_vram;          /* emulated VRAM, borrowed; NULL until armed */
 gcmd_t   g_cmds[GPU_MAX_CMDS];
 int      g_cmd_count;
 gstate_t g_states[GPU_MAX_STATES];
-static int      g_state_count;
+int      g_state_count;
 static int      g_cmd_overflowed;
 /* Set when a frame has been presented, cleared by the next primitive to arrive. It is what makes
  * the geometry persist: a PlayStation's framebuffer keeps what was drawn into it until something
@@ -40,8 +40,8 @@ int      g_scene_dirty = 1;
 #define HDRC_N (1 << HDRC_BITS)
 typedef struct {
     pvr_ptr_t mem;
-    int       fmt, dim;
-    uint8_t   flags, semi_mode, used, over, kind;
+    int       fmt;
+    uint32_t  key;      /* the rest of the binding in one word (hdr_key); 0 for a free slot */
     float     alpha;
     pvr_poly_hdr_t hdr;
 } ghdr_t;
@@ -54,11 +54,17 @@ int    g_hdr_hits, g_hdr_compiles;
  * untextured white turning each pixel under it into its complement (1 - B). */
 enum { HK_NORMAL = 0, HK_OPAQUE = 1, HK_ADD = 2, HK_INVERT = 3 };
 
-static int hdr_slot(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind) {
-    uint32_t h = (uint32_t)(uintptr_t)mem + (uint32_t)over * 0x9E3779B9u + (uint32_t)kind * 0x85EBCA6Bu;
-    h = h * 2654435761u + (uint32_t)fmt;
-    h = h * 2654435761u + (uint32_t)dim;
-    h = h * 2654435761u + ((uint32_t)s->flags << 8) + (uint32_t)s->semi_mode;
+/* A header's binding less its texture and format: the size (at most 1024), the state's flags and
+ * blend, the pass and the kind, and a bit that no free slot has. One compare where there were six,
+ * and two multiplies of the hash where there were four, each waiting on the one before: the cache
+ * answers every run of every frame, ~400 times a frame in Crash Bash, and it nearly always hits. */
+static inline uint32_t hdr_key(int dim, const gstate_t* s, int over, int kind) {
+    return (uint32_t)dim | ((uint32_t)s->flags << 11) | ((uint32_t)s->semi_mode << 19)
+         | ((uint32_t)over << 23) | ((uint32_t)kind << 24) | (1u << 27);
+}
+
+static inline int hdr_slot(pvr_ptr_t mem, int fmt, uint32_t key) {
+    const uint32_t h = (((uint32_t)(uintptr_t)mem ^ (uint32_t)fmt) * 2654435761u ^ key) * 0x85EBCA6Bu;
     return (int)(h >> (32 - HDRC_BITS));
 }
 
@@ -112,10 +118,28 @@ static inline int bgr_brightens(uint32_t c) {
  *  index into the emptied one. */
 static int g_clip_x0, g_clip_y0, g_clip_x1 = 1023, g_clip_y1 = 511;
 
+/* The new frame's first primitive, out of line and cold: inlined into the triangle path it was a
+ * call site every primitive's values had to survive, and they went to the stack for it. */
+__attribute__((noinline, cold)) static void begin_frame(void);
 static inline void begin_frame_if_needed(void) {
-    if(!g_frame_shown) return;
+    if(__builtin_expect(g_frame_shown, 0)) begin_frame();
+    else {}
+}
+
+/* The frame's fill rectangles by record index, and how many VRAM marks it has: present_frame asks
+ * for the last fill covering the picture and for marks after it, and walking every record for
+ * those — a cache line each, long evicted — was 0.2 ms a frame of Crash 3's title screen under the
+ * cache model, which has ~1,100 records and no covering fill (E-045). Rectangles are never moved
+ * once recorded (mark_vram compacts only the trailing marks); a frame with more than the list holds
+ * walks the records as before. The mark count is an upper bound (compaction can remove marks). */
+#define RECT_KEEP 1024
+static uint16_t g_rect_at[RECT_KEEP];
+static int      g_rect_n, g_rect_over, g_marks;
+
+static void begin_frame(void) {
     g_frame_shown = 0;
     g_cmd_count = 0;
+    g_rect_n = 0; g_rect_over = 0; g_marks = 0;
     /* The latched state carries over as the new frame's first entry: the ABI latches it until
      * the next bp_gpu_state, and the runtime now sends one only when it changes, so the first
      * primitive of a frame may well arrive under the last frame's state. */
@@ -123,6 +147,7 @@ static inline void begin_frame_if_needed(void) {
         if(g_state_count > 1) shz_memcpy32_1(&g_states[0], &g_states[g_state_count - 1]);
         else {}
         g_state_count = 1;
+        g_states[0].tris = 0;       /* the new frame's count starts here */
     } else {}
 }
 
@@ -162,6 +187,8 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
     s->draw_y = (int16_t)draw_y;
     s->clip_x0 = (int16_t)g_clip_x0; s->clip_y0 = (int16_t)g_clip_y0;
     s->clip_x1 = (int16_t)g_clip_x1; s->clip_y1 = (int16_t)g_clip_y1;
+    s->pad = 0;
+    s->tris = 0;
 }
 
 /* A new record's line, allocated in the cache without a read (see gcmd_t). The caller writes
@@ -181,11 +208,19 @@ static inline gcmd_t* cmd_new(void) {
     return c;
 }
 
+/* Forced inline (LTO takes it into the runtime's triangle path, polygonHw): the count below made
+ * GCC stop inlining it on its own, and as a call its fifteen arguments went through the stack —
+ * +0.49 ms a frame of Crash 3 against the 0.22 the count saves. */
+__attribute__((always_inline))
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2) {
     gcmd_t* c = cmd_new();
     if(!c) return;
+    /* Counted where it is recorded, on the state line just written, so that palette_priority
+     * reads the few states instead of walking every record — a cache miss each — again. */
+    if(g_state_count > 0) g_states[g_state_count - 1].tris++;
+    else {}
     c->is_rect = GCMD_TRI;
     c->x[0] = (int16_t)x0; c->y[0] = (int16_t)y0; c->u[0] = (uint8_t)u0; c->v[0] = (uint8_t)v0;
     c->x[1] = (int16_t)x1; c->y[1] = (int16_t)y1; c->u[1] = (uint8_t)u1; c->v[1] = (uint8_t)v1;
@@ -204,6 +239,8 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     (void)semi; (void)semi_mode;
     gcmd_t* c = cmd_new();
     if(!c) return;
+    if(g_rect_n < RECT_KEEP) g_rect_at[g_rect_n++] = (uint16_t)(c - g_cmds);
+    else g_rect_over = 1;
     c->is_rect = GCMD_RECT;
     c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
     c->x[1] = (int16_t)w; c->y[1] = (int16_t)h;
@@ -289,6 +326,7 @@ static void mark_vram(int x, int y, int w, int h) {
     g_cmd_count = out;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return; }
     gcmd_t* c = cmd_alloc();
+    g_marks++;
     c->is_rect = GCMD_VRAM;
     c->state = 0;
     c->x[0] = (int16_t)x; c->y[0] = (int16_t)y;
@@ -308,6 +346,7 @@ void bp_gpu_clip(int x0, int y0, int x1, int y1) {
     *n = *p;
     n->clip_x0 = (int16_t)x0; n->clip_y0 = (int16_t)y0;
     n->clip_x1 = (int16_t)x1; n->clip_y1 = (int16_t)y1;
+    n->tris = 0;
 }
 
 /* Recorded, not yet applied. The PVR has no stencil; the browser backend models these with one. */
@@ -434,16 +473,28 @@ static float blend_setup(pvr_poly_cxt_t* cxt, const gstate_t* s) {
  * none of it has to be uploaded or built. A game that clears its buffer with a fill every frame
  * (Crash Bash does, 512x240, from its first 3D scene on) otherwise paid for a full background
  * upload at every buffer flip, to be hidden by the first primitive. */
+static int covers(const gcmd_t* c, int sw, int sh) {
+    const gstate_t* s = &g_states[c->state];
+    if(s->flags & BP_GPU_SEMI) return 0;
+    int ox, oy, ow, oh;
+    if(!screen_origin(s, &ox, &oy, &ow, &oh)) return 0;
+    const int x0 = c->x[0] - ox, y0 = c->y[0] - oy;
+    return x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh;
+}
+
 int last_cover(int sw, int sh) {
-    for(int i = g_cmd_count - 1; i >= 0; i--) {
-        const gcmd_t* c = &g_cmds[i];
-        if(c->is_rect != GCMD_RECT) continue;
-        const gstate_t* s = &g_states[c->state];
-        if(s->flags & BP_GPU_SEMI) continue;
-        int ox, oy, ow, oh;
-        if(!screen_origin(s, &ox, &oy, &ow, &oh)) continue;
-        const int x0 = c->x[0] - ox, y0 = c->y[0] - oy;
-        if(x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh) return i;
+    if(g_rect_over) {
+        for(int i = g_cmd_count - 1; i >= 0; i--) {
+            const gcmd_t* c = &g_cmds[i];
+            if(c->is_rect == GCMD_RECT && covers(c, sw, sh)) return i;
+            else {}
+        }
+        return -1;
+    } else {}
+    for(int k = g_rect_n - 1; k >= 0; k--) {
+        const int i = g_rect_at[k];
+        if(i < g_cmd_count && g_cmds[i].is_rect == GCMD_RECT && covers(&g_cmds[i], sw, sh)) return i;
+        else {}
     }
     return -1;
 }
@@ -451,6 +502,8 @@ int last_cover(int sw, int sh) {
 /* Whether a VRAM mark from `first` on falls inside the picture (sx, sy, sw, sh): if so the
  * background texture is needed even under a covering fill. */
 int marks_from(int first, int sx, int sy, int sw, int sh) {
+    if(g_marks == 0) return 0;      /* none this frame: no walk */
+    else {}
     const int disp[4] = { sx, sy, sw, sh };
     for(int i = first < 0 ? 0 : first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
@@ -491,19 +544,27 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
  *  texture and source factor, but added to what is there (dst ONE) instead of replacing it. */
 /* `keep`, when given, receives a copy of the header emitted, for build_scene to restate without
  * asking the cache again (the slot itself may be taken by the next header that hashes there). */
+static float emit_header_compile(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind,
+                                 pvr_poly_hdr_t* keep, int hs, uint32_t key) __attribute__((noinline));
+
 static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind,
                          pvr_poly_hdr_t* keep) {
-    const int hs = hdr_slot(mem, fmt, dim, s, over, kind);
-    if(g_hdrc[hs].used && g_hdrc[hs].mem == mem && g_hdrc[hs].fmt == fmt
-       && g_hdrc[hs].dim == dim && g_hdrc[hs].flags == s->flags
-       && g_hdrc[hs].semi_mode == s->semi_mode && g_hdrc[hs].over == over
-       && g_hdrc[hs].kind == kind) {
+    const uint32_t key = hdr_key(dim, s, over, kind);
+    const int hs = hdr_slot(mem, fmt, key);
+    ghdr_t* e = &g_hdrc[hs];
+    if(e->key == key && e->mem == mem && e->fmt == fmt) {
         g_hdr_hits++;
-        put_hdr(&g_hdrc[hs].hdr);
-        if(keep) shz_memcpy32_1(keep, &g_hdrc[hs].hdr);
+        put_hdr(&e->hdr);
+        if(keep) shz_memcpy32_1(keep, &e->hdr);
         else {}
-        return g_hdrc[hs].alpha;
-    }
+        return e->alpha;
+    } else return emit_header_compile(mem, fmt, dim, s, over, kind, keep, hs, key);
+}
+
+/* A binding the cache does not hold: compiled, kept and emitted. Out of line, so that the hit
+ * above does not open this one's frame (the context below is most of it) for every run. */
+static float emit_header_compile(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int over, int kind,
+                                 pvr_poly_hdr_t* keep, int hs, uint32_t key) {
     float alpha;
     pvr_poly_cxt_t cxt;
     const int blends = (s->flags & BP_GPU_SEMI) && kind == HK_NORMAL;
@@ -545,14 +606,9 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     }
     if(over) cxt.blend.dst = PVR_BLEND_ONE;
     pvr_poly_compile(&g_hdrc[hs].hdr, &cxt);
-    g_hdrc[hs].used = 1;
+    g_hdrc[hs].key = key;
     g_hdrc[hs].mem = mem;
     g_hdrc[hs].fmt = fmt;
-    g_hdrc[hs].dim = dim;
-    g_hdrc[hs].flags = s->flags;
-    g_hdrc[hs].semi_mode = s->semi_mode;
-    g_hdrc[hs].over = (uint8_t)over;
-    g_hdrc[hs].kind = (uint8_t)kind;
     g_hdrc[hs].alpha = alpha;
     g_hdr_compiles++;
     put_hdr(&g_hdrc[hs].hdr);
@@ -561,27 +617,74 @@ static float emit_header(pvr_ptr_t mem, int fmt, int dim, const gstate_t* s, int
     return alpha;
 }
 
-/** One triangle's vertices, written straight into a store queue and flushed to the TA (KOS direct
- *  rendering). Every field is written: the queue holds whatever went before.
- *
- *  Each coordinate is one conversion and one multiply-add: the offsets — the drawing area's
- *  origin in screen units, the texel centre and patch origin in texture units — are the caller's,
- *  converted once per run. They were converted again at every vertex, six int-to-float
- *  conversions and ten float operations where four and four do. */
-static inline void put_tri(const gcmd_t* c, const uint32_t* col, float scale_x, float scale_y,
-                           float xo, float yo, float rdim, float uo, float vo) {
+/* What put_tri needs of the current binding: the scale, and the offsets as integers — the buffer's
+ * corner in VRAM, and in the texture twice the patch origin less the texel centre (ou2 = 2 * ou - 1)
+ * — so that each coordinate is an integer subtraction, one conversion and one multiply. It was a
+ * multiply-add, and on the SH-4 fmac takes its multiplier in fr0 and overwrites its addend, so each
+ * one also cost a move into fr0 and a copy of the offset. Texture terms stay exact: rh = rdim / 2
+ * is a power of two. */
+typedef struct { float sx, sy, rh; int ox, oy, ou2, ov2; } gvert_t;
+
+static inline void vert_set(gvert_t* t, float sx, float sy, int ox, int oy, float rdim, int ou, int ov) {
+    t->sx = sx; t->sy = sy; t->rh = 0.5f * rdim;
+    t->ox = ox; t->oy = oy; t->ou2 = 2 * ou - 1; t->ov2 = 2 * ov - 1;
+}
+
+/** One vertex into the store queue that ends at `end`, and the queue sent to the TA: written
+ *  backwards, every store a pre-decrement (`mov.l`/`fmov.s @-Rn`), then `pref` on the queue — what
+ *  pvr_dr_commit does. The SH-4's `fmov.s` has no displacement form, so the same fields written in
+ *  place (pvr_vertex_t) cost an address computation per float, and GCC turns `*--p` back into
+ *  displacements, hence the asm. Every field is written: the queue holds whatever went before.
+ *  No "memory" clobber: the queue is no C object, so nothing C reads can change under it, and with
+ *  the clobber every vertex made the compiler load the record and the binding again. The asm is
+ *  volatile, so the queue's stores keep their order and the `pref` its place. */
+static inline void sq_vertex(uint32_t end, uint32_t flags, float x, float y, float u, float v,
+                             uint32_t argb) {
+    __asm__ __volatile__(
+        "mov.l   %[zero], @-%[p]\n\t"   /* oargb */
+        "mov.l   %[argb], @-%[p]\n\t"
+        "fmov.s  %[v], @-%[p]\n\t"
+        "fmov.s  %[u], @-%[p]\n\t"
+        "fmov.s  %[z], @-%[p]\n\t"      /* no depth: the order of submission decides */
+        "fmov.s  %[y], @-%[p]\n\t"
+        "fmov.s  %[x], @-%[p]\n\t"
+        "mov.l   %[flags], @-%[p]\n\t"
+        "pref    @%[p]"
+        : [p] "+r" (end)
+        : [zero] "r" (0), [argb] "r" (argb), [flags] "r" (flags),
+          [x] "f" (x), [y] "f" (y), [u] "f" (u), [v] "f" (v), [z] "f" (1.0f));
+}
+
+/** One triangle's vertices, straight into the store queues and on to the TA (KOS direct
+ *  rendering), the queue address kept in a register for the triangle and stored back once where
+ *  pvr_dr_target read and wrote `pvr_dr_addr` at every vertex. All four coordinates of a vertex
+ *  are computed before any is stored, so the multiplies overlap. */
+static inline uint32_t put_tri_at(uint32_t a, const gcmd_t* c, const uint32_t* col, const gvert_t* t) {
     for(int k = 0; k < 3; k++) {
-        pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
-        v->flags = (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-        v->x = (float)c->x[k] * scale_x + xo;
-        v->y = (float)c->y[k] * scale_y + yo;
-        v->z = 1.0f;
-        v->u = (float)c->u[k] * rdim + uo;
-        v->v = (float)c->v[k] * rdim + vo;
-        v->argb = col[k];
-        v->oargb = 0;
-        pvr_dr_commit(v);
+        const float x = (float)(c->x[k] - t->ox) * t->sx;
+        const float y = (float)(c->y[k] - t->oy) * t->sy;
+        const float u = (float)(2 * c->u[k] - t->ou2) * t->rh;
+        const float v = (float)(2 * c->v[k] - t->ov2) * t->rh;
+        a ^= 32;
+        sq_vertex(a + 32, (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, x, y, u, v, col[k]);
     }
+    return a;
+}
+
+/** An untextured triangle: the same, with no texture coordinates to compute. An untextured
+ *  header's vertex (the TA's packed-colour type 0) ignores the two words where U and V go. */
+static inline uint32_t put_tri_col_at(uint32_t a, const gcmd_t* c, const uint32_t* col, const gvert_t* t) {
+    for(int k = 0; k < 3; k++) {
+        const float x = (float)(c->x[k] - t->ox) * t->sx;
+        const float y = (float)(c->y[k] - t->oy) * t->sy;
+        a ^= 32;
+        sq_vertex(a + 32, (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, x, y, 0.0f, 0.0f, col[k]);
+    }
+    return a;
+}
+
+static inline void put_tri(const gcmd_t* c, const uint32_t* col, const gvert_t* t) {
+    pvr_dr_addr = put_tri_at(pvr_dr_addr, c, col, t);
 }
 
 /* The current run's header and its brightening header, as build_scene last emitted them. */
@@ -610,6 +713,7 @@ typedef struct {
      * arena brightens a quarter of them. Now the run's header is kept when first emitted and
      * copied back (`restate`), and the brightening header is looked up once per run. */
     int       restate, over_ready;
+    gvert_t   t;              /* put_tri's form of the same binding (vert_set) */
 } gscene_t;
 
 /* A texture, bound: where it is, its format and size, and the patch origin in texels. */
@@ -875,9 +979,10 @@ static inline int tri_inside(const gcmd_t* c, const gscene_t* g) {
 }
 
 static inline void emit_tri(const gcmd_t* c, const uint32_t* col, const gscene_t* g) {
-    if(tri_inside(c, g))
-        put_tri(c, col, g->scale_x, g->scale_y, g->xo, g->yo, g->rdim, g->uo, g->vo);
-    else
+    if(tri_inside(c, g)) {
+        if(g->mem) put_tri(c, col, &g->t);
+        else pvr_dr_addr = put_tri_col_at(pvr_dr_addr, c, col, &g->t);   /* an untextured pass */
+    } else
         put_clipped(c, col, g);
 }
 
@@ -902,7 +1007,59 @@ static void scene_header(gscene_t* g, int state, const gstate_t* s, const gbind_
     g->yo = -(float)g->oy * g->scale_y;
     g->uo = (0.5f - (float)b->ou) * g->rdim;
     g->vo = (0.5f - (float)b->ov) * g->rdim;
+    vert_set(&g->t, g->scale_x, g->scale_y, g->ox, g->oy, g->rdim, b->ou, b->ov);
     g->a = (uint32_t)(alpha * 255.0f) << 24;
+}
+
+/* The bindings a run of semi-transparent primitives goes back and forth between — a subtraction's
+ * inverting and adding passes, a split CLUT's solid and STP ones — each set up once for the scene
+ * and then restated from here. scene_header hashed and searched the header cache, divided for
+ * rdim and set the vertex terms up again at every change, three to four times for each triangle
+ * Crash 3 subtracts (a hundred a frame on its title screen). Keyed by everything scene_pass
+ * compares; the state index is only a state's own for one scene, so build_scene clears them. */
+#define SEMI_BINDS 4
+typedef struct __attribute__((aligned(32))) {
+    pvr_poly_hdr_t hdr;
+    gvert_t   t;
+    int       state, fmt, dim, ou, ov, kind;
+    pvr_ptr_t mem;
+    float     rdim, xo, yo, uo, vo;
+    uint32_t  a;
+} gsemibind_t;
+static gsemibind_t g_semi_binds[SEMI_BINDS];
+static int g_semi_next;
+
+static void semi_binds_clear(void) {
+    for(int k = 0; k < SEMI_BINDS; k++) g_semi_binds[k].state = -1;
+    g_semi_next = 0;
+}
+
+/** scene_header, answered from g_semi_binds when this scene has seen the binding: the header sent
+ *  again as it was compiled, and the terms put back. */
+static void scene_bind(gscene_t* g, int state, const gstate_t* s, const gbind_t* b, int kind) {
+    for(int k = 0; k < SEMI_BINDS; k++) {
+        const gsemibind_t* e = &g_semi_binds[k];
+        if(e->state == state && e->mem == b->mem && e->fmt == b->fmt && e->dim == b->dim
+           && e->ou == b->ou && e->ov == b->ov && e->kind == kind) {
+            shz_memcpy32_1(&g_run_hdr, &e->hdr);
+            put_hdr(&g_run_hdr);
+            g->state = state; g->mem = b->mem; g->fmt = b->fmt; g->dim = b->dim;
+            g->ou = b->ou; g->ov = b->ov; g->kind = kind;
+            g->rdim = e->rdim; g->xo = e->xo; g->yo = e->yo; g->uo = e->uo; g->vo = e->vo;
+            g->t = e->t; g->a = e->a;
+            g->restate = 0;
+            g->over_ready = 0;
+            return;
+        } else {}
+    }
+    scene_header(g, state, s, b, kind);
+    gsemibind_t* e = &g_semi_binds[g_semi_next];
+    g_semi_next = (g_semi_next + 1) & (SEMI_BINDS - 1);
+    shz_memcpy32_1(&e->hdr, &g_run_hdr);
+    e->state = state; e->mem = b->mem; e->fmt = b->fmt; e->dim = b->dim;
+    e->ou = b->ou; e->ov = b->ov; e->kind = kind;
+    e->rdim = g->rdim; e->xo = g->xo; e->yo = g->yo; e->uo = g->uo; e->vo = g->vo;
+    e->t = g->t; e->a = g->a;
 }
 
 /** A rectangle: four vertices, untextured (the runtime clipped it already). */
@@ -981,7 +1138,7 @@ static void scene_pass(gscene_t* g, const gcmd_t* c, int state, const gstate_t* 
                        const gbind_t* b, int kind) {
     if(state != g->state || b->mem != g->mem || b->fmt != g->fmt || b->dim != g->dim
        || b->ou != g->ou || b->ov != g->ov || kind != g->kind) {
-        scene_header(g, state, s, b, kind);
+        scene_bind(g, state, s, b, kind);
     } else if(g->restate) {
         put_hdr(&g_run_hdr);
         g->restate = 0;
@@ -1064,6 +1221,79 @@ static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const 
     else scene_pass(g, c, state, s, &b, HK_NORMAL);
 }
 
+/** The rest of an opaque run: the triangles after `c` recorded under the same state (one compare
+ *  of the record's tag), drawn with the binding `c` was. Everything else build_scene's loop asks of
+ *  a record — its state's area and blending, its texture, the header — is the same for all of them,
+ *  and each was ~40 instructions of that loop a triangle. Stops at the first record that needs more
+ *  than its colours and three vertices, a brightened one (a second pass) or one reaching past the
+ *  drawing area (the clipper), which build_scene then takes as before; returns it. Its own function,
+ *  so that the binding's terms and the queue address stay in registers for the run. */
+__attribute__((noinline))
+static const gcmd_t* run_tris(const gcmd_t* c, const gcmd_t* end, uint32_t a, int textured, int raw,
+                              const gscene_t* g, const gvert_t* bt) {
+    const uint16_t tag = c->tag;
+    const gvert_t t = *bt;
+    uint32_t q = pvr_dr_addr;
+    uint32_t col[3];
+    c++;
+    if(textured) {
+        for(; c < end && c->tag == tag; c++) {
+            SHZ_PREFETCH(c + 4);
+            int bright = 0;
+            for(int k = 0; k < 3; k++) {
+                col[k] = (bgr_to_argb_mod(c->argb[k]) & 0x00FFFFFFu) | a;
+                bright |= bgr_brightens(c->argb[k]);
+            }
+            if((bright && !raw) || !tri_inside(c, g)) break;
+            else {}
+            q = put_tri_at(q, c, col, &t);
+        }
+    } else {
+        for(; c < end && c->tag == tag; c++) {
+            SHZ_PREFETCH(c + 4);
+            for(int k = 0; k < 3; k++) col[k] = (bgr_to_argb(c->argb[k]) & 0x00FFFFFFu) | a;
+            if(!tri_inside(c, g)) break;
+            else {}
+            q = put_tri_col_at(q, c, col, &t);
+        }
+    }
+    pvr_dr_addr = q;
+    return c;
+}
+
+/* The textures a state binds, by what it binds — its page, CLUT, texture window and depth — for
+ * the build under way. A frame's state records alternate between a few contents (Crash Bash's
+ * Ballistix: 401 records a frame, the page or the CLUT changing at nearly every one), and each
+ * change asked page4_mirror, the palette cache and the slot table again, ~150 cycles, for an answer
+ * the build had already had (docs/perf/dreamcast-ledger.md, E-044). Nothing a build does changes
+ * those answers: VRAM is written between builds, a page's first use in the build decodes it, and a
+ * palette's bank is memoised for the build (pal_bank_cached). A slot can be reassigned when the pool
+ * is all in flight, so a slot is checked against what it holds before it is trusted. */
+#define TBIND_BITS 6
+typedef struct {
+    uint32_t page, clut, window;    /* tex_x | tex_y << 16, clut_x | clut_y << 16, the window */
+    uint16_t depth, gen;
+    pvr_ptr_t mir;
+    int16_t   bank, slot;
+    uint8_t   patch8;
+} gtbind_t;
+static gtbind_t g_tbind[1 << TBIND_BITS];
+static uint16_t g_tbind_gen;
+
+static inline gtbind_t* tbind_at(uint32_t page, uint32_t clut, uint32_t window, int depth) {
+    uint32_t h = page * 2654435761u + clut;
+    h = h * 2654435761u + window + (uint32_t)depth;
+    return &g_tbind[(h * 2654435761u) >> (32 - TBIND_BITS)];
+}
+
+/** Whether texture slot `i` still holds what `s` binds (tex_slot's own match). */
+static inline int slot_holds(int i, const gstate_t* s) {
+    const int amode = AM_VIS;
+    return g_tex[i].used && g_tex[i].tex_x == s->tex_x && g_tex[i].tex_y == s->tex_y
+        && g_tex[i].depth == s->depth && g_tex[i].window == s->window && g_tex[i].amode == amode
+        && (s->depth != 1 || (g_tex[i].clut_x == s->clut_x && g_tex[i].clut_y == s->clut_y));
+}
+
 PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
@@ -1078,6 +1308,11 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
 
     g_pal_memo_gen++;         /* VRAM may have changed since the last build */
     palette_priority();
+    semi_binds_clear();
+    if(++g_tbind_gen == 0) {   /* a wrapped generation would find last builds' answers valid */
+        for(int k = 0; k < (1 << TBIND_BITS); k++) g_tbind[k].gen = 0;
+        g_tbind_gen = 1;
+    } else {}
 
     /* The semi-transparent path's own binding and texture answers (semi_prim), and what both
      * paths share: the scale, and the current state's buffer corner and drawing area. */
@@ -1114,7 +1349,12 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * copied back (`restate`), and the brightening header is looked up once per run. */
     int restate = 0, over_ready = 0;
     float cur_xo = 0.0f, cur_yo = 0.0f, cur_uo = 0.0f, cur_vo = 0.0f;
+    gvert_t cur_t;
+    vert_set(&cur_t, scale_x, scale_y, 0, 0, cur_rdim, 0, 0);
     uint32_t cur_a = 0xFF000000u;
+    /* What the vertex terms and cur_a were last worked out from (cur_dim is the size): none yet. */
+    int vs_ou = -1, vs_ov = -1, vs_ox = 0x7FFFFFFF, vs_oy = 0x7FFFFFFF;
+    float vs_alpha = -1.0f;
     for(int i = first; i < g_cmd_count; i++) {
         const gcmd_t* c = &g_cmds[i];
         /* Four records — four lines — ahead: the buffer is far larger than the cache and is read
@@ -1164,30 +1404,48 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         const int textured = (s->flags & BP_GPU_TEXTURED) && !c->is_rect;
         pvr_ptr_t mem = NULL;
         int fmt = 0, dim = TEX_DIM, ou = 0, ov = 0;
+        /* Whether the binding is the state's, not the record's: then the records after this one
+         * under the same state bind the same way (run_tris). A baked patch is per record. */
+        int per_state = 1;
 
         if(textured) {
             if((int)c->state != run_state) {
                 run_state = (int)c->state;
-                run_bank = -1; run_slot = -1; run_mir = NULL;
-                /* The page grid is the mirror's index, so a page origin that is not on
-                 * the grid would silently read a neighbour. The texpage encoding cannot
-                 * produce one; the guard costs a compare and removes the assumption. */
-                if(s->depth == 0 && (s->window & 0x3FF) == 0
-                   && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
-                    run_mir = page4_mirror(s);
-                else {}
-                /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
-                 * (bake_slot); the whole page is decoded only for a primitive sampling across
-                 * patches, below. */
-                run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
-                          && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
-                if(run_mir) {
-                    run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
-                } else if(!run_patch8) {
-                    run_slot = tex_slot(s, AM_VIS);
-                    if(run_slot >= 0 && s->depth == 0)
-                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
-                } else {}
+                const uint32_t pk = (uint32_t)s->tex_x | ((uint32_t)s->tex_y << 16);
+                const uint32_t ck = (uint32_t)s->clut_x | ((uint32_t)s->clut_y << 16);
+                gtbind_t* tb = tbind_at(pk, ck, s->window, s->depth);
+                if(tb->gen == g_tbind_gen && tb->page == pk && tb->clut == ck
+                   && tb->window == s->window && tb->depth == s->depth
+                   && (tb->slot < 0 || slot_holds(tb->slot, s))) {
+                    run_mir = tb->mir; run_bank = tb->bank; run_slot = tb->slot;
+                    run_patch8 = tb->patch8;
+                } else {
+                    run_bank = -1; run_slot = -1; run_mir = NULL;
+                    /* The page grid is the mirror's index, so a page origin that is not on
+                     * the grid would silently read a neighbour. The texpage encoding cannot
+                     * produce one; the guard costs a compare and removes the assumption. */
+                    if(s->depth == 0 && (s->window & 0x3FF) == 0
+                       && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
+                        run_mir = page4_mirror(s);
+                    else {}
+                    /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
+                     * (bake_slot); the whole page is decoded only for a primitive sampling
+                     * across patches, below. */
+                    run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
+                              && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
+                    if(run_mir) {
+                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
+                    } else if(!run_patch8) {
+                        run_slot = tex_slot(s, AM_VIS);
+                        if(run_slot >= 0 && s->depth == 0)
+                            run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
+                        else {}
+                    } else {}
+                    tb->page = pk; tb->clut = ck; tb->window = s->window;
+                    tb->depth = s->depth; tb->gen = g_tbind_gen;
+                    tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
+                    tb->patch8 = (uint8_t)run_patch8;
+                }
             }
             if(run_mir && run_bank >= 0) {
                 mem = run_mir;
@@ -1195,6 +1453,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             } else if(run_mir || run_patch8) {
                 /* No bank was left for this palette, or an 8bpp page: texels with the CLUT
                  * already in them — exact, and only as large as this primitive samples. */
+                per_state = 0;
                 int tu, tv;
                 const int b = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, AM_VIS) : -1;
                 if(b >= 0) {
@@ -1234,19 +1493,28 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         if((int)c->state != cur_state || mem != cur_mem || fmt != cur_fmt
            || dim != cur_dim || ou != cur_ou || ov != cur_ov) {
             cur_state = (int)c->state;
-            cur_mem = mem; cur_fmt = fmt; cur_dim = dim; cur_ou = ou; cur_ov = ov;
-            cur_rdim = 1.0f / (float)dim;
+            cur_mem = mem; cur_fmt = fmt; cur_ou = ou; cur_ov = ov;
             alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &g_run_hdr);
             restate = 0;
             over_ready = 0;
             /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture
              * the texel centre less the patch origin. rdim is a power of two, so the texture
-             * terms are exact either way round. */
-            cur_xo = -(float)g.ox * scale_x;
-            cur_yo = -(float)g.oy * scale_y;
-            cur_uo = (0.5f - (float)ou) * cur_rdim;
-            cur_vo = (0.5f - (float)ov) * cur_rdim;
-            cur_a = (uint32_t)(alpha * 255.0f) << 24;
+             * terms are exact either way round. They depend on the size, the patch and the
+             * corner, which nearly every state shares with the one before it: worked out again
+             * only when one of those changed (a divide and a dozen conversions, E-044). */
+            if(dim != cur_dim || ou != vs_ou || ov != vs_ov || g.ox != vs_ox || g.oy != vs_oy) {
+                cur_dim = dim; vs_ou = ou; vs_ov = ov; vs_ox = g.ox; vs_oy = g.oy;
+                cur_rdim = 1.0f / (float)dim;
+                cur_xo = -(float)g.ox * scale_x;
+                cur_yo = -(float)g.oy * scale_y;
+                cur_uo = (0.5f - (float)ou) * cur_rdim;
+                cur_vo = (0.5f - (float)ov) * cur_rdim;
+                vert_set(&cur_t, scale_x, scale_y, g.ox, g.oy, cur_rdim, ou, ov);
+            } else {}
+            if(alpha != vs_alpha) {
+                vs_alpha = alpha;
+                cur_a = (uint32_t)(alpha * 255.0f) << 24;
+            } else {}
             g.state = -1;           /* the semi-transparent path's header is not the last one now */
         } else if(restate) {
             put_hdr(&g_run_hdr);
@@ -1291,8 +1559,10 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             if(!inside) {
                 g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.uo = cur_uo; g.vo = cur_vo;
             } else {}
-            if(inside) put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
-            else put_clipped(c, col, &g);
+            if(inside) {
+                if(mem) put_tri(c, col, &cur_t);
+                else pvr_dr_addr = put_tri_col_at(pvr_dr_addr, c, col, &cur_t);
+            } else put_clipped(c, col, &g);
             if(bright && !(s->flags & BP_GPU_RAW)) {
                 if(over_ready) put_hdr(&g_run_over);
                 else {
@@ -1301,12 +1571,17 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 }
                 for(int k = 0; k < 3; k++)
                     col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
-                if(inside) put_tri(c, col, scale_x, scale_y, cur_xo, cur_yo, cur_rdim, cur_uo, cur_vo);
+                if(inside) put_tri(c, col, &cur_t);
                 else put_clipped(c, col, &g);
                 restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
                 g_bright_prims++;
 #endif
+            } else {}
+            if(per_state && !restate) {
+                const gcmd_t* next = run_tris(c, &g_cmds[g_cmd_count], a, mem != NULL,
+                                              (s->flags & BP_GPU_RAW) != 0, &g, &cur_t);
+                i = (int)(next - g_cmds) - 1;
             } else {}
         }
     }

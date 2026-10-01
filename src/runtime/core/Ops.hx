@@ -67,18 +67,16 @@ class Ops {
 		return ctx.hi;
 	}
 
+	/** The low word is the wrapping 32-bit product whatever the signs; the high word is the
+	    shim's (`IntMath.mulHi`), one widening multiply where the host has one. */
 	public static function mult(ctx:CpuState, a:Int, b:Int):Void {
-		final neg = (a < 0) != (b < 0);
-		var ua = a;
-		if (a < 0) ua = -a;
-		var ub = b;
-		if (b < 0) ub = -b;
-		mulUnsigned(ctx, ua, ub);
-		if (neg) negate64(ctx);
+		ctx.lo = IntMath.mul(a, b);
+		ctx.hi = IntMath.mulHi(a, b);
 	}
 
 	public static function multu(ctx:CpuState, a:Int, b:Int):Void {
-		mulUnsigned(ctx, a, b);
+		ctx.lo = IntMath.mul(a, b);
+		ctx.hi = IntMath.mulHiU(a, b);
 	}
 
 	/**
@@ -141,39 +139,4 @@ class Ops {
 	/** The unsigned comparison, on a type that only has signed ones. */
 	public static inline function unsignedLess(a:Int, b:Int):Bool
 		return (a ^ 0x80000000) < (b ^ 0x80000000);
-
-	/**
-		32×32 → 64, from 16-bit halves.
-
-		Deliberately not `haxe.Int64`: it allocates an object per intermediate on both of this
-		project's targets, and this is one of the hottest operations in the machine (ADR-0004).
-		Every partial product below fits in 32 bits, so the whole thing is ordinary integer
-		arithmetic that behaves identically everywhere.
-	**/
-	static function mulUnsigned(ctx:CpuState, a:Int, b:Int):Void {
-		final al = a & 0xFFFF, ah = a >>> 16;
-		final bl = b & 0xFFFF, bh = b >>> 16;
-
-		final ll = IntMath.mul(al, bl);
-		final lh = IntMath.mul(al, bh);
-		final hl = IntMath.mul(ah, bl);
-		final hh = IntMath.mul(ah, bh);
-
-		// Sum the middle terms, keeping the carry out of bit 31.
-		final mid = ((ll >>> 16) + (lh & 0xFFFF) + (hl & 0xFFFF)) | 0;
-
-		ctx.lo = ((ll & 0xFFFF) | (mid << 16)) | 0;
-		ctx.hi = (hh + (lh >>> 16) + (hl >>> 16) + (mid >>> 16)) | 0;
-	}
-
-	/** Two's-complement negation of the 64-bit hi:lo pair. */
-	static function negate64(ctx:CpuState):Void {
-		// The negation carries into the high word exactly when the low word was zero.
-		var carry = 0;
-		if (ctx.lo == 0) carry = 1;
-		final lo = (~ctx.lo + 1) | 0;
-		final hi = (~ctx.hi + carry) | 0;
-		ctx.lo = lo;
-		ctx.hi = hi;
-	}
 }

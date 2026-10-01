@@ -77,6 +77,7 @@ to 300, no byte outside the run.
 
 The C++ shim grows a native header and a header-only class, shaped as `mem.Access` is (an
 `@:include` on an extern does not follow its `@:nativeFunctionCode` calls into the files that
-make them); the Hatchet shim, set aside but kept compiling, calls the same header. Game digests
+make them); the Hatchet shim called the same header until Hatchet support was removed
+(2026-10-01, the owner's call). Game digests
 do not move: Crash 3 9,000/20,000 and Crash Bash 3,000/9,000/30,000 on JavaScript, conformance
 on both targets.

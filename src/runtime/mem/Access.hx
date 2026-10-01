@@ -91,4 +91,90 @@ class Access {
 			shim.MemA.set32(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
 		else Memory.slowWrite32(Memory.phys(a), v);
 	}
+
+	// ---- with the cycle count in a local ---------------------------------------------------------
+	//
+	// Generated code keeps the running function's cycle count in a local, `cyc`, and writes it to
+	// the machine only where something else can read it (the recompiler's Emitter). A device read
+	// or written through a port reads it — a timer's count, GPUSTAT's field, the CD's and the
+	// serial port's deadlines — so these take `cyc` and bring `ctx.cycles` up to date on the slow
+	// path only, before the port is reached. RAM and the scratchpad never look at the clock.
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function read8ut(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return RawMem.get8(Memory.ram(), r);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			return RawMem.get8(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return Memory.slowRead8(Memory.phys(a));
+		}
+	}
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function read16ut(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get16(Memory.ram(), r);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			return shim.MemA.get16(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return Memory.slowRead16(Memory.phys(a));
+		}
+	}
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function read32t(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get32(Memory.ram(), r);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			return shim.MemA.get32(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return Memory.slowRead32(Memory.phys(a));
+		}
+	}
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function write8t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) RawMem.set8(Memory.ram(), r, v);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			RawMem.set8(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			Memory.slowWrite8(Memory.phys(a), v);
+		}
+	}
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function write16t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set16(Memory.ram(), r, v);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			shim.MemA.set16(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			Memory.slowWrite16(Memory.phys(a), v);
+		}
+	}
+
+	@:cppInline
+	@:specifier("__attribute__((always_inline))")
+	public static function write32t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
+		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set32(Memory.ram(), r, v);
+		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
+			shim.MemA.set32(Memory.scratch(), a & (Memory.SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			Memory.slowWrite32(Memory.phys(a), v);
+		}
+	}
 }

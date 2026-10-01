@@ -39,6 +39,21 @@
  * boot with no controller and no disc. */
 KOS_INIT_FLAGS(INIT_DEFAULT);
 
+/* Where the stack starts: the emulation runs on the main thread, whose stack KallistiOS hangs from
+ * the top of RAM (startup.S reads these two, weak in stack.c: 8D000000h, or 8E000000h on a 32 MB
+ * unit). Its busiest few kilobytes — the frames of generated code, the dispatcher and the GPU's
+ * command loop, around 2.5 KB down — take their operand-cache lines by address, like any data,
+ * and at the top of RAM they shared them with the literal pools of the hottest code and with the
+ * runtime's hottest variables. The cache model's operand traces (dc-ocache-sim stack) read every
+ * start 0..511 lines down (the colour repeats every 512 lines, 16 KB). 2026-09-30: 441 lines cut
+ * the operand cache's cost by 20.8 % on Crash 3's title screen and 4.3 % on Crash Bash's
+ * Ballistix (E-006). 2026-10-01, with the code where it now is and three windows (Crash 3's title
+ * screen and gameplay, Crash Bash's Ballistix, in ms a frame of each): 235 lines, 7,520 bytes,
+ * the colour of 441 + 306 — −0.50, −0.83 and −0.22 ms against 441 (E-058). The top 7.5 KB of
+ * RAM go unused. */
+uintptr_t arch_stack_16m = 0x8d000000u - 7520u;
+uintptr_t arch_stack_32m = 0x8e000000u - 7520u;
+
 /* ---- launch state ---------------------------------------------------------------------------- */
 
 #define MAX_ARGS 8
@@ -218,7 +233,13 @@ int bp_init(const char* title) {
 #endif
     twid_init();
 
-    if(snd_stream_init() == 0) {
+    /* The stream's stereo split writes the left and right channels into two buffers KOS places
+     * half its size apart: 32 KB with the default 64 KB (snd_stream_init), the same sets of the
+     * 16 KB operand cache, so each store of one channel evicted the other's line — a miss and a
+     * write-back on nearly every store, ~0.14 ms a frame under the cache model. A fill is at most
+     * half our buffer per channel (4 KB), so 2 x STREAM_BYTES_PER_CHANNEL puts the right channel
+     * 8 KB after the left, in the other half of the cache, and allocates 48 KB less. */
+    if(snd_stream_init_ex(2, 2 * STREAM_BYTES_PER_CHANNEL) == 0) {
         g_snd_up = 1;
         g_stream = snd_stream_alloc(audio_pull, STREAM_BYTES_PER_CHANNEL);
         if(g_stream != SND_STREAM_INVALID) {

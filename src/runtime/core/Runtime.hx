@@ -44,6 +44,10 @@ class Runtime {
 		the *first* one — meaning the switch itself is wrong — or a later one from inside a
 		function that did run? Those two have the same error message and completely different
 		causes. One integer settles it.
+
+		Counted only with `-D recompsx_insns`, beside the instruction counts: on the SH-4 counting
+		every dynamic call was a literal-pool address, a load and a store each time. A build
+		chasing a failed dispatch turns it on; elsewhere the message says #0.
 	**/
 	public static var dispatches = 0;
 	/** Optional instruction/block profiling; excluded from the emulated-state digest. */

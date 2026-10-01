@@ -10,10 +10,18 @@
  *   dc-icache-sim sim <trace> <sections>
  *       misses of the 8 KB direct-mapped cache with every section at its new address, and of a
  *       fully associative LRU cache of the same size, which no placement changes
- *   dc-icache-sim opt <trace> <sections> <k> <rounds> <events> <out>
+ *   dc-icache-sim detail <trace> <sections> [colours]
+ *       misses by section, most first, and the pairs of sections that evict each other most,
+ *       with the traced link's colours or with those of an `opt` result: which function a
+ *       placement cannot help (one larger than the cache whose hot parts meet evicts itself)
+ *   dc-icache-sim opt <trace> <sections> <k> <rounds> <events> <out> [fresh]
  *       colours (line index mod 256) for the k most fetched sections, each in turn set to the
  *       colour that misses least with the others where they are, `rounds` times over the first
- *       `events` entries of the trace; written to <out> as "index colour" lines
+ *       `events` entries of the trace; written to <out> as "index colour" lines. The search
+ *       starts from the traced link's colours, or with `fresh` from all k at colour 0: a descent
+ *       ends in the nearest optimum, and from a link already placed for older code that can be a
+ *       poor one (Crash 3, 2026-09-30: 0.89 M misses from the link's colours, against a fully
+ *       associative 0.61 M)
  *
  * <sections>: one line per .text input section of the traced link, "oldstart size newstart" in
  * hex, sorted by oldstart; the index of a line is the section's number in <out>. A section keeps
@@ -179,6 +187,64 @@ static void *tryColours(void *arg)
 	return NULL;
 }
 
+/* ---- detail ---- */
+/* Misses by section and eviction pairs (incoming <- evicted) among the 512 sections met first. */
+#define PAIRS 512
+static void detail(const uint32_t *base)
+{
+	size_t *miss = calloc(nsec, sizeof(size_t)), *entries = calloc(nsec, sizeof(size_t));
+	uint32_t tag[SETS];
+	int owner[SETS];
+	memset(tag, 0xff, sizeof tag);
+	for (unsigned i = 0; i < SETS; i++) owner[i] = -1;
+	int *slot = malloc(nsec * sizeof(int));
+	for (int i = 0; i < nsec; i++) slot[i] = -1;
+	int back[PAIRS], nslots = 0;
+	size_t (*pair)[PAIRS] = calloc(PAIRS, sizeof *pair);
+	size_t total = 0;
+	for (size_t i = 0; i < nev; i++) {
+		const int32_t s = evSec[i];
+		const uint32_t line = (s >= 0 ? base[s] + evOff[i] : evOff[i]) / LINE;
+		const uint32_t set = line % SETS;
+		if (s >= 0) entries[s]++;
+		if (tag[set] == line) continue;
+		total++;
+		const int ev = owner[set];
+		if (s >= 0) {
+			miss[s]++;
+			if (ev >= 0) {
+				if (slot[s] < 0 && nslots < PAIRS) { slot[s] = nslots; back[nslots++] = s; }
+				if (slot[ev] < 0 && nslots < PAIRS) { slot[ev] = nslots; back[nslots++] = ev; }
+				if (slot[s] >= 0 && slot[ev] >= 0) pair[slot[s]][slot[ev]]++;
+			}
+		}
+		tag[set] = line;
+		owner[set] = s;
+	}
+	printf("entries %zu  direct-mapped misses %zu\n  misses   entries  start     size\n", nev, total);
+	int *order = malloc(nsec * sizeof(int));
+	for (int i = 0; i < nsec; i++) order[i] = i;
+	for (int i = 0; i < 25 && i < nsec; i++) {
+		int b = i;
+		for (int j = i + 1; j < nsec; j++) if (miss[order[j]] > miss[order[b]]) b = j;
+		const int t = order[i]; order[i] = order[b]; order[b] = t;
+		const int q = order[i];
+		if (!miss[q]) break;
+		printf("%8zu %9zu  %08x %6u\n", miss[q], entries[q], oldStart[q], size[q]);
+	}
+	printf("evicting each other most (incoming <- evicted, by traced start):\n");
+	for (int r = 0; r < 20; r++) {
+		size_t best = 0;
+		int bi = -1, bj = -1;
+		for (int i = 0; i < nslots; i++)
+			for (int j = 0; j < nslots; j++)
+				if (pair[i][j] > best) { best = pair[i][j]; bi = i; bj = j; }
+		if (bi < 0) break;
+		printf("%8zu  %08x <- %08x\n", best, oldStart[back[bi]], oldStart[back[bj]]);
+		pair[bi][bj] = 0;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 4) { fprintf(stderr, "usage: see the header of scripts/dc-icache-sim.c\n"); return 2; }
@@ -189,6 +255,20 @@ int main(int argc, char **argv)
 		const size_t lru = simulateLru(newStart);
 		printf("entries %zu  direct-mapped misses %zu  fully associative LRU %zu  conflicts %zu\n",
 		       nev, dm, lru, dm > lru ? dm - lru : 0);
+		return 0;
+	}
+	if (!strcmp(argv[1], "detail")) {
+		loadTrace(argv[2], 0);
+		uint32_t *base = malloc(nsec * 4);
+		memcpy(base, newStart, nsec * 4);
+		if (argc > 4) {
+			FILE *cf = fopen(argv[4], "r");
+			if (!cf) { perror(argv[4]); return 1; }
+			int idx, col, rank = 0;
+			while (fscanf(cf, "%d %d", &idx, &col) == 2) base[idx] = placed(rank++, idx, col);
+			fclose(cf);
+		}
+		detail(base);
 		return 0;
 	}
 	if (strcmp(argv[1], "opt") || argc < 8) { fprintf(stderr, "usage: see the header\n"); return 2; }
@@ -204,6 +284,9 @@ int main(int argc, char **argv)
 			if (count[order[j]] > count[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
 	uint32_t *base = malloc(nsec * 4);
 	memcpy(base, newStart, nsec * 4);
+	if (argc > 8 && !strcmp(argv[8], "fresh"))
+		for (int q = 0; q < k && q < nsec; q++)
+			if (count[order[q]]) base[order[q]] = placed(q, order[q], 0);
 	size_t current = simulate(base, nev);
 	printf("start: %zu misses over %zu entries\n", current, nev);
 	enum { THREADS = 10 };

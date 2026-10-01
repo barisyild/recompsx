@@ -2,6 +2,68 @@
 
 ## Status snapshot
 
+**2026-10-01 (later): Dreamcast full speed, round 4 — the caches. Crash 3's title screen 19.46 → 18.19 ms a frame,
+its gameplay demo (new window, 4700:5000) 35.47 → 29.26, Crash Bash's Ballistix 20.55 → 19.19 (work 16.03). Target
+16.7; ledger E-053..E-058.** Kept:
+- CpuState's machine instance at a fixed address (`recompsx_cpustate`, `CpuState.machine()`, `shim.CpuStateHome`),
+  coloured with the data; RTPT one copy of the transform for real (`MemA.opaque(3)` keeps GCC from unrolling the
+  loop: rtpt 2,444 → 1,064 bytes, gameplay cf −1.50);
+- Crash 3's code placement from both windows' traces at once (gameplay 35.85 → 31.86 alone), Crash Bash's redone;
+  the main stack 235 lines below the top of RAM (backend_kos.c); data colours for 58 variables over three windows
+  (dc-data-placement.txt); each game's literal-pool halves;
+- the cache model counts every instruction (RXCOUNT=1, rx_cache.cpp, `<prof>.cache.count`).
+- `-fschedule-insns -fsched-pressure` for the runtime and the backend, not for the game's code (scripts/build-dc.sh,
+  E-063): conflict-free −0.07 ms on both Crash 3 windows, −0.15 on Crash Bash.
+Measured and not pursued: CpuState fields by heat (code does not shrink), GCC hot/cold partitioning (slow paths
+already out of the hot lines), gp folding (Crash 3 uses gp as a plain register). What is left is instructions, not
+caches: with no cache miss at all gameplay would be 17.2 ms (E-057). Test image: out/dc/crash3-g44-max.cdi. Next: the
+GPU path's per-polygon cost (~1,500-2,000 SH-4 instructions a polygon), the generated code's per-call overhead
+(prologue, pump, spans: ~45 instructions a call, 3,583 calls a frame in gameplay), RTPS/RTPT on the SH-4.
+
+**2026-10-01: Dreamcast full speed, round 3 — Crash 3's title screen cf 17.98 → 17.23 ms, frame 19.46 with a
+fresh placement (g40p2); Crash Bash's Ballistix work 16.82 → 16.05 (g41, placement pending). Target 16.7; ledger
+E-047..E-052.** Owner's rule (2026-10-01): only optimisations that need no run of the game and give the same
+result for everyone — profile-guided compilation measured −1.55 ms and was rejected (E-047, removed). Kept:
+- RTPS/RTPT matrix rows on the SH-4's MAC unit (`GteFile.dot3`, `native/recompsx_gte.h`, packed RT at GTE word
+  648; checked on the SH-4 by a KOS program, 3.6 M rows, 0 differ) — C3 −0.41, CB −0.28;
+- emit_header's hit split from its compile, one-word key, cheaper hash — C3 −0.18, CB −0.27; OT clear (DMA6)
+  without a test per entry;
+- spans as addresses on C++ (`shim.Span`: `uint8_t*`, `@(disp,Rn)` per access) — C3 −0.09, CB −0.20;
+- `lwl`/`lwr` pairs fused (`Memory.lwu`, conformance `Unaligned`), idle loops on JOY_STAT/I_STAT/I_MASK and in
+  linear chains (`Memory.isIdleReadable`) — C3 −0.05;
+- the cache model charges mac.w/clrmac dependencies (Flycast fork, rx_cache.cpp); the bench prints `bench rest`
+  (Crash Bash's idle is the pacer's sleep) and presents by cost (both games run at 30 Hz: a light vblank then a
+  heavy one; the pair must fit 33.4 ms — C3's is ~38.5 now, CB's heavy pairs ~44).
+Rejected: game code at -O2 (+0.23), RTPS inline in looping leaves again (+0.08 with mac.w).
+Hatchet support removed (owner, 2026-10-01): scripts/build-hatchet.sh, src/shims/hatchet and the CMake
+template's transpiler switch; reflaxe.CPP is the only C++ transpiler.
+Digests unchanged (C3 JS 9000 4de78425, gpu-stream 4050 5f877994a1335867, CB plain 3000 db892c4b; conformance
+both targets). Test image for the owner: out/dc/crash3-g40-max.cdi (g40 + its placement). Next: finish the
+placement round (C3: f_8003fc50's literal pool shares sets with the CpuState — another halves pass; CB: colours
+in $SP col41-cb, then halves), then calls' register summaries (reads as well as writes) so guest registers stay
+in locals across calls the summaries clear.
+
+**2026-09-30 (later): Dreamcast full speed — Crash 3's title screen 20.34 → 19.39 ms a frame (cf
+18.72 → 18.14), Crash Bash's Ballistix work 18.04 → 17.36 ms, under the cache model (target 16.7;
+ledger: docs/perf/dreamcast-ledger.md, E-035..E-042).** All global; per-game data is only each
+game's placement file. Kept this round:
+- the last call through a register kept in the CpuState (`_callAt`/`_callFn`/`_callBlock`, FnTable
+  `run`/`runFast`): Crash 3's FAST slot and the CpuState's first line had met in one cache set;
+- the sound stream's split buffers 8 KB apart (`snd_stream_init_ex(2, 16 KB)`, were 32 KB: same sets);
+- branch hints in generated code (`shim.MemA.likely/unlikely` on span tests, resume guards, pumps,
+  unwind checks): Crash 3's 21 KB f_8003fc50 no longer evicts itself (code colours 0.89 → 0.63 M);
+- the scheduler's handler re-arm is a store (`fire` clears `nextSlot`); the timers' tables in a
+  register file (`recompsx_timers`, `shim.TimerFile`), a power-of-two wrap as a mask (no divides),
+  `Memory.machine` a plain pointer with a sentinel CpuState;
+- `ctx` is `core.Ctx`: `core::CpuState* __restrict` on C++ (spike first), generated code −0.09 ms;
+- the PC sampler's symbol cached per bucket; `dc-icache-sim detail` / `opt ... fresh`;
+- placement redone for both games (code colours, halves) and the data colours for both (g28 traces).
+Rejected: triRecord out of line (+0.06), span-step qualification (+0.15), value-checked span
+retakes (neutral, +203 KB). Digests unchanged throughout (C3 9000 4de78425, CB 3000 db892c4b, both
+GPU streams); conformance unchanged on both targets. In the tree, not committed. Next: the placement
+round for the current code (g33 traces), then Crash Bash's state-change cost in build_scene (401 state
+records a frame from ~50 contents).
+
 **2026-09-29: Dreamcast — the hot code placed for the instruction cache (ADR-0043): Crash 3's title
 screen 35.1 → 29.5 ms a frame under the cache model.** Most instruction fills were conflicts, and
 they are now placed away:
@@ -1900,6 +1962,35 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+
+2026-10-01 [claude] Pushed the Dreamcast rounds (ledger E-001..E-063); Crash 3's placement is g44p3's, the one
+measured (round 5's colours were not built). Researched a CpuState-free translation (E-064): Crash 3's hot engine
+code takes 6-21 register inputs, Crash Bash's at most 4; Crash 3's hot shards compile 21-28 % larger with registers as
+statics or locals than as CpuState fields. Next: the GPU path per polygon, the per-call overhead.
+
+2026-10-01 [claude] Dreamcast perf round 4 (ledger E-053..E-058): static CpuState, RTPT one copy (MemA.opaque),
+two-window code placement, stack 235 lines, data colours (58, CpuState incl.) and halves; RXCOUNT in the model.
+C3 title 19.46 -> 18.19, gameplay 35.47 -> 29.26; CB 20.55 -> 19.19. Test image crash3-g44-max.cdi. Next: GPU
+path per polygon, per-call overhead of generated code, RTPS/RTPT on the SH-4.
+
+2026-10-01 [claude] Dreamcast perf round 3 (ledger E-047..E-052): PGO measured (-1.55) and rejected by the owner;
+mac.w RTPS rows, emit_header split, spans as addresses, lwl/lwr fusion, JOY_STAT idle loops, bench histogram.
+Model: C3 cf 17.98 -> 17.23, frame 19.46 placed; CB work 16.82 -> 16.05. Next: placement round, call summaries.
+
+2026-09-30 [claude] Dreamcast perf round 2 (ledger E-035..E-042): CpuState last-call cache, snd split buffers,
+branch hints, scheduler re-arm, timers register file, restrict ctx (core.Ctx), sampler cache, placement + data
+colours. Model: C3 20.34 -> 19.39 ms (cf 18.14), CB work 18.04 -> 17.36. Next: placement for g33 code, CB states.
+
+2026-09-30 [claude] Dreamcast perf round (ledger E-023..E-034): run_tris, semi bindings, inline RTPS (not in leaves), call
+write summaries + guarded jalr, polygonHw streamed, overlay every 4th window, placement for both games, JS --gpu-hash
+(= null backend's). Model: C3 title 23.13 -> 20.34 ms; CB work 18.48 -> 18.04. Rejected: quad strips, per-kind polygonHw,
+OCRAM. Next: CB halves (g22/g23), then span check + SpuFile (in tree, verified on JS/conformance) and a new placement.
+
+2026-09-30 [claude] Toolchain: .toolchain/haxe = local build of haxe-plus haxe4 (github barisyild/haxe-plus; its HAXE-PLUS.md
+records every change): native eval JIT (HAXE_EVAL_JIT=0 off; native only once a compilation makes 1M calls, recompsx's
+builds are recorded), exact eval caches, GC tuning. Game via reflaxe.CPP 331 -> 40.5 s, gen 6.8 -> 2.8 s, byte-identical;
+CI green; haxe5 branch (5.0.0-preview.1 + the same changes) pushed, CI green. Latent: the installed binary's mbedtls stubs
+saw 3.6.3 headers (eval TLS only, unused here); haxe-build.sh uses CPATH now. Next: reinstall + releases, on the owner's word.
 
 2026-09-29 [claude] Hot code placed for the SH-4 I-cache (ADR-0043): model traces (RXTRACE), dc-icache-sim.c
 (replay + colour search), dc-layout.py (ordering file + padding), build-dc.sh two-pass link from

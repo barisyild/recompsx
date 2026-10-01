@@ -14,7 +14,7 @@ class GenMain {
 	#end
 
 	public static function main():Void {
-		final ctx = new CpuState();
+		final ctx = CpuState.machine();
 		Runtime.bindDispatch(FnTable.call);
 		Runtime.bindRun(FnTable.run);
 		Runtime.boot(ctx);

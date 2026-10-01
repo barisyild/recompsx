@@ -11,13 +11,21 @@ package shim;
 	constants at every use, and the array is its own object, so the compiler can keep an element
 	in a machine register as freely as it kept a field.
 
+	`dot3` is a matrix row times a vector, three signed halfwords of the file by three
+	(`native/recompsx_gte.h`): on the SH-4 its multiply-accumulate unit reads them itself.
+
 	Every placeholder parenthesised: `@:nativeFunctionCode` splices text (golden rule 1).
 **/
-@:include("recompsx_arena.h", true)
+@:include("recompsx_gte.h", true)
 extern class GteFile {
 	@:nativeFunctionCode("(recompsx_gte[({arg0})])")
 	public static function get(i:Int):Int;
 
 	@:nativeFunctionCode("(recompsx_gte[({arg0})] = ({arg1}))")
 	public static function set(i:Int, v:Int):Void;
+
+	/** The low 32 bits of the sum of halfword m times halfword v, m+1 times v+1 and m+2 times
+	    v+2, each signed; halfword h is word h >> 1's low half for an even h, its high half else. */
+	@:nativeFunctionCode("recompsx_gte_dot3(({arg0}), ({arg1}))")
+	public static function dot3(m:Int, v:Int):Int;
 }

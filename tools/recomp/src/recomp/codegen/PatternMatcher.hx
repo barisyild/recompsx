@@ -22,6 +22,7 @@ enum FusedKind {
 	DivHi;
 	DivuLo;
 	DivuHi;
+	UnalignedLoad;
 }
 
 class FusedPattern {
@@ -49,6 +50,17 @@ class PatternMatcher {
 				case ADDIU: new FusedPattern(ConstantAdd);
 				case _: null;
 			};
+		}
+
+		// One unaligned word: `lwr rt, k(rs)` and `lwl rt, k+3(rs)`, either first, each filling the
+		// byte lanes the other leaves. Each reads one aligned word and switches on the address;
+		// together they are one read of the word at rs+k (Memory.lwu, which reads as they would).
+		// Not when rt is rs, whose first load would move the second, nor into $zero.
+		if (((a.op == Op.LWL && b.op == Op.LWR) || (a.op == Op.LWR && b.op == Op.LWL))
+				&& a.rt == b.rt && a.rs == b.rs && a.rt != a.rs && a.rt != 0) {
+			final l = a.op == Op.LWL ? a : b;
+			final r = a.op == Op.LWR ? a : b;
+			return l.immS == r.immS + 3 ? new FusedPattern(UnalignedLoad) : null;
 		}
 
 		// MULT/DIV update both HI and LO. The helper preserves that architectural side effect and

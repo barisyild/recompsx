@@ -145,20 +145,26 @@ enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2 };
  * reading memory (shz_dcache_alloc_line, `movca.l`: the SH-4 caches write-back, and a store that
  * misses would otherwise fetch 32 bytes only to overwrite them), and build_scene reads the buffer
  * as a stream it prefetches ahead of. It was 36 bytes, so most records straddled two lines. The
- * state index and the kind share the last halfword: states <= GPU_MAX_STATES < 2^14. */
+ * state index and the kind share the last halfword: states <= GPU_MAX_STATES < 2^14. `tag` is that
+ * halfword whole, so a run of triangles under one state is told by one compare (build_scene). */
 typedef struct __attribute__((aligned(32))) {
     int16_t  x[3], y[3];
     uint32_t argb[3];
     uint8_t  u[3], v[3];
-    uint16_t state   : 14;
-    uint16_t is_rect : 2;
+    union {
+        struct {
+            uint16_t state   : 14;
+            uint16_t is_rect : 2;
+        };
+        uint16_t tag;
+    };
 } gcmd_t;
 _Static_assert(sizeof(gcmd_t) == 32, "a command record is one cache line");
 _Static_assert(GPU_MAX_STATES <= (1 << 14), "a state index fits the record's 14 bits");
 
 /* Texture and blend state, recorded once per run of primitives that share it. */
 /* One cache line too, for the same reasons as gcmd_t: appended into a line allocated without a
- * read, and prefetched ahead of the command walk that reads it. 27 bytes of fields, padded. */
+ * read, and prefetched ahead of the command walk that reads it. 29 bytes of fields, padded. */
 typedef struct __attribute__((aligned(32))) {
     uint16_t tex_x, tex_y;      /* texture page origin, in VRAM halfwords */
     uint16_t clut_x, clut_y;
@@ -168,6 +174,8 @@ typedef struct __attribute__((aligned(32))) {
     uint8_t  depth;             /* 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct */
     uint8_t  semi_mode;
     uint8_t  flags;             /* BP_GPU_TEXTURED | BP_GPU_SEMI | BP_GPU_RAW */
+    uint8_t  pad;
+    uint16_t tris;              /* triangles recorded under it, for palette_priority */
 } gstate_t;
 _Static_assert(sizeof(gstate_t) == 32, "a state record is one cache line");
 
@@ -314,6 +322,7 @@ extern const uint16_t* g_vram;
 extern gcmd_t g_cmds[GPU_MAX_CMDS];
 extern int g_cmd_count;
 extern gstate_t g_states[GPU_MAX_STATES];
+extern int g_state_count;
 extern int g_frame_shown;
 extern int g_scene_dirty;
 extern int g_hdr_hits;
@@ -425,6 +434,11 @@ void perf_window_open(void);
 extern uint64_t g_prof_log_us;
 extern int g_prof_logs;
 void profile_report(void);
+/* The time from the end of one present's pacing to the start of the next's: what the frame cost,
+ * whatever it held for after. Counted into the bench's histogram (dc_prof.c). */
+void bench_frame_busy(uint64_t busy_us);
+/* The present just made: the emulation since the last one (pacing left out) and the present itself. */
+extern uint32_t g_frame_emu_us, g_frame_present_us;
 #if RECOMPSX_DC_PROFILE_OVERLAY
 void draw_profile_overlay(void);
 #endif

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""scripts/dc-prof.py <prof.txt> <recompsx.elf> [--top N] [--hot FUNC] [--nm PATH]
+"""scripts/dc-prof.py <prof.txt> <recompsx.elf> [--top N] [--hot FUNC] [--lines FUNC] [--annotate FUNC]
+                     [--nm PATH] [--frames N]
 
 Reads a guest profile written by the profiling Flycast build (branch `recompsx-prof` of a local
 Flycast clone: every SH4 timeslice records the PC it resumes at) and names where the cycles went,
@@ -12,6 +13,15 @@ presents, and the Flycast build records between the first two and quits at the t
     --top N      functions to list (default 40)
     --hot FUNC   also list FUNC's hottest addresses (substring of the demangled name), with
                  the instruction at each — disassembled from the ELF
+    --lines FUNC FUNC's samples by source line (addr2line over every sampled address), the
+                 generated C++, runtime or backend line each came from, with its text
+    --annotate FUNC  FUNC's whole disassembly, each instruction with its samples: the path a call
+                 takes is the run of instructions with about the same count, and a wait shows as
+                 a count several times its neighbours'
+    --frames N   the recording's N frames (the bench range's length) as one line of ms a frame:
+                 total, the conflict-free time (total less the conflict columns: what the frame
+                 would be with every cache conflict placed away), issue, and each wait. How code
+                 changes are compared (docs/perf/dreamcast-ledger.md, How to measure)
 
 A profile recorded with RXPROF_CALLERS (scripts/dc-flycast-prof.sh --callers) also lists, for
 each watched function, its callers by the return address.
@@ -22,6 +32,11 @@ operand-cache fills, operand dependencies and uncached accesses (the rest is iss
 <prof.txt>.cache.fa as well, the misses fully associative caches of the same sizes would have had,
 two more columns give the fills that were conflicts (direct-mapped minus fully associative): the
 part of each fill column that placing code and data decides.
+
+A v2 model (rx_cache.cpp, 2026-09-30) also charges each instruction its operand write-backs and
+store-queue bursts, and the fully associative cache its own write-backs: three more columns, wb,
+wbc (write-backs that were conflicts) and sq, after oconf. Before v2 those were inside `issue`,
+where a write-back a conflict caused made identical code look slower from one link to the next.
 """
 import bisect
 import os
@@ -53,38 +68,44 @@ def load_profile(path):
 
 
 def load_costs(path):
-    """<prof.txt>.cache from the cache model: per instruction address, instruction misses, operand
-    misses, dependency stall cycles and uncached-access cycles; None without one."""
+    """<prof.txt>.cache from the cache model: per instruction address, in cycles, instruction
+    fills, operand fills, dependency stalls, uncached accesses, and (v2) write-backs and
+    store-queue bursts; None without one."""
     if not os.path.exists(path):
         return None
-    costs, fill = {}, (0, 0)
+    costs, fill, wb, sq = {}, (0, 0), 0, 0
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
-                m = re.search(r"ifill (\d+) ofill (\d+)", line)
+                m = re.search(r"ifill (\d+) ofill (\d+) wb (\d+) sq (\d+)", line)
                 if m:
                     fill = (int(m.group(1)), int(m.group(2)))
+                    wb, sq = int(m.group(3)), int(m.group(4))
                 continue
-            a, im, om, dep, ext = line.split()
-            costs[int(a, 16)] = (int(im) * fill[0], int(om) * fill[1], int(dep), int(ext))
+            p = line.split()
+            w, q = (int(p[5]), int(p[6])) if len(p) >= 7 else (0, 0)
+            costs[int(p[0], 16)] = (int(p[1]) * fill[0], int(p[2]) * fill[1], int(p[3]), int(p[4]),
+                                    w * wb, q * sq)
     return costs
 
 
 def load_fa(path):
-    """<prof.txt>.cache.fa: per instruction address, the instruction and operand misses fully
-    associative LRU caches of the same sizes had; None without one."""
+    """<prof.txt>.cache.fa: per instruction address, in cycles, the instruction and operand fills
+    fully associative LRU caches of the same sizes had, and (v2) the operand write-backs; None
+    without one."""
     if not os.path.exists(path):
         return None
-    fa, fill = {}, (0, 0)
+    fa, fill, wb = {}, (0, 0), 0
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
-                m = re.search(r"ifill (\d+) ofill (\d+)", line)
+                m = re.search(r"ifill (\d+) ofill (\d+)(?: wb (\d+))?", line)
                 if m:
                     fill = (int(m.group(1)), int(m.group(2)))
+                    wb = int(m.group(3)) if m.group(3) else 0
                 continue
-            a, im, om = line.split()
-            fa[int(a, 16)] = (int(im) * fill[0], int(om) * fill[1])
+            p = line.split()
+            fa[int(p[0], 16)] = (int(p[1]) * fill[0], int(p[2]) * fill[1], (int(p[3]) if len(p) >= 4 else 0) * wb)
     return fa
 
 
@@ -108,7 +129,7 @@ def main():
     args = sys.argv[1:]
     if len(args) < 2:
         sys.exit(__doc__)
-    top, hot, nm = 40, None, None
+    top, hot, nm, nframes, lines, annotate = 40, None, None, None, None, None
     rest = []
     i = 0
     while i < len(args):
@@ -116,8 +137,14 @@ def main():
             top = int(args[i + 1]); i += 2
         elif args[i] == "--hot":
             hot = args[i + 1]; i += 2
+        elif args[i] == "--lines":
+            lines = args[i + 1]; i += 2
+        elif args[i] == "--annotate":
+            annotate = args[i + 1]; i += 2
         elif args[i] == "--nm":
             nm = args[i + 1]; i += 2
+        elif args[i] == "--frames":
+            nframes = int(args[i + 1]); i += 2
         else:
             rest.append(args[i]); i += 1
     prof, elf = rest[0], rest[1]
@@ -145,33 +172,58 @@ def main():
     fa = load_fa(prof + ".cache.fa") if costs is not None else None
     per_cost = {}
     if costs is not None:
+        # per function: ifill ofill dep ext iconf oconf wb wbconf sq, in cycles
         for addr, c in costs.items():
             k = bisect.bisect_right(starts, addr) - 1
             if k >= 0 and addr < ends[k]:
-                p = per_cost.setdefault(k, [0, 0, 0, 0, 0, 0])
+                p = per_cost.setdefault(k, [0] * 9)
                 for i in range(4):
                     p[i] += c[i]
                 p[4] += c[0]
                 p[5] += c[1]
+                p[6] += c[4]
+                p[7] += c[4]
+                p[8] += c[5]
         for addr, c in (fa or {}).items():
             k = bisect.bisect_right(starts, addr) - 1
             if k >= 0 and addr < ends[k]:
-                p = per_cost.setdefault(k, [0, 0, 0, 0, 0, 0])
+                p = per_cost.setdefault(k, [0] * 9)
                 p[4] -= c[0]
                 p[5] -= c[1]
-        sums = [sum(p[i] for p in per_cost.values()) / 200e3 for i in range(6)]
-        conf = f" (conflicts: ifill {sums[4]:.0f} ofill {sums[5]:.0f})" if fa is not None else ""
-        print(f"cache model: ifill {sums[0]:.0f} ofill {sums[1]:.0f} dep {sums[2]:.0f} ext {sums[3]:.0f} ms{conf}")
+                p[7] -= c[2]
+        if fa is None:
+            for p in per_cost.values():
+                p[4] = p[5] = p[7] = 0
+        sums = [sum(p[i] for p in per_cost.values()) / 200e3 for i in range(9)]
+        conf = f" (conflicts: ifill {sums[4]:.0f} ofill {sums[5]:.0f} wb {sums[7]:.0f})" if fa is not None else ""
+        print(f"cache model: ifill {sums[0]:.0f} ofill {sums[1]:.0f} dep {sums[2]:.0f} ext {sums[3]:.0f} "
+              f"wb {sums[6]:.0f} sq {sums[8]:.0f} ms{conf}")
+        if nframes:
+            tot = cycles / 200e3
+            fa_ms = tot - (sums[4] + sums[5] + sums[7] if fa is not None else 0)
+            waits = sums[0] + sums[1] + sums[2] + sums[3] + sums[6] + sums[8]
+            # Time nothing was run for: KOS's idle thread, where bp_pace_frame sleeps when a present
+            # is ahead of its vblank. Not the emulator's work; `work` is the conflict-free time less it.
+            idle = sum(c for k, c in per_fn.items() if names[k] in ("thd_idle_task", "_thd_idle_task")) \
+                * slice_ / 200e3
+            print(f"a frame ({nframes}): total {tot / nframes:.2f}  conflict-free {fa_ms / nframes:.2f}  "
+                  f"issue {(tot - waits) / nframes:.2f}  ifill {sums[0] / nframes:.2f} "
+                  f"(conf {sums[4] / nframes:.2f})  ofill {sums[1] / nframes:.2f} (conf {sums[5] / nframes:.2f})  "
+                  f"dep {sums[2] / nframes:.2f}  ext {sums[3] / nframes:.2f}  wb {sums[6] / nframes:.2f} "
+                  f"(conf {sums[7] / nframes:.2f})  sq {sums[8] / nframes:.2f}  idle {idle / nframes:.2f}  "
+                  f"work {(fa_ms - idle) / nframes:.2f} ms")
         extra = f" {'iconf':>6} {'oconf':>6}" if fa is not None else ""
-        print(f"{'share':>6} {'ms@200MHz':>9} {'ifill':>6} {'ofill':>6} {'dep':>6} {'ext':>5}{extra}  function")
+        print(f"{'share':>6} {'ms@200MHz':>9} {'ifill':>6} {'ofill':>6} {'dep':>6} {'ext':>5}{extra} "
+              f"{'wb':>5} {'wbc':>5} {'sq':>5}  function")
     else:
         print(f"{'share':>6} {'ms@200MHz':>9}  function")
     for k, count in sorted(per_fn.items(), key=lambda kv: -kv[1])[:top]:
         split = ""
         if costs is not None:
-            p = per_cost.get(k, [0, 0, 0, 0, 0, 0])
-            widths = (6, 6, 6, 5, 6, 6) if fa is not None else (6, 6, 6, 5)
-            split = " " + " ".join(f"{v / 200e3:{w}.1f}" for v, w in zip(p, widths))
+            p = per_cost.get(k, [0] * 9)
+            cols = (p if fa is not None else p[:4] + p[6:])
+            widths = (6, 6, 6, 5, 6, 6, 5, 5, 5) if fa is not None else (6, 6, 6, 5, 5, 5, 5)
+            split = " " + " ".join(f"{v / 200e3:{w}.1f}" for v, w in zip(cols, widths))
         print(f"{100.0 * count / total:5.1f}% {count * slice_ / 200e3:9.1f}{split}  {names[k]}")
     def name_of(addr):
         k = bisect.bisect_right(starts, addr) - 1
@@ -205,6 +257,47 @@ def main():
         inside = sorted(((a, c) for a, c in samples if starts[k] <= a < ends[k]), key=lambda ac: -ac[1])
         for a, c in inside[:30]:
             print(f"  {a:08x} +{a - starts[k]:#06x} {100.0 * c / per_fn[k]:5.1f}%  {text.get(a, '')}")
+    def pick(sub):
+        matches = [k for k in per_fn if sub in names[k]]
+        if not matches:
+            sys.exit(f"no sampled function matches {sub!r}")
+        return max(matches, key=lambda m: per_fn[m])
+    if lines:
+        k = pick(lines)
+        inside = [(a, c) for a, c in samples if starts[k] <= a < ends[k]]
+        where = subprocess.run([os.path.join(tools, "sh-elf-addr2line"), "-e", elf]
+                               + [f"{a:x}" for a, _ in inside], capture_output=True, text=True).stdout.split("\n")
+        by, files = {}, {}
+        for (a, c), loc in zip(inside, where):
+            by[loc] = by.get(loc, 0) + c
+        print(f"\n{names[k]} by source line ({per_fn[k]} samples):")
+        for loc, c in sorted(by.items(), key=lambda kv: -kv[1])[:top]:
+            f, _, ln = loc.rpartition(":")
+            ln = re.sub(r"\D.*", "", ln)
+            src = ""
+            try:
+                if f not in files:
+                    files[f] = open(f, errors="replace").read().split("\n")
+                src = files[f][int(ln) - 1].strip()[:100]
+            except (OSError, ValueError, IndexError):
+                pass
+            print(f"  {100.0 * c / per_fn[k]:5.1f}%  {os.path.basename(f)}:{ln}  {src}")
+    if annotate:
+        k = pick(annotate)
+        dis = subprocess.run([os.path.join(tools, "sh-elf-objdump"), "-d", "--no-show-raw-insn",
+                              f"--start-address={starts[k]:#x}", f"--stop-address={ends[k]:#x}", elf],
+                             capture_output=True, text=True).stdout
+        count = dict((a, c) for a, c in samples if starts[k] <= a < ends[k])
+        peak = max(count.values()) if count else 1
+        print(f"\n{names[k]}, every instruction ({per_fn[k]} samples):")
+        for line in dis.splitlines():
+            head, _, ins = line.partition(":\t")
+            try:
+                a = int(head.strip(), 16)
+            except ValueError:
+                continue
+            c = count.get(a, 0)
+            print(f"  {a:08x} {c:8d} {'#' * (c * 30 // peak):30s} {ins.strip()[:80]}")
 
 
 main()

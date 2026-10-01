@@ -59,8 +59,10 @@ from 10.1 to 4.1 ms a frame, and operand fills rose 0.5 ms (constants moving wit
 
 ## Consequences
 
-- A placed Dreamcast build links twice: about three more minutes with `--max`. `--no-placement`
-  gives the linker's own layout; `--placement <file>` tries another.
+- A placed Dreamcast build links twice. Since 2026-09-30 the second link takes its code from GCC's
+  incremental LTO cache, because only the order changed: 2 s instead of 181 s for Crash 3, with a
+  byte-identical loaded image. `--no-placement` gives the linker's own layout; `--placement
+  <file>` tries another.
 - .text grows about 500 KB (Crash 3: 507,904 bytes, all padding). The loaded image is checked
   against the budget as before.
 - A placement names sections, so it survives most changes to the code. A section that disappears

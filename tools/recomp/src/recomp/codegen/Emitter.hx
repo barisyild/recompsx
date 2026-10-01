@@ -83,6 +83,19 @@ class Emitter {
 	var leafWritten:Array<Int> = [];
 	// While the idle prologue evaluates a dry turn, the registers it writes are these locals.
 	var shadow:Null<Map<Int, String>> = null;
+	// The span (Memory.span) the load or store being emitted belongs to: its local (a shim.Span) and
+	// the instruction's offset. Null: the access decodes its own address, as always.
+	var span:Null<SpanAccess> = null;
+	var spanCount = 0;
+	// Function spans (planFunctionSpans): a base register's span for the whole function, by
+	// register, set wherever the register's value may have changed. Null: none.
+	var fspans:Null<Map<Int, FunctionSpan>> = null;
+	// Where each function span must be taken again (planFspanLiveness), and the block being emitted.
+	var fspanLive:Null<FspanLive> = null;
+	var curBlock = -1;
+	// The function's cycle count is its local `cyc` (an optimized build), written to CpuState
+	// where anything else can read it and read back where anything else may have moved it.
+	var cycLocal = false;
 
 	/**
 		The class a call to this address should go to, or null to dispatch it by address.
@@ -104,6 +117,15 @@ class Emitter {
 		dispatcher on a hit; a fixture compiled without a program keeps `Runtime.call`.
 	**/
 	public var dynamicCall = "Runtime.call";
+
+	/**
+		What a call to a function may write, transitively, as a register mask (bit n for $n):
+		`Program`'s summaries of the functions a direct call reaches; every register (ALL_REGS)
+		for anything they cannot see. Read by the function spans' liveness: a span on a register
+		the callee never writes need not be taken again after the call.
+	**/
+	public var writesOf:Int -> Int = _ -> ALL_REGS;
+	public static inline final ALL_REGS = 0xFFFFFFFE;
 
 	/**
 		Function entries a mod hooks (ADR-0033), set by `Program` from the manifests `gen --mods`
@@ -168,6 +190,12 @@ class Emitter {
 		while (frames.length > 0) frames.pop();
 		idlePlans = [];
 		shadow = null;
+		span = null;
+		spanCount = 0;
+		fspans = null;
+		fspanLive = null;
+		curBlock = -1;
+		cycLocal = optimize;
 
 		// Dense indices in address order: stable across regenerations, and the case labels read
 		// in the same order as the original listing.
@@ -186,7 +214,8 @@ class Emitter {
 			buf.add('\t\tprogram is known to reach it statically.\n');
 		}
 		buf.add('\t**/\n');
-		buf.add('\tpublic static function ${fn.name}(ctx:CpuState, entry:Int = 0):Void {\n');
+		// `core.Ctx`: the CpuState, `__restrict` on C++ (E-041).
+		buf.add('\tpublic static function ${fn.name}(ctx:core.Ctx, entry:Int = 0):Void {\n');
 		// First, before anything can call out and let another relocatable function set it.
 		if (relocatable) buf.add('\t\tfinal rbase = core.Reloc.base;\n');
 		// The address this call returns to, before anything can overwrite `$ra` (ADR-0027).
@@ -204,7 +233,18 @@ class Emitter {
 		buf.add(PUMP_ENTRY);
 		buf.add('\t\t#end\n');
 		if (hooks != null && !relocatable && hooks.exists(fn.entry)) emitModEntry(buf, fn.entry);
+		if (cycLocal) buf.add('\t\tvar cyc = ctx.cycles;\n');
 		if (leafUsed != null) for (r in leafUsed) buf.add('\t\tvar ${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
+		fspans = optimize ? planFunctionSpans(ir) : null;
+		fspanLive = fspans != null ? planFspanLiveness() : null;
+		if (fspans != null) for (r in 1...32) {
+			final f = fspans.get(r);
+			// Taken here when the entry block needs it; otherwise only for a resume, which may
+			// enter at a block that does — a call enters at 0 and takes it where it is needed.
+			if (f == null) {}
+			else if ((fspanLive.top & (1 << r)) != 0) buf.add('\t\tvar ${f.v} = Memory.span(${reg(r)}, ${f.lo}, ${f.hi});\n');
+			else buf.add('\t\tvar ${f.v} = entry == 0 ? Memory.spanNone() : Memory.span(${reg(r)}, ${f.lo}, ${f.hi});\n');
+		}
 
 		// Even a one-block CFG needs a loop if it has an edge to itself.
 		final flat = blockAddrs.length == 1 && fn.blocks.get(blockAddrs[0]).successors.length == 0;
@@ -233,6 +273,9 @@ class Emitter {
 			else if (guarded) buf.add('\t\tif (entry <= $i) { // ${addrNote(addr)}\n');
 			final loopExit = optimize ? selfLoopExit(fn, addr) : null;
 			if (loopExit != null) {
+				// A loop of one block in a linear chain is planned as the regions' are.
+				final id = ir.byAddress.get(addr).resumeId;
+				planIdle([id], id);
 				nativeLoop = addr;
 				buf.add(indent + 'while (true) {\n');
 				emitPump(buf, indent + '\t', i);
@@ -309,7 +352,7 @@ class Emitter {
 				for (i in 0...parts.length) {
 					frame.index = i;
 					final last = i + 1 == parts.length;
-					buf.add(ind + 'if (resume < 0 || ${containsEntry(parts[i])}) {\n');
+					buf.add(ind + 'if (shim.MemA.likely(resume < 0) || ${containsEntry(parts[i])}) {\n');
 					emitRegion(buf, fn, parts[i], indexOf, ind + '\t', last ? follow : parts[i + 1].entry);
 					buf.add(ind + '} else {}\n');
 				}
@@ -318,13 +361,13 @@ class Emitter {
 				final branch = head.selector;
 				final name = 'take_${branch.resumeId}';
 				buf.add(ind + 'var $name = false;\n');
-				buf.add(ind + 'if (resume < 0 || ${containsEntry(head)}) {\n');
+				buf.add(ind + 'if (shim.MemA.likely(resume < 0) || ${containsEntry(head)}) {\n');
 				final previous = capturedBranch;
 				capturedBranch = branch.addr;
 				emitRegion(buf, fn, head, indexOf, ind + '\t', null);
 				capturedBranch = previous;
 				buf.add(ind + '} else {}\n');
-				buf.add(ind + 'if (resume < 0 ? $name : ${containsEntry(taken)}) {\n');
+				buf.add(ind + 'if (shim.MemA.likely(resume < 0) ? $name : ${containsEntry(taken)}) {\n');
 				if (taken != null) emitRegion(buf, fn, taken, indexOf, ind + '\t', join);
 				buf.add(ind + '} else {\n');
 				if (notTaken != null) emitRegion(buf, fn, notTaken, indexOf, ind + '\t', join);
@@ -342,7 +385,7 @@ class Emitter {
 				emitRegion(buf, fn, body, indexOf, ind + '\t', null);
 				// Reached with a recorded target only: one outside the loop leaves it, and the
 				// guards after the loop steer to it; the loop's own header is the next pass.
-				buf.add(ind + '\tif (resume >= 0 && resume != $headId) break; else {}\n');
+				buf.add(ind + '\tif (shim.MemA.unlikely(resume >= 0) && resume != $headId) break; else {}\n');
 				buf.add(ind + '}\n');
 				loopHead = outerHead;
 				loopMembers = outerMembers;
@@ -442,11 +485,13 @@ class Emitter {
 
 	/** A leaf's written registers back to CpuState, before anything outside it can look. */
 	function publish(buf:StringBuf, ind:String):Void {
+		if (cycLocal) buf.add('${ind}ctx.cycles = cyc;\n');
 		if (leafUsed != null) for (r in leafWritten) buf.add('${ind}ctx.${Instr.regName(r)} = ${Instr.regName(r)};\n');
 	}
 
 	/** A leaf's locals read again, after a due pump. */
 	function reloadLeaf(buf:StringBuf, ind:String):Void {
+		if (cycLocal) buf.add('${ind}cyc = ctx.cycles;\n');
 		if (leafUsed != null) for (r in leafUsed) buf.add('${ind}${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
 	}
 
@@ -469,6 +514,8 @@ class Emitter {
 
 	function emitCheckpoint(buf:StringBuf, ind:String, entry:String, entryPump:Bool):Void {
 		buf.add(ind + '#if recompsx_cooperative\n');
+		// The yield budget is counted in cycles: it reads the clock. At the entry it is current.
+		if (cycLocal && !entryPump) buf.add(ind + 'ctx.cycles = cyc;\n');
 		buf.add(ind + 'if (core.Cooperative.wantsYield(ctx)) {\n');
 		if (!entryPump) publish(buf, ind + '\t');
 		final ra = entryRaLocal ? ', entryRa' : '';
@@ -497,12 +544,13 @@ class Emitter {
 
 	function emitPump(buf:StringBuf, ind:String, entry:Int):Void {
 		emitCheckpoint(buf, ind, Std.string(entry), false);
-		buf.add('${ind}if (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n');
+		buf.add('${ind}if (shim.MemA.unlikely(((${cycExpr()} - ctx.nextEvent) | 0) >= 0)) {\n');
 		publish(buf, ind + '\t');
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
 		// A nonlocal jump has already restored CpuState: never publish a leaf's locals over it.
 		buf.add(ind + '\t' + unwindLine(NO_CONTINUATION) + '\n');
 		reloadLeaf(buf, ind + '\t');
+		resetAllFunctionSpans(buf, ind + '\t');
 		buf.add(ind + '} else {}\n');
 	}
 
@@ -523,7 +571,7 @@ class Emitter {
 	// external entries. At a function entry only a due pump can introduce a new token, so keep
 	// its check on that path instead of paying a second branch on every ordinary function call.
 	static inline final PUMP_ENTRY =
-		"\t\tif (((ctx.cycles - ctx.nextEvent) | 0) >= 0) {\n"
+		"\t\tif (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0)) {\n"
 		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
 
 	/**
@@ -541,7 +589,7 @@ class Emitter {
 	// to elsewhere at the frame that continues at `cont` (ADR-0027); the common case, no token at
 	// all, is the same single compare as before.
 	static function unwindLine(cont:String):String {
-		return 'if (ctx.unwindToken != 0 && Runtime.unwinding(ctx, $cont)) return;';
+		return 'if (shim.MemA.unlikely(ctx.unwindToken != 0) && Runtime.unwinding(ctx, $cont)) return;';
 	}
 
 	/** Where no call returns: after a pump or a trap. No return to elsewhere stops there. */
@@ -570,11 +618,13 @@ class Emitter {
 	function emitBlock(buf:StringBuf, fn:Func, blockAddr:Int, indexOf:Map<Int, Int>,
 			ind:String):Void {
 		final block = ir.byAddress.get(blockAddr);
+		curBlock = blockAddr;
 		// Arriving here ends whatever `resume` was steering towards.
 		if (inRegions) buf.add(ind + 'resume = -1;\n');
 		final idle = idlePlans.get(blockAddr);
 		if (idle != null) emitIdlePrologue(buf, ind, idle);
 		final stackPlan = optimize ? StackMemoryForwarding.plan(block.body) : null;
+		final spans = optimize ? planSpans(block.body, stackPlan) : null;
 		var i = 0;
 		while (i < block.body.length) {
 			if (stackPlan != null) {
@@ -582,6 +632,7 @@ class Emitter {
 					case ForwardLoad(source):
 						final line = assign(block.body[i].decoded.rt, reg(source), false);
 						if (line != "") buf.add(ind + line + '\n');
+						resetFunctionSpans(buf, ind, i);
 						i++;
 						continue;
 					case DropStore:
@@ -592,10 +643,23 @@ class Emitter {
 			}
 			final fused = optimize ? PatternMatcher.match(block.body, i) : null;
 			if (fused == null) {
+				if (spans != null) {
+					final open = spans.open.get(i);
+					if (open != null) buf.add(ind + open + '\n');
+					span = spans.at.get(i);
+				}
+				if (span == null) span = functionSpanOf(block.body[i].decoded);
 				emitSimple(buf, ind, block.body[i].decoded, false, block.addr, i);
+				span = null;
+				resetFunctionSpans(buf, ind, i);
+				if (fspanLive != null) {
+					final st = fspanLive.step.get(curBlock);
+					stepFunctionSpans(buf, ind, st == null || !st.exists(i) ? 0 : st.get(i), block.body[i].decoded);
+				} else {}
 				i++;
 			} else {
 				emitFused(buf, ind, block.body[i].decoded, block.body[i + 1].decoded, fused.kind);
+				for (k in 0...fused.length) resetFunctionSpans(buf, ind, i + k);
 				i += fused.length;
 			}
 		}
@@ -609,6 +673,405 @@ class Emitter {
 			else emitReturn(buf, ind);
 		}
 	}
+
+	/**
+		The runs of loads and stores in a block that go through one base register with no write
+		to it between them: each run of two or more is checked once (`Memory.span`, before its
+		first access) and its accesses index the arena by the result. A run ends at a write to its
+		base — a load into its own base register ends it after that load, which used the old value
+		— and every run ends at a trap, an unknown instruction or a coprocessor-0 write, after
+		which nothing is assumed. Accesses the stack forwarding removed are in no run, and a delay
+		slot is emitted elsewhere and is in none either. The unaligned ones (lwl and the rest)
+		keep their own path.
+	**/
+	function planSpans(body:Array<recomp.ir.FunctionIR.InstructionIR>,
+			stackPlan:Null<Array<Null<StackMemoryForwarding.StackMemoryDecision>>>):Null<SpanPlan> {
+		final open:Map<Int, Array<Int>> = [];
+		final runs:Array<{base:Int, members:Array<Int>}> = [];
+		function close(r:Int):Void {
+			final m = open.get(r);
+			if (m != null) {
+				if (m.length >= 2) runs.push({base: r, members: m});
+				else {}
+				open.remove(r);
+			} else {}
+		}
+		function closeAll():Void {
+			for (r in [for (k in open.keys()) k]) close(r);
+		}
+		for (idx in 0...body.length) {
+			final ins = body[idx];
+			final d = ins.decoded;
+			if (d.op == Op.SYSCALL || d.op == Op.BREAK || d.op == Op.INVALID || d.op == Op.MTC0 || d.op == Op.RFE) {
+				closeAll();
+				continue;
+			} else {}
+			final elided = stackPlan != null && stackPlan[idx] != null;
+			if (!elided && spanWidth(d.op) > 0 && d.rs != 0 && (fspans == null || !fspans.exists(d.rs))) {
+				final m = open.get(d.rs);
+				if (m == null) open.set(d.rs, [idx]);
+				else m.push(idx);
+			} else {}
+			for (r in 1...32) if (ins.writes.has(r)) close(r);
+		}
+		closeAll();
+		if (runs.length == 0) return null;
+		final plan:SpanPlan = {open: [], at: []};
+		for (run in runs) {
+			var lo = 0x7FFFFFFF, hi = -0x7FFFFFFF;
+			for (k in run.members) {
+				final d = body[k].decoded;
+				if (d.immS < lo) lo = d.immS;
+				else {}
+				final last = d.immS + spanWidth(d.op) - 1;
+				if (last > hi) hi = last;
+				else {}
+			}
+			final v = 'span_$spanCount';
+			spanCount++;
+			plan.open.set(run.members[0], 'final $v = Memory.span(${reg(run.base)}, $lo, $hi);');
+			for (k in run.members) plan.at.set(k, {v: v, off: body[k].decoded.immS});
+		}
+		return plan;
+	}
+
+	/**
+		Function spans: a base register the function reads memory through often and sets seldom
+		gets one span for the whole function — checked once wherever its value may have changed,
+		and every load and store through it, in any block and in delay slots, indexes the arena
+		by it. Those places: the entry, after each instruction writing the register, and after
+		anything outside the function that could have — a call, a pump that ran, a trap. Nothing
+		about calling conventions is assumed: a callee that changes the register is seen, since
+		the span is taken again from its value after every call.
+
+		For a register never written here that is only the entry and the calls, which is what
+		makes a pointer a caller hands down (Crash Bandicoot: Warped keeps the scratchpad's
+		address in v1 through its hot object loop) cost one check instead of one per access —
+		and the scratchpad's was the dearer check, after the RAM test had failed. `sp` is set
+		at entry and exit. A register written as often as it is read through keeps the block
+		spans: a check after every write would be no fewer checks. Link registers are left out
+		(a transfer writes them before its delay slot runs), and so is any register whose
+		offsets span more than the scratchpad, which could never pass there.
+	**/
+	function planFunctionSpans(ir:recomp.ir.FunctionIR):Null<Map<Int, FunctionSpan>> {
+		final accesses = [for (_ in 0...32) 0];
+		final writes = [for (_ in 0...32) 0];
+		final lo = [for (_ in 0...32) 0x7FFFFFFF];
+		final hi = [for (_ in 0...32) -0x7FFFFFFF];
+		final linked = [for (_ in 0...32) false];
+		for (block in ir.blocks) for (ins in block.instructions) {
+			final d = ins.decoded;
+			final w = spanWidth(d.op);
+			if (w > 0 && d.rs != 0) {
+				accesses[d.rs]++;
+				if (d.immS < lo[d.rs]) lo[d.rs] = d.immS;
+				else {}
+				if (d.immS + w - 1 > hi[d.rs]) hi[d.rs] = d.immS + w - 1;
+				else {}
+			} else {}
+			for (r in 1...32) {
+				if (ins.writes.has(r)) {
+					// A step (`addiu r, r, imm`) counts as a write here, though the span follows
+					// it (stepFunctionSpans) instead of being taken again: counted as nothing, a
+					// pointer stepped more often than it is read through got a span too, and
+					// Crash 3's generated code ran 0.15 ms a frame slower with those 455 spans
+					// (docs/perf/dreamcast-ledger.md, E-035).
+					writes[r]++;
+					if (d.op.hasDelaySlot) linked[r] = true;
+					else {}
+				} else {}
+			}
+		}
+		var plan:Null<Map<Int, FunctionSpan>> = null;
+		for (r in 1...32) {
+			if (accesses[r] >= 2 && !linked[r] && writes[r] * 2 <= accesses[r] && hi[r] - lo[r] < 1024) {
+				if (plan == null) plan = [];
+				else {}
+				plan.set(r, {v: 'fspan_${Instr.regName(r)}', lo: lo[r], hi: hi[r]});
+			} else {}
+		}
+		return plan;
+	}
+
+	/** The function span a load or store goes through, or null. */
+	function functionSpanOf(i:Instr):Null<SpanAccess> {
+		if (fspans == null || spanWidth(i.op) == 0 || i.rs == 0) return null;
+		final f = fspans.get(i.rs);
+		return f == null ? null : {v: f.v, off: i.immS};
+	}
+
+	/** After instruction `index` of the current block (a write, a forwarded load, a trap): the
+	    function spans it changed that a later access still needs, taken again. */
+	function resetFunctionSpans(buf:StringBuf, ind:String, index:Int):Void {
+		if (fspans == null) return;
+		final m = fspanLive.write.get(curBlock);
+		takeFunctionSpans(buf, ind, m == null || !m.exists(index) ? 0 : m.get(index));
+	}
+
+	/** Every function span taken again: after a pump that ran, where it is rare enough not to ask. */
+	function resetAllFunctionSpans(buf:StringBuf, ind:String):Void {
+		takeFunctionSpans(buf, ind, -1);
+	}
+
+	/** `addiu r, r, imm`: a register stepped by a constant, which its function span follows. */
+	static inline function isStep(d:Instr, r:Int):Bool return d.op == Op.ADDIU && d.rs == r && d.rt == r && r != 0;
+
+	/** After a step of a span register (`d`, just emitted): the span moved by the same amount
+	    while it stays inside its region (Memory.spanStep). One that was not a span stays none
+	    (the accesses take the slow path, which is always right): a pointer outside RAM and the
+	    scratchpad is not stepped into them, and a full check here cost code at every step. */
+	function stepFunctionSpans(buf:StringBuf, ind:String, mask:Int, d:Instr):Void {
+		if (fspans == null || mask == 0) return;
+		for (r in 1...32) {
+			final f = fspans.get(r);
+			if (f != null && (mask & (1 << r)) != 0)
+				buf.add('${ind}${f.v} = Memory.spanOk(${f.v}) ? Memory.spanStep(${f.v}, ${d.immS}, ${f.lo}, ${f.hi}) : Memory.spanNone();\n');
+			else {}
+		}
+	}
+
+	/** The function spans of the registers in `mask`, from their values now. */
+	function takeFunctionSpans(buf:StringBuf, ind:String, mask:Int):Void {
+		if (fspans == null || mask == 0) return;
+		for (r in 1...32) {
+			final f = fspans.get(r);
+			if (f != null && (mask & (1 << r)) != 0) buf.add('${ind}${f.v} = Memory.span(${reg(r)}, ${f.lo}, ${f.hi});\n');
+			else {}
+		}
+	}
+
+	/**
+		Where each function span has to be taken again, so that none is taken for nothing: a
+		backward liveness over the blocks, of "an access through this register may come before
+		its value changes again". Taking one costs a dozen instructions, and taking every one
+		after every call was 13 % of Crash 3's generated code for 1.9 accesses a span. The value
+		changes at a write to the register, a call (anything may have happened), a trap; the
+		span is taken again after one of those only if some path reaches an access through the
+		register first. A pump that ran still takes every span (resetAllFunctionSpans), being rare.
+		The events follow the order emitBlock emits: stack forwarding, fused pairs, the body,
+		the delay slot, the transfer. A conditional call (bltzal, bgezal) changes nothing on the
+		path that does not call, so it is no kill here, only a place to take them again.
+	**/
+	function planFspanLiveness():FspanLive {
+		var regs = 0;
+		for (r in fspans.keys()) regs |= 1 << r;
+		inline function bitOf(r:Int):Int return (1 << r) & regs;
+		// Per block, its events: [kind, arg, at] — kind 0 a use of arg's span, 1 a write of the
+		// registers in mask arg, 2 everything changed, 3 a conditional call; at is the body
+		// index, -1 the delay slot, -2 the transfer.
+		final events:Map<Int, Array<Array<Int>>> = [];
+		for (block in ir.blocks) {
+			final ev:Array<Array<Int>> = [];
+			final stackPlan = StackMemoryForwarding.plan(block.body);
+			var i = 0;
+			while (i < block.body.length) {
+				if (stackPlan != null && stackPlan[i] != null) {
+					switch (stackPlan[i]) {
+						case ForwardLoad(_):
+							final w = (block.body[i].writes : Int) & regs;
+							if (w != 0) ev.push([1, w, i]);
+							else {}
+						case _:
+					}
+					i++;
+					continue;
+				} else {}
+				final fused = PatternMatcher.match(block.body, i);
+				if (fused != null) {
+					for (k in 0...fused.length) {
+						final w = (block.body[i + k].writes : Int) & regs;
+						if (w != 0) ev.push([1, w, i + k]);
+						else {}
+					}
+					i += fused.length;
+					continue;
+				} else {}
+				final d = block.body[i].decoded;
+				if (d.op == Op.SYSCALL || d.op == Op.BREAK) ev.push([2, 0, i]);
+				else {
+					if (spanWidth(d.op) > 0 && d.rs != 0 && bitOf(d.rs) != 0) ev.push([0, d.rs, i]);
+					else {}
+					final w = (block.body[i].writes : Int) & regs;
+					if (w != 0 && isStep(d, d.rt)) ev.push([5, d.rt, i]);
+					else if (w != 0) ev.push([1, w, i]);
+					else {}
+				}
+				i++;
+			}
+			if (block.delaySlot != null) {
+				final d = block.delaySlot.decoded;
+				if (spanWidth(d.op) > 0 && d.rs != 0 && bitOf(d.rs) != 0) ev.push([0, d.rs, -1]);
+				else {}
+				final w = (block.delaySlot.writes : Int) & regs;
+				if (w != 0 && isStep(d, d.rt)) ev.push([5, d.rt, -1]);
+				else if (w != 0) ev.push([1, w, -1]);
+				else {}
+			} else {}
+			if (block.transfer != null) {
+				final d = block.transfer.decoded;
+				final link = (block.transfer.writes : Int);
+				if (d.op == Op.BLTZAL || d.op == Op.BGEZAL) ev.push([3, 0, -2]);
+				else if (d.op == Op.JAL) ev.push([4, (callWrites(d.target) | link) & regs, -2]);
+				else if (d.op == Op.JALR) {
+					// Through a register: only a guessed target (jalrGuess) has a summary, and its
+					// guard's other arm takes every span the call left live (`callLive`).
+					final guess = jalrGuess(block.transfer.decoded);
+					if (guess != null) ev.push([4, (writesOf(Vaddr.canonRam(guess)) | link) & regs, -2]);
+					else ev.push([2, 0, -2]);
+				} else {}
+			} else {}
+			events.set(block.addr, ev);
+		}
+		// Backward to a fixed point: what each block needs taken on entry.
+		final needIn:Map<Int, Int> = [];
+		for (block in ir.blocks) needIn.set(block.addr, 0);
+		var changed = true;
+		while (changed) {
+			changed = false;
+			var k = ir.blocks.length - 1;
+			while (k >= 0) {
+				final block = ir.blocks[k];
+				var live = 0;
+				for (s in block.successors) live |= needIn.exists(s) ? needIn.get(s) : 0;
+				final ev = events.get(block.addr);
+				var e = ev.length - 1;
+				while (e >= 0) {
+					final x = ev[e];
+					if (x[0] == 0) live |= 1 << x[1];
+					else if (x[0] == 1 || x[0] == 4) live &= ~x[1];
+					else if (x[0] == 2) live = 0;
+					else {}
+					e--;
+				}
+				if (live != needIn.get(block.addr)) {
+					needIn.set(block.addr, live);
+					changed = true;
+				} else {}
+				k--;
+			}
+		}
+		// The same pass once more, now recording what to take after each event.
+		final plan:FspanLive = {top: needIn.get(ir.blocks[0].addr), write: [], slot: [], call: [], callLive: [],
+			step: [], slotStep: []};
+		for (block in ir.blocks) {
+			var live = 0;
+			for (s in block.successors) live |= needIn.exists(s) ? needIn.get(s) : 0;
+			final ev = events.get(block.addr);
+			final writes:Map<Int, Int> = [];
+			final steps:Map<Int, Int> = [];
+			var e = ev.length - 1;
+			while (e >= 0) {
+				final x = ev[e];
+				if (x[0] == 5) {
+					// A step keeps the span valid if it was: moved where it is live after.
+					if ((live & (1 << x[1])) != 0) {
+						if (x[2] == -1) plan.slotStep.set(block.addr, 1 << x[1]);
+						else steps.set(x[2], 1 << x[1]);
+					} else {}
+				} else if (x[0] == 0) live |= 1 << x[1];
+				else if (x[0] == 1) {
+					if (x[2] == -1) plan.slot.set(block.addr, live & x[1]);
+					else writes.set(x[2], (writes.exists(x[2]) ? writes.get(x[2]) : 0) | (live & x[1]));
+					live &= ~x[1];
+				} else if (x[0] == 2) {
+					if (x[2] == -2) plan.call.set(block.addr, live);
+					else writes.set(x[2], live);
+					live = 0;
+				} else if (x[0] == 4) {
+					// A call that writes only x[1]: those spans are taken again, the rest kept.
+					plan.call.set(block.addr, live & x[1]);
+					plan.callLive.set(block.addr, live);
+					live &= ~x[1];
+				} else plan.call.set(block.addr, live);
+				e--;
+			}
+			plan.write.set(block.addr, writes);
+			plan.step.set(block.addr, steps);
+		}
+		return plan;
+	}
+
+	/** What a `jal` to `target` may write: the summary of the function it calls directly, or
+	    every register for a call by address (emitCall's same test). */
+	function callWrites(target:Int):Int {
+		final t = Vaddr.canonRam(target);
+		return staticTargetOf(t) != null ? writesOf(t) : ALL_REGS;
+	}
+
+	/**
+		The function a `jalr` through a register most likely calls: the one constant the running
+		function builds in that register (`lui` then `ori`/`addiu` into it), when it names a function
+		this universe calls directly. A guess, and emitted as one: the call is guarded by the
+		compare (emitTransfer), so a register that holds anything else still goes by address.
+		Crash Bandicoot: Warped's model loop calls its vertex decoder this way at every vertex.
+	**/
+	function jalrGuess(i:Instr):Null<Int> {
+		if (!optimize || i.rs == 0 || i.rs == 31) return null;
+		final r = i.rs;
+		var guess:Null<Int> = null;
+		var hi:Null<Int> = null;
+		for (block in ir.blocks) {
+			for (x in block.instructions) {
+				final d = x.decoded;
+				if (d.op == Op.LUI && d.rt == r) hi = d.immU << 16;
+				else if (hi != null && d.rt == r && d.rs == r && (d.op == Op.ORI || d.op == Op.ADDIU)) {
+					final k = d.op == Op.ORI ? (hi | d.immU) : ((hi + d.immS) | 0);
+					if (guess != null && guess != k) return null;
+					else guess = k;
+					hi = null;
+				} else if (((x.writes : Int) & (1 << r)) != 0) hi = null;
+				else {}
+			}
+		}
+		// The constant as the code builds it, which is what the register will hold; a caller
+		// canonicalises it to look the function up.
+		return (guess != null && staticTargetOf(Vaddr.canonRam(guess)) != null) ? guess : null;
+	}
+
+	/** The bytes a load or store a span can take moves, or 0 for one it cannot. */
+	static function spanWidth(op:Op):Int {
+		return switch (op) {
+			case LB | LBU | SB: 1;
+			case LH | LHU | SH: 2;
+			case LW | SW | LWC2 | SWC2: 4;
+			case _: 0;
+		};
+	}
+
+	/** A load: the timed form (`Memory.read32t(a, ctx, cyc)`) when the clock is in `cyc`, which
+	    writes it to CpuState before a port can read it. */
+	function memRead(name:String, addr:String):String
+		return cycLocal ? 'Memory.${name}t($addr, ctx, cyc)' : 'Memory.$name($addr)';
+
+	/** A store, likewise, as a statement. */
+	function memWrite(name:String, addr:String, value:String):String
+		return cycLocal ? 'Memory.${name}t($addr, $value, ctx, cyc);' : 'Memory.$name($addr, $value);';
+
+	/** `stmt` after the clock is written to CpuState: for the unaligned accesses, which have no
+	    timed form and are rare. */
+	function clockFirst(stmt:String):String
+		return (!cycLocal || stmt == "") ? stmt : 'ctx.cycles = cyc; $stmt';
+
+	/** `span + offset`, the index of the access being emitted in its span. */
+
+	/** A load (`name`: `read32` and the rest): through its span when it has one — the arena where
+	    the span holds, the whole decode out of line (`Memory.read32f`) where it does not — and
+	    otherwise the access itself, inline.
+
+	    The span's test is marked likely (`shim.MemA.likely`, GCC's `__builtin_expect`), as are a
+	    resume guard's `resume < 0` and a guessed call's compare, and a due pump and a pending
+	    token unlikely: GCC then lays the slow paths out after a function's hot code rather than
+	    between its blocks. Unmarked, Crash 3's 21 KB f_8003fc50 kept two hot stretches 8 KB
+	    apart, which the SH-4's 8 KB instruction cache cannot hold at once, and no placement of
+	    the function can separate (docs/perf/dreamcast-ledger.md, E-037). */
+	function spanLoad(fast:String, name:String, addr:String):String
+		return span == null ? memRead(name, addr)
+			: '(shim.MemA.likely(Memory.spanOk(${span.v})) ? Memory.$fast(${span.v}, ${span.off}) : Memory.${name}f($addr, ctx, cyc))';
+
+	/** A store, likewise, as a statement. */
+	function spanStore(fast:String, name:String, addr:String, value:String):String
+		return span == null ? memWrite(name, addr, value)
+			: 'if (shim.MemA.likely(Memory.spanOk(${span.v}))) Memory.$fast(${span.v}, ${span.off}, $value); else Memory.${name}f($addr, $value, ctx, cyc);';
 
 	/** Emit a selected pair as one Haxe expression or one runtime helper call. */
 	function emitFused(buf:StringBuf, ind:String, first:Instr, second:Instr,
@@ -642,6 +1105,11 @@ class Emitter {
 			case DivuHi:
 				fusedResult(second.rd, 'Ops.divuHi(ctx, ${reg(first.rs)}, ${reg(first.rt)})',
 					'Ops.divu(ctx, ${reg(first.rs)}, ${reg(first.rt)})');
+			case UnalignedLoad:
+				final r = first.op == Op.LWR ? first : second;
+				final l = first.op == Op.LWL ? first : second;
+				assign(first.rt, 'Memory.lwu(${busAddr(r)}, ${busAddr(l)}, ${reg(first.rt)}, '
+					+ '${first.op == Op.LWR}, ctx, ${cycLocal ? "cyc" : "ctx.cycles"})', false);
 		};
 		if (text != "") buf.add(ind + text + '\n');
 	}
@@ -707,9 +1175,9 @@ class Emitter {
 						buf.add(in1 + 'if (Memory.isPlainMemory($addr)) { ${reg(i.rt)} = Memory.read32($addr); idleTop = ${reg(i.rt)}; } else { idleOk = false; }\n');
 					} else if (slot != null) {
 						buf.add(in1 + 'final $diff = ($addr - idleSlot) | 0;\n');
-						buf.add(in1 + 'if (Memory.isPlainMemory($addr) && ($diff <= -$width || $diff >= 4)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
+						buf.add(in1 + 'if (Memory.isIdleReadable($addr) && ($diff <= -$width || $diff >= 4)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
 					} else {
-						buf.add(in1 + 'if (Memory.isPlainMemory($addr)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
+						buf.add(in1 + 'if (Memory.isIdleReadable($addr)) ${reg(i.rt)} = Memory.$read($addr); else idleOk = false;\n');
 					}
 				case SW:
 					if (slot != null) buf.add(in1 + 'final idleStored = ${reg(i.rt)};\n');
@@ -724,7 +1192,7 @@ class Emitter {
 		}
 		shadow = null;
 		buf.add(in1 + 'if (idleOk) {\n');
-		buf.add(in2 + 'var idleTurns = core.IdleLoop.untilEvent(ctx.cycles, ctx.nextEvent, ${plan.cycles});\n');
+		buf.add(in2 + 'var idleTurns = core.IdleLoop.untilEvent(${cycExpr()}, ctx.nextEvent, ${plan.cycles});\n');
 		final exit = plan.counterExit;
 		if (slot != null && exit != null) {
 			final other = reg(exit.other);
@@ -734,7 +1202,7 @@ class Emitter {
 		}
 		buf.add(in2 + 'if (idleTurns >= 2) {\n');
 		buf.add(in3 + 'final idleSkip = idleTurns - 1;\n');
-		buf.add(in3 + 'ctx.cycles = (ctx.cycles + shim.IntMath.mul(${plan.cycles}, idleSkip)) | 0;\n');
+		buf.add(in3 + '${cycExpr()} = (${cycExpr()} + shim.IntMath.mul(${plan.cycles}, idleSkip)) | 0;\n');
 		if (slot != null) buf.add(in3 + 'Memory.write32(idleSlot, (idleTop + shim.IntMath.mul(${slot.delta}, idleSkip)) | 0);\n');
 		buf.add(in3 + '#if recompsx_insns\n');
 		buf.add(in3 + 'Runtime.insns = (Runtime.insns + shim.IntMath.mul(${plan.instructions}, idleSkip)) | 0;\n');
@@ -747,8 +1215,8 @@ class Emitter {
 	}
 
 	/** Charge every original instruction, including eliminated instructions and delay slots. */
-	static function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
-		if (cycles > 0) buf.add('${ind}ctx.cycles = (ctx.cycles + $cycles) | 0;\n');
+	function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
+		if (cycles > 0) buf.add('${ind}${cycExpr()} = (${cycExpr()} + $cycles) | 0;\n');
 		buf.add('${ind}#if recompsx_insns\n');
 		buf.add('${ind}Runtime.insns = (Runtime.insns + $insns) | 0;\n');
 		buf.add('${ind}Runtime.blocks = (Runtime.blocks + 1) | 0;\n');
@@ -762,7 +1230,13 @@ class Emitter {
 		callReturnAddr = retAddr;
 		inline function emitSlot():Void {
 			if (slot == null) return;
+			span = functionSpanOf(slot);
 			emitSimple(buf, ind, slot, true);
+			span = null;
+			if (fspanLive != null) {
+				takeFunctionSpans(buf, ind, fspanLive.slot.exists(curBlock) ? fspanLive.slot.get(curBlock) : 0);
+				stepFunctionSpans(buf, ind, fspanLive.slotStep.exists(curBlock) ? fspanLive.slotStep.get(curBlock) : 0, slot);
+			} else {}
 		}
 
 		inline function bump():Void {
@@ -868,9 +1342,25 @@ class Emitter {
 				if (instr.rd != 0) buf.add('${ind}${reg(instr.rd)} = ${pcExpr(retAddr)};\n');
 				emitSlot();
 				bump();
+				if (cycLocal) buf.add('${ind}ctx.cycles = cyc;\n');
 				buf.add('${ind}ctx.pc = $t;\n');
-				buf.add('${ind}$dynamicCall(ctx, $t);\n');
-				emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
+				final guess = jalrGuess(instr);
+				if (guess != null) {
+					// The guessed function called directly when the register holds it, and after it
+					// only the spans it may have changed taken again; anything else by address, and
+					// every span the call left live.
+					buf.add('${ind}if (shim.MemA.likely($t == ${hex(guess)})) {\n');
+					final g = Vaddr.canonRam(guess);
+					buf.add('${ind}\t${staticTargetOf(g)}.${Discovery.defaultName(g)}(ctx);\n');
+					emitCallUnwind(buf, ind + '\t', continuation, pcExpr(retAddr));
+					buf.add('${ind}} else {\n');
+					buf.add('${ind}\t$dynamicCall(ctx, $t);\n');
+					emitCallUnwind(buf, ind + '\t', continuation, pcExpr(retAddr), true);
+					buf.add('${ind}}\n');
+				} else {
+					buf.add('${ind}$dynamicCall(ctx, $t);\n');
+					emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
+				}
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
 
 			case J:
@@ -960,15 +1450,31 @@ class Emitter {
 			resumes ? pcExpr(callReturnAddr) : NO_CONTINUATION);
 	}
 
-	/** After a call: `entry` is the block it resumes at, `cont` the guest address it returns to. */
-	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int, cont:String):Void {
+	/** After a call: `entry` is the block it resumes at, `cont` the guest address it returns to;
+	    `anything` for a call that may have written any register (a guessed call's other arm). */
+	function emitCallUnwind(buf:StringBuf, ind:String, entry:Int, cont:String, anything:Bool = false):Void {
 		final ra = entryRaLocal ? ', entryRa' : '';
 		buf.add(ind + '#if recompsx_cooperative\n');
 		buf.add(ind + (relocatable
 			? 'if (core.Cooperative.afterCallAt(ctx, ${continuationId()}, $entry, rbase, $cont$ra)) return;\n'
 			: 'if (core.Cooperative.afterCall(ctx, ${continuationId()}, $entry, $cont$ra)) return;\n'));
 		buf.add(ind + '#else\n' + ind + unwindLine(cont) + '\n' + ind + '#end\n');
+		// After the unwind check: `unwinding` may have run a tail jump the callee left.
+		if (cycLocal) buf.add(ind + 'cyc = ctx.cycles;\n');
+		if (fspanLive != null) {
+			final m = anything && fspanLive.callLive.exists(curBlock) ? fspanLive.callLive.get(curBlock)
+				: (fspanLive.call.exists(curBlock) ? fspanLive.call.get(curBlock) : -1);
+			takeFunctionSpans(buf, ind, m);
+		} else {}
 	}
+
+	/** The running function's cycle count: its local in an optimized build (`cycLocal`). */
+	function cycExpr():String return cycLocal ? 'cyc' : 'ctx.cycles';
+
+	/** `stmt` with the cycle count written to CpuState before it and read back after it: for a
+	    statement that reaches the runtime, which may read the clock and may move it. */
+	function aroundRuntime(stmt:String):String
+		return (!cycLocal || stmt == "") ? stmt : 'ctx.cycles = cyc; $stmt cyc = ctx.cycles;';
 
 	function continuationId():String return continuationToken == null ? hex(functionAddr) : continuationToken;
 
@@ -1051,6 +1557,11 @@ class Emitter {
 		final line = simple(i, afterBlock, afterIndex);
 		if (line != "") buf.add(ind + line + (slot ? '   // delay slot' : '') + '\n');
 		if (barrier) buf.add(ind + unwindLine(NO_CONTINUATION) + '\n');
+		if (barrier && cycLocal) buf.add(ind + 'cyc = ctx.cycles;\n');
+		// A trap in the body is an event of the liveness plan (resetFunctionSpans, by its index,
+		// after this returns); one in a delay slot takes every span.
+		if (barrier && slot) resetAllFunctionSpans(buf, ind);
+		else {}
 	}
 
 	/** The Haxe statement for one non-branching instruction, or "" for a nop. */
@@ -1126,34 +1637,34 @@ class Emitter {
 			case MTLO:  'ctx.lo = ${reg(rs)};';
 
 			// A load into $zero still performs the read: half the address space is hardware.
-			case LB:  load(rt, 'Memory.read8s(${busAddr(i)})');
-			case LBU: load(rt, 'Memory.read8u(${busAddr(i)})');
-			case LH:  load(rt, 'Memory.read16s(${busAddr(i)})');
-			case LHU: load(rt, 'Memory.read16u(${busAddr(i)})');
-			case LW:  load(rt, 'Memory.read32(${busAddr(i)})');
-			case LWL: load(rt, 'Memory.lwl(${busAddr(i)}, ${reg(rt)})');
-			case LWR: load(rt, 'Memory.lwr(${busAddr(i)}, ${reg(rt)})');
+			case LB:  load(rt, spanLoad('spanRead8s', 'read8s', busAddr(i)));
+			case LBU: load(rt, spanLoad('spanRead8u', 'read8u', busAddr(i)));
+			case LH:  load(rt, spanLoad('spanRead16s', 'read16s', busAddr(i)));
+			case LHU: load(rt, spanLoad('spanRead16u', 'read16u', busAddr(i)));
+			case LW:  load(rt, spanLoad('spanRead32', 'read32', busAddr(i)));
+			case LWL: clockFirst(load(rt, 'Memory.lwl(${busAddr(i)}, ${reg(rt)})'));
+			case LWR: clockFirst(load(rt, 'Memory.lwr(${busAddr(i)}, ${reg(rt)})'));
 
-			case SB: 'Memory.write8(${busAddr(i)}, ${reg(rt)});';
-			case SH: 'Memory.write16(${busAddr(i)}, ${reg(rt)});';
-			case SW: 'Memory.write32(${busAddr(i)}, ${reg(rt)});';
-			case SWL: 'Memory.swl(${busAddr(i)}, ${reg(rt)});';
-			case SWR: 'Memory.swr(${busAddr(i)}, ${reg(rt)});';
+			case SB: spanStore('spanWrite8', 'write8', busAddr(i), reg(rt));
+			case SH: spanStore('spanWrite16', 'write16', busAddr(i), reg(rt));
+			case SW: spanStore('spanWrite32', 'write32', busAddr(i), reg(rt));
+			case SWL: clockFirst('Memory.swl(${busAddr(i)}, ${reg(rt)});');
+			case SWR: clockFirst('Memory.swr(${busAddr(i)}, ${reg(rt)});');
 
-			case SYSCALL: 'ctx.pc = ${pcExpr(i.addr)}; Kernel.syscall(ctx, ${i.code});';
-			case BREAK:   'ctx.pc = ${pcExpr(i.addr)}; Kernel.brk(ctx, ${i.code});';
+			case SYSCALL: '${cycLocal ? "ctx.cycles = cyc; " : ""}ctx.pc = ${pcExpr(i.addr)}; Kernel.syscall(ctx, ${i.code});';
+			case BREAK:   '${cycLocal ? "ctx.cycles = cyc; " : ""}ctx.pc = ${pcExpr(i.addr)}; Kernel.brk(ctx, ${i.code});';
 
-			case MFC0: assign(rt, 'Runtime.mfc0(ctx, ${i.rd})', false);
-			case MTC0: 'Runtime.mtc0(ctx, ${i.rd}, ${reg(rt)});';
-			case RFE:  'Runtime.rfe(ctx);';
+			case MFC0: aroundRuntime(assign(rt, 'Runtime.mfc0(ctx, ${i.rd})', false));
+			case MTC0: aroundRuntime('Runtime.mtc0(ctx, ${i.rd}, ${reg(rt)});');
+			case RFE:  aroundRuntime('Runtime.rfe(ctx);');
 
 			case MFC2: assign(rt, 'Gte.getData(ctx, ${i.rd})', false);
 			case MTC2: 'Gte.setData(ctx, ${i.rd}, ${reg(rt)});';
 			case CFC2: assign(rt, 'Gte.getCtrl(ctx, ${i.rd})', false);
 			case CTC2: 'Gte.setCtrl(ctx, ${i.rd}, ${reg(rt)});';
-			case LWC2: 'Gte.setData(ctx, ${i.rt}, Memory.read32(${busAddr(i)}));';
-			case SWC2: 'Memory.write32(${busAddr(i)}, Gte.getData(ctx, ${i.rt}));';
-			case COP2CMD: gteCommand(i.code);
+			case LWC2: 'Gte.setData(ctx, ${i.rt}, ${spanLoad('spanRead32', 'read32', busAddr(i))});';
+			case SWC2: spanStore('spanWrite32', 'write32', busAddr(i), 'Gte.getData(ctx, ${i.rt})');
+			case COP2CMD: gteCommand(i.code, optimize, optimize && leafUsed == null);
 
 			case _: '// unhandled: ${Disasm.text(i)}';
 		}
@@ -1164,16 +1675,27 @@ class Emitter {
 		runtime's `execute` would have decoded from it; `execute` itself is kept for any word the
 		table below does not know, so an unknown operation still reports itself at run time.
 	**/
-	static function gteCommand(code:Int):String {
+	/* In an optimized build NCLIP, AVSZ3 and AVSZ4 run at the call site (`gte.GteQuick`, forced
+	   inline on C++): each is shorter than the call it was. */
+	/**
+		A COP2 command by name. `quick`: NCLIP, AVSZ3 and AVSZ4 run inline (gte.GteQuick).
+		`inlineRtps`: RTPS as well — not in a looping leaf, whose registers already hold the
+		host's registers: there the transform's own dozen values spilled, and Crash Bash's
+		hottest loop (a leaf, four RTPS) ran 0.2 ms a frame slower inlined, where Crash 3's model
+		loop (registers in CpuState) ran 0.15 ms faster. Measured again with the matrix rows on
+		the multiply-accumulate unit (GteFile.dot3), which keeps the nine elements out of
+		registers: still 0.08 ms slower (docs/perf/dreamcast-ledger.md, E-051).
+	**/
+	static function gteCommand(code:Int, quick:Bool = false, inlineRtps:Bool = false):String {
 		final sf = (code & 0x80000) != 0 ? 12 : 0;
 		final lm = (code & 0x400) != 0 ? "true" : "false";
 		final args = '$sf, $lm';
 		return switch (code & 0x3F) {
-			case 0x01: 'Gte.cmdRtps($args);';
+			case 0x01: inlineRtps ? 'gte.GteQuick.rtps($args);' : 'Gte.cmdRtps($args);';
 			case 0x30: 'Gte.cmdRtpt($args);';
-			case 0x06: 'Gte.cmdNclip();';
-			case 0x2D: 'Gte.cmdAvsz3();';
-			case 0x2E: 'Gte.cmdAvsz4();';
+			case 0x06: quick ? 'gte.GteQuick.nclip();' : 'Gte.cmdNclip();';
+			case 0x2D: quick ? 'gte.GteQuick.avsz3();' : 'Gte.cmdAvsz3();';
+			case 0x2E: quick ? 'gte.GteQuick.avsz4();' : 'Gte.cmdAvsz4();';
 			case 0x12: 'Gte.cmdMvmva($args, ${hex(code)});';
 			case 0x28: 'Gte.cmdSqr($sf);';
 			case 0x0C: 'Gte.cmdOp($args);';
@@ -1292,3 +1814,17 @@ private class SequenceFrame {
 	public var index:Int = 0;
 	public function new(entries:Array<Int>) this.entries = entries;
 }
+
+/** A load or store's place in its span (Emitter.planSpans): the span's local, its offset. */
+typedef SpanAccess = {v:String, off:Int};
+
+/** A block's spans: the line opening each, by the index of its first access, and every access's. */
+typedef SpanPlan = {open:Map<Int, String>, at:Map<Int, SpanAccess>};
+
+/** A function span (Emitter.planFunctionSpans): its local, and the offsets it covers. */
+typedef FunctionSpan = {v:String, lo:Int, hi:Int};
+
+/** Where function spans are taken (Emitter.planFspanLiveness), as register masks: at the entry,
+    after a body instruction by block and index, after a block's delay slot, after its call. */
+typedef FspanLive = {top:Int, write:Map<Int, Map<Int, Int>>, slot:Map<Int, Int>, call:Map<Int, Int>,
+	callLive:Map<Int, Int>, step:Map<Int, Map<Int, Int>>, slotStep:Map<Int, Int>};

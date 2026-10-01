@@ -219,6 +219,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
     const uint64_t t0 = bp_time_us();
     if(g_prof_end) {
         g_prof_emu += t0 - g_prof_end;
+        g_frame_emu_us = (uint32_t)(t0 - g_prof_end);
         perf_window_close(t0 - g_prof_end);
     } else {}
 #endif
@@ -249,6 +250,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
         g_prof_skipped++;
         g_prof_end = bp_time_us();
         g_prof_submit += g_prof_end - t0;
+        g_frame_present_us = (uint32_t)(g_prof_end - t0);
         profile_report();
         if(g_pc_armed || g_pc_frames == 0) perf_window_open();
         else {}
@@ -352,6 +354,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 #if RECOMPSX_DC_PROFILE
     g_prof_end = bp_time_us();
     g_prof_submit += g_prof_end - t2;
+    g_frame_present_us = (uint32_t)(g_prof_end - t0);
     if(g_diag.pending) {
         g_diag.pending = 0;
         char m2[416];
@@ -403,11 +406,15 @@ static void pace_present(int flags) {
         return;
     }
 #if RECOMPSX_DC_PROFILE
+    static uint64_t paced;      /* when the last present's pacing ended */
     const uint64_t a = bp_time_us();
+    if(paced) bench_frame_busy(a - paced);
+    else {}
 #endif
     bp_pace_frame((flags & BP_PRESENT_PAL) ? 20000 : 16683);
 #if RECOMPSX_DC_PROFILE
     const uint64_t b = bp_time_us();
+    paced = b;
     g_prof_pace += b - a;
     if(g_prof_end) g_prof_end = b;
     else {}

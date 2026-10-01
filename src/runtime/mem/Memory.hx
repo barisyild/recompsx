@@ -60,7 +60,7 @@ class Memory {
 	public static function init():Void {
 		// Zero-filled, deliberately: emulated state must never start from host memory, or the
 		// first run differs from the second and every determinism guarantee is void.
-		machine = null;
+		machine = NONE;
 		for (i in 0...RAM_SIZE) RawMem.set8(ram(), i, 0);
 		for (i in 0...SCRATCH_SIZE) RawMem.set8(scratch(), i, 0);
 		resetMemControl();
@@ -83,6 +83,19 @@ class Memory {
 	public static function isPlainMemory(a:Int):Bool {
 		final p = phys(a);
 		return (p & RAM_DECODE_MASK) < RAM_SIZE || (p & SCRATCH_MATCH_MASK) == SCRATCH_BASE;
+	}
+
+	/**
+		Whether an idle loop's dry turn (the recompiler's idle-loop prologue) may read `a`: plain
+		memory, or a device register that only an event or a store can change and that reading
+		does not change — the controller port's status (JOY_STAT) and the interrupt controller's
+		status and mask. Between two pumps nothing runs but the loop, which stores to neither, so
+		such a register reads the same on every turn the prologue skips, as memory does: libpad
+		waits for each controller byte polling JOY_STAT, a few hundred turns a frame.
+	**/
+	public static function isIdleReadable(a:Int):Bool {
+		final w = phys(a) & ~3;
+		return isPlainMemory(a) || w == 0x1F801044 || w == 0x1F801070 || w == 0x1F801074;
 	}
 
 	// ---- reads ---------------------------------------------------------------------------------
@@ -115,6 +128,138 @@ class Memory {
 
 	public static inline function write32(a:Int, v:Int):Void Access.write32(a, v);
 
+	// ---- with the cycle count in a local (Access, the timed forms) --------------------------------
+
+	public static inline function read8ut(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read8ut(a, ctx, cyc);
+
+	public static inline function read8st(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read8ut(a, ctx, cyc) << 24) >> 24;
+
+	public static inline function read16ut(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read16ut(a, ctx, cyc);
+
+	public static inline function read16st(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read16ut(a, ctx, cyc) << 16) >> 16;
+
+	public static inline function read32t(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read32t(a, ctx, cyc);
+
+	public static inline function write8t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write8t(a, v, ctx, cyc);
+
+	public static inline function write16t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write16t(a, v, ctx, cyc);
+
+	public static inline function write32t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write32t(a, v, ctx, cyc);
+
+	// ---- out of line: where a span's check failed ---------------------------------------------------
+
+	/*
+		The same accesses as a call, for the path a span takes when its check failed (the emitter's
+		spanLoad and spanStore): rare — a base pointing at the ports, or a run that crosses the end
+		of a region — so it goes out of line, where inlining the whole decode again beside the
+		span's own path doubled every such access's code (Crash 3's image grew 1 MB with function
+		spans).
+	*/
+
+	@:specifier("__attribute__((noinline))")
+	public static function read8uf(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read8ut(a, ctx, cyc);
+
+	@:specifier("__attribute__((noinline))")
+	public static function read8sf(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read8ut(a, ctx, cyc) << 24) >> 24;
+
+	@:specifier("__attribute__((noinline))")
+	public static function read16uf(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read16ut(a, ctx, cyc);
+
+	@:specifier("__attribute__((noinline))")
+	public static function read16sf(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read16ut(a, ctx, cyc) << 16) >> 16;
+
+	@:specifier("__attribute__((noinline))")
+	public static function read32f(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read32t(a, ctx, cyc);
+
+	@:specifier("__attribute__((noinline))")
+	public static function write8f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write8t(a, v, ctx, cyc);
+
+	@:specifier("__attribute__((noinline))")
+	public static function write16f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write16t(a, v, ctx, cyc);
+
+	@:specifier("__attribute__((noinline))")
+	public static function write32f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write32t(a, v, ctx, cyc);
+
+	// ---- spans: a run of accesses through one base -----------------------------------------------
+
+	/** Where the scratchpad starts in the arena RAM shares with it (RECOMPSX_SCRATCH_OFFSET). */
+	public static inline var SCRATCH_OFFSET = 0x2000A0;
+
+	/**
+		The span of `a` when every byte from `a + lo` to `a + hi` is plain memory — all of it in
+		RAM, in one 2 MB mirror, or all of it in the scratchpad — or none (`spanOk` false).
+
+		For a run of guest loads and stores through one base register with no write to it between
+		them (the recompiler's spans): checked once here, each access is then the span and its own
+		offset into the arena (spanRead*, spanWrite*) instead of the full decode (Access). The
+		same bytes either way, since a span is only taken where every access in it would have
+		taken Access's fast path; where there is none the run goes through Access, access by
+		access, in order, as before — a mirror crossed, a register page, anything else. What a
+		span is, is the shim's (`shim.Span`): the arena's address on C++, its index elsewhere.
+	**/
+	public static inline function span(a:Int, lo:Int, hi:Int):shim.Span {
+		// One compare for the RAM case: the mask leaves `r` below RAM_SIZE for RAM and its
+		// mirrors and at 8 MB or more for anything else, so with offsets from a 16-bit immediate
+		// `r + hi < RAM_SIZE` already says `r < RAM_SIZE` — and with `lo` not negative, as it
+		// nearly always is, the compiler drops `r + lo >= 0`. It was a range test and a branch
+		// more at every take, a dozen thousand a frame.
+		final r = a & RAM_DECODE_MASK;
+		var at = shim.Arena.spanNone();
+		if (r + hi < RAM_SIZE && r + lo >= 0) at = shim.Arena.spanAt(r);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) {
+			final s = a & (SCRATCH_SIZE - 1);
+			if (s + lo >= 0 && s + hi < SCRATCH_SIZE) at = shim.Arena.spanAt(SCRATCH_OFFSET + s);
+			else {}
+		} else {}
+		return at;
+	}
+
+	/** No span: what a run that must decode access by access holds. */
+	public static inline function spanNone():shim.Span return shim.Arena.spanNone();
+
+	/** Whether `s` is a span, rather than none. */
+	public static inline function spanOk(s:shim.Span):Bool return shim.Arena.spanOk(s);
+
+	/**
+		A span after its base register was stepped by `imm` (`addiu r, r, imm`): the index moved
+		the same way while every byte from `+ lo` to `+ hi` stays in the region it was in — RAM's
+		mirror, or the scratchpad — else -1, and the accesses decode one by one as they would
+		without a span. Exactly `span(new value, lo, hi)` wherever it is not -1: inside one
+		region, an address and its arena index move together.
+
+		How a pointer walked through memory keeps its span (the recompiler's function spans): a
+		vertex decoder reading a stream through `$gp`, four bytes a step, took the full decode at
+		every read, the RAM test failing before the scratchpad's.
+	**/
+	public static inline function spanStep(s:shim.Span, imm:Int, lo:Int, hi:Int):shim.Span {
+		final i = shim.Arena.spanIndex(s);
+		final j = i + imm;
+		return i < RAM_SIZE
+			? ((j + lo >= 0 && j + hi < RAM_SIZE) ? shim.Arena.spanAt(j) : shim.Arena.spanNone())
+			: ((j + lo >= SCRATCH_OFFSET && j + hi < SCRATCH_OFFSET + SCRATCH_SIZE) ? shim.Arena.spanAt(j) : shim.Arena.spanNone());
+	}
+
+	// An access through a span: the span, and the access's offset from the span's base register.
+	public static inline function spanRead8u(s:shim.Span, k:Int):Int return shim.Arena.spanRead8(s, k);
+
+	public static inline function spanRead8s(s:shim.Span, k:Int):Int return (shim.Arena.spanRead8(s, k) << 24) >> 24;
+
+	public static inline function spanRead16u(s:shim.Span, k:Int):Int return shim.Arena.spanRead16(s, k);
+
+	public static inline function spanRead16s(s:shim.Span, k:Int):Int return (shim.Arena.spanRead16(s, k) << 16) >> 16;
+
+	public static inline function spanRead32(s:shim.Span, k:Int):Int return shim.Arena.spanRead32(s, k);
+
+	public static inline function spanWrite8(s:shim.Span, k:Int, v:Int):Void shim.Arena.spanWrite8(s, k, v);
+
+	public static inline function spanWrite16(s:shim.Span, k:Int, v:Int):Void shim.Arena.spanWrite16(s, k, v);
+
+	public static inline function spanWrite32(s:shim.Span, k:Int, v:Int):Void shim.Arena.spanWrite32(s, k, v);
+
 	// ---- unaligned access ------------------------------------------------------------------------
 
 	/**
@@ -143,6 +288,28 @@ class Memory {
 			case 2: (current & 0xFFFF0000) | (w >>> 16);
 			case _: (current & 0xFFFFFF00) | (w >>> 24);
 		}
+	}
+
+	/**
+		An `lwr`/`lwl` pair that loads one unaligned word — `lwr rt, k(rs)` and `lwl rt, k+3(rs)`,
+		either first (`lwrFirst`), at `aR` and `aL` — as the recompiler fuses it (PatternMatcher):
+		in RAM, the one or two aligned words the pair reads, joined, with no switch on the
+		alignment and no call; anywhere else the two run as they are, in their order. Each half
+		of the pair writes the byte lanes the other leaves, so in RAM `current` is not read.
+	**/
+	public static inline function lwu(aR:Int, aL:Int, current:Int, lwrFirst:Bool, ctx:core.CpuState, cyc:Int):Int {
+		final rR = phys(aR) & RAM_DECODE_MASK;
+		final rL = phys(aL) & RAM_DECODE_MASK;
+		if (shim.MemA.likely(rR + 3 == rL && rL < RAM_SIZE)) {
+			final sh = (rR & 3) << 3;
+			final lo = shim.MemA.get32(ram(), rR & ~3);
+			return sh == 0 ? lo : ((lo >>> sh) | (shim.MemA.get32(ram(), rL & ~3) << (32 - sh)));
+		} else return lwuSlow(aR, aL, current, lwrFirst, ctx, cyc);
+	}
+
+	static function lwuSlow(aR:Int, aL:Int, current:Int, lwrFirst:Bool, ctx:core.CpuState, cyc:Int):Int {
+		ctx.cycles = cyc;
+		return lwrFirst ? lwl(aL, lwr(aR, current)) : lwr(aR, lwl(aL, current));
 	}
 
 	public static function swl(a:Int, v:Int):Void {
@@ -308,14 +475,18 @@ class Memory {
 		One static, set once at boot. There is exactly one live machine; HLE thread switches copy
 		registers into it rather than replacing it, which is what makes a single binding correct.
 	**/
-	// Stand-alone device fixtures may run without a CPU; boot binds the live machine.
-	public static var machine:Null<core.CpuState> = null;
+	// Stand-alone device fixtures may run without a CPU; boot binds the live machine. Until then
+	// it is `NONE`, a CpuState nothing runs on, whose clock reads 0 — not `null` in a `Null<>`:
+	// on C++ that was a `std::optional` of the pointer, a flag tested and a value loaded on every
+	// clocked register read, where this is one load (docs/perf/dreamcast-ledger.md, E-040).
+	static final NONE:core.CpuState = new core.CpuState();
+	public static var machine:core.CpuState = NONE;
 
 	/** The current cycle count, read straight off the machine. */
-	public static inline function cycleHint():Int return machine == null ? 0 : machine.cycles;
+	public static inline function cycleHint():Int return machine.cycles;
 
 	/** The running function's return address, for diagnostics that need to name a caller. */
-	public static inline function raHint():Int return machine == null ? 0 : machine.ra;
+	public static inline function raHint():Int return machine.ra;
 
 	static function ioWrite32(p:Int, v:Int):Void {
 		if (p == 0x1F801070) inline core.Irq.writeStat(v);

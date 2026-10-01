@@ -3,6 +3,8 @@
  * instruction runs. Being in .bss rather than on the heap changes nothing about the bytes. */
 #include "recompsx_arena.h"
 
-unsigned char recompsx_ram[RECOMPSX_RAM_BYTES];
-unsigned char recompsx_scratch[RECOMPSX_SCRATCH_BYTES];
+recompsx_mem_t recompsx_mem;
 int recompsx_gte[RECOMPSX_GTE_WORDS];
+int recompsx_gpu[RECOMPSX_GPU_WORDS];
+int recompsx_spu[RECOMPSX_SPU_WORDS];
+int recompsx_timers[RECOMPSX_TIMER_WORDS];

@@ -1,0 +1,72 @@
+# The runtime's and the backend's hottest variables in the SH-4's operand cache: "colour section",
+# a colour being the variable's first line, mod 512, in the 16 KB direct-mapped operand cache.
+# scripts/dc-layout.py place lists .data and .bss in full at every Dreamcast link with these first
+# (scripts/build-dc.sh). Global: the same for every game, since the variables are the runtime's and
+# the backend's, not a game's (docs/perf/dreamcast-ledger.md, E-007, E-022, E-043, E-058).
+#
+# Made 2026-10-01 by dc-ocache-sim dopt over three windows' operand traces — Crash 3's title screen
+# and its gameplay demo, Crash Bash's Ballistix; 20 M of 40 M accesses each — taken from builds with
+# the code where it now is (each game's dc-placement.txt, E-056's code), with the main stack at its
+# new start (backend_kos.c, 235 lines below the top of RAM: dopt's shift 306 from 441): the 58
+# variables, CpuState's machine instance (recompsx_cpustate, a fixed address since E-054) among them,
+# one colour each for every game, two rounds — each window's operand cost 0.59, 0.78 and 0.73 of its
+# link's. Regenerate it the same way — after the code placements, from traces of a build that has
+# them — when the hot variables change.
+257 .bss.recompsx_gte
+420 .bss.recompsx_cpustate
+74 .bss.recompsx_mem
+504 .bss.recompsx_gpu
+299 .bss.g_cmds
+268 .bss.g_states
+237 .bss.g_hdrc
+61 .bss.g_semi_binds
+234 .data.pvr_dr_addr
+357 .bss.recompsx_spu
+228 .bss.g_run_hdr
+242 .bss.recompsx_timers
+241 .bss.g_cmd_count
+226 .bss.g_pull
+464 .bss.g_bake
+174 .bss.g_prio
+305 .bss.g_pal4
+235 .bss.g_run_over
+14 .bss.g_state_count
+128 .bss.g_frame_shown
+322 .bss._ZN4core9Scheduler10activeBitsE
+240 .data._ZN4core9Scheduler8nextSlotE
+124 .bss._ZN3gpu3Gpu7opCountE
+238 .bss.g_hdr_hits
+281 .rodata._ZL12recompsx_fns
+268 .data.g_scene_dirty
+141 .bss._ZN3gpu3Gpu10wholeWordsE
+133 .bss.g_where_depth
+205 .bss.g_bright_prims
+333 .bss._ZN3gpu3Gpu6packetE
+162 .bss._ZN4core9Scheduler3dueE
+387 .bss.g_pal_memo
+256 .data.g_where
+97 .data._ZN3dma3Dma6listAtE
+496 .bss._ZN4core9Scheduler5firedE
+279 .bss.g_page4
+149 .bss.g_where_outer
+165 .bss._ZN4core3Irq4statE
+362 .bss._ZN3dma3Dma9listClockE
+381 .bss._ZN3dma3Dma9listLinksE
+130 .bss._ZN3dma3Dma10wordsToGpuE
+433 .bss._ZN6kernel7KEvents7evFlagsE
+188 .data.g_clip_y1
+159 .bss.g_clip_y0
+107 .data.g_clip_x1
+98 .bss.g_clip_x0
+391 .bss._ZN3mem6Memory7machineE
+471 .rodata.none.0
+432 .bss._ZN4core3Irq4maskE
+132 .bss.g_disp
+328 .bss.g_spu_pcm
+223 .data.g_tex_frame
+211 .data.g_pal_memo_gen
+0 .bss._ZN6timers6Timers7reachedE
+0 .bss._ZN6timers6Timers6anchorE
+0 .bss._ZN6timers6Timers6targetE
+0 .bss._ZN6timers6Timers4baseE
+0 .bss._ZN6timers6Timers4modeE

@@ -17,7 +17,10 @@
 #
 # The variables tune the model (RXCACHE_IFILL, RXCACHE_OFILL, RXCACHE_WB, RXCACHE_SQ,
 # RXCACHE_EXT, RXCACHE_DEP=0); RXTRACE=<n> also records the first n instruction-line changes to
-# <out.txt>.cache.itrace, for placing the code (scripts/dc-layout.py, dc-icache-sim.c, ADR-0043).
+# <out.txt>.cache.itrace, for placing the code (scripts/dc-layout.py, dc-icache-sim.c, ADR-0043);
+# RXOTRACE=<n> the first n operand accesses to <out.txt>.cache.otrace (dc-ocache-sim.c); RXCOUNT=1
+# how many times each instruction ran, "address count" lines in <out.txt>.cache.count — what the
+# code executes, where the profile only samples it (docs/perf/dreamcast-ledger.md, E-057).
 # FLYCAST_MODEL points at the build (the clone's build-rxcache),
 # FLYCAST_PROF_HOME is the HOME it runs with, never the user's own Flycast settings. VSync is off:
 # with the window out of sight (the screen locked, another Space) the OpenGL swap waits for a vblank

@@ -221,7 +221,7 @@ class TestOverlay {
 				"the second copy forwards to the first");
 			// The forwarder is still a real function, so callers and the shard's own dispatch
 			// switch need no special case.
-			Assert.isTrue(b.indexOf("public static function f_80020040(ctx:CpuState") >= 0,
+			Assert.isTrue(b.indexOf("public static function f_80020040(ctx:core.Ctx") >= 0,
 				"and is still callable by that name");
 		}
 

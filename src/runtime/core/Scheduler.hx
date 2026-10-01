@@ -1,5 +1,9 @@
 package core;
 
+import shim.MemA;
+import shim.RawBuf;
+import shim.RawMem;
+
 /**
 	When the machine's subsystems next need attention.
 
@@ -30,8 +34,24 @@ class Scheduler {
 	public static inline var MEMCARD_OP = 9;
 	public static inline var SLOTS = 10;
 
-	static var due:Array<Int>;
-	static var active:Array<Bool>;
+	/**
+		The deadlines, a word a slot, and which slots are armed, a bit a slot.
+
+		Flat on purpose: as an `Array<Int>` and an `Array<Bool>` every read went through a
+		reference to a vector and, for the flags, a `std::vector<bool>`'s bit packing — measured
+		on the Dreamcast, a third of `runDue`'s time for ten slots scanned four times an event.
+	**/
+	static var due:RawBuf;
+	static var activeBits = 0;
+
+	/**
+		The armed slot with the earliest deadline (the lower slot of two equal ones), or -1: what
+		`ctx.nextEvent` holds the deadline of. Kept as slots are armed and cancelled, so arming one
+		that is not the earliest costs a compare, and a pump fires it without a search. It was a
+		scan of every armed slot to arm any, two scans to fire one and a third after — some 230
+		pumps a frame in Crash Bandicoot: Warped, most of them its GPU list's steps.
+	**/
+	static var nextSlot = -1;
 
 	/**
 		The machine's one CpuState, kept so a device can arm a deadline without holding it.
@@ -46,8 +66,9 @@ class Scheduler {
 
 	public static function init(ctx:CpuState):Void {
 		owner = ctx;
-		due = [for (_ in 0...SLOTS) 0];
-		active = [for (_ in 0...SLOTS) false];
+		due = RawMem.alloc(SLOTS << 2);
+		activeBits = 0;
+		nextSlot = -1;
 		fired = 0;
 		// The frame starts now, and vblank is the one deadline that always exists.
 		schedule(ctx, VBLANK_START, TimeBase.nextVblankStart(ctx.cycles));
@@ -56,7 +77,6 @@ class Scheduler {
 
 	public static function schedule(ctx:CpuState, slot:Int, atCycle:Int):Void {
 		scheduleAt(slot, atCycle);
-		recomputeNext(ctx);
 	}
 
 	/**
@@ -73,24 +93,39 @@ class Scheduler {
 		A deadline nobody looks at is not scheduled. There is no cheap version of this.
 	**/
 	public static function scheduleAt(slot:Int, atCycle:Int):Void {
-		due[slot] = atCycle;
-		active[slot] = true;
-		recomputeNext(owner);
+		MemA.set32(due, slot << 2, atCycle);
+		activeBits |= 1 << slot;
+		// Only the earliest deadline can move `nextEvent`: re-arming the slot that holds it (which
+		// may move it either way) is a new search, a deadline before it takes its place, and any
+		// other changes nothing.
+		if (slot == nextSlot) recomputeNext(owner);
+		else if (nextSlot < 0 || beats(atCycle, slot, MemA.get32(due, nextSlot << 2), nextSlot)) {
+			nextSlot = slot;
+			owner.nextEvent = atCycle;
+		} else {}
+	}
+
+	/** Whether deadline `a` of slot `sa` comes before deadline `b` of slot `sb`: earlier, or the
+	    same cycle and the lower slot — the order `runDue` fires in. */
+	static inline function beats(a:Int, sa:Int, b:Int, sb:Int):Bool {
+		return earlier(a, b) || (a == b && sa < sb);
 	}
 
 	public static function cancel(ctx:CpuState, slot:Int):Void {
-		active[slot] = false;
-		recomputeNext(ctx);
+		activeBits &= ~(1 << slot);
+		if (slot == nextSlot) recomputeNext(ctx);
+		else {}
 	}
 
 	/** `cancel`, for a device that has no CpuState to hand — the same reason `scheduleAt` exists. */
 	public static function cancelSlot(slot:Int):Void {
-		active[slot] = false;
-		recomputeNext(owner);
+		activeBits &= ~(1 << slot);
+		if (slot == nextSlot) recomputeNext(owner);
+		else {}
 	}
 
 	public static function isActive(slot:Int):Bool {
-		return active[slot];
+		return ((activeBits >> slot) & 1) != 0;
 	}
 
 	/**
@@ -102,17 +137,20 @@ class Scheduler {
 	**/
 	public static function runDue(ctx:CpuState):Void {
 		var guard = 0;
-		while (true) {
-			final slot = earliestDue(ctx.cycles);
-			if (slot < 0) break;
-			else {}
+		// The earliest deadline is `nextSlot`'s; while it has passed, it is the one to fire — the
+		// earliest of those due, the lower slot of a tie. Firing may arm anything, so each is
+		// followed by a new search, which also leaves `nextEvent` right for when the loop ends.
+		while (nextSlot >= 0 && reached(ctx.cycles, MemA.get32(due, nextSlot << 2))) {
 			// A runaway would otherwise hang silently; 4096 is far above any real frame's worth.
 			guard++;
 			if (guard > 4096) return giveUp(ctx);
 			else {}
-			fire(ctx, slot);
+			fire(ctx, nextSlot);
+			recomputeNext(ctx);
 		}
-		recomputeNext(ctx);
+		// Nothing was due: a pump asked for by hand (a test sets `nextEvent` itself), so put it back.
+		if (guard == 0) recomputeNext(ctx);
+		else {}
 	}
 
 	/**
@@ -132,23 +170,15 @@ class Scheduler {
 		return ((a - b) | 0) < 0;
 	}
 
-	/** The lowest-numbered slot whose deadline has passed, or -1. Slot order is the tie-break. */
-	static function earliestDue(cycles:Int):Int {
-		var best = -1;
-		var bestDue = 0;
-		for (i in 0...SLOTS) {
-			if (active[i] && reached(cycles, due[i]) && (best < 0 || earlier(due[i], bestDue))) {
-				best = i;
-				bestDue = due[i];
-			} else {}
-		}
-		return best;
-	}
-
 	static function fire(ctx:CpuState, slot:Int):Void {
 		fired++;
 		// Deactivate before the handler runs, so a handler that re-arms its own slot wins.
-		active[slot] = false;
+		activeBits &= ~(1 << slot);
+		// And no earliest deadline while it runs: `runDue` searches again after every handler,
+		// so the one that re-arms its own slot — every stretch of a DMA list walk (~200 a frame),
+		// every vblank — takes `scheduleAt`'s store rather than a search of its own first. Nothing
+		// a handler runs reads `nextSlot` or `nextEvent`; guest code runs only after the search.
+		nextSlot = -1;
 		if (slot == VBLANK_START) onVblankStart(ctx);
 		else if (slot == VBLANK_END) onVblankEnd(ctx);
 		else if (slot == CD_EVENT) cd.Cdrom.onEvent(ctx);
@@ -193,38 +223,41 @@ class Scheduler {
 		// add the message you actually needed.
 		var worst = 0;
 		for (i in 0...SLOTS) {
-			if (active[i] && earlier(due[i], due[worst])) worst = i;
+			if (((activeBits >> i) & 1) != 0 && earlier(MemA.get32(due, i << 2), MemA.get32(due, worst << 2))) worst = i;
 			else {}
 		}
 		Runtime.reportOnce(0x5C0000FF, "scheduler ran 4096 events without settling: cycles="
-			+ ctx.cycles + " earliest slot " + worst + " due " + due[worst]
+			+ ctx.cycles + " earliest slot " + worst + " due " + MemA.get32(due, worst << 2)
 			+ " active=" + activeMask() + " perFrame=" + TimeBase.cyclesPerFrame());
 		// Push every deadline forward so the machine keeps moving rather than wedging here.
-		for (i in 0...SLOTS) due[i] = (ctx.cycles + 1000000) | 0;
+		for (i in 0...SLOTS) MemA.set32(due, i << 2, (ctx.cycles + 1000000) | 0);
 		recomputeNext(ctx);
 	}
 
 	static function activeMask():Int {
-		var m = 0;
-		for (i in 0...SLOTS) {
-			if (active[i]) m |= 1 << i;
-			else {}
-		}
-		return m;
+		return activeBits;
 	}
 
 	/** The soonest deadline, which is what the pump check in generated code compares against. */
 	static function recomputeNext(ctx:CpuState):Void {
 		var best = 0;
-		var have = false;
-		for (i in 0...SLOTS) {
-			if (active[i] && (!have || earlier(due[i], best))) {
-				best = due[i];
-				have = true;
+		var slot = -1;
+		var bits = activeBits;
+		var i = 0;
+		while (bits != 0) {
+			if ((bits & 1) != 0) {
+				final d = MemA.get32(due, i << 2);
+				if (slot < 0 || earlier(d, best)) {
+					best = d;
+					slot = i;
+				} else {}
 			} else {}
+			bits = bits >>> 1;
+			i++;
 		}
+		nextSlot = slot;
 		// Nothing armed should be impossible (vblank re-arms), but a deadline far ahead is the
 		// safe answer rather than one in the past, which would spin.
-		ctx.nextEvent = have ? best : (ctx.cycles + 0x40000000) | 0;
+		ctx.nextEvent = slot >= 0 ? best : (ctx.cycles + 0x40000000) | 0;
 	}
 }

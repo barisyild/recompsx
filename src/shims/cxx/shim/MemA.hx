@@ -33,6 +33,9 @@ import shim.RawBuf;
 #if recompsx_bigendian
 class MemA {
 	public static inline function likely(c:Bool):Bool return c;
+	public static inline function unlikely(c:Bool):Bool return c;
+	public static inline function opaque(v:Int):Int return v;
+	public static inline function prefetch(m:RawBuf, a:Int):Void {}
 	public static inline function get16(m:RawBuf, a:Int):Int return RawMem.get16(m, a);
 	public static inline function get32(m:RawBuf, a:Int):Int return RawMem.get32(m, a);
 	public static inline function set16(m:RawBuf, a:Int, v:Int):Void RawMem.set16(m, a, v);
@@ -48,6 +51,27 @@ extern class MemA {
 	**/
 	@:nativeFunctionCode("(__builtin_expect(!!(({arg0})), 1))")
 	public static function likely(c:Bool):Bool;
+
+	/** `c`, which the fast path expects NOT to hold: a clamp, an overflow, a flag being raised. */
+	@:nativeFunctionCode("(__builtin_expect(!!(({arg0})), 0))")
+	public static function unlikely(c:Bool):Bool;
+
+	/**
+		`v`, which the compiler may not assume it knows: an empty `asm` that claims to change it,
+		so no instruction and no store, only a value GCC cannot fold. For a loop whose trip count
+		is a constant and must stay a loop — GCC unrolls one it can count at -O3, and RTPT's three
+		vertices unrolled were three copies of the transform (Gte.rtpt, E-054).
+	**/
+	@:nativeFunctionCode("(__extension__({ int recompsx_opaque = ({arg0}); __asm__(\"\" : \"+r\"(recompsx_opaque)); recompsx_opaque; }))")
+	public static function opaque(v:Int):Int;
+
+	/**
+		A hint that the line holding byte `a` of `m` will be read soon: a cache fill started now,
+		while the CPU does something else (the SH-4's `pref`). Never a load: nothing about the
+		machine can depend on it, and a target without the idea does nothing.
+	**/
+	@:nativeFunctionCode("(__builtin_prefetch(({arg0}) + ({arg1})))")
+	public static function prefetch(m:RawBuf, a:Int):Void;
 
 	@:nativeFunctionCode("((int)(*((unsigned short*)(({arg0}) + ({arg1})))))")
 	public static function get16(m:RawBuf, a:Int):Int;

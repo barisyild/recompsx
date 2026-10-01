@@ -27,6 +27,23 @@ class IntMath {
 	public static inline function mul(a:Int, b:Int):Int
 		return js.Syntax.code("Math.imul({0}, {1})", a, b);
 
+	/** Bits 63..32 of the signed 64-bit product (MIPS MULT's HI): the unsigned high word less
+	    each operand where the other is negative, all modulo 2^32. */
+	public static inline function mulHi(a:Int, b:Int):Int
+		return (mulHiU(a, b) - ((a >> 31) & b) - ((b >> 31) & a)) | 0;
+
+	/** Bits 63..32 of the unsigned 64-bit product (MULTU's HI), from 16-bit halves: every
+	    partial product is exact in a word, and the middle column's carry is kept. */
+	public static function mulHiU(a:Int, b:Int):Int {
+		final al = a & 0xFFFF, ah = a >>> 16;
+		final bl = b & 0xFFFF, bh = b >>> 16;
+		final ll = mul(al, bl);
+		final lh = mul(al, bh);
+		final hl = mul(ah, bl);
+		final mid = ((ll >>> 16) + (lh & 0xFFFF) + (hl & 0xFFFF)) | 0;
+		return (mul(ah, bh) + (lh >>> 16) + (hl >>> 16) + (mid >>> 16)) | 0;
+	}
+
 	public static inline function divPow2Trunc(a:Int, shift:Int):Int
 		return a < 0 ? -((-a) >> shift) : (a >> shift);
 

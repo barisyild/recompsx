@@ -742,8 +742,9 @@ class Kernel {
 	/** Every GP0 opcode the frame contained, with its count. */
 	static function reportOpcodes():Void {
 		for (op in 0...256) {
-			if (gpu.Gpu.opCount[op] > 0) {
-				Runtime.note("gp0 op 0x" + StringTools.hex(op, 2) + " x" + gpu.Gpu.opCount[op]);
+			final n = shim.MemA.get32(gpu.Gpu.opCount, op << 2);
+			if (n > 0) {
+				Runtime.note("gp0 op 0x" + StringTools.hex(op, 2) + " x" + n);
 			} else {}
 		}
 	}

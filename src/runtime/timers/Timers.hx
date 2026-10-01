@@ -6,6 +6,7 @@ import core.Runtime;
 import core.Scheduler;
 import core.TimeBase;
 import shim.IntMath;
+import shim.TimerFile;
 
 /**
 	The three root counters at 1F801100h, computed rather than stepped.
@@ -24,29 +25,27 @@ import shim.IntMath;
 	psx-spx "Timers", as recorded in docs/specs/runtime.md §10.
 **/
 class Timers {
-	static var anchor:Array<Int>;
-	static var base:Array<Int>;
-	static var mode:Array<Int>;
-	static var target:Array<Int>;
-	static var reached:Array<Int>;   // bits 11/12, read-then-clear
+	// Each table is three words of one register file (`shim.TimerFile`, `recompsx_timers` on C++),
+	// four apart: as `Array<Int>`s every element was three dependent loads, on the path of every
+	// counter read — and a game's pad driver polls a counter for its timeout hundreds of times a
+	// frame (docs/perf/dreamcast-ledger.md, E-040).
+	static inline var anchor:TimerArray = cast 0;
+	static inline var base:TimerArray = cast 4;
+	static inline var mode:TimerArray = cast 8;
+	static inline var target:TimerArray = cast 12;
+	static inline var reached:TimerArray = cast 16;   // bits 11/12, read-then-clear
 	/** Mode bit 10, the interrupt request: 0x400 is "none", and a mode write sets it. */
-	static var request:Array<Int>;
-	/** A one-shot counter that has raised its interrupt stays quiet until the mode is written. */
-	static var spent:Array<Bool>;
+	static inline var request:TimerArray = cast 20;
+	/** A one-shot counter that has raised its interrupt stays quiet until the mode is written: 1. */
+	static inline var spent:TimerArray = cast 24;
 	/** The cycle the armed interrupt is due at, and which condition that is: 1 target, 2 0xFFFF. */
-	static var due:Array<Int>;
-	static var dueKind:Array<Int>;
+	static inline var due:TimerArray = cast 28;
+	static inline var dueKind:TimerArray = cast 32;
+	static inline var WORDS = 40;
 
 	public static function init():Void {
-		anchor = [0, 0, 0];
-		base = [0, 0, 0];
-		mode = [0, 0, 0];
-		target = [0, 0, 0];
-		reached = [0, 0, 0];
-		request = [0x400, 0x400, 0x400];
-		spent = [false, false, false];
-		due = [0, 0, 0];
-		dueKind = [0, 0, 0];
+		for (i in 0...WORDS) TimerFile.set(i, 0);
+		for (t in 0...3) request[t] = 0x400;
 	}
 
 	public static function read(addr:Int, cycles:Int):Int {
@@ -111,7 +110,11 @@ class Timers {
 		65536.
 	**/
 	static inline function unsignedMod(v:Int, m:Int):Int {
-		if (v >= 0) return v < m ? v : IntMath.mod(v, m);
+		// A power of two — 0x10000, the free-running wrap — is a mask whatever the sign: `v`'s low
+		// bits are the unsigned residue. Without it a counter the game never re-armed, whose
+		// elapsed count has passed 2^31, took two divides (__sdivsi3 on the SH-4) on every read.
+		if ((m & (m - 1)) == 0) return v & (m - 1);
+		else if (v >= 0) return v < m ? v : IntMath.mod(v, m);
 		else {
 			final half = IntMath.mod(v >>> 1, m);
 			return IntMath.mod(IntMath.mul(half, 2) + (v & 1), m);
@@ -333,7 +336,7 @@ class Timers {
 		anchor[t] = cycles;
 		reached[t] = 0;
 		request[t] = 0x400;
-		spent[t] = false;
+		spent[t] = 0;
 		arm(t, cycles);
 	}
 
@@ -352,7 +355,7 @@ class Timers {
 	/** Arms the next interrupt this counter will raise, or disarms it if it will raise none. */
 	static function arm(t:Int, cycles:Int):Void {
 		final slot = Scheduler.TIMER0 + t;
-		if ((mode[t] & 0x30) == 0 || spent[t]) {
+		if ((mode[t] & 0x30) == 0 || spent[t] != 0) {
 			if (Scheduler.isActive(slot)) Scheduler.cancelSlot(slot);
 			else {}
 			return;
@@ -441,8 +444,17 @@ class Timers {
 		} else {}
 		if (raise) Irq.raise(ctx, Irq.TIMER0 + t);
 		else {}
-		if ((mode[t] & 0x40) == 0) spent[t] = true;
+		if ((mode[t] & 0x40) == 0) spent[t] = 1;
 		else {}
 		arm(t, sysclkSource(t) ? at : ctx.cycles);
+	}
+}
+
+/** One of `Timers`' tables: `t`'s word of it in the root counters' register file. */
+abstract TimerArray(Int) {
+	@:arrayAccess inline function get(t:Int):Int return TimerFile.get(this + t);
+	@:arrayAccess inline function set(t:Int, v:Int):Int {
+		TimerFile.set(this + t, v);
+		return v;
 	}
 }

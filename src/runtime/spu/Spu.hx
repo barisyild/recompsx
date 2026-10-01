@@ -7,6 +7,7 @@ import shim.Backend;
 import shim.RawBuf;
 import shim.IntMath;
 import shim.RawMem;
+import shim.SpuFile;
 
 /**
 	The sound processor: twenty-four ADPCM voices, their envelopes, and the mix they add up to.
@@ -36,6 +37,7 @@ import shim.RawMem;
 
 	Register map and the ADSR and ADPCM arithmetic from psx-spx "Sound Processing Unit (SPU)".
 **/
+@:headerCode("#include \"recompsx_arena.h\"")
 class Spu {
 	/** Sound RAM: 512 KB, addressed in 8-byte units by every register that names it. */
 	public static inline var RAM_BYTES = 0x80000;
@@ -82,23 +84,26 @@ class Spu {
 
 	// ---- voice state ------------------------------------------------------------------------
 
-	static var volL:Array<Int>;         // raw register value
-	static var volR:Array<Int>;
-	static var pitch:Array<Int>;
-	static var startAddr:Array<Int>;    // byte address in sound RAM
-	static var repeatAddr:Array<Int>;
-	static var adsrLo:Array<Int>;
-	static var adsrHi:Array<Int>;
+	static inline var volL:SpuArray = cast 0;         // raw register value
+	static inline var volR:SpuArray = cast 24;
+	static inline var pitch:SpuArray = cast 48;
+	static inline var startAddr:SpuArray = cast 72;    // byte address in sound RAM
+	static inline var repeatAddr:SpuArray = cast 96;
+	static inline var adsrLo:SpuArray = cast 120;
+	static inline var adsrHi:SpuArray = cast 144;
 
-	static var curAddr:Array<Int>;      // byte address of the block being played
-	static var blockPos:Array<Int>;     // 0..27 within the decoded block
-	static var counter:Array<Int>;      // 12-bit fractional position
-	static var older:Array<Int>;        // the two samples the ADPCM filter looks back at
-	static var old:Array<Int>;
-	static var decoded:Array<Int>;      // VOICES * 28 samples
-	static var envLevel:Array<Int>;     // 0..0x7FFF
-	static var envPhase:Array<Int>;
-	static var envCounter:Array<Int>;
+	static inline var curAddr:SpuArray = cast 168;      // byte address of the block being played
+	static inline var blockPos:SpuArray = cast 192;     // 0..27 within the decoded block
+	static inline var counter:SpuArray = cast 216;      // 12-bit fractional position
+	static inline var older:SpuArray = cast 240;        // the two samples the ADPCM filter looks back at
+	static inline var old:SpuArray = cast 264;
+	static inline var decoded:SpuArray = cast 504;      // VOICES * 28 samples
+	static inline var envLevel:SpuArray = cast 288;     // 0..0x7FFF
+	static inline var envPhase:SpuArray = cast 312;
+	static inline var envCounter:SpuArray = cast 336;
+
+	/** The words of shim.SpuFile the tables above take: 21 of 24 voices, then `decoded`. */
+	static inline var SPU_WORDS = 1176;
 
 	static inline var PHASE_OFF = 0;
 	static inline var PHASE_ATTACK = 1;
@@ -175,12 +180,12 @@ class Spu {
 		path that hashes anything.
 	**/
 	public static var voicesToBackend = false;
-	static var keyCount:Array<Int>;     // key-ons per voice: a new count is a new note
-	static var sentKey:Array<Int>;
-	static var sentOn:Array<Int>;
-	static var sentPitch:Array<Int>;
-	static var sentL:Array<Int>;
-	static var sentR:Array<Int>;
+	static inline var keyCount:SpuArray = cast 360;     // key-ons per voice: a new count is a new note
+	static inline var sentKey:SpuArray = cast 384;
+	static inline var sentOn:SpuArray = cast 408;
+	static inline var sentPitch:SpuArray = cast 432;
+	static inline var sentL:SpuArray = cast 456;
+	static inline var sentR:SpuArray = cast 480;
 	static var dirtyLo = RAM_BYTES;     // sound RAM written since the last sync: [lo, hi)
 	static var dirtyHi = 0;
 	/**
@@ -199,30 +204,19 @@ class Spu {
 		mixRegs = [for (_ in 0...MIX_COUNT) 0];
 		reverbRegs = [for (_ in 0...REVERB_COUNT) 0];
 
-		volL = [for (_ in 0...VOICES) 0];
-		volR = [for (_ in 0...VOICES) 0];
-		pitch = [for (_ in 0...VOICES) 0];
-		startAddr = [for (_ in 0...VOICES) 0];
-		repeatAddr = [for (_ in 0...VOICES) 0];
-		adsrLo = [for (_ in 0...VOICES) 0];
-		adsrHi = [for (_ in 0...VOICES) 0];
-		curAddr = [for (_ in 0...VOICES) 0];
-		blockPos = [for (_ in 0...VOICES) SAMPLES_PER_BLOCK];
-		counter = [for (_ in 0...VOICES) 0];
-		older = [for (_ in 0...VOICES) 0];
-		old = [for (_ in 0...VOICES) 0];
-		decoded = [for (_ in 0...VOICES * SAMPLES_PER_BLOCK) 0];
+		// The per-voice tables (SpuArray): every word zero, then the ones that start elsewhere.
+		for (i in 0...SPU_WORDS) SpuFile.set(i, 0);
+		for (v in 0...VOICES) {
+			blockPos[v] = SAMPLES_PER_BLOCK;
+			envPhase[v] = PHASE_OFF;
+			sentKey[v] = -1;
+			sentOn[v] = -1;
+			sentPitch[v] = -1;
+			sentL[v] = -1;
+			sentR[v] = -1;
+		}
 		accL = [for (_ in 0...MAX_CATCHUP) 0];
 		accR = [for (_ in 0...MAX_CATCHUP) 0];
-		envLevel = [for (_ in 0...VOICES) 0];
-		envPhase = [for (_ in 0...VOICES) PHASE_OFF];
-		envCounter = [for (_ in 0...VOICES) 0];
-		keyCount = [for (_ in 0...VOICES) 0];
-		sentKey = [for (_ in 0...VOICES) -1];
-		sentOn = [for (_ in 0...VOICES) -1];
-		sentPitch = [for (_ in 0...VOICES) -1];
-		sentL = [for (_ in 0...VOICES) -1];
-		sentR = [for (_ in 0...VOICES) -1];
 		dirtyLo = RAM_BYTES;
 		dirtyHi = 0;
 		softMask = 0;
@@ -1488,5 +1482,18 @@ class Spu {
 		var s = 28;
 		while (s >= 0) { out += digits.charAt((v >>> s) & 0xF); s -= 4; }
 		return "0x" + out;
+	}
+}
+
+/**
+	One of the SPU's per-voice tables: an offset into shim.SpuFile, where `table[v]` is its word v.
+	The tables were `Array<Int>`s, and on C++ each element was three dependent loads (a shared pointer,
+	its vector, the element); here it is one register the compiler keeps and an index.
+**/
+abstract SpuArray(Int) {
+	@:arrayAccess inline function get(i:Int):Int return SpuFile.get(this + i);
+	@:arrayAccess inline function set(i:Int, v:Int):Int {
+		SpuFile.set(this + i, v);
+		return v;
 	}
 }

@@ -73,8 +73,25 @@ package core;
 	nothing here should make it worse. On SH-4 neither number has been taken at all — atomics
 	there are not a `lock` prefix but a gUSA sequence, so if anything the case is stronger.
 **/
+// The machine's own instance on C++ (shim.CpuStateHome): declared for every file that includes
+// this header, defined once beside the class. Ignored by targets without C++ files.
+@:headerCode("namespace core { class CpuState; }\nextern core::CpuState recompsx_cpustate;")
+@:cppFileCode("core::CpuState recompsx_cpustate;")
 @:unsafePtrType
 class CpuState {
+	/**
+		The machine's CpuState, made once at boot: on C++ the object at a fixed address
+		(shim.CpuStateHome), so that its cache sets are the data placement's to choose; elsewhere a
+		new one. The other instances (a saved interrupt context, threads' images) are plain `new`.
+	**/
+	public static function machine():CpuState {
+		#if cxx
+		return shim.CpuStateHome.get();
+		#else
+		return new CpuState();
+		#end
+	}
+
 	// General-purpose registers, by their ABI names. $zero is deliberately absent.
 	public var at:Int = 0;
 	public var v0:Int = 0;  public var v1:Int = 0;
@@ -126,6 +143,21 @@ class CpuState {
 		address carries on (ADR-0027).
 	**/
 	public var returnTarget:Int = 0;
+
+	/**
+		The last call through a register that `FnTable.run` answered from its table (C++): the
+		address, the function's place in the native pointer array, and the block. A call by
+		address mostly goes where the one before it went — Crash 3's renderer hops to one routine
+		for every primitive — and these words share this object's last line with a0..a3, which
+		never leaves the operand cache, where the table's slot for an address sits wherever the
+		address puts it: in Crash 3 on the set of this object's first line, both evicted at every
+		hop (~0.3 ms a frame under the cache model). Named to sort last: reflaxe.CPP lays fields
+		out by name, descending, so no other field moves. `FnTable` sets the empty state (an odd
+		address, which no table answers, and a function that asks the long way).
+	**/
+	public var _callAt:Int = 1;
+	public var _callFn:Int = 0;
+	public var _callBlock:Int = 0;
 
 	/**
 		Kept for the HLE thread functions, which do have a depth. Critical sections do not: the

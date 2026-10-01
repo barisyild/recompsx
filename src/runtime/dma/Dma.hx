@@ -237,8 +237,15 @@ class Dma {
 		var addr = listAt;
 		var spent = 0;
 		var state = LIST_GOING;
+		// The counters in locals for the step, stored back once at its end: a node is a handful of
+		// instructions, and two statics read and written for each were a fair part of them.
+		var links = listLinks;
+		var words = wordsToGpu;
 		while (state == LIST_GOING && spent < LIST_STEP) {
 			final header = MemA.get32(ram, addr);
+			// The next node's line on its way while this node's words are drawn: a list is a chain
+			// through RAM in no order the cache can guess, and each header was a miss.
+			MemA.prefetch(ram, header & 0x1FFFFC);
 			final count = (header >>> 24) & 0xFF;
 			// Straight from RAM into GP0, not through the CPU's memory map: the channel only ever
 			// addresses RAM, wrapping at 2 MB exactly as `Memory.read32`'s decode does for these
@@ -247,7 +254,7 @@ class Dma {
 			// channel, measured on the hardware-drawing path. The GPU takes the node whole.
 			if (count != 0) {
 				Gpu.writeGp0Words(ram, addr + 4, count);
-				wordsToGpu += count;
+				words = (words + count) | 0;
 			} else {}
 			// The channel's own cycle a word, and however long the GPU takes to draw what it was
 			// handed, since its FIFO holds sixteen words and the channel waits on it.
@@ -255,11 +262,13 @@ class Dma {
 			// Bit 23 of the link marks the end.
 			if ((header & 0x800000) != 0) state = LIST_ENDED;
 			else {
-				listLinks++;
-				if (listLinks > 0x10000) state = LIST_RUNAWAY;
+				links++;
+				if (links > 0x10000) state = LIST_RUNAWAY;
 				else addr = header & 0x1FFFFC;
 			}
 		}
+		listLinks = links;
+		wordsToGpu = words;
 		Backend.profileMark(Backend.PROFILE_GPU, 0);
 		listClock = (listClock + spent) | 0;
 		if (state == LIST_GOING) {
@@ -460,12 +469,18 @@ class Dma {
 		// A table that stays inside RAM is stored directly — what Memory.write32 would do there,
 		// without asking which region each word is in. One running below RAM's first word goes
 		// through the memory map, as it always did.
-		if (addr - ((n - 1) << 2) >= 0) {
+		// Every entry but the last points at the word below it, which inside RAM is its own address
+		// less four as it stands: one store and one subtract a word, and the last one after the
+		// loop rather than a test for it in every turn (Crash Bash clears thousands a frame).
+		final last = addr - ((n - 1) << 2);
+		if (last >= 0) {
 			final ram = Memory.ram();
-			for (i in 0...n) {
-				MemA.set32(ram, addr, i == n - 1 ? 0x00FFFFFF : ((addr - 4) & 0xFFFFFF));
+			while (addr > last) {
+				MemA.set32(ram, addr, addr - 4);
 				addr -= 4;
 			}
+			MemA.set32(ram, last, 0x00FFFFFF);
+			addr = last - 4;
 		} else {
 			for (i in 0...n) {
 				// Every entry points at the one below it; the last one ends the list.

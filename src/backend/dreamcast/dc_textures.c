@@ -829,22 +829,18 @@ PROF_NOINLINE void palette_priority(void) {
     shz_memset8(g_prio, 0, sizeof(g_prio));
     /* The slots in use, collected as they fill: the ranking below then sorts a few dozen entries
      * where it used to scan all 256 slots once per bank — sixty-four passes, some sixteen
-     * thousand iterations a scene, for a list that is sorted once. And primitives arrive in runs
-     * sharing a state, so a run's palette is looked up once and counted by increment. */
+     * thousand iterations a scene, for a list that is sorted once.
+     *
+     * By state, not by record: each state carries the triangles recorded under it (bp_gpu_tri
+     * counts them), and states arrive in the order primitives first use them, so the slots fill
+     * in the order a walk of the records filled them and every palette gets the same count. The
+     * walk read every 32-byte record — a cache miss each, half this function's time, the scene
+     * build reading them all again right after. */
     int used[PRIO_SLOTS];
-    int n_used = 0, last_state = -1, last_slot = -1;
-    for(int i = 0; i < g_cmd_count; i++) {
-        const gcmd_t* c = &g_cmds[i];
-        if(c->is_rect) continue;
-        if((int)c->state == last_state) {
-            if(last_slot >= 0) g_prio[last_slot].n++;
-            else {}
-            continue;
-        } else {}
-        last_state = (int)c->state;
-        last_slot = -1;
-        const gstate_t* s = &g_states[c->state];
-        if(!(s->flags & BP_GPU_TEXTURED) || s->depth != 0) continue;
+    int n_used = 0;
+    for(int i = 0; i < g_state_count; i++) {
+        const gstate_t* s = &g_states[i];
+        if(s->tris == 0 || !(s->flags & BP_GPU_TEXTURED) || s->depth != 0) continue;
         const uint32_t base = (uint32_t)s->clut_x * 31u + (uint32_t)s->clut_y * 17u;
         for(int probe = 0; probe < 4; probe++) {
             const int hh = (int)((base + (uint32_t)probe) & (PRIO_SLOTS - 1));
@@ -852,14 +848,12 @@ PROF_NOINLINE void palette_priority(void) {
                 g_prio[hh].used = 1;
                 g_prio[hh].cx = s->clut_x;
                 g_prio[hh].cy = s->clut_y;
-                g_prio[hh].n = 1;
+                g_prio[hh].n = s->tris;
                 used[n_used++] = hh;
-                last_slot = hh;
                 break;
             }
             if(g_prio[hh].cx == s->clut_x && g_prio[hh].cy == s->clut_y) {
-                g_prio[hh].n++;
-                last_slot = hh;
+                g_prio[hh].n += s->tris;
                 break;
             }
         }

@@ -95,18 +95,17 @@ int g_rxprof;
 
 /* ---- the runtime's brackets (bp_profile_mark) ------------------------------------------------- */
 
-/* The runtime's own brackets (bp_profile_mark), timed on this side of the ABI: the SPU's decoding
- * and mixing, and each GPU DMA transfer. Taken out of `emu` and printed beside it, and the runtime
- * never sees the clock, only says where the stretch begins and ends. */
-static uint64_t g_prof_section_us[BP_PROFILE_SECTIONS];
-static uint64_t g_prof_section_at[BP_PROFILE_SECTIONS];
-
-/* Where the emulation is, for the sampler (samp_tick): the innermost open bracket, or -1, and the
- * ones it sits inside. A GTE command is too short and too frequent to time — two clock reads cost
- * more than most commands do — so it is only noted here, and the 1 kHz sampler counts the ticks
- * that land inside one: a tick is a millisecond, the unit of every other number. Only ticks that
- * interrupt the emulation thread count; the disc and audio threads can run while it is preempted
- * in the middle of a command. */
+/* The runtime's own brackets (bp_profile_mark): the SPU's decoding and mixing, each stretch of the
+ * GPU's list walk, each GTE command. Taken out of `emu` and printed beside it; the runtime never
+ * sees the clock, only says where a stretch begins and ends.
+ *
+ * None of them is timed. The emulation is noted as being inside one, and the 1 kHz sampler
+ * (samp_tick) counts the ticks that land there: a tick is a millisecond, the unit of every other
+ * number. A GTE command was always done so, being too short and too frequent to time; the GPU's
+ * and the SPU's brackets were timed with two clock reads each until 2026-09-30, and the list walk
+ * opens one ~150 times a frame, so that was 0.2-0.3 ms of every frame on reading the clock
+ * (gettimeofday, under the cache model on Crash 3). Only ticks that interrupt the emulation thread
+ * count; the disc and audio threads can run while it is preempted in the middle of a bracket. */
 #define WHERE_DEPTH 4
 static volatile int      g_where = -1;
 static int               g_where_outer[WHERE_DEPTH];
@@ -115,23 +114,18 @@ kthread_t*        g_emu_thread;
 static volatile uint32_t g_samp_where[BP_PROFILE_SECTIONS];
 
 void bp_profile_mark(int section, int begin) {
-    /* A GTE command is entered ~2500 times a vblank and never runs inside another bracket or
-     * holds one, so it is a single store: the stack below cost ~20 instructions a mark, which
-     * across a window was ~15 ms of the profile measuring itself. */
-    if(section == BP_PROFILE_GTE) { g_where = begin ? BP_PROFILE_GTE : -1; return; }
+    /* A GTE command is not bracketed at all: entered ~2500 times a vblank, its one store to
+     * g_where was a line the game's code had evicted in between, allocated again by the write —
+     * ~14 cycles of every RTPS on Crash 3 under the cache model (E-026), ~0.2 ms a frame. The GTE's
+     * share is in the model's profile by function; the overlay counts it in `emu`. (The stack below
+     * had cost ~20 instructions a mark, ~15 ms of a window, before it was a single store.) */
+    if(section == BP_PROFILE_GTE) { (void)begin; return; }
     if(section < 0 || section >= BP_PROFILE_SECTIONS) return;
     if(begin) {
         if(g_where_depth < WHERE_DEPTH) g_where_outer[g_where_depth++] = g_where;
         g_where = section;
     } else {
         g_where = g_where_depth > 0 ? g_where_outer[--g_where_depth] : -1;
-    }
-    const uint64_t now = bp_time_us();
-    if(begin) {
-        g_prof_section_at[section] = now;
-    } else if(g_prof_section_at[section]) {
-        g_prof_section_us[section] += now - g_prof_section_at[section];
-        g_prof_section_at[section] = 0;
     }
 }
 
@@ -239,6 +233,8 @@ void perf_window_close(uint64_t emu_us) {
 #define SAMP_SLOTS 1024
 #define SAMP_GRAN  7
 static uint32_t g_samp_key[SAMP_SLOTS] __attribute__((aligned(8))), g_samp_hit[SAMP_SLOTS] __attribute__((aligned(8)));
+/* The function a bucket's last sample fell in (samp_tick), or -1: kept with the bucket. */
+static int32_t g_samp_fn[SAMP_SLOTS];
 static uint32_t g_samp_total, g_samp_lost;
 uint32_t g_samp_frames;
 
@@ -256,6 +252,7 @@ static volatile uint32_t  g_sym_other;          /* samples in no listed function
 static const char*        g_sym_state = "no SYMS.BIN on the disc";
 
 static void samp_tick(irq_t code, irq_context_t* ctx, void* data);
+static void syms_clear(void);
 
 void syms_load(void) {
     static const char* paths[] = { "/pc/SYMS.BIN", "/cd/SYMS.BIN", "/cd/syms.bin" };
@@ -315,14 +312,18 @@ static void syms_top(char* a, char* b, size_t len) {
         b[0] = '\0';
         return;
     }
-    int top[6];
-    for(int k = 0; k < 6; k++) {
-        top[k] = -1;
-        for(int i = 0; i < g_sym_count; i++) {
-            int taken = 0;
-            for(int j = 0; j < k; j++) if(top[j] == i) taken = 1;
-            if(!taken && g_sym_hits[i] > 0 && (top[k] < 0 || g_sym_hits[i] > g_sym_hits[top[k]])) top[k] = i;
-        }
+    /* The six with the most samples, in one pass: each function with any goes into its place
+     * among the six kept so far, after those with as many (the earlier one first on a tie, as the
+     * six passes over every function it replaced had it — ~500,000 instructions a report, which
+     * the overlay's own profile showed at 0.08 ms a frame). */
+    int top[6] = { -1, -1, -1, -1, -1, -1 };
+    for(int i = 0; i < g_sym_count; i++) {
+        const uint32_t h = g_sym_hits[i];
+        if(h == 0 || (top[5] >= 0 && g_sym_hits[top[5]] >= h)) continue;
+        else {}
+        int k = 5;
+        while(k > 0 && (top[k - 1] < 0 || g_sym_hits[top[k - 1]] < h)) { top[k] = top[k - 1]; k--; }
+        top[k] = i;
     }
     char* out[2] = { a, b };
     for(int line = 0; line < 2; line++) {
@@ -335,6 +336,11 @@ static void syms_top(char* a, char* b, size_t len) {
             if(n >= (int)len) break;
         }
     }
+    syms_clear();
+}
+
+/** A new window for the function samples. */
+static void syms_clear(void) {
     for(int i = 0; i < g_sym_count; i++) g_sym_hits[i] = 0;
     g_sym_other = 0;
 }
@@ -348,21 +354,30 @@ static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
     timer_clear(TMU1);
     const int where = g_where;
     if(where >= 0 && thd_get_current() == g_emu_thread) g_samp_where[where]++;
+    const uint32_t pc = CONTEXT_PC(*ctx);
+    const uint32_t k = pc >> SAMP_GRAN;
+    const uint32_t h = (k * 2654435761u) & (SAMP_SLOTS - 1);
+    int slot = -1;
+    for(int i = 0; i < 8; i++) {
+        const uint32_t c = (h + (uint32_t)i) & (SAMP_SLOTS - 1);
+        if(g_samp_hit[c] == 0) { g_samp_key[c] = k; g_samp_fn[c] = -1; slot = (int)c; break; }
+        if(g_samp_key[c] == k) { slot = (int)c; break; }
+    }
+    if(slot >= 0) { g_samp_hit[slot]++; g_samp_total++; }
+    else g_samp_lost++;
     if(g_sym_count > 0) {
-        const int fn = sym_find(CONTEXT_PC(*ctx));
+        /* The function the bucket's last sample fell in, if this one falls there too — nearly
+         * always: two compares where the binary search took a dozen dependent loads, most of them
+         * misses, at every tick (~0.07 ms a frame of Crash 3 under the cache model, E-041). */
+        int fn = slot >= 0 ? g_samp_fn[slot] : -1;
+        if(fn < 0 || pc < g_sym_range[fn * 2] || pc >= g_sym_range[fn * 2 + 1]) {
+            fn = sym_find(pc);
+            if(slot >= 0) g_samp_fn[slot] = fn;
+            else {}
+        } else {}
         if(fn >= 0) g_sym_hits[fn]++;
         else g_sym_other++;
     } else {}
-    const uint32_t k = CONTEXT_PC(*ctx) >> SAMP_GRAN;
-    const uint32_t h = (k * 2654435761u) & (SAMP_SLOTS - 1);
-    for(int i = 0; i < 8; i++) {
-        const uint32_t c = (h + (uint32_t)i) & (SAMP_SLOTS - 1);
-        if(g_samp_hit[c] == 0) {
-            g_samp_key[c] = k; g_samp_hit[c] = 1; g_samp_total++; return;
-        }
-        if(g_samp_key[c] == k) { g_samp_hit[c]++; g_samp_total++; return; }
-    }
-    g_samp_lost++;
 }
 
 void samp_start(void) {
@@ -436,6 +451,7 @@ int      g_prof_logs;
  * are about, but it is *read* in seconds by a person watching a log — and on a machine managing a
  * couple of frames a second, thirty of them is half a minute between signs of life. */
 #define PROFILE_EVERY 30
+#define OVERLAY_EVERY 4
 
 /* ---- the benchmark range ------------------------------------------------------------------------
  * `--dc-bench=FROM:TO` in recompsx.cfg measures presents FROM..TO counted from boot as one block and
@@ -448,14 +464,40 @@ int      g_prof_logs;
 static int      g_bench_state;        /* 0 waiting, 1 on, 2 done; the range is g_bench_from/to */
 static uint32_t g_presents;
 static uint64_t g_bench_sum[5];       /* total, emu, gte, gpu, build — microseconds */
+/* The rest of the total, for the serial log only: the PVR's wait, uploads, the submission less the
+ * build, the pacer's hold and the disc — where a frame's time went that is not the emulator's. */
+static uint64_t g_bench_rest[5];
+/* Presents by what they cost (bench_frame_busy), for the serial log: whether a bench's average hides
+ * frames far over 16.7 ms behind others far under it, which the pacer then sleeps through. */
+#define BENCH_BINS 10
+static const uint16_t g_bench_edge[BENCH_BINS - 1] = { 10000, 13000, 15000, 16683, 18000, 20000, 23000, 27000, 33000 };
+static uint32_t g_bench_bin[BENCH_BINS];
+static uint64_t g_bench_bin_us[BENCH_BINS];
+static uint64_t g_bench_bin_emu[BENCH_BINS], g_bench_bin_pres[BENCH_BINS];
+uint32_t g_frame_emu_us, g_frame_present_us;
+
+void bench_frame_busy(uint64_t busy_us) {
+    if(g_bench_state != 1) return;
+    else {}
+    int i = 0;
+    while(i < BENCH_BINS - 1 && busy_us >= g_bench_edge[i]) i++;
+    g_bench_bin[i]++;
+    g_bench_bin_us[i] += busy_us;
+    g_bench_bin_emu[i] += g_frame_emu_us;
+    g_bench_bin_pres[i] += g_frame_present_us;
+}
 static uint32_t g_bench_frames;
 static char     g_bench_line[48];
 
 static void profile_reset(void);
 
+
 static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, uint64_t build) {
     g_bench_sum[0] += total; g_bench_sum[1] += emu; g_bench_sum[2] += gte;
     g_bench_sum[3] += gpu;   g_bench_sum[4] += build;
+    g_bench_rest[0] += g_prof_wait; g_bench_rest[1] += g_prof_upload;
+    g_bench_rest[2] += g_prof_submit - g_prof_build; g_bench_rest[3] += g_prof_pace;
+    g_bench_rest[4] += g_prof_disc_us;
     g_bench_frames += (uint32_t)g_prof_frames;
     if(g_presents < (uint32_t)g_bench_to) return;
     g_bench_state = 2;
@@ -468,6 +510,35 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
     char msg[96];
     snprintf(msg, sizeof(msg), "bench %d..%d: %s (ms a frame)", g_bench_from, g_bench_to, g_bench_line);
     bp_log(BP_LOG_WARN, msg);   /* WARN: the overlay silences INFO, and this line is the point */
+    unsigned long r[5];
+    for(int i = 0; i < 5; i++) r[i] = (unsigned long)(g_bench_rest[i] / ((uint64_t)g_bench_frames * 10u));
+    char rest[128];
+    snprintf(rest, sizeof(rest), "bench rest: pvr-wait %lu.%02lu upload %lu.%02lu submit %lu.%02lu pace %lu.%02lu disc %lu.%02lu (ms a frame)",
+             r[0] / 100, r[0] % 100, r[1] / 100, r[1] % 100, r[2] / 100, r[2] % 100, r[3] / 100, r[3] % 100,
+             r[4] / 100, r[4] % 100);
+    bp_log(BP_LOG_WARN, rest);
+    /* Each bin: its upper edge in ms, the presents in it, their mean cost in tenths of a ms. */
+    char hist[256];
+    int at = snprintf(hist, sizeof(hist), "bench presents by cost:");
+    for(int i = 0; i < BENCH_BINS && at < (int)sizeof(hist) - 24; i++) {
+        const unsigned long mean = g_bench_bin[i] ? (unsigned long)(g_bench_bin_us[i] / g_bench_bin[i] / 100u) : 0;
+        if(i < BENCH_BINS - 1)
+            at += snprintf(hist + at, sizeof(hist) - (size_t)at, " <%u.%u:%lu@%lu.%lu", (unsigned)(g_bench_edge[i] / 1000u),
+                           (unsigned)(g_bench_edge[i] / 100u % 10u), (unsigned long)g_bench_bin[i], mean / 10, mean % 10);
+        else
+            at += snprintf(hist + at, sizeof(hist) - (size_t)at, " more:%lu@%lu.%lu", (unsigned long)g_bench_bin[i],
+                           mean / 10, mean % 10);
+    }
+    bp_log(BP_LOG_WARN, hist);
+    /* And of each bin's cost, how much was the emulation and how much the present (tenths of ms). */
+    at = snprintf(hist, sizeof(hist), "bench presents emu/present:");
+    for(int i = 0; i < BENCH_BINS && at < (int)sizeof(hist) - 24; i++) {
+        if(g_bench_bin[i] == 0) continue;
+        const unsigned long e = (unsigned long)(g_bench_bin_emu[i] / g_bench_bin[i] / 100u);
+        const unsigned long q = (unsigned long)(g_bench_bin_pres[i] / g_bench_bin[i] / 100u);
+        at += snprintf(hist + at, sizeof(hist) - (size_t)at, " [%d] %lu.%lu/%lu.%lu", i, e / 10, e % 10, q / 10, q % 10);
+    }
+    bp_log(BP_LOG_WARN, hist);
     if(g_rxprof) { printf("@@rxprof stop\n@@rxprof exit\n"); fflush(stdout); }
     else {}
 }
@@ -495,16 +566,24 @@ void profile_report(void) {
      * code with the kernel, memory and timers it calls, and every number on the overlay is its own
      * and they add up to the total. GTE time is sampled (a tick is a millisecond), the rest timed,
      * so the remainder is clamped rather than trusted to the last millisecond. */
-    const uint64_t spu_us = g_prof_section_us[BP_PROFILE_SPU];
-    const uint64_t gpu_us = g_prof_section_us[BP_PROFILE_GPU];
+    const uint64_t spu_us = (uint64_t)g_samp_where[BP_PROFILE_SPU] * 1000ull;
+    const uint64_t gpu_us = (uint64_t)g_samp_where[BP_PROFILE_GPU] * 1000ull;
     const uint64_t gte_us = (uint64_t)g_samp_where[BP_PROFILE_GTE] * 1000ull;
     const uint64_t inside = g_prof_disc_us + spu_us + gpu_us + gte_us + g_prof_aica;
     const uint64_t emu = g_prof_emu > inside ? g_prof_emu - inside : 0;
     if(g_bench_state == 1) bench_add(total, emu, gte_us, gpu_us, g_prof_build);
     else {}
 
+    /* The serial line, spun out only where it is written: with the overlay on it is not, and its
+     * twenty-five fields were formatted every window for nothing. */
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    const int log_line = !g_txt;
+#else
+    const int log_line = 1;
+#endif
     char msg[300];
-    snprintf(msg, sizeof(msg),
+    msg[0] = '\0';
+    if(log_line) snprintf(msg, sizeof(msg),
              "dc: %d frames in %lu ms | emu %lu | gte %lu | gpu %lu | spu %lu | aica %lu/%d/%d | disc %lu (%d rd, %d miss)"
              " | pvr-wait %lu | audio %lu (%d) | upload %lu | build %lu (%d hdr, %d cc) | submit %lu | pace %lu | empty %d | log %d in %lu",
              g_prof_frames,
@@ -525,50 +604,57 @@ void profile_report(void) {
 #if RECOMPSX_DC_PROFILE_OVERLAY
     /* The on-screen copy is built before the serial one is written, so the log counters describe
      * the period they belong to rather than including the cost of reporting themselves. */
-    char l0[48], l1[48], l2[48], l3[48], l4[48];
-    const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
-    /* The window is always PROFILE_EVERY presents, so it is not printed; the disc's wait is
-     * followed by what the drive delivered in it, which is what tells a slow drive from a busy
-     * one. */
-    snprintf(l0, sizeof(l0), "%lu ms %lu.%lu fps pace %lu disc %lu/%luk",
-             (unsigned long)(total / 1000), tenths / 10, tenths % 10,
-             (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000),
-             (unsigned long)(g_prof_disc_bytes / 1024));
-    /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
-     * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
-    if(g_hw_voices)
-        snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu aica %lu/%d/%d",
-                 (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
-                 (unsigned long)(spu_us / 1000),
-                 (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined);
-    else
-        snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
-                 (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
-                 (unsigned long)(spu_us / 1000));
-    /* fin and wait (hand-over and the PVR's wait) have read 0 for a long while; they stay in the
-     * serial line, and their room goes to the texture decodes. */
-    snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d+%d",
-             (unsigned long)(gpu_us / 1000),
-             (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
-             g_bright_prims, g_win_mir, g_win_slot, g_win_bake, g_win_patch);
-    /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
-     * header counts that were here are in the serial line. */
-    syms_top(l3, l4, sizeof(l3));
-    if(g_bench_state == 2) shz_memcpy(l4, g_bench_line, sizeof(l4));
-    else if(g_fm_line[0]) shz_memcpy(l4, g_fm_line, sizeof(l4));
-    else {}
+    /* The overlay's text redrawn every OVERLAY_EVERY windows, two seconds: formatting it, finding
+     * the six hottest functions among every symbol, drawing five lines a pixel at a time and
+     * uploading them was ~0.14 ms of every frame under the cache model, for numbers a person reads
+     * once a second at best. The window itself (bench_add above) is still every PROFILE_EVERY. */
+    static int s_overlay_window;
+    if(g_txt && (s_overlay_window++ % OVERLAY_EVERY) == 0) {
+        char l0[48], l1[48], l2[48], l3[48], l4[48];
+        const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
+        /* The window is always PROFILE_EVERY presents, so it is not printed; the disc's wait is
+         * followed by what the drive delivered in it, which is what tells a slow drive from a busy
+         * one. */
+        snprintf(l0, sizeof(l0), "%lu ms %lu.%lu fps pace %lu disc %lu/%luk",
+                 (unsigned long)(total / 1000), tenths / 10, tenths % 10,
+                 (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000),
+                 (unsigned long)(g_prof_disc_bytes / 1024));
+        /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
+         * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
+        if(g_hw_voices)
+            snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu aica %lu/%d/%d",
+                     (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
+                     (unsigned long)(spu_us / 1000),
+                     (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined);
+        else
+            snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
+                     (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
+                     (unsigned long)(spu_us / 1000));
+        /* fin and wait (hand-over and the PVR's wait) have read 0 for a long while; they stay in the
+         * serial line, and their room goes to the texture decodes. */
+        snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d+%d",
+                 (unsigned long)(gpu_us / 1000),
+                 (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
+                 g_bright_prims, g_win_mir, g_win_slot, g_win_bake, g_win_patch);
+        /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
+         * header counts that were here are in the serial line. */
+        syms_top(l3, l4, sizeof(l3));
+        if(g_bench_state == 2) shz_memcpy(l4, g_bench_line, sizeof(l4));
+        else if(g_fm_line[0]) shz_memcpy(l4, g_fm_line, sizeof(l4));
+        else {}
 
-    if(g_txt) {
-        shz_memset8(g_txt_buf, 0, sizeof(g_txt_buf));
-        txt_line(g_txt_buf,                        l0);
-        txt_line(g_txt_buf + TXT_W * TXT_LINE,     l1);
-        txt_line(g_txt_buf + TXT_W * TXT_LINE * 2, l2);
-        txt_line(g_txt_buf + TXT_W * TXT_LINE * 3, l3);
-        txt_line(g_txt_buf + TXT_W * TXT_LINE * 4, l4);
-        txr_put(g_txt_buf, g_txt, sizeof(g_txt_buf));
-        sq_wait();
-        g_txt_ready = 1;
-    }
+        {
+            shz_memset8(g_txt_buf, 0, sizeof(g_txt_buf));
+            txt_line(g_txt_buf,                        l0);
+            txt_line(g_txt_buf + TXT_W * TXT_LINE,     l1);
+            txt_line(g_txt_buf + TXT_W * TXT_LINE * 2, l2);
+            txt_line(g_txt_buf + TXT_W * TXT_LINE * 3, l3);
+            txt_line(g_txt_buf + TXT_W * TXT_LINE * 4, l4);
+            txr_put(g_txt_buf, g_txt, sizeof(g_txt_buf));
+            sq_wait();
+            g_txt_ready = 1;
+        }
+    } else syms_clear();
 #endif
 
     g_prof_logs = 0;
@@ -576,12 +662,8 @@ void profile_report(void) {
     /* Not while the overlay shows the same numbers. A line of this length is ~280 characters
      * spun out of the serial port a byte at a time whether or not anything listens, and the
      * overlay's own profile put that spin (scif_write) at 54 ms of an 824 ms window. */
-#if RECOMPSX_DC_PROFILE_OVERLAY
-    if(!g_txt) bp_log(BP_LOG_INFO, msg);
+    if(log_line) bp_log(BP_LOG_INFO, msg);
     else {}
-#else
-    bp_log(BP_LOG_INFO, msg);
-#endif
 
     profile_reset();
 }
@@ -597,7 +679,7 @@ static void profile_reset(void) {
     g_prof_skipped = 0;
     g_bright_prims = 0;
     g_win_mir = g_win_slot = g_win_bake = g_win_patch = 0;
-    for(int i = 0; i < BP_PROFILE_SECTIONS; i++) { g_prof_section_us[i] = 0; g_samp_where[i] = 0; }
+    for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_samp_where[i] = 0;
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;
     g_prof_aica_declined = 0;

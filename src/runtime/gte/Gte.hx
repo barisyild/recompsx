@@ -8,8 +8,6 @@ import shim.Acc;
 import shim.Backend;
 import shim.GteFile;
 import shim.MemA;
-import shim.RawBuf;
-import shim.RawMem;
 
 /**
 	The Geometry Transformation Engine — coprocessor 2, and the reason PlayStation games have
@@ -40,8 +38,9 @@ import shim.RawMem;
 **/
 // The register file (shim.GteFile) must be declared in every translation unit that inlines a GTE
 // access, and reflaxe does not carry an extern's include along an inlining chain; this header is the
-// one they all include, as Memory's is for guest memory. Ignored by targets without C++ headers.
-@:headerCode("#include \"recompsx_arena.h\"")
+// one they all include, as Memory's is for guest memory — recompsx_gte.h, which is the arena's and
+// GteFile.dot3's. Ignored by targets without C++ headers.
+@:headerCode("#include \"recompsx_gte.h\"")
 class Gte {
 	// ---- the data registers ----------------------------------------------------------------------
 	//
@@ -339,6 +338,7 @@ class Gte {
 		mac0 = 0; mac1 = 0; mac2 = 0; mac3 = 0;
 		lzcs = 0; lzcr = 32;
 		rt11 = 0; rt12 = 0; rt13 = 0; rt21 = 0; rt22 = 0; rt23 = 0; rt31 = 0; rt32 = 0; rt33 = 0;
+		for (i in 0...5) GteFile.set(RTP + i, 0);
 		trX = 0; trY = 0; trZ = 0;
 		l11 = 0; l12 = 0; l13 = 0; l21 = 0; l22 = 0; l23 = 0; l31 = 0; l32 = 0; l33 = 0;
 		rbk = 0; gbk = 0; bbk = 0;
@@ -516,11 +516,11 @@ class Gte {
 
 	public static inline function setCtrl(ctx:CpuState, reg:Int, value:Int):Void {
 		switch (reg) {
-			case 0: { rt11 = lowOf(value); rt12 = highOf(value); }
-			case 1: { rt13 = lowOf(value); rt21 = highOf(value); }
-			case 2: { rt22 = lowOf(value); rt23 = highOf(value); }
-			case 3: { rt31 = lowOf(value); rt32 = highOf(value); }
-			case 4: rt33 = sext16(value);
+			case 0: { rt11 = lowOf(value); rt12 = highOf(value); GteFile.set(RTP, value); }
+			case 1: { rt13 = lowOf(value); rt21 = highOf(value); GteFile.set(RTP + 1, value); }
+			case 2: { rt22 = lowOf(value); rt23 = highOf(value); GteFile.set(RTP + 2, value); }
+			case 3: { rt31 = lowOf(value); rt32 = highOf(value); GteFile.set(RTP + 3, value); }
+			case 4: { rt33 = sext16(value); GteFile.set(RTP + 4, value); }
 			case 5: trX = value;
 			case 6: trY = value;
 			case 7: trZ = value;
@@ -578,10 +578,27 @@ class Gte {
 	/**
 		The reciprocal table the hardware's Newton-Raphson step starts from.
 
-		257 entries, built once at init from the formula in the spec. Allocation at init is allowed
-		and this is the only place the GTE does any; every other value it touches is a static Int.
+		257 entries, built once at init from the formula in the spec, in the register file itself
+		(`shim.GteFile`) from word `UNR` on, as `clz8`'s table is from `CLZ`: one base for every
+		access an RTPS makes. On the heap each was a pointer loaded from a static and then the
+		entry, and the Dreamcast's operand cache lost them to whatever shared their lines — the
+		two table reads were a fifth of RTPS's time on Crash Bandicoot: Warped.
 	**/
-	static var unrTable:RawBuf;
+	static inline var UNR = 128;
+	static inline var CLZ = 392;
+
+	/**
+		The rotation matrix again, packed as the hardware's control registers 0-4 hold it: RT11 and
+		RT12 in word RTP, RT13 and RT21 in the next, RT22 and RT23, RT31 and RT32, RT33 alone. Its
+		nine elements are then nine consecutive halfwords, row after row, as each vertex RTPS and
+		RTPT transform is three (VXY0 and VZ0 are words 33 and 34: halfwords 66-68, `V0H`), and a
+		row times the vertex is one `GteFile.dot3` — on the Dreamcast the SH-4's multiply-accumulate
+		unit, reading both from memory, where the nine products were nine trips through its one
+		MACL (native/recompsx_gte.h). setCtrl keeps it beside the unpacked elements, which every
+		other command reads.
+	**/
+	static inline var RTP = 648;
+	static inline var V0H = 66;
 
 	static function buildUnrTable():Void {
 		// Built unconditionally, not behind `if (unrTable != null)`.
@@ -595,10 +612,9 @@ class Gte {
 		//
 		// A flat buffer, not an `Array<Int>`: on C++ that is a `shared_ptr` to a `vector`, three
 		// dependent loads for an entry on every perspective divide where this is two.
-		unrTable = RawMem.alloc(257 << 2);
 		for (i in 0...257) {
 			final v = shim.IntMath.div(shim.IntMath.div(0x40000, i + 0x100) + 1, 2) - 0x101;
-			MemA.set32(unrTable, i << 2, v < 0 ? 0 : v);
+			GteFile.set(UNR + i, v < 0 ? 0 : v);
 		}
 	}
 
@@ -613,25 +629,26 @@ class Gte {
 		A divisor at most half the dividend cannot be normalised into range, and the hardware
 		answers 0x1FFFF with the overflow flag rather than a wrong number.
 
-		Forced inline on C++: as a call it sat in the middle of every vertex of RTPT, and a call is
-		a point after which the compiler must read the whole matrix again.
+		Inline — Haxe's own, so that the body is at every call site whatever file it is in (GteQuick's
+		RTPS in the generated code): as a call it sat in the middle of every vertex of RTPT, and a
+		call is a point after which the compiler must read the whole matrix again. One return, as
+		Haxe's inliner needs: the in-range quotient is `unrQuotient`.
 	**/
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function unrDivide():Int {
+	static inline function unrDivide():Int {
 		final divisor = sz3 & 0xFFFF;
 		final dividend = h & 0xFFFF;
-		if (divisor * 2 <= dividend) return divideOverflow();
-		else {}
+		return MemA.unlikely(divisor * 2 <= dividend) ? divideOverflow() : unrQuotient(divisor, dividend);
+	}
 
+	static inline function unrQuotient(divisor:Int, dividend:Int):Int {
 		final shift = countLeadingZeros16(divisor);
 		var n = (dividend << shift) | 0;
 		var d = (divisor << shift) & 0xFFFF;
-		final u = MemA.get32(unrTable, ((d - 0x7FC0) >> 7) << 2) + 0x101;
+		final u = GteFile.get(UNR + ((d - 0x7FC0) >> 7)) + 0x101;
 		d = (0x2000080 - shim.IntMath.mul(d, u)) >> 8;
 		d = (0x0000080 + shim.IntMath.mul(d, u)) >> 8;
 		final q = I64.mulShr16Round(n, d);
-		return q > 0x1FFFF ? 0x1FFFF : q;
+		return MemA.unlikely(q > 0x1FFFF) ? 0x1FFFF : q;
 	}
 
 	static function divideOverflow():Int {
@@ -639,12 +656,9 @@ class Gte {
 		return 0x1FFFF;
 	}
 
-	/** Leading zeros of a byte, 8 for zero: the table countLeadingZeros16 reads. Flat, as
-	    `unrTable` is. */
-	static var clz8:RawBuf;
-
+	/** Leading zeros of a byte, 8 for zero: the table countLeadingZeros16 reads, from word `CLZ` of
+	    the register file (see `UNR`). */
 	static function buildClzTable():Void {
-		clz8 = RawMem.alloc(256 << 2);
 		for (i in 0...256) {
 			var n = 8;
 			var v = i;
@@ -652,7 +666,7 @@ class Gte {
 				n--;
 				v = v >> 1;
 			}
-			MemA.set32(clz8, i << 2, n);
+			GteFile.set(CLZ + i, n);
 		}
 	}
 
@@ -668,7 +682,7 @@ class Gte {
 	static inline function countLeadingZeros16(v:Int):Int {
 		final x = v & 0xFFFF;
 		final hi = x >>> 8;
-		return hi != 0 ? MemA.get32(clz8, hi << 2) : 8 + MemA.get32(clz8, x << 2);
+		return hi != 0 ? GteFile.get(CLZ + hi) : 8 + GteFile.get(CLZ + x);
 	}
 
 	// ---- executing ------------------------------------------------------------------------------------
@@ -771,23 +785,28 @@ class Gte {
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	static function rtps(sf:Int, lm:Bool, v:Int, last:Bool):Void {
-		project(sf, lm, vecX(v), vecY(v), vecZ(v), last);
+		project(sf, lm, vecX(v), vecY(v), vecZ(v), V0H + (v << 2), last);
 	}
 
 	/**
 		The same transform for all three vertices; only the last one sets the depth-cue outputs.
 
-		On C++ `project` is forced inline here, which is where the time goes — RTPT is most of a
-		frame's vertices. The three copies then share one read of the matrix and the translation,
-		and the first two vertices' MAC and IR stores, which the third overwrites before anything
-		reads them, are dropped by the compiler.
+		One copy of `project` in a loop, where it was three, inlined one after another. The three
+		shared their reads of the translation and dropped the first two vertices' MAC and IR stores,
+		but they were 2.4 KB of code: on the Dreamcast, in Crash Bandicoot: Warped's gameplay, RTPT
+		was the hottest function and more than half its time was instruction-cache fills, its body
+		evicted by the game's code between one call and the next (docs/perf/dreamcast-ledger.md,
+		E-053). The vertices are words 33/34, 35/36 and 37/38 of the register file (VXY and VZ), and
+		halfwords V0H, V0H + 4 and V0H + 8 for the matrix rows.
+
+		The count goes through `MemA.opaque`: GCC unrolls a loop it can count at -O3, and with a
+		plain 3 the loop came back as the three copies, 2.4 KB again (E-054).
 	**/
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
 	static function rtpt(sf:Int, lm:Bool):Void {
-		project(sf, lm, sext16(vxy0), vxy0 >> 16, vz0, false);
-		project(sf, lm, sext16(vxy1), vxy1 >> 16, vz1, false);
-		project(sf, lm, sext16(vxy2), vxy2 >> 16, vz2, true);
+		for (v in 0...MemA.opaque(3)) {
+			final xy = GteFile.get(33 + (v << 1));
+			project(sf, lm, sext16(xy), xy >> 16, GteFile.get(34 + (v << 1)), V0H + (v << 2), v == 2);
+		}
 	}
 
 	/**
@@ -811,19 +830,23 @@ class Gte {
 		On the SH-4 the general forms were most of the transform: a row was a shift, a mask and a
 		carry per product, a screen coordinate a 64-bit multiply, a carry chain, a five-way range
 		check and a double-word shift.
+
+		Inline, Haxe's own rather than C++'s forced inline: the body goes to every call site at
+		compile time — RTPT's three, RTPS's, and each RTPS the generated code issues (GteQuick.rtps)
+		— where an always_inline C++ function has its body only in gte_Gte.cpp, and another file's
+		call to it does not link.
 	**/
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function project(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, last:Bool):Void {
+	static inline function project(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, vh:Int, last:Bool):Void {
 		final tx = trX, ty = trY, tz = trZ;
 		var mac3Shifted = 0;
 		// Each `v + 0x4000` is within 0..0x7FFF exactly when v is within -0x4000..0x3FFF, each
 		// `t + 0x40000000` is non-negative exactly when t is within -2^30..2^30-1: one test each.
-		if ((((vx + 0x4000) | (vy + 0x4000) | (vz + 0x4000)) >>> 15) == 0
-				&& (((tx + 0x40000000) | (ty + 0x40000000) | (tz + 0x40000000)) >= 0)) {
-			final r1 = (IntMath.mul(rt11, vx) + IntMath.mul(rt12, vy) + IntMath.mul(rt13, vz)) | 0;
-			final r2 = (IntMath.mul(rt21, vx) + IntMath.mul(rt22, vy) + IntMath.mul(rt23, vz)) | 0;
-			final r3 = (IntMath.mul(rt31, vx) + IntMath.mul(rt32, vy) + IntMath.mul(rt33, vz)) | 0;
+		if (MemA.likely((((vx + 0x4000) | (vy + 0x4000) | (vz + 0x4000)) >>> 15) == 0
+				&& (((tx + 0x40000000) | (ty + 0x40000000) | (tz + 0x40000000)) >= 0))) {
+			// Each row times the vertex, which is at halfword `vh` of the register file (RTP).
+			final r1 = GteFile.dot3(RTP << 1, vh);
+			final r2 = GteFile.dot3((RTP << 1) + 3, vh);
+			final r3 = GteFile.dot3((RTP << 1) + 6, vh);
 			// The depth value is always the >>12 form, whatever `sf` says — and IR3's saturation
 			// flag is judged from *that*, not from the stored MAC3. Only visible at sf=0, and games
 			// rely on it. psx-spx records the same quirk.
@@ -853,7 +876,7 @@ class Gte {
 		final sx = (ofx + px) | 0;
 		final sy = (ofy + py) | 0;
 		// A sum overflowed exactly when both addends share a sign the result does not.
-		if (n <= 0xFFFF && (((ofx ^ sx) & (px ^ sx)) | ((ofy ^ sy) & (py ^ sy))) >= 0) {
+		if (MemA.likely(n <= 0xFFFF && (((ofx ^ sx) & (px ^ sx)) | ((ofy ^ sy) & (py ^ sy))) >= 0)) {
 			mac0 = sy;
 			pushSxy(pack(saturateSxy(sx >> 16, F_SX2), saturateSxy(sy >> 16, F_SY2)));
 		} else {
@@ -942,15 +965,13 @@ class Gte {
 		produced (it writes its own before every use; counted over 30,000 frames), so its digests
 		did not move. A game that fogs with it would have drawn every distant vertex fully fogged.
 	**/
-	@:cppInline
-	@:specifier("__attribute__((always_inline))")
-	static function depthCueing(n:Int):Void {
+	static inline function depthCueing(n:Int):Void {
 		// In 32 bits under project's premise for SX/SY: DQA is sixteen-bit signed. Inline on C++,
 		// with the 64-bit form out of line: as one function it was too big to inline, and the
 		// call cost more than the arithmetic.
 		final p = IntMath.mul(dqa, n);
 		final m = (dqb + p) | 0;
-		if (n <= 0xFFFF && ((dqb ^ m) & (p ^ m)) >= 0) {
+		if (MemA.likely(n <= 0xFFFF && ((dqb ^ m) & (p ^ m)) >= 0)) {
 			mac0 = m;
 			ir0 = saturateIr0(m >> 12);
 		} else {
@@ -979,8 +1000,8 @@ class Gte {
 		// regroup as (x1-x0)(y2-y0) - (x2-x0)(y1-y0), whose factors stay under 2^15 and whose
 		// result under 2^31: two 32-bit multiplies where the 64-bit form took six, and no flag
 		// can arise. A game that writes wider coordinates into the queue gets the 64-bit form.
-		if ((((x0 + 0x4000) | (y0 + 0x4000) | (x1 + 0x4000) | (y1 + 0x4000) | (x2 + 0x4000)
-				| (y2 + 0x4000)) & -0x8000) == 0) {
+		if (MemA.likely((((x0 + 0x4000) | (y0 + 0x4000) | (x1 + 0x4000) | (y1 + 0x4000) | (x2 + 0x4000)
+				| (y2 + 0x4000)) & -0x8000) == 0)) {
 			mac0 = IntMath.mul(x1 - x0, y2 - y0) - IntMath.mul(x2 - x0, y1 - y0);
 		} else {
 			nclipWide(x0, y0, x1, y1, x2, y2);
@@ -1001,7 +1022,7 @@ class Gte {
 	static function avsz3():Void {
 		// ZSF times the sum of three depths fits in 32 bits for |ZSF3| <= 10922 (3 x 0xFFFF x
 		// 10922 < 2^31); games use a few hundred. Then it is one multiply and no flag can arise.
-		if (zsf3 >= -10922 && zsf3 <= 10922) {
+		if (MemA.likely(zsf3 >= -10922 && zsf3 <= 10922)) {
 			final m = IntMath.mul(zsf3, (sz1 & 0xFFFF) + (sz2 & 0xFFFF) + (sz3 & 0xFFFF));
 			mac0 = m;
 			otz = saturateSz3(m >> 12);
@@ -1022,7 +1043,7 @@ class Gte {
 
 	static function avsz4():Void {
 		// As avsz3, with four depths: |ZSF4| <= 8192 keeps the product under 2^31.
-		if (zsf4 >= -8192 && zsf4 <= 8192) {
+		if (MemA.likely(zsf4 >= -8192 && zsf4 <= 8192)) {
 			final m = IntMath.mul(zsf4, (sz0 & 0xFFFF) + (sz1 & 0xFFFF) + (sz2 & 0xFFFF) + (sz3 & 0xFFFF));
 			mac0 = m;
 			otz = saturateSz3(m >> 12);
@@ -1494,13 +1515,22 @@ class Gte {
 		return Acc.low32(m);
 	}
 
+	/*
+		The saturations are a range test that nearly always passes, and then the clamp and its flag
+		(`clampFlag`) out of the way. The hint (`MemA.likely`, GCC's `__builtin_expect`) is what
+		lays the pass out as the fall-through: without it every in-range value was the taken branch
+		of two tests, a dozen taken branches an RTPS on the SH-4, and the clamp the straight line.
+	*/
 	static function saturateIr(v:Int, lm:Bool, bit:Int):Int {
 		final lo = lm ? 0 : -0x8000;
-		if (v < lo) { flag |= (1 << bit); return lo; }
-		else {}
-		if (v > 0x7FFF) { flag |= (1 << bit); return 0x7FFF; }
-		else {}
-		return v;
+		return MemA.likely(v >= lo && v <= 0x7FFF) ? v : clampFlag(v, lo, 0x7FFF, bit);
+	}
+
+	/** A value outside lo..hi, clamped, with its flag raised. Inline, not a call: the hint already
+	    puts it out of the straight line, and a call there cost Crash 3 0.1 ms a frame. */
+	static function clampFlag(v:Int, lo:Int, hi:Int, bit:Int):Int {
+		flag |= (1 << bit);
+		return v < lo ? lo : hi;
 	}
 
 	/**
@@ -1511,37 +1541,32 @@ class Gte {
 	**/
 	static function saturateIr3(v:Int, shifted:Int, lm:Bool):Int {
 		final lo = lm ? 0 : -0x8000;
-		if (shifted < -0x8000 || shifted > 0x7FFF) flag |= (1 << F_IR3);
-		else {}
-		if (v < lo) return lo;
-		else {}
-		if (v > 0x7FFF) return 0x7FFF;
-		else {}
-		return v;
+		return MemA.likely(shifted >= -0x8000 && shifted <= 0x7FFF && v >= lo && v <= 0x7FFF) ? v
+			: saturateIr3Slow(v, shifted, lo);
 	}
 
+	@:specifier("__attribute__((noinline))")
+	static function saturateIr3Slow(v:Int, shifted:Int, lo:Int):Int {
+		if (shifted < -0x8000 || shifted > 0x7FFF) flag |= (1 << F_IR3);
+		else {}
+		return v < lo ? lo : (v > 0x7FFF ? 0x7FFF : v);
+	}
+
+	/** No hint here: IR0 is the one that usually does saturate — Crash Bandicoot: Warped clamps it
+	    in 85 % of its RTPS (a fog factor the game never uses), so neither side is the rare one. */
 	static function saturateIr0(v:Int):Int {
-		if (v < 0) { flag |= (1 << F_IR0); return 0; }
+		final c = v < 0 ? 0 : (v > 0x1000 ? 0x1000 : v);
+		if (c != v) flag |= (1 << F_IR0);
 		else {}
-		if (v > 0x1000) { flag |= (1 << F_IR0); return 0x1000; }
-		else {}
-		return v;
+		return c;
 	}
 
 	static function saturateSz3(v:Int):Int {
-		if (v < 0) { flag |= (1 << F_SZ3); return 0; }
-		else {}
-		if (v > 0xFFFF) { flag |= (1 << F_SZ3); return 0xFFFF; }
-		else {}
-		return v;
+		return MemA.likely(v >= 0 && v <= 0xFFFF) ? v : clampFlag(v, 0, 0xFFFF, F_SZ3);
 	}
 
 	static function saturateSxy(v:Int, bit:Int):Int {
-		if (v < -0x400) { flag |= (1 << bit); return -0x400; }
-		else {}
-		if (v > 0x3FF) { flag |= (1 << bit); return 0x3FF; }
-		else {}
-		return v;
+		return MemA.likely(v >= -0x400 && v <= 0x3FF) ? v : clampFlag(v, -0x400, 0x3FF, bit);
 	}
 
 	static function pushSz(v:Int):Void {

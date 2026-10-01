@@ -10,6 +10,11 @@ import shim.RawBuf;
 class MemA {
 	/** The C++ shim's branch hint; a condition here is only itself. */
 	public static inline function likely(c:Bool):Bool return c;
+	public static inline function unlikely(c:Bool):Bool return c;
+	/** The C++ shim's optimisation barrier; a value here is only itself. */
+	public static inline function opaque(v:Int):Int return v;
+	/** The C++ shim's cache hint; nothing to do here. */
+	public static inline function prefetch(m:RawBuf, a:Int):Void {}
 	public static inline function get16(m:RawBuf, a:Int):Int return RawMem.get16(m, a);
 	public static inline function get32(m:RawBuf, a:Int):Int return RawMem.get32(m, a);
 	public static inline function set16(m:RawBuf, a:Int, v:Int):Void RawMem.set16(m, a, v);

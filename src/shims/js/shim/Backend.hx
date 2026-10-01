@@ -44,6 +44,62 @@ class Backend {
 	static var args:Array<String> = [];
 	static var quit = false;
 
+	/**
+		`--gpu-hash N` under Node: what the null backend does with it (src/backend/null), here. The
+		shim says it draws, so a run with `--video-hw` takes the runtime's hardware path, and every
+		gpu* call below folds its arguments into one 64-bit FNV-1a hash — the same bytes in the same
+		order and from the same seed as the C backend, so the two targets print the same hash
+		(`--gpu-hash-frames` prints it at every present, `--gpu-hash-trace N` the first N calls,
+		to find where they part) — printed when the run ends
+		at its Nth present. It is how a change to the hardware path is shown to hand the backend
+		exactly what it did before, in seconds (Crash 3's 4,050 frames take four): `--headless-hash`
+		cannot, since a run that hashes VRAM never takes that path. -1 until asked.
+	**/
+	static var gpuHashing = -1;
+	static var gpuHashStop = 0;
+	static var gpuHashPresents = 0;
+	/** `--gpu-hash-frames`: the running hash at every present, to find where two targets part. */
+	static var gpuHashFrames = false;
+	/** `--gpu-hash-trace N`: the first N calls printed value by value, as the null backend does. */
+	static var gpuHashTrace = 0;
+
+	static function gpuHashOn():Bool {
+		if (gpuHashing < 0) {
+			gpuHashing = 0;
+			if (!hosted()) {
+				final a = readArgs();
+				for (i in 0...a.length) {
+					if (a[i] == "--gpu-hash-frames") gpuHashFrames = true;
+					else {}
+					if (a[i] == "--gpu-hash-trace" && i + 1 < a.length) gpuHashTrace = Std.parseInt(a[i + 1]);
+					else {}
+					if (a[i] == "--gpu-hash" && gpuHashing == 0) {
+						gpuHashing = 1;
+						gpuHashStop = i + 1 < a.length ? Std.parseInt(a[i + 1]) : 0;
+						// The null backend's seed, 1469598103934665603: FNV-1a's offset basis with its last digit
+						// missing. Kept, not corrected: every hash recorded so far was made with it.
+						js.Syntax.code("globalThis.__recompsxGpuHash = { lo: 0x739d0383, hi: 0x14650fb0, calls: 0 }");
+						js.Syntax.code("process.on('exit', function () { const h = globalThis.__recompsxGpuHash; const x = function (v) { return ('0000000' + v.toString(16)).slice(-8); }; console.log('[info] gpu-stream hash ' + x(h.hi) + x(h.lo) + ' over ' + h.calls + ' calls'); })");
+					} else {}
+				}
+			} else {}
+		} else {}
+		return gpuHashing == 1;
+	}
+
+	/** The call's tag, counted, then each argument: four bytes each, low first, as gpu_mix does. */
+	static function gpuHashCall(tag:Int):Void {
+		js.Syntax.code("(function (h, n) { h.calls++; if (h.calls <= n) process.stdout.write('\\ngpu-call ' + h.calls + ':'); })(globalThis.__recompsxGpuHash, {0})", gpuHashTrace);
+		gpuHashMix(tag);
+	}
+
+	/** h = (h ^ byte) * 0x100000001B3 on 64 bits held as two words: the low word times 0x1B3, its
+		carry, and the low word shifted by 40 are the high word's share. */
+	static function gpuHashMix(v:Int):Void {
+		js.Syntax.code("(function (h, n, v) { if (h.calls <= n) process.stdout.write(' ' + v); })(globalThis.__recompsxGpuHash, {0}, {1})", gpuHashTrace, v);
+		js.Syntax.code("(function (h, v) { let lo = h.lo, hi = h.hi; for (let k = 0; k < 4; k++) { const x = (lo ^ ((v >>> (8 * k)) & 0xFF)) >>> 0; const p = x * 0x1B3; hi = (Math.imul(hi, 0x1B3) + Math.floor(p / 4294967296) + (x << 8)) >>> 0; lo = p >>> 0; } h.lo = lo; h.hi = hi; })(globalThis.__recompsxGpuHash, {0})", v);
+	}
+
 	/** The page's object, or null under Node. Asked for rather than assumed, once per call site. */
 	static inline function host():Dynamic {
 		return js.Syntax.code("(typeof globalThis !== 'undefined' ? globalThis.recompsxHost : null)");
@@ -74,7 +130,7 @@ class Backend {
 	**/
 	public static function caps(capId:Int):Int {
 		if (capId == 0) return 4;
-		else if (capId == 4) return hasGpu() ? 1 : 0;
+		else if (capId == 4) return (hasGpu() || gpuHashOn()) ? 1 : 0;
 		// The page's WebGL renderer samples what it drew (web/gpu-webgl.js), so it must hear of
 		// every upload, not only of those that changed emulated VRAM (BP_CAP_GPU_UPLOADS).
 		else if (capId == 6) return hasGpu() ? 1 : 0;
@@ -91,12 +147,20 @@ class Backend {
 		once `caps(4)` said yes, so the renderer is present whenever they run.
 	**/
 	public static function gpuVram(vram:RawBuf):Void {
+		if (gpuHashOn()) return;
+		else {}
 		js.Syntax.code("{0}.gpu.vram({1}.u16)", host(), vram);
 	}
 
 	public static function gpuState(texBaseX:Int, texBaseY:Int, texDepth:Int,
 			clutX:Int, clutY:Int, semiMode:Int, flags:Int, texWindow:Int,
 			drawX:Int, drawY:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(2); gpuHashMix(texBaseX); gpuHashMix(texBaseY); gpuHashMix(texDepth);
+			gpuHashMix(clutX); gpuHashMix(clutY); gpuHashMix(semiMode); gpuHashMix(flags);
+			gpuHashMix(texWindow); gpuHashMix(drawX); gpuHashMix(drawY);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.state({1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10})",
 			host(), texBaseX, texBaseY, texDepth, clutX, clutY, semiMode, flags, texWindow, drawX, drawY);
 	}
@@ -104,25 +168,48 @@ class Backend {
 	public static function gpuTri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
 			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
 			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(1); gpuHashMix(x0); gpuHashMix(y0); gpuHashMix(c0); gpuHashMix(u0); gpuHashMix(v0);
+			gpuHashMix(x1); gpuHashMix(y1); gpuHashMix(c1); gpuHashMix(u1); gpuHashMix(v1);
+			gpuHashMix(x2); gpuHashMix(y2); gpuHashMix(c2); gpuHashMix(u2); gpuHashMix(v2);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.tri({1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15})",
 			host(), x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
 	}
 
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(3); gpuHashMix(x); gpuHashMix(y); gpuHashMix(w); gpuHashMix(h); gpuHashMix(bgr);
+			gpuHashMix(semi); gpuHashMix(semiMode);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.rect({1}, {2}, {3}, {4}, {5}, {6}, {7})",
 			host(), x, y, w, h, bgr, semi, semiMode);
 	}
 
 	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(4); gpuHashMix(x); gpuHashMix(y); gpuHashMix(w); gpuHashMix(h);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.dirty({1}, {2}, {3}, {4})", host(), x, y, w, h);
 	}
 
 	public static function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(5); gpuHashMix(x0); gpuHashMix(y0); gpuHashMix(x1); gpuHashMix(y1);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.clip({1}, {2}, {3}, {4})", host(), x0, y0, x1, y1);
 	}
 
 	public static function gpuMask(setBit:Int, checkBit:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(6); gpuHashMix(setBit); gpuHashMix(checkBit);
+			return;
+		} else {}
 		js.Syntax.code("{0}.gpu.mask({1}, {2})", host(), setBit, checkBit);
 	}
 
@@ -150,6 +237,14 @@ class Backend {
 
 	public static function present(vram:RawBuf, sx:Int, sy:Int, sw:Int, sh:Int, flags:Int):Void {
 		fast = (flags & PRESENT_FAST) != 0;
+		// The null backend's rule: a hashed run ends at its Nth present, and prints at exit.
+		if (gpuHashing == 1 && gpuHashStop > 0) {
+			gpuHashPresents++;
+			if (gpuHashFrames) js.Syntax.code("(function (h, n) { const x = function (v) { return ('0000000' + v.toString(16)).slice(-8); }; console.log('gpu-frame ' + n + ' ' + x(h.hi) + x(h.lo) + ' ' + h.calls); })(globalThis.__recompsxGpuHash, {0})", gpuHashPresents);
+			else {}
+			if (gpuHashPresents >= gpuHashStop) js.Syntax.code("process.exit(0)");
+			else {}
+		} else {}
 		if (!hosted()) return;
 		else {}
 		js.Syntax.code("{0}.present({1}.u8, {2}, {3}, {4}, {5}, {6})",

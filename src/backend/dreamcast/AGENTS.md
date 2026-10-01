@@ -32,6 +32,10 @@ which removes sh4zam's alignment asserts — check alignment by construction, no
 
 ## Measuring
 
+**Performance work starts and ends in `docs/perf/dreamcast-ledger.md`:** what has been tried, how
+it was measured, what it gave, kept or not. Read it before trying anything, run the experiment with
+`scripts/dc-exp.sh`, and add its row whatever the verdict.
+
 Flycast (the profiling fork `scripts/dc-flycast-prof.sh` drives) counts guest cycles, but it does
 not model cache misses, store-queue bursts, `movca.l`, VRAM/bus timing or FPU pairing. Its
 figures are the gate for **correctness** and for **CPU-work regressions** only; a change made for
@@ -93,10 +97,14 @@ without it. To make a placement, or remake one when the hot code has changed muc
 Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim <part>
 <sections>`, with `sections <map> <placed map>` once it is linked; then confirm under the model.
 
-- Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`; the link
-  takes minutes, twice when the game has a placement; `--no-placement` links once, as the linker
-  lays it out). A whole-game reflaxe.CPP transpile takes several minutes and gigabytes of
-  memory: run one at a time.
+- Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`). The
+  compile is parallel and takes seconds. The link generates the code of the whole program on one
+  core (`-flto-partition=one`), about three minutes. A game with a placement links twice, and the
+  second link takes the code from GCC's incremental LTO cache (`build-dc-max/lto-cache`) in
+  seconds, since only the order changed. `--no-placement` links once, as the linker lays it out.
+  A whole-game reflaxe.CPP transpile takes about a minute with the toolchain's haxe-plus and under
+  3 GB; the first one with new class paths (a new out/ directory) takes about two, while its JIT
+  learns. Run one at a time.
 - CDI: copy `build-dc-max/SYMS.BIN` into the data directory, then
   `mkdcdisc -q --allow-overwrite -N -e <elf> -D <data dir> -n "<name>" -a recompsx -s <SERIAL> -o <cdi>`.
   `-s` is the game's product code (SCUS94570): the disc's serial, which Flycast keys its per-game

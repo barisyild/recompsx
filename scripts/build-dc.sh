@@ -9,9 +9,11 @@
 #   --placement F  place the hot code as F says (scripts/dc-layout.py) instead of the game's own
 #                  games/<SERIAL>/dc-placement.txt, which is used when there is one
 #   --no-placement leave the code where the linker puts it
+#   --no-data-placement  leave .data and .bss as the linker lays them out, instead of placing the
+#                  runtime's and backend's hot variables (src/backend/dreamcast/dc-data-placement.txt)
 #   --max          the fastest build: Release (-O3) with link-time optimisation, and without
 #                  exceptions or RTTI, which no generated or runtime code uses (checked: no
-#                  throw, try, dynamic_cast or typeid in either transpiler's output), plus the
+#                  throw, try, dynamic_cast or typeid in reflaxe.CPP's output), plus the
 #                  SH-4 flags in DC_MAX_FLAGS below. Built in build-dc-max so its cache never
 #                  mixes with the ordinary build's. Not -funroll-loops: it grows code, and the
 #                  SH-4 has an 8 KB instruction cache.
@@ -33,6 +35,7 @@ RUN=0
 MAX=0
 BUILD_TYPE="Release"
 PLACEMENT=auto
+DATA_PLACEMENT=src/backend/dreamcast/dc-data-placement.txt
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)        RUN=1 ;;
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
     --max)        MAX=1 ;;
     --placement)  shift; PLACEMENT="${1:?--placement needs a file}" ;;
     --no-placement) PLACEMENT=none ;;
+    --no-data-placement) DATA_PLACEMENT="" ;;
     *)            TARGET="$1" ;;
   esac
   shift
@@ -51,11 +55,7 @@ TOOLCHAIN="$KOS_BASE/utils/cmake/kallistios.toolchain.cmake"
 [ -f "$TOOLCHAIN" ] || { echo "no KOS CMake toolchain under $KOS_BASE/utils/cmake"; exit 1; }
 
 DIR="out/$TARGET"
-# reflaxe.CPP writes cpp/src; Hatchet (scripts/build-hatchet.sh --transpile-only) one tree
-# under cpp/ with GenMain at its root. The template builds either.
-TRANSPILER=reflaxe
-if [ ! -d "$DIR/cpp/src" ] && [ -f "$DIR/cpp/GenMain.h" ]; then TRANSPILER=hatchet; fi
-[ -d "$DIR/cpp/src" ] || [ "$TRANSPILER" = hatchet ] || { echo "no generated sources in $DIR/cpp/src — generate first"; exit 1; }
+[ -d "$DIR/cpp/src" ] || { echo "no generated sources in $DIR/cpp/src — generate first"; exit 1; }
 
 # A separate build directory from the desktop one: same sources, different machine, and a shared
 # CMake cache between two toolchains is a morning wasted.
@@ -75,15 +75,33 @@ EXTRA=()
 #                         entry, so no handler runs in the double mode the helper switches to.
 #   -flto-partition=one   one LTO unit instead of parallel partitions, so every call sees its
 #                         callee's register use; the link takes three times as long (~3 minutes).
-# Tried and left out (same profile): -fschedule-insns -fsched-pressure, -fsched2-use-superblocks,
+#   -fschedule-insns -fsched-pressure   instructions scheduled before register allocation as well,
+#                         with an eye on register pressure — for the runtime and the backend only
+#                         (the game's own code turns it off again, below): there a load waiting on
+#                         the load before it is the common stall (polygonHw, the scene build, the
+#                         GTE), and moving loads apart saves more than the code it adds; over the
+#                         megabytes of generated code the added code cost the instruction cache as
+#                         much as the stalls saved (docs/perf/dreamcast-ledger.md, E-002, E-063).
+# Tried and left out (same profile): -fsched2-use-superblocks,
 # -fselective-scheduling2 and -fira-algorithm=priority (+0.3 to +0.7 %), -mpretend-cmove and
 # -fipa-pta (no gain on top), -mlra (GCC 15.2 ICE in reload on dc_scene.c).
-DC_MAX_FLAGS="-mbranch-cost=1 -mdiv=call-fp -flto-partition=one"
+# DC_EXTRA_FLAGS in the environment adds flags to these for an experiment; a flag joins the list
+# only once it has been measured. DC_GAME_FLAGS adds flags to the recompiled game's own code only
+# (its shards, overlays and tables; RECOMPSX_GAME_FLAGS in the CMake template), after the rest: a
+# CMake list, its flags separated by semicolons.
+DC_MAX_FLAGS="-mbranch-cost=1 -mdiv=call-fp -flto-partition=one -fschedule-insns -fsched-pressure ${DC_EXTRA_FLAGS:-}"
+# The one partition's code is generated on one core, and it is most of the link. GCC 15's
+# incremental LTO (-flto-incremental) keeps it: a link whose code has not changed takes it from the
+# cache instead. That is the placement's second link, which only moves sections (Crash 3: 181 s ->
+# 2 s, the loaded image byte-identical to one linked without the cache), and any relink after a
+# change that leaves the code as it was. Two entries: the current code and the one before.
 if [ "$MAX" = 1 ]; then
   BUILD="$DIR/build-dc-max"
   BUILD_TYPE="Release"
+  mkdir -p "$ROOT/$BUILD/lto-cache"
   EXTRA=(-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
-         "-DCMAKE_CXX_FLAGS=-fno-exceptions -fno-rtti $DC_MAX_FLAGS" "-DCMAKE_C_FLAGS=$DC_MAX_FLAGS")
+         "-DCMAKE_CXX_FLAGS=-fno-exceptions -fno-rtti $DC_MAX_FLAGS" "-DCMAKE_C_FLAGS=$DC_MAX_FLAGS"
+         "-DCMAKE_EXE_LINKER_FLAGS=-flto-incremental=$ROOT/$BUILD/lto-cache -flto-incremental-cache-size=2")
 fi
 
 cp build/templates/CMakeLists.txt "$DIR/CMakeLists.txt"
@@ -92,7 +110,9 @@ configure() {
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DRECOMPSX_DC_ORDER="$1" \
-    -DRECOMPSX_BACKEND=dreamcast -DRECOMPSX_TRANSPILER="$TRANSPILER" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
+    -DRECOMPSX_BACKEND=dreamcast \
+    -DRECOMPSX_GAME_FLAGS="-fno-schedule-insns;-fno-sched-pressure${DC_GAME_FLAGS:+;$DC_GAME_FLAGS}" \
+    ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
 }
 
 # The hot code's placement for the 8 KB direct-mapped instruction cache (ADR-0043): the game's own
@@ -106,23 +126,29 @@ elif [ "$PLACEMENT" = none ]; then
   PLACEMENT=""
 fi
 ORDER="$BUILD/placement"
-if [ -n "$PLACEMENT" ]; then
+[ -n "$DATA_PLACEMENT" ] && [ ! -f "$DATA_PLACEMENT" ] && DATA_PLACEMENT=""
+if [ -n "$PLACEMENT" ] || [ -n "$DATA_PLACEMENT" ]; then
   # The first link keeps the last build's order: where a section goes does not change its size,
   # and sizes are all a plan is made from. When the plan it gives is that same order, it is done.
+  # A data placement lists .data and .bss whole, and a section's start can move by a few bytes of
+  # alignment between links; then the plan is made again from the new link, once. A relink of
+  # unchanged code takes its code from the LTO cache, in seconds.
   if [ -f "$ORDER/order.ld" ]; then configure "$(pwd)/$ORDER"; else configure ""; fi
   cmake --build "$BUILD"
-  rm -rf "$ORDER.new"
-  python3 scripts/dc-layout.py place "$BUILD/recompsx.map" "$PLACEMENT" "$ORDER.new"
-  if cmp -s "$ORDER.new/order.ld" "$ORDER/order.ld" 2>/dev/null && cmp -s "$ORDER.new/pad.s" "$ORDER/pad.s"; then
+  for round in 1 2; do
     rm -rf "$ORDER.new"
-  else
-    rm -rf "$ORDER"
-    mv "$ORDER.new" "$ORDER"
-    configure "$(pwd)/$ORDER"
-    cmake --build "$BUILD"
-  fi
-  python3 scripts/dc-layout.py check "$BUILD/recompsx.map" "$ORDER/plan.txt" \
-    || echo "warning: the hot code is not where $PLACEMENT puts it — see ADR-0043"
+    python3 scripts/dc-layout.py place "$BUILD/recompsx.map" "${PLACEMENT:--}" "$ORDER.new" ${DATA_PLACEMENT:+"$DATA_PLACEMENT"}
+    if cmp -s "$ORDER.new/order.ld" "$ORDER/order.ld" 2>/dev/null && cmp -s "$ORDER.new/pad.s" "$ORDER/pad.s"; then
+      rm -rf "$ORDER.new"
+    else
+      rm -rf "$ORDER"
+      mv "$ORDER.new" "$ORDER"
+      configure "$(pwd)/$ORDER"
+      cmake --build "$BUILD"
+    fi
+    if python3 scripts/dc-layout.py check "$BUILD/recompsx.map" "$ORDER/plan.txt"; then break; fi
+    [ "$round" = 2 ] && echo "warning: the hot code or data is not where its placement puts it — see ADR-0043"
+  done
 else
   configure ""
   cmake --build "$BUILD"

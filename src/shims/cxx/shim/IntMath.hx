@@ -43,6 +43,14 @@ class IntMath {
 	    needs `Math.imul`. Callers use this on both targets so the two cannot drift apart. */
 	public static inline function mul(a:Int, b:Int):Int return NativeIntOps.mul(a, b);
 
+	/** Bits 63..32 of the signed 64-bit product: MIPS MULT's HI. One widening multiply on a host
+	    that has one (the SH-4's `dmuls.l`), where four half-word products and their carries were
+	    a call from every MULT. */
+	public static inline function mulHi(a:Int, b:Int):Int return NativeIntOps.mulHi(a, b);
+
+	/** The same, both operands unsigned: MIPS MULTU's HI (`dmulu.l`). */
+	public static inline function mulHiU(a:Int, b:Int):Int return NativeIntOps.mulHiU(a, b);
+
 	/** Truncating division by a power of two differs from a shift for negative numbers
 	    (`-1 / 2 == 0` but `-1 >> 1 == -1`). Named so the choice is visible at the call site. */
 	public static inline function divPow2Trunc(a:Int, shift:Int):Int
@@ -54,7 +62,8 @@ class IntMath {
 
 /**
 	The native operations themselves. Nothing to include — these are operators, not library calls
-	— so the extern carries only the templates.
+	— so the extern carries only the templates. The widening multiplies spell their 64-bit types
+	`long long`, which needs no header (an `@:include` on this private extern reaches no file).
 **/
 private extern class NativeIntOps {
 	@:nativeFunctionCode("(({arg0}) / ({arg1}))")
@@ -65,6 +74,12 @@ private extern class NativeIntOps {
 
 	@:nativeFunctionCode("(({arg0}) * ({arg1}))")
 	public static function mul(a:Int, b:Int):Int;
+
+	@:nativeFunctionCode("((int)((((long long)({arg0})) * ((long long)({arg1}))) >> 32))")
+	public static function mulHi(a:Int, b:Int):Int;
+
+	@:nativeFunctionCode("((int)((((unsigned long long)(unsigned int)({arg0})) * ((unsigned long long)(unsigned int)({arg1}))) >> 32))")
+	public static function mulHiU(a:Int, b:Int):Int;
 
 	// GCC and Clang, which every backend in docs/specs/backend.md §0 builds with.
 	@:nativeFunctionCode("((((unsigned int)({arg0})) == 0u) ? 32 : __builtin_clz((unsigned int)({arg0})))")
