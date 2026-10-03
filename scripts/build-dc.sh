@@ -11,6 +11,8 @@
 #   --no-placement leave the code where the linker puts it
 #   --no-data-placement  leave .data and .bss as the linker lays them out, instead of placing the
 #                  runtime's and backend's hot variables (src/backend/dreamcast/dc-data-placement.txt)
+#   --data-placement F  place the hot variables as F says instead (a candidate from a placement
+#                  round, before it replaces that file)
 #   --max          the fastest build: Release (-O3) with link-time optimisation, and without
 #                  exceptions or RTTI, which no generated or runtime code uses (checked: no
 #                  throw, try, dynamic_cast or typeid in reflaxe.CPP's output), plus the
@@ -44,6 +46,7 @@ while [ $# -gt 0 ]; do
     --placement)  shift; PLACEMENT="${1:?--placement needs a file}" ;;
     --no-placement) PLACEMENT=none ;;
     --no-data-placement) DATA_PLACEMENT="" ;;
+    --data-placement) shift; DATA_PLACEMENT="${1:?--data-placement needs a file}" ;;
     *)            TARGET="$1" ;;
   esac
   shift

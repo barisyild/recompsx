@@ -16,4 +16,3 @@ build/common.hxml
 # runtime is built almost entirely from static accessors (ADR-0002). Every JS build in this
 # project uses it, so that measurements and the shipped artefact are the same thing.
 -D js-es=6
--dce full

@@ -16,6 +16,25 @@ class TestMain {
 		TestOverlay.run();
 		TestMods.run();
 		TestRelocatable.run();
+		TestFunctionSummary.run();
+		TestRegisterRanges.run();
+		TestRangeCodegen.run();
+		TestScalarCfg.run();
+		TestScalarPredicates.run();
+		TestScalarResults.run();
+		TestScalarEffects.run();
+		TestScalarMemoryCfg.run();
+		TestValueRegions.run();
+		TestValueCfg.run();
+		TestScalarCalls.run();
+		TestScalarCompose.run();
+		TestScalarPointers.run();
+		TestCallAliases.run();
+		TestScalarBorrow.run();
+		TestScalarPool.run();
+		TestProjectionShare.run();
+		TestScalarCop.run();
+		TestHandOver.run();
 		TestCodegen.run();
 		Sys.exit(Assert.summary());
 	}

@@ -28,8 +28,700 @@ import shim.GpuFile;
 **/
 // The hot state (shim.GpuFile) must be declared wherever a GPU access is inlined — ioWrite32
 // takes writeGp0 into Memory — and reflaxe does not carry an extern's include along an inlining
-// chain; Gte does the same for its register file.
-@:headerCode("#include \"recompsx_arena.h\"")
+// chain; Gte does the same for its register file. Then the polygon core's call (ADR-0047,
+// GpuFile.poly): on the SH-4 a `jsr` into scripts/sh4/poly.blk's assembly, the GPU file and guest
+// RAM as memory it reads and writes; with RECOMPSX_GPU_POLY_CHECK it runs on a copy of the file
+// beside the C form instead, which then decides, and the two are compared (polyChecked).
+@:headerCode("#include \"recompsx_arena.h\"
+#ifndef RECOMPSX_GPU_POLY
+#define RECOMPSX_GPU_POLY
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM)
+extern \"C\" void recompsx_gpu_poly(void);
+extern \"C\" void recompsx_gpu_poly2(void);
+static inline __attribute__((always_inline)) int recompsx_gpu_poly_run(const unsigned char* ram, int at, int op, int* g, int second) {
+	register int r0 __asm__(\"r0\");
+	register const unsigned char* r4 __asm__(\"r4\") = ram;
+	register int r5 __asm__(\"r5\") = at;
+	register int r6 __asm__(\"r6\") = op;
+	register int* r7 __asm__(\"r7\") = g;
+	void (*fn)(void) = second ? recompsx_gpu_poly2 : recompsx_gpu_poly;
+	__asm__ __volatile__(\"jsr @%5\\n\\tnop\"
+	        : \"=r\" (r0), \"+r\" (r4), \"+r\" (r5), \"+r\" (r6), \"+r\" (r7)
+	        : \"r\" (fn)
+	        : \"r1\", \"r2\", \"r3\", \"pr\", \"macl\", \"mach\", \"t\", \"memory\");
+	return r0;
+}
+#if RECOMPSX_GPU_POLY_CHECK
+#include <cstdio>
+#include \"backend_c_api.h\"
+struct recompsx_gpu_poly_state { int shadow[64]; int before[64]; int rc; unsigned calls, drawn, rejected, declined, bad; };
+inline recompsx_gpu_poly_state& recompsx_gpu_poly_st() { static recompsx_gpu_poly_state s; return s; }
+inline int recompsx_gpu_poly_check(const unsigned char* ram, int at, int op) {
+	recompsx_gpu_poly_state& s = recompsx_gpu_poly_st();
+	for(int i = 0; i < 64; i++) s.shadow[i] = s.before[i] = recompsx_gpu[i];
+	s.rc = (op & 8) ? -1 : recompsx_gpu_poly_run(ram, at, op, s.shadow, 0);
+	return 1;
+}
+inline void recompsx_gpu_poly_bad(const char* what, int i, int a, int b) {
+	recompsx_gpu_poly_state& s = recompsx_gpu_poly_st();
+	if(++s.bad <= 8) {
+		char m[120];
+		snprintf(m, sizeof m, \"gpu poly check: %s %d core %d, the C form %d (rc %d)\", what, i, a, b, s.rc);
+		bp_log(BP_LOG_WARN, m);
+	} else {}
+}
+inline void recompsx_gpu_poly_checked(int op) {
+	recompsx_gpu_poly_state& s = recompsx_gpu_poly_st();
+	(void)op;
+	if(s.rc < 0) return;
+	s.calls++;
+	if(s.rc == 1) {
+		s.declined++;
+		for(int i = 0; i < 48; i++)
+			if(i < 16 || i > 18) { if(s.shadow[i] != s.before[i]) { recompsx_gpu_poly_bad(\"declined, word\", i, s.shadow[i], s.before[i]); break; } else {} }
+			else {}
+	} else {
+		int sent = 0;
+		for(int i = 0; i < 48; i++) {
+			if(i >= 19 && i <= 22 && recompsx_gpu[i] != s.before[i]) sent = 1;
+			else {}
+			if(s.shadow[i] != recompsx_gpu[i]) { recompsx_gpu_poly_bad(\"word\", i, s.shadow[i], recompsx_gpu[i]); break; }
+			else {}
+		}
+		if(s.rc == 3) s.rejected++;
+		else {
+			s.drawn++;
+			if((s.rc == 2) != (sent != 0)) recompsx_gpu_poly_bad(\"state sent\", 0, s.rc, sent);
+			else {}
+		}
+	}
+	if((s.calls & 0xFFFF) == 0) {
+		char m[120];
+		snprintf(m, sizeof m, \"gpu poly check: %u packets, %u drawn, %u rejected, %u declined, %u differ\", s.calls, s.drawn, s.rejected, s.declined, s.bad);
+		bp_log(BP_LOG_WARN, m);
+	} else {}
+}
+#endif
+#endif
+static inline __attribute__((always_inline)) int recompsx_gpu_poly_try(const unsigned char* ram, int at, int op, int second) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM)
+#if RECOMPSX_GPU_POLY_CHECK
+	(void)second;
+	return recompsx_gpu_poly_check(ram, at, op);
+#else
+	return recompsx_gpu_poly_run(ram, at, op, recompsx_gpu, second);
+#endif
+#else
+	(void)ram; (void)at; (void)op; (void)second;
+	return 1;
+#endif
+}
+static inline __attribute__((always_inline)) void recompsx_gpu_poly_after(int op) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM) && RECOMPSX_GPU_POLY_CHECK
+	recompsx_gpu_poly_checked(op);
+#else
+	(void)op;
+#endif
+}
+#endif")
+// <dc-sched scripts/sh4/poly.blk> written by scripts/dc-sched.py --into: never edit by hand
+@:cppFileCode("#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM)
+__asm__(R\"ASM(
+	.pushsection .text.recompsx_gpu_poly,\"ax\",@progbits
+	.align	5
+.Lpoly_wrap0:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+.Lpoly_clut0:
+	mov	#-128,r0
+	extu.b	r0,r0
+	shll8	r0
+	add	#-1,r0
+	and	r11,r0
+	mov.l	r0,@(4,r7)
+	mov	r7,r2
+	add	#64,r2
+	mov	r11,r0
+	and	#63,r0
+	shll2	r0
+	shll2	r0
+	mov.l	r0,@(40,r2)
+	mov	r11,r0
+	shlr2	r0
+	shlr2	r0
+	shlr2	r0
+	mov	#2,r3
+	shll8	r3
+	add	#-1,r3
+	and	r3,r0
+	mov.l	r0,@(44,r2)
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	bra	.Lpoly_poly
+	nop
+.Lpoly_page0:
+	mov	#2,r3
+	shll8	r3
+	add	#-1,r3
+	and	r13,r3
+	mov.l	r3,@(0,r7)
+	mov	r7,r2
+	add	#64,r2
+	mov	r13,r0
+	and	#15,r0
+	shll2	r0
+	shll2	r0
+	shll2	r0
+	mov.l	r0,@(28,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	and	#1,r0
+	shll8	r0
+	mov.l	r0,@(32,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	shlr	r0
+	and	#3,r0
+	mov.l	r0,@(48,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	shlr2	r0
+	shlr	r0
+	and	#3,r0
+	mov.l	r0,@(36,r2)
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	bra	.Lpoly_poly
+	nop
+	.global	_recompsx_gpu_poly2
+	.type	_recompsx_gpu_poly2,@function
+_recompsx_gpu_poly2:
+	bra	.Lpoly_poly
+	mov	#-1,r1
+	.global	_recompsx_gpu_poly
+	.type	_recompsx_gpu_poly,@function
+_recompsx_gpu_poly:
+	mov	#0,r1
+.Lpoly_poly:
+	mov.l	.Lpoly_k1ffffc,r0
+	mov.l	.Lpoly_k1fffd0,r2
+	and	r5,r0
+	mov.l	r8,@-r15
+	cmp/hi	r2,r0
+	mov	r4,r2
+	add	r0,r2
+	mov	r6,r0
+	and	#31,r0
+	mov.l	r9,@-r15
+	shll2	r0
+	mov.l	r10,@-r15
+	shll2	r0
+	mov.l	r11,@-r15
+	shll2	r0
+	mov.l	@(8,r2),r11
+	mov.l	r12,@-r15
+	mov	r0,r3
+	mova	.Lpoly_ops,r0
+	shlr16	r11
+	mov.w	.Lpoly_k7fff,r12
+	mov.l	r13,@-r15
+	add	r0,r3
+	mov.l	@(4,r7),r13
+	and	r11,r12
+	mov.l	r14,@-r15
+	mov.l	@r3,r14
+	xor	r13,r12
+	mov.l	@(28,r3),r10
+	mov	r2,r13
+	add	r14,r13
+	bt	.Lpoly_wrap0
+	and	r10,r12
+	mov.l	@(8,r13),r13
+	tst	r12,r12
+	mov.w	.Lpoly_k1ff,r12
+	shlr16	r13
+	mov.l	@(0,r7),r8
+	and	r13,r12
+	bf	.Lpoly_clut0
+	xor	r8,r12
+	mov	r14,r9
+	and	r10,r12
+	mov.l	@(8,r7),r10
+	tst	r12,r12
+	and	r1,r9
+	bf	.Lpoly_page0
+	mov.l	@(32,r3),r4
+	mov	r7,r5
+	mov	r7,r6
+	and	r9,r4
+	mov.l	@(24,r3),r11
+	add	r2,r9
+	mov.w	.Lpoly_k21,r1
+	add	#127,r5
+	add	r2,r4
+	mov.w	.Lpoly_km21,r2
+	add	#4,r9
+	add	#17,r5
+	mov.l	r4,@(56,r5)
+	add	#64,r6
+	mov.l	r9,@(60,r5)
+	mov.l	@(16,r3),r4
+	mov.l	@(20,r3),r5
+	mov.l	r4,@(0,r6)
+	mov.l	r5,@(4,r6)
+	mov.l	@(12,r3),r4
+	mov.l	@(16,r7),r5
+	mov.l	r11,@(8,r6)
+	xor	r5,r4
+	mov.l	@(0,r7),r5
+	xor	r10,r5
+	mov.l	@(12,r7),r10
+	or	r5,r4
+	mov.l	@(4,r7),r5
+	xor	r10,r5
+	mov.l	@(12,r6),r10
+	or	r5,r4
+	mov.l	@(24,r7),r5
+	mov	r7,r6
+	xor	r10,r5
+	mov.l	@(20,r7),r10
+	or	r5,r4
+	mov.l	@(28,r7),r5
+	add	#127,r6
+	xor	r10,r5
+	or	r5,r4
+	tst	r4,r4
+	add	#17,r6
+	movt	r0
+	mov.l	r3,@(48,r6)
+	add	#-1,r0
+	mov.w	.Lpoly_k5,r4
+	and	#2,r0
+	mov.l	r0,@(52,r6)
+	mov.l	@r9,r0
+	add	r14,r9
+	mov.l	@r9,r3
+	add	r14,r9
+	mov.l	@r9,r5
+	mov	r0,r8
+	mov	r3,r10
+	mov	r0,r9
+	mov	r5,r13
+	mov	r5,r12
+	shld	r1,r10
+	mov.l	@(32,r7),r6
+	shld	r4,r13
+	mov.l	@(36,r7),r14
+	shld	r1,r8
+	mov	r3,r11
+	shld	r1,r12
+	mov.w	.Lpoly_k1023,r3
+	shad	r2,r10
+	shld	r4,r9
+	shad	r2,r13
+	shad	r2,r8
+	shad	r2,r12
+	add	r6,r10
+	shad	r2,r9
+	mov	r10,r0
+	add	r14,r13
+	add	r6,r8
+	add	r6,r12
+	mov	r13,r6
+	add	r14,r9
+	shld	r4,r11
+	mov	r12,r4
+	sub	r8,r0
+	sub	r9,r6
+	cmp/gt	r3,r0
+	shad	r2,r11
+	bt	.Lpoly_rej1
+	mul.l	r0,r6
+	add	r14,r11
+	mov.w	.Lpoly_km1023,r14
+	mov	r11,r5
+	sub	r8,r4
+	sub	r9,r5
+	cmp/ge	r14,r0
+	sts	macl,r1
+	mul.l	r5,r4
+	bf	.Lpoly_rej1
+	cmp/gt	r3,r4
+	bt	.Lpoly_rej1
+	cmp/ge	r14,r4
+	sts	macl,r2
+	bf	.Lpoly_rej1
+	mov.l	@(52,r7),r4
+	sub	r2,r1
+	mov	r12,r2
+	sub	r10,r2
+	mov	r1,r0
+	cmp/gt	r3,r2
+	mov.w	.Lpoly_k511,r3
+	bt	.Lpoly_rej1
+	cmp/ge	r14,r2
+	bf	.Lpoly_rej1
+	mov.w	.Lpoly_km511,r14
+	cmp/gt	r3,r5
+	mov	r13,r2
+	bt	.Lpoly_rej1
+	cmp/ge	r14,r5
+	bf	.Lpoly_rej1
+	cmp/gt	r3,r6
+	bt	.Lpoly_rej1
+	cmp/ge	r14,r6
+	sub	r11,r2
+	bf	.Lpoly_rej1
+	cmp/gt	r3,r2
+	mov.l	@(44,r7),r3
+	bt	.Lpoly_rej1
+	cmp/ge	r14,r2
+	bf	.Lpoly_rej1
+	tst	r1,r1
+	bt	.Lpoly_rej1
+	shll	r0
+	subc	r0,r0
+	mov.l	@(60,r7),r2
+	xor	r0,r1
+	mov	r10,r6
+	sub	r0,r1
+	mov	r12,r14
+	add	#1,r2
+	shlr	r1
+	mov.l	r2,@(60,r7)
+	mov	r1,r0
+	mov.l	@(40,r7),r1
+	mov.l	@(48,r7),r2
+	sub	r3,r4
+	sub	r1,r6
+	sub	r1,r2
+	mov	r2,r5
+	sub	r1,r14
+	or	r4,r5
+	cmp/pz	r5
+	mov	r8,r5
+	sub	r1,r5
+	bf	.Lpoly_out1
+	cmp/hi	r2,r5
+	mov	r9,r5
+	bt	.Lpoly_out1
+	cmp/hi	r2,r6
+	bt	.Lpoly_out1
+	cmp/hi	r2,r14
+	sub	r3,r5
+	bt	.Lpoly_out1
+	mov	r11,r6
+	cmp/hi	r4,r5
+	sub	r3,r6
+	bt	.Lpoly_out1
+	mov	r13,r14
+	cmp/hi	r4,r6
+	sub	r3,r14
+	bt	.Lpoly_out1
+	cmp/hi	r4,r14
+	bt	.Lpoly_out1
+	bra	.Lpoly_join
+	nop
+.Lpoly_rej1:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#3,r0
+.Lpoly_k1023:	.word	1023
+.Lpoly_km1023:	.word	-1023
+.Lpoly_k511:		.word	511
+.Lpoly_km511:	.word	-511
+.Lpoly_k21:		.word	21
+.Lpoly_km21:		.word	-21
+.Lpoly_k5:		.word	5
+.Lpoly_k7fff:	.word	0x7FFF
+.Lpoly_k1ff:		.word	0x1FF
+.Lpoly_join:
+	mov	r7,r6
+	add	#127,r6
+	add	#17,r6
+	mov.l	@(48,r6),r3
+	mov.l	r11,@(20,r6)
+	mov.l	@(4,r3),r1
+	mov.l	@(8,r3),r2
+	shld	r1,r0
+	mov.l	@(32,r3),r5
+	mov	r0,r4
+	mov.l	@(56,r6),r1
+	shlr2	r4
+	mov.l	r8,@(0,r6)
+	add	r4,r0
+	mov.l	r12,@(32,r6)
+	mov	r0,r4
+	mov.l	@r1,r8
+	shlr	r4
+	mov.l	r9,@(4,r6)
+	and	r2,r4
+	mov.l	@(60,r6),r2
+	add	r4,r0
+	mov.l	@(56,r7),r4
+	add	#16,r0
+	mov.l	@(4,r2),r11
+	add	r0,r4
+	mov.l	r13,@(36,r6)
+	mov.l	r4,@(56,r7)
+	mov.l	@r3,r4
+	mov.l	@(28,r3),r14
+	and	r4,r5
+	mov.l	r10,@(16,r6)
+	add	r4,r2
+	mov.l	@(52,r6),r0
+	add	r5,r1
+	mov.l	@(4,r2),r12
+	add	r4,r2
+	mov.l	@r1,r9
+	add	r5,r1
+	mov.l	@(4,r2),r13
+	mov.l	@r1,r10
+	and	r14,r11
+	and	r14,r12
+	mov.l	r8,@(8,r6)
+	and	r14,r13
+	mov.l	r11,@(12,r6)
+	mov.l	r9,@(24,r6)
+	tst	r0,r0
+	mov.l	r12,@(28,r6)
+	mov.l	r10,@(40,r6)
+	mov.l	r13,@(44,r6)
+	bf	.Lpoly_send1
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+.Lpoly_out1:
+	mov	r8,r1
+	mov	r8,r2
+	cmp/gt	r10,r1
+	bf	.Lpoly_o1
+	mov	r10,r1
+.Lpoly_o1:
+	cmp/gt	r12,r1
+	bf	.Lpoly_o2
+	mov	r12,r1
+.Lpoly_o2:
+	cmp/gt	r2,r10
+	bf	.Lpoly_o3
+	mov	r10,r2
+.Lpoly_o3:
+	cmp/gt	r2,r12
+	bf	.Lpoly_o4
+	mov	r12,r2
+.Lpoly_o4:
+	mov	r9,r3
+	mov	r9,r4
+	cmp/gt	r11,r3
+	bf	.Lpoly_o5
+	mov	r11,r3
+.Lpoly_o5:
+	cmp/gt	r13,r3
+	bf	.Lpoly_o6
+	mov	r13,r3
+.Lpoly_o6:
+	cmp/gt	r4,r11
+	bf	.Lpoly_o7
+	mov	r11,r4
+.Lpoly_o7:
+	cmp/gt	r4,r13
+	bf	.Lpoly_o8
+	mov	r13,r4
+.Lpoly_o8:
+	mov.l	@(40,r7),r5
+	mov.l	@(48,r7),r6
+	cmp/gt	r6,r2
+	bf	.Lpoly_o9
+	mov	r6,r2
+.Lpoly_o9:
+	cmp/gt	r1,r5
+	bf	.Lpoly_o10
+	mov	r5,r1
+.Lpoly_o10:
+	sub	r1,r2
+	add	#1,r2
+	mov.l	@(44,r7),r5
+	mov.l	@(52,r7),r6
+	cmp/gt	r6,r4
+	bf	.Lpoly_o11
+	mov	r6,r4
+.Lpoly_o11:
+	cmp/gt	r3,r5
+	bf	.Lpoly_o12
+	mov	r5,r3
+.Lpoly_o12:
+	sub	r3,r4
+	add	#1,r4
+	cmp/pl	r2
+	bf	.Lpoly_nobox
+	cmp/pl	r4
+	bf	.Lpoly_nobox
+	mul.l	r2,r4
+	sts	macl,r1
+	cmp/gt	r1,r0
+	bf	.Lpoly_join
+	bra	.Lpoly_join
+	mov	r1,r0
+.Lpoly_nobox:
+	bra	.Lpoly_join
+	mov	#0,r0
+.Lpoly_send1:
+	mov	r7,r13
+	mov	r7,r14
+	add	#64,r13
+	mov.l	@(4,r7),r2
+	add	#104,r14
+	mov.l	@(32,r13),r9
+	mov.l	@(36,r13),r10
+	add	#104,r14
+	mov.l	@(48,r13),r6
+	mov.l	r2,@(12,r7)
+	mov.l	r9,@(4,r14)
+	shll8	r9
+	mov.l	r10,@(8,r14)
+	shll16	r10
+	mov.l	r6,@(20,r14)
+	shll16	r6
+	mov.l	@(44,r7),r2
+	shll2	r9
+	mov.l	@(0,r7),r1
+	shll2	r10
+	mov.l	@(28,r13),r8
+	shll2	r6
+	mov.l	@(12,r3),r4
+	shll2	r10
+	mov.l	@(44,r13),r12
+	or	r8,r9
+	mov.l	r2,@(36,r14)
+	shll8	r2
+	mov.l	r1,@(8,r7)
+	shll2	r6
+	mov.l	r4,@(16,r7)
+	shll2	r2
+	mov.l	@(40,r7),r1
+	or	r10,r9
+	mov.l	r12,@(16,r14)
+	shll8	r12
+	mov.l	r4,@(24,r14)
+	shll2	r6
+	shll16	r4
+	mov.l	@(28,r7),r5
+	mov.l	@(40,r13),r11
+	or	r1,r2
+	mov.l	r8,@(0,r14)
+	shll2	r12
+	mov.l	r1,@(32,r14)
+	or	r6,r9
+	shll8	r4
+	mov.l	@(16,r13),r1
+	mov.l	@(20,r13),r8
+	or	r11,r12
+	mov.l	r5,@(20,r7)
+	or	r4,r9
+	mov.l	@(24,r7),r5
+	xor	r9,r1
+	mov.l	@(12,r13),r10
+	xor	r12,r8
+	mov.l	r11,@(12,r14)
+	or	r8,r1
+	mov.l	@(24,r13),r11
+	xor	r5,r10
+	or	r10,r1
+	mov.l	r5,@(28,r14)
+	xor	r2,r11
+	or	r11,r1
+	tst	r1,r1
+	bt	.Lpoly_same
+	mov.l	r9,@(16,r13)
+	mov.l	r12,@(20,r13)
+	mov.l	r5,@(12,r13)
+	mov.l	r2,@(24,r13)
+	bra	.Lpoly_sendpop
+	mov	#2,r0
+.Lpoly_same:
+	mov	#0,r0
+.Lpoly_sendpop:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+	.align	2
+.Lpoly_k1ffffc:	.long	0x1FFFFC
+.Lpoly_k1fffd0:	.long	0x1FFFD0
+	.align	5
+.Lpoly_ops:
+	.long	4, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 20h
+	.long	4, -2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 21h
+	.long	4, -2, -1, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 22h
+	.long	4, -2, -1, 6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 23h
+	.long	8, -1, 0, 1, 1, 0, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 24h
+	.long	8, -1, 0, 5, 1, 1, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 25h
+	.long	8, -1, -1, 3, 1, 0, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 26h
+	.long	8, -1, -1, 7, 1, 1, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 27h
+	.long	4, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 28h
+	.long	4, -2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 29h
+	.long	4, -2, -1, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 2Ah
+	.long	4, -2, -1, 6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 2Bh
+	.long	8, -1, 0, 1, 1, 0, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Ch
+	.long	8, -1, 0, 5, 1, 1, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Dh
+	.long	8, -1, -1, 3, 1, 0, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Eh
+	.long	8, -1, -1, 7, 1, 1, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Fh
+	.long	8, -2, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 30h
+	.long	8, -2, 0, 4, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 31h
+	.long	8, -2, -1, 2, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 32h
+	.long	8, -2, -1, 6, 0, 1, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 33h
+	.long	12, -1, 0, 1, 1, 0, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 34h
+	.long	12, -1, 0, 5, 1, 1, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 35h
+	.long	12, -1, -1, 3, 1, 0, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 36h
+	.long	12, -1, -1, 7, 1, 1, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 37h
+	.long	8, -2, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 38h
+	.long	8, -2, 0, 4, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 39h
+	.long	8, -2, -1, 2, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 3Ah
+	.long	8, -2, -1, 6, 0, 1, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 3Bh
+	.long	12, -1, 0, 1, 1, 0, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Ch
+	.long	12, -1, 0, 5, 1, 1, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Dh
+	.long	12, -1, -1, 3, 1, 0, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Eh
+	.long	12, -1, -1, 7, 1, 1, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Fh
+	.size	_recompsx_gpu_poly, .-_recompsx_gpu_poly
+	.popsection
+)ASM\");
+#endif")
+// </dc-sched>
 class Gpu {
 	// GP0(E1h) — texture page and drawing attributes, mirrored in GPUSTAT bits 0..10.
 	static var texPage = 0;
@@ -582,11 +1274,29 @@ class Gpu {
 			if (n > 0 && i + n < count) {
 				wholePacket(ram, addr + (i << 2), v >>> 24, n);
 				i += n + 1;
+			} else if (xferLeft == 0 && pending == 0 && (v >>> 24) >= 0xE1 && (v >>> 24) <= 0xE6) {
+				stateCommand(v);
+				i++;
 			} else {
 				writeGp0(v);
 				i++;
 			}
 		}
+	}
+
+	/**
+		A state command (GP0 E1h-E6h) a list carries: what `writeGp0` does with it, but for `draw`,
+		which has nothing to do for one — the packet is the command alone, it takes no parameters,
+		and none of `draw`'s commands is among them. Crash Bash's ordering tables carry ~450 a frame
+		(a texture page or window before nearly every object), and the call to `draw` that found
+		nothing to draw cost 0.11 ms of a Dreamcast frame.
+	**/
+	static inline function stateCommand(v:Int):Void {
+		wordsReceived++;
+		commandsReceived++;
+		packet[0] = v;
+		packetLen = 1;
+		command(v);
 	}
 
 	/** Parameter words of a packet `writeGp0Words` takes whole — polygons, rectangles — or -1. */
@@ -635,6 +1345,69 @@ class Gpu {
 	**/
 	@:specifier("__attribute__((noinline))")
 	static function polygonHw(ram:RawBuf, at:Int, op:Int):Void {
+		// On the SH-4 the packet's common case is a core in assembly (ADR-0047: `GpuFile.poly`,
+		// scripts/sh4/poly.blk, scheduled by scripts/dc-sched.py): the texture keys, the flags, each
+		// triangle's rejects, count, GPU time and state test (Gpu.triState, sendState), the backend's
+		// triangle in words 36-47 — 0 drawn, 2 drawn with its state for the backend first in words
+		// 52-61, 3 rejected — or 1 for a packet that could wrap at the end of RAM, which the C form
+		// draws. Elsewhere it is 1 and that form is the whole of it. A triangle drawn is the backend's
+		// record, after the state when there is one to send.
+		final rc = GpuFile.poly(ram, at, op, 0);
+		if ((rc & 1) == 0 && (op & 0x08) == 0) {
+			if (rc == 2) Backend.gpuStateWords() else {}
+			Backend.gpuTriWords();
+		} else polygonRest(ram, at, op, rc);
+	}
+
+	/** polygonHw's other cases: a quad's second triangle, a rejected one, and the packet the core
+	    declined (the C form). Out of line, so that the common case's frame is the core's call and the
+	    backend's calls alone. */
+	@:specifier("__attribute__((noinline))")
+	static function polygonRest(ram:RawBuf, at:Int, op:Int, rc:Int):Void {
+		if (rc != 1) {
+			triRecord(rc);
+			if ((op & 0x08) != 0) triRecord(GpuFile.poly(ram, at, op, 1));
+			else {}
+		} else {
+			polygonC(ram, at, op);
+			GpuFile.polyChecked(op);
+		}
+	}
+
+	/** A triangle the core answered for: the state it left for the backend first (2), then the
+	    backend's record from the GPU file's words; nothing for a rejected one (3). */
+	static inline function triRecord(rc:Int):Void {
+		if (rc != 3) {
+			if (rc == 2) Backend.gpuStateWords() else {}
+			Backend.gpuTriWords();
+		} else {}
+	}
+
+	/**
+		The C form's triangle: its colour and texture words into the GPU file beside its positions
+		(words 36-47: x, y, the colour word, the texture word a vertex), as the backend takes a triangle
+		in words (the SH-4 core writes the same twelve itself): the
+		colour the word before a vertex's position with gouraud — vertex 0's is the command word —
+		the command word's otherwise; the texture word the one after, masked to its sixteen bits, 0
+		untextured. Each value is read and stored, so nothing is held across the record's own work,
+		where fifteen arguments built in one frame had been spilled around it (ADR-0047).
+	**/
+	static inline function triWords(src:RawBuf, at0:Int, a:Int, step:Int, op:Int):Void {
+		final b = a + step;
+		final c = b + step;
+		final gouraud = (op & 0x10) != 0;
+		final tm = (op & 0x04) != 0 ? 0xFFFF : 0;
+		GpuFile.set(38, MemA.get32(src, gouraud ? a - 4 : at0));
+		GpuFile.set(39, MemA.get32(src, a + 4) & tm);
+		GpuFile.set(42, MemA.get32(src, gouraud ? b - 4 : at0));
+		GpuFile.set(43, MemA.get32(src, b + 4) & tm);
+		GpuFile.set(46, MemA.get32(src, gouraud ? c - 4 : at0));
+		GpuFile.set(47, MemA.get32(src, c + 4) & tm);
+	}
+
+	/** polygonHw's C form: every target's but the SH-4's, and the SH-4's for a packet its core declines. */
+	@:specifier("__attribute__((noinline))")
+	static function polygonC(ram:RawBuf, at:Int, op:Int):Void {
 		// Every word of the packet from one base, when the packet cannot wrap at the end of RAM
 		// (a polygon is at most twelve words): a load each, where the index masked for the wrap
 		// was an add, a mask and a load a word. A packet that could wrap is copied out first.
@@ -700,17 +1473,18 @@ class Gpu {
 		final hiY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
 		final e = edge(x0, y0, x1, y1, x2, y2);
 		if (MemA.likely(hiX - loX <= 1023 && hiY - loY <= 511 && e != 0)) {
+			// The positions into the GPU file first, so that none is held across triState's call.
+			GpuFile.set(36, x0);
+			GpuFile.set(37, y0);
+			GpuFile.set(40, x1);
+			GpuFile.set(41, y1);
+			GpuFile.set(44, x2);
+			GpuFile.set(45, y2);
 			primitives++;
 			triangleWork(e, loX, hiX, loY, hiY);
 			triState();
-			final gouraud = (op & 0x10) != 0;
-			final tm = (op & 0x04) != 0 ? 0xFFFF : 0;
-			final t0 = MemA.get32(src, a + 4) & tm;
-			final t1 = MemA.get32(src, b + 4) & tm;
-			final t2 = MemA.get32(src, c + 4) & tm;
-			Backend.gpuTri(x0, y0, MemA.get32(src, gouraud ? a - 4 : at0) & 0xFFFFFF, t0 & 0xFF, t0 >>> 8,
-				x1, y1, MemA.get32(src, gouraud ? b - 4 : at0) & 0xFFFFFF, t1 & 0xFF, t1 >>> 8,
-				x2, y2, MemA.get32(src, gouraud ? c - 4 : at0) & 0xFFFFFF, t2 & 0xFF, t2 >>> 8);
+			triWords(src, at0, a, b - a, op);
+			Backend.gpuTriWords();
 		} else {}
 	}
 
@@ -1391,7 +2165,17 @@ class Gpu {
 	static inline function maxInt(a:Int, b:Int):Int return a > b ? a : b;
 	static inline function minInt(a:Int, b:Int):Int return a < b ? a : b;
 
-	/** One colour over the whole triangle: no interpolation to do, so none is paid for. */
+	/**
+		One colour over the whole triangle: no interpolation to do, so none is paid for.
+
+		A row's columns are rowSpan's, but carried down the rows rather than divided for: each
+		edge's bound is a floor quotient of its value by its step, and the value grows by the same
+		amount a row, so the quotient grows by that amount's quotient and by one more where the
+		remainders carry — the integer the division gives, without dividing (two divisions an edge
+		a triangle where rowSpan took one an edge a row). Inline, with nothing passed: E-078 carried
+		them through calls of seven and nine arguments and spent in the calls what the divisions
+		had cost. Crash 3 draws its shadow into VRAM this way, ~460 rows a frame.
+	**/
 	static function flatSpans(minX:Int, maxX:Int, minY:Int, maxY:Int,
 			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
 			stepY0:Int, stepY1:Int, stepY2:Int, colour:Int):Void {
@@ -1402,13 +2186,42 @@ class Gpu {
 		final value = set ? colour | 0x8000 : colour;
 		final last = maxX - minX;
 		var written = 0;
+		// Each edge: w + s*k >= 0 for the row's value w and column offset k bounds k from below by
+		// -floor(w / s) when s > 0 and from above by floor(w / -s) when s < 0 (rowSpan). d is |s|
+		// (1 for an edge level with the rows, whose quotient is not read: such an edge keeps or
+		// drops the whole row by w's sign), q and m the quotient and remainder of w by d, qt and mt
+		// those of the row step. A negated quotient is `| 0`'d: -0 is a double on JavaScript.
+		final d0 = stepX0 > 0 ? stepX0 : (stepX0 < 0 ? -stepX0 : 1);
+		final d1 = stepX1 > 0 ? stepX1 : (stepX1 < 0 ? -stepX1 : 1);
+		final d2 = stepX2 > 0 ? stepX2 : (stepX2 < 0 ? -stepX2 : 1);
+		var q0 = floorDiv(row0, d0), q1 = floorDiv(row1, d1), q2 = floorDiv(row2, d2);
+		var m0 = (row0 - shim.IntMath.mul(q0, d0)) | 0;
+		var m1 = (row1 - shim.IntMath.mul(q1, d1)) | 0;
+		var m2 = (row2 - shim.IntMath.mul(q2, d2)) | 0;
+		final qt0 = floorDiv(stepY0, d0), qt1 = floorDiv(stepY1, d1), qt2 = floorDiv(stepY2, d2);
+		final mt0 = (stepY0 - shim.IntMath.mul(qt0, d0)) | 0;
+		final mt1 = (stepY1 - shim.IntMath.mul(qt1, d1)) | 0;
+		final mt2 = (stepY2 - shim.IntMath.mul(qt2, d2)) | 0;
 		var r0 = row0, r1 = row1, r2 = row2;
 		var y = minY;
 		while (y <= maxY) {
-			final span = rowSpan(r0, r1, r2, stepX0, stepX1, stepX2, last);
-			if (span >= 0) {
-				final lo = span & 0xFFFF;
-				final count = (span >> 16) - lo + 1;
+			var lo = 0;
+			var hi = last;
+			var empty = false;
+			if (stepX0 > 0) lo = maxInt(lo, (-q0) | 0);
+			else if (stepX0 < 0) hi = minInt(hi, q0);
+			else if (r0 < 0) empty = true;
+			else {}
+			if (stepX1 > 0) lo = maxInt(lo, (-q1) | 0);
+			else if (stepX1 < 0) hi = minInt(hi, q1);
+			else if (r1 < 0) empty = true;
+			else {}
+			if (stepX2 > 0) lo = maxInt(lo, (-q2) | 0);
+			else if (stepX2 < 0) hi = minInt(hi, q2);
+			else if (r2 < 0) empty = true;
+			else {}
+			if (!empty && lo <= hi) {
+				final count = hi - lo + 1;
 				final first = Vram.rowStart(y) + minX + lo;
 				if (!blend && !check) {
 					Vram.fillLinear(first, count, value);
@@ -1423,6 +2236,13 @@ class Gpu {
 				}
 			} else {}
 			r0 = (r0 + stepY0) | 0; r1 = (r1 + stepY1) | 0; r2 = (r2 + stepY2) | 0;
+			// w + t = (q + qt) d + (m + mt), with 0 <= m + mt < 2d: one more where it reaches d.
+			q0 = (q0 + qt0) | 0; m0 = (m0 + mt0) | 0;
+			if (m0 >= d0) { m0 = (m0 - d0) | 0; q0 = (q0 + 1) | 0; } else {}
+			q1 = (q1 + qt1) | 0; m1 = (m1 + mt1) | 0;
+			if (m1 >= d1) { m1 = (m1 - d1) | 0; q1 = (q1 + 1) | 0; } else {}
+			q2 = (q2 + qt2) | 0; m2 = (m2 + mt2) | 0;
+			if (m2 >= d2) { m2 = (m2 - d2) | 0; q2 = (q2 + 1) | 0; } else {}
 			y++;
 		}
 		pixels = (pixels + written) | 0;

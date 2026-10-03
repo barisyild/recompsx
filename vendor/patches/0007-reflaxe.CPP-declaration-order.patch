@@ -1,0 +1,39 @@
+diff --git a/src/cxxcompiler/config/Meta.hx b/src/cxxcompiler/config/Meta.hx
+index 4beedef..9f36109 100644
+--- a/src/cxxcompiler/config/Meta.hx
++++ b/src/cxxcompiler/config/Meta.hx
+@@ -230,6 +230,16 @@ enum abstract Meta(String) from String to String {
+ 	**/
+ 	var HeaderClassCode = ":headerClassCode";
+ 
++	/**
++		@:declarationOrder
++
++		On a class: its instance variables are laid out in the order
++		they are declared, rather than sorted by type and then by name.
++		For an object whose field offsets matter, such as a register
++		file reached through short displacements.
++	**/
++	var DeclarationOrder = ":declarationOrder";
++
+ 	/**
+ 		@:cppTypedef
+ 
+diff --git a/src/cxxcompiler/subcompilers/Classes.hx b/src/cxxcompiler/subcompilers/Classes.hx
+index b2801c5..be3461d 100644
+--- a/src/cxxcompiler/subcompilers/Classes.hx
++++ b/src/cxxcompiler/subcompilers/Classes.hx
+@@ -328,7 +328,12 @@ class Classes extends SubCompiler {
+ 
+ 		// Instance vars
+ 		final orderedVarFields = varFields.copy();
+-		orderedVarFields.sort(function(varData1, varData2) {
++		if(classType.hasMeta(Meta.DeclarationOrder)) {
++			// @:declarationOrder: as written in the source file.
++			orderedVarFields.sort(function(varData1, varData2) {
++				return haxe.macro.Context.getPosInfos(varData1.field.pos).min - haxe.macro.Context.getPosInfos(varData2.field.pos).min;
++			});
++		} else orderedVarFields.sort(function(varData1, varData2) {
+ 			final p1 = varData1.field.type.typePriority();
+ 			final p2 = varData2.field.type.typePriority();
+ 			if(p1 == p2) {

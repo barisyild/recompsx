@@ -180,6 +180,8 @@ class TestOverlay {
 				"the executable's own code inside a window is dispatched too");
 			Assert.isTrue(base.indexOf(".f_80020060(ctx);") < 0,
 				"and never called directly");
+			Assert.isTrue(base.indexOf(".f_80020060_value(") < 0,
+				"a scalar helper cannot bypass overlay dispatch");
 		}
 
 		Assert.group("overlay: a resident overlay shadows the executable, with no fallthrough");
@@ -223,6 +225,8 @@ class TestOverlay {
 			// switch need no special case.
 			Assert.isTrue(b.indexOf("public static function f_80020040(ctx:core.Ctx") >= 0,
 				"and is still callable by that name");
+			Assert.isTrue(b.indexOf("return Ovl_a_01_80020000.f_80020040_value(") >= 0,
+				"the scalar signature forwards to the same shared owner");
 		}
 
 		Assert.group("overlay: the generated table describes both windows");

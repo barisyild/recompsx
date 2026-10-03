@@ -178,6 +178,22 @@ class Backend {
 			host(), x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
 	}
 
+	/** The state the GPU file's words 52-61 hold (the polygon core's, ADR-0047), as bp_gpu_state_w
+	    takes it: gpuState with the words in order. */
+	public static function gpuStateWords():Void {
+		gpuState(GpuFile.get(52), GpuFile.get(53), GpuFile.get(54), GpuFile.get(55), GpuFile.get(56),
+			GpuFile.get(57), GpuFile.get(58), GpuFile.get(59), GpuFile.get(60), GpuFile.get(61));
+	}
+
+	/** The triangle the GPU file's words 36-47 hold (gpu.Gpu.triWords: x, y, the colour word, the
+	    texture word a vertex), as bp_gpu_tri_w takes it: gpuTri with the words unpacked. */
+	public static function gpuTriWords():Void {
+		final t0 = GpuFile.get(39), t1 = GpuFile.get(43), t2 = GpuFile.get(47);
+		gpuTri(GpuFile.get(36), GpuFile.get(37), GpuFile.get(38) & 0xFFFFFF, t0 & 0xFF, (t0 >>> 8) & 0xFF,
+			GpuFile.get(40), GpuFile.get(41), GpuFile.get(42) & 0xFFFFFF, t1 & 0xFF, (t1 >>> 8) & 0xFF,
+			GpuFile.get(44), GpuFile.get(45), GpuFile.get(46) & 0xFFFFFF, t2 & 0xFF, (t2 >>> 8) & 0xFF);
+	}
+
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void {
 		if (gpuHashOn()) {

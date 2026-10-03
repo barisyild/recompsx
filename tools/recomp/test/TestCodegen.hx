@@ -216,7 +216,96 @@ class TestCodegen {
 			imm(0x23, 8, 4, 0), imm(0x23, 9, 4, 4), alu(9, 31, 23, 0), 0,
 			imm(0x23, 10, 4, 8), alu(0x21, 2, 8, 9), alu(0x21, 2, 2, 10), JR, 0, 0,
 			imm(9, 11, 0, 5), JR, alu(0x21, 3, 11, 0)], [48]);
+		final scalarBase = next;
+		final scalar = add("scalarArithmetic", [imm(9, 2, 4, 7), alu(0, 2, 0, 2) | (2 << 6),
+			JR, alu(0x21, 2, 2, 5)]);
+		final overwritten = add("scalarOverwrite", [alu(0x26, 2, 6, 7), alu(0x21, 2, 4, 5), JR, 0]);
+		// Input v0 is needed here; input a0 is not. Every final scratch register stays visible.
+		add("scalarInputResult", [imm(9, 2, 2, -3), JR, alu(0x26, 2, 2, 5)]);
+		final twoResults = add("scalarTwoResults", [alu(0x21, 8, 4, 5), JR, alu(0x21, 2, 8, 0)]);
+		final unsafeLoad = add("scalarDiscardLoad", [imm(0x23, 0, 4, 0), JR, imm(9, 2, 0, 1)]);
+		final trapOp = add("scalarTrapOp", [imm(8, 2, 4, 1), JR, 0]);
+		final raWrite = add("scalarRaWrite", [alu(0x21, 31, 4, 0), JR, imm(9, 2, 0, 1)]);
+		final scalarChainAddr = next;
+		final scalarChain = add("scalarChain", [alu(0x21, 16, 31, 0), jal(next + 48), imm(9, 5, 5, 3),
+			alu(0x21, 4, 2, 0), jal(next + 68), imm(9, 5, 5, -1), alu(0x21, 31, 16, 0), JR, 0,
+			0, 0, 0, imm(9, 2, 4, 7), alu(0, 2, 0, 2) | (2 << 6), JR, alu(0x21, 2, 2, 5), 0,
+			imm(9, 2, 2, -3), JR, alu(0x26, 2, 2, 5)]);
+		final scalarOpsAddr = next;
+		final scalarOps = [for (op in [0x21, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2a, 0x2b]) alu(op, 2, 4, 5)];
+		for (op in [9, 12, 13, 14, 10, 11, 15]) scalarOps.push(imm(op, 2, 4, 0x8000));
+		for (op in [0, 2, 3]) for (shift in [0, 1, 31]) scalarOps.push(alu(op, 2, 0, 5) | (shift << 6));
+		for (op in [4, 6, 7]) scalarOps.push(alu(op, 2, 4, 5));
+		for (k in 0...scalarOps.length) add('scalarOp$k', [scalarOps[k], JR, 0]);
+		final restored = add("scalarRestored", [alu(0x21, 2, 8, 0), alu(0x21, 8, 4, 0),
+			alu(0x21, 8, 2, 0), imm(9, 2, 4, 1), JR, 0]);
+		final longWords = [for (_ in 0...31) imm(9, 2, 2, 1)];
+		longWords.push(JR); longWords.push(0);
+		final tooLong = add("scalarTooLong", longWords);
+		final tooManyInputs = add("scalarTooManyInputs", [alu(0x21, 2, 4, 5), alu(0x21, 2, 2, 6),
+			alu(0x21, 2, 2, 7), alu(0x21, 2, 2, 8), alu(0x21, 2, 2, 9), JR, alu(0x21, 2, 2, 10)]);
+		final readBase = next;
+		final read32 = add("scalarRead32", [imm(0x23, 2, 4, 0), JR, imm(9, 2, 2, 7)]);
+		add("scalarRead8s", [imm(0x20, 2, 4, 1), JR, 0]);
+		add("scalarRead8u", [imm(0x24, 2, 4, 1), JR, 0]);
+		add("scalarRead16s", [imm(0x21, 2, 4, 2), JR, 0]);
+		add("scalarRead16u", [imm(0x25, 2, 4, 2), JR, 0]);
+		final affine = add("scalarReadAffine", [imm(9, 2, 4, 4), imm(0x23, 2, 2, -4), JR, alu(0x21, 2, 2, 5)]);
+		add("scalarReadMany", [imm(0x24, 0, 4, 0), imm(0x21, 2, 4, 2), imm(0x23, 2, 4, 4), JR, imm(9, 2, 2, -7)]);
+		final aligned = add("scalarReadByteFirst", [imm(0x24, 0, 4, 1), imm(0x23, 2, 4, 4), JR, 0]);
+		final constantRead = add("scalarReadConstant", [imm(15, 2, 0, 0x8004), imm(13, 2, 2, 0x20), imm(0x23, 2, 2, 0), JR, 0]);
+		add("scalarReadWrap", [imm(9, 2, 4, -16), imm(0x23, 2, 2, 16), JR, 0]);
+		add("scalarReadBackwards", [imm(0x23, 0, 4, 0), imm(0x23, 2, 4, -4), JR, 0]);
+		final chase = add("scalarReadChase", [imm(0x23, 2, 4, 0), imm(0x23, 2, 2, 0), JR, 0]);
+		final bases = add("scalarReadTwoBases", [imm(0x23, 2, 4, 0), imm(0x23, 2, 5, 0), JR, 0]);
+		final io = add("scalarReadKnownIo", [imm(15, 2, 0, 0x1f80), imm(0x23, 2, 2, 0x1814), JR, 0]);
+		final incompatible = add("scalarReadUnaligned", [imm(0x21, 0, 4, 1), imm(0x23, 2, 4, 0), JR, 0]);
+		final store = add("scalarMemoryStore", [imm(0x2b, 0, 4, 0), JR, imm(9, 2, 0, 1)]);
+		add("scalarReadFifo", [imm(0x24, 0, 4, 0), imm(0x24, 2, 4, 0), JR, imm(14, 2, 2, 0x55)]);
+		add("scalarReadDeadFifo", [imm(0x24, 0, 4, 0), imm(0x24, 2, 4, 0), JR, imm(9, 2, 0, 1)]);
+		final readChain = next;
+		add("scalarReadChain", [alu(0x21, 16, 31, 0), jal(next + 28), 0, alu(0x21, 31, 16, 0), JR, 0, 0,
+			imm(0x23, 2, 4, 0), JR, imm(9, 2, 2, 7)]);
+		bodies.add('public static inline var SCALAR_READS = $readBase;\n');
+		bodies.add('public static inline var SCALAR_READ_CHAIN = $readChain;\n');
+		bodies.add('public static inline var SCALAR_BASE = $scalarBase;\n');
+		bodies.add('public static inline var SCALAR_CHAIN = $scalarChainAddr;\n');
+		bodies.add('public static inline var SCALAR_OPS = $scalarOpsAddr;\n');
+		bodies.add('public static inline var SCALAR_COUNT = ${scalarOps.length};\n');
 		if (check) {
+			Assert.equals(restored.indexOf('scalarRestored_value(a0:Int):Int') >= 0, opt,
+				"SSA proves a scratch register is restored without reading it into the helper");
+			Assert.equals(tooLong.indexOf('_value(') >= 0, opt, "compact recovery may exceed 32 guest instructions");
+			Assert.isTrue(tooManyInputs.indexOf('_value(') < 0, "scalar recovery limits argument pressure");
+			Assert.equals(scalar.indexOf('scalarArithmetic_value(a0:Int, a1:Int):Int') >= 0, opt,
+				"scalar signature comes from values read before definition");
+			Assert.equals(overwritten.indexOf('scalarOverwrite_value(a0:Int, a1:Int):Int') >= 0, opt,
+				"overwritten pure values do not become parameters");
+			Assert.equals(twoResults.indexOf('_value(') >= 0, opt, "multiple observable outputs use the scalar return ABI");
+			if (opt) Assert.isTrue(twoResults.indexOf('ctx.t0 = ') >= 0, "scratch register output is published too");
+			Assert.equals(unsafeLoad.indexOf('Memory.spanOk(memory0)') >= 0, opt, "even a dead load needs a memory guard");
+			Assert.isTrue(unsafeLoad.indexOf('Memory.read32') >= 0, "a discarded MMIO read survives in the fallback");
+			Assert.equals(read32.indexOf('scalarRead32_value(memory0:shim.Span):Int') >= 0, opt,
+				"a memory getter receives checked storage, not CpuState");
+			Assert.equals(affine.indexOf('scalarReadAffine_value(a1:Int, memory0:shim.Span):Int') >= 0, opt,
+				"affine address input is consumed by the guard, data input by the helper");
+			Assert.equals(aligned.indexOf('(memory0Address & 3) == 1') >= 0, opt,
+				"alignment is relative to each actual access, not only the first byte");
+			Assert.equals(constantRead.indexOf('memory0Address = -2147221472;') >= 0, opt,
+				"LUI and ORI form a known address before any load");
+			for (rejected in [io, incompatible]) Assert.isTrue(rejected.indexOf('_value(') < 0,
+				"known IO and incompatible alignment retain original code");
+			Assert.equals(chase.indexOf('_value(') >= 0, opt, 'checked dependent reads use recovered signatures');
+			for (accepted in [bases, store]) Assert.equals(accepted.indexOf('_value(') >= 0, opt,
+				"multiple checked bases and ordered writes use recovered signatures");
+			Assert.isTrue(trapOp.indexOf('_value(') < 0, "overflow-trapping operations are not pure helpers");
+			Assert.isTrue(raWrite.indexOf('_value(') < 0, "changing ra is not an ordinary scalar return");
+			Assert.equals(scalarChain.indexOf('_value(ctx.a0, ctx.a1)') >= 0, opt,
+				"direct calls use the scalar signature");
+			Assert.equals(scalarChain.indexOf('core.Cooperative.deadline') >= 0, opt,
+				"scalar direct calls retain due checkpoint fallback");
+			if (opt) Assert.isTrue(scalar.substring(scalar.indexOf('public static function scalarArithmetic_value')).indexOf('ctx') < 0,
+				"scalar computation has no CpuState access");
 			Assert.equals(walk.indexOf('Memory.spanStep(') >= 0, opt, "a stepped pointer keeps its span");
 			Assert.equals(guessed.indexOf('== 0x${StringTools.hex(gc + 48, 8).toLowerCase()})) {') >= 0
 				|| guessed.indexOf('== ${gc + 48})) {') >= 0 || guessed.indexOf('== 0x${StringTools.hex(gc + 48, 8)})) {') >= 0, opt,
@@ -249,7 +338,7 @@ class TestCodegen {
 			Assert.equals(stack.indexOf('ctx.t2 = ctx.t1;') >= 0 || stack.indexOf('\tt2 = t1;') >= 0, opt, "stack load forwarding");
 			Assert.equals(stack.indexOf('Memory.write32(ctx.sp & 0x1FFFFFFF, ctx.t0);') >= 0, !opt,
 				"superseded stack store shape");
-			Assert.isTrue(dead.indexOf('t0 = 1;') >= 0, "a dead write is still made: a register is machine state");
+			Assert.equals(dead.indexOf('t0 = 1;') >= 0, !opt, "only unobserved definitions inside a pure value region disappear");
 			Assert.equals(multi.indexOf('while (true) {') >= 0, opt, "multi-block loop is a native loop");
 			Assert.equals(multi.indexOf('switch (bb)') < 0, opt, "multi-block loop needs no dispatcher");
 			Assert.equals(multi.indexOf('; break;') >= 0, opt, "loop exit records its target and breaks");

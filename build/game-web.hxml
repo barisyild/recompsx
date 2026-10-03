@@ -8,4 +8,3 @@ build/common.hxml
 -js out/_web/game.js
 -D js-es=6
 -D recompsx_cooperative
--dce full

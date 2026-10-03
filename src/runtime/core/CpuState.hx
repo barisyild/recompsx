@@ -78,6 +78,7 @@ package core;
 @:headerCode("namespace core { class CpuState; }\nextern core::CpuState recompsx_cpustate;")
 @:cppFileCode("core::CpuState recompsx_cpustate;")
 @:unsafePtrType
+@:declarationOrder
 class CpuState {
 	/**
 		The machine's CpuState, made once at boot: on C++ the object at a fixed address
@@ -92,34 +93,29 @@ class CpuState {
 		#end
 	}
 
-	// General-purpose registers, by their ABI names. $zero is deliberately absent.
-	public var at:Int = 0;
+	/*
+		The fields in the order they sit in the object on C++ (`@:declarationOrder`, reflaxe.CPP
+		patch 0007; without it reflaxe.CPP sorts them by name). The SH-4 reaches the first 64
+		bytes of an object with a 4-bit displacement (`mov.l @(disp,Rn)`); a field past them costs
+		the compiler another base register, kept in each function that uses one — and a register
+		is what generated code runs short of first. So the 16 words there are the ones generated
+		code names most: the result and argument registers, the stack pointer and return address,
+		the most used temporaries and saved registers, the clock, and the unwind token tested after
+		every call. Measured: docs/perf/dreamcast-ledger.md E-076. $zero is deliberately absent.
+	*/
 	public var v0:Int = 0;  public var v1:Int = 0;
-	public var a0:Int = 0;  public var a1:Int = 0;  public var a2:Int = 0;  public var a3:Int = 0;
-	public var t0:Int = 0;  public var t1:Int = 0;  public var t2:Int = 0;  public var t3:Int = 0;
-	public var t4:Int = 0;  public var t5:Int = 0;  public var t6:Int = 0;  public var t7:Int = 0;
-	public var s0:Int = 0;  public var s1:Int = 0;  public var s2:Int = 0;  public var s3:Int = 0;
-	public var s4:Int = 0;  public var s5:Int = 0;  public var s6:Int = 0;  public var s7:Int = 0;
-	public var t8:Int = 0;  public var t9:Int = 0;
-	public var k0:Int = 0;  public var k1:Int = 0;
-	public var gp:Int = 0;  public var sp:Int = 0;  public var fp:Int = 0;  public var ra:Int = 0;
-
-	/** The multiply/divide result pair. */
-	public var hi:Int = 0;
-	public var lo:Int = 0;
-
-	/** Virtual: see the note above. */
-	public var pc:Int = 0;
 
 	/**
-		Emulated time, in CPU cycles, and the deadline of the next scheduled event.
+		Emulated time, in CPU cycles, and (below) the deadline of the next scheduled event.
 
 		Both are plain `Int` and compared by subtraction (`cycles - nextEvent >= 0`), which stays
 		correct across wraparound. That works because nothing is ever scheduled more than 2^31
 		cycles — about a minute of emulated time — ahead.
 	**/
 	public var cycles:Int = 0;
-	public var nextEvent:Int = 0;
+
+	public var a0:Int = 0;  public var sp:Int = 0;  public var t8:Int = 0;  public var a1:Int = 0;
+	public var t9:Int = 0;  public var s0:Int = 0;  public var ra:Int = 0;
 
 	/**
 		Non-zero while an emulated `longjmp` is unwinding.
@@ -130,6 +126,24 @@ class CpuState {
 		unwind. Frames peel back to the dispatcher holding the matching anchor, which clears it.
 	**/
 	public var unwindToken:Int = 0;
+
+	public var a2:Int = 0;  public var s1:Int = 0;  public var a3:Int = 0;  public var s2:Int = 0;
+	public var at:Int = 0;
+
+	// 64 bytes on: what generated code names less.
+	public var nextEvent:Int = 0;
+	public var t0:Int = 0;  public var s7:Int = 0;  public var s3:Int = 0;  public var s4:Int = 0;
+	public var t2:Int = 0;  public var s5:Int = 0;  public var t1:Int = 0;  public var s6:Int = 0;
+	public var t5:Int = 0;  public var t3:Int = 0;  public var gp:Int = 0;  public var t6:Int = 0;
+	public var t4:Int = 0;  public var t7:Int = 0;
+
+	/** Virtual: see the note above. */
+	public var pc:Int = 0;
+
+	public var fp:Int = 0;
+
+	/** The multiply/divide result pair (hi below). */
+	public var lo:Int = 0;
 
 	/**
 		Where a computed tail jump is going, while `unwindToken` is `Runtime.TAIL`: the code that
@@ -144,20 +158,8 @@ class CpuState {
 	**/
 	public var returnTarget:Int = 0;
 
-	/**
-		The last call through a register that `FnTable.run` answered from its table (C++): the
-		address, the function's place in the native pointer array, and the block. A call by
-		address mostly goes where the one before it went — Crash 3's renderer hops to one routine
-		for every primitive — and these words share this object's last line with a0..a3, which
-		never leaves the operand cache, where the table's slot for an address sits wherever the
-		address puts it: in Crash 3 on the set of this object's first line, both evicted at every
-		hop (~0.3 ms a frame under the cache model). Named to sort last: reflaxe.CPP lays fields
-		out by name, descending, so no other field moves. `FnTable` sets the empty state (an odd
-		address, which no table answers, and a function that asks the long way).
-	**/
-	public var _callAt:Int = 1;
-	public var _callFn:Int = 0;
-	public var _callBlock:Int = 0;
+	public var hi:Int = 0;
+	public var k0:Int = 0;  public var k1:Int = 0;
 
 	/**
 		Kept for the HLE thread functions, which do have a depth. Critical sections do not: the
@@ -179,6 +181,20 @@ class CpuState {
 	**/
 	public var sr:Int = 0;
 	public var cause:Int = 0;
+
+	/**
+		The last call through a register that `FnTable.run` answered from its table (C++): the
+		address, the function's place in the native pointer array, and the block. A call by
+		address mostly goes where the one before it went — Crash 3's renderer hops to one routine
+		for every primitive — and the object's own line keeps them in the operand cache, where the
+		table's slot for an address sits wherever the address puts it: in Crash 3 on the set of
+		this object's first line, both evicted at every hop (~0.3 ms a frame under the cache
+		model). `FnTable` sets the empty state (an odd address, which no table answers, and a
+		function that asks the long way).
+	**/
+	public var _callFn:Int = 0;
+	public var _callBlock:Int = 0;
+	public var _callAt:Int = 1;
 
 	public function new() {}
 }

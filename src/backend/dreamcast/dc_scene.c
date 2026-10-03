@@ -10,6 +10,9 @@ gcmd_t   g_cmds[GPU_MAX_CMDS];
 int      g_cmd_count;
 gstate_t g_states[GPU_MAX_STATES];
 int      g_state_count;
+/* The state records name now (cmd_new): the one last entered, which state_enter finds among those
+ * the frame recorded before it records one more. */
+static int g_state_cur;
 static int      g_cmd_overflowed;
 /* Set when a frame has been presented, cleared by the next primitive to arrive. It is what makes
  * the geometry persist: a PlayStation's framebuffer keeps what was drawn into it until something
@@ -22,6 +25,11 @@ int      g_frame_shown;
  * the PVR keeps showing the last one it rendered. A game at thirty frames a second presents
  * every frame twice, and building the same list the second time cost as much as the first. */
 int      g_scene_dirty = 1;
+#if RECOMPSX_TA_HASH
+#include <stdio.h>
+uint32_t g_ta_hash;
+int      g_ta_hashing;
+#endif
 
 /* Compiled polygon headers, kept.
  *
@@ -78,9 +86,19 @@ static int      g_warned_sub;           /* the one blend mode the PVR cannot exp
  * spread over its byte with a shift and a subtraction. The host test checks each against the
  * per-channel form it replaced, for every one of the 2^24 colours. */
 
-/** BGR to ARGB8888, alpha 0xFF: bytes 0 and 2 change places. */
-static inline uint32_t bgr_to_argb(uint32_t c) {
-    return 0xFF000000u | ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+/** Bytes 0 and 2 of `c` change places, byte 3 cleared: bytes 0 and 2 alone, their halves swapped
+ *  (`swap.w`), byte 1 put back. The same in C GCC turns into its byte-reversal idiom, three swaps
+ *  and two shifts. */
+static inline uint32_t swap_rb(uint32_t c) {
+    uint32_t x = c & 0x00FF00FFu;
+    __asm__("swap.w %1, %0" : "=r" (x) : "r" (x));
+    return x | (c & 0x0000FF00u);
+}
+
+/** BGR to RGB888, byte 3 clear for the vertex's alpha (the header's blend's): bytes 0 and 2 change
+ *  places. */
+static inline uint32_t bgr_to_rgb(uint32_t c) {
+    return swap_rb(c);
 }
 
 /* 0xFF in every byte of `c` whose top bit is set, 0 elsewhere (c's other bits must be clear). */
@@ -90,19 +108,19 @@ static inline uint32_t byte_mask(uint32_t top_bits) {
 
 /** The same, doubled: PlayStation modulation is texel*colour/128, so 0x80 means "unchanged",
  *  where the PVR's multiply wants 0xFF for that — min(2c, 255) per channel. What the clamp
- *  loses is bgr_to_argb_over's. */
-static inline uint32_t bgr_to_argb_mod(uint32_t c) {
+ *  loses is bgr_to_rgb_over's. */
+static inline uint32_t bgr_to_rgb_mod(uint32_t c) {
     const uint32_t d = ((c << 1) & 0x00FEFEFEu) | byte_mask(c & 0x00808080u);
-    return bgr_to_argb(d);
+    return swap_rb(d);
 }
 
 /** What the doubled colour loses to the clamp: 2c - 255 per channel, floored at zero. Drawn as a
  *  second, additive pass it restores PlayStation modulation above 1.0 — texel*(2c) is
  *  texel*min(2c, 1) + texel*max(2c - 1, 0), and blending is linear in the source. For a channel
  *  of 0x80 or more, 2c - 255 is 2(c - 0x80) + 1. */
-static inline uint32_t bgr_to_argb_over(uint32_t c) {
+static inline uint32_t bgr_to_rgb_over(uint32_t c) {
     const uint32_t v = ((c & 0x007F7F7Fu) << 1) | 0x00010101u;
-    return bgr_to_argb(v & byte_mask(c & 0x00808080u));
+    return swap_rb(v & byte_mask(c & 0x00808080u));
 }
 
 /** Whether any channel brightens: above 0x80, the PlayStation's 1.0 — top bit set and some other
@@ -121,6 +139,7 @@ static int g_clip_x0, g_clip_y0, g_clip_x1 = 1023, g_clip_y1 = 511;
 /* The new frame's first primitive, out of line and cold: inlined into the triangle path it was a
  * call site every primitive's values had to survive, and they went to the stack for it. */
 __attribute__((noinline, cold)) static void begin_frame(void);
+static void state_table_reset(void);
 static inline void begin_frame_if_needed(void) {
     if(__builtin_expect(g_frame_shown, 0)) begin_frame();
     else {}
@@ -144,51 +163,135 @@ static void begin_frame(void) {
      * the next bp_gpu_state, and the runtime now sends one only when it changes, so the first
      * primitive of a frame may well arrive under the last frame's state. */
     if(g_state_count > 0) {
-        if(g_state_count > 1) shz_memcpy32_1(&g_states[0], &g_states[g_state_count - 1]);
+        if(g_state_cur > 0) shz_memcpy32_1(&g_states[0], &g_states[g_state_cur]);
         else {}
         g_state_count = 1;
+        g_state_cur = 0;
         g_states[0].tris = 0;       /* the new frame's count starts here */
     } else {}
+    state_table_reset();
 }
+
+/* The frame's states by content: open addressing over a hash of a state's words, each slot the
+ * index of a state recorded this frame plus one (0 empty). A state the frame recorded before is
+ * named again rather than recorded again — Crash Bash changes state ~1,130 times a frame among
+ * ~105 states, Crash 3 ~370 among 37 on its title screen and ~670 among ~120 in play, the same few
+ * over and over as the ordering table interleaves objects — so build_scene can remember what it
+ * worked out for each (g_sres) and palette_priority walks a state once. Past SDEDUP_FILL states a
+ * frame (none seen) new ones are recorded without an entry, as before. */
+#define SDEDUP_BITS 10
+#define SDEDUP_FILL 640
+static uint16_t g_sdedup[1 << SDEDUP_BITS] __attribute__((aligned(8)));
+
+static inline uint32_t state_hash(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3, uint32_t w6) {
+    const uint32_t h = (w0 ^ (w1 * 33u) ^ (w2 << 7) ^ (w3 * 5u) ^ (w6 << 13)) * 0x9E3779B1u;
+    return h >> (32 - SDEDUP_BITS);
+}
+
+static inline int state_same(const gstate_t* p, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3,
+                             uint32_t w4, uint32_t w5, uint32_t w6) {
+    return ((p->w[0] ^ w0) | (p->w[1] ^ w1) | (p->w[2] ^ w2) | (p->w[3] ^ w3) | (p->w[4] ^ w4)
+            | (p->w[5] ^ w5) | (p->w[6] ^ w6)) == 0;
+}
+
+/* The drawing areas the frame's states draw within — the buffer's corner and the area's corners,
+ * words 3-5 of a state's line — each named by its index in the frame: state_enter gives a new state
+ * its area's index (gstate_t's `area`), so build_scene tells "the area of the last state placed" by
+ * one compare where it compared six fields at every change of state (Crash Bash changes state
+ * ~1,130 times a frame, within one or two areas). Past AREA_MAX areas in a frame a state is given
+ * an index of its own, AREA_MAX + its own index, which costs build_scene only the placement again. */
+#define AREA_MAX 16
+static uint32_t g_area_w[AREA_MAX][3];
+static int      g_area_count;
+
+static inline uint32_t area_index(uint32_t w3, uint32_t w4, uint32_t w5, int state) {
+    for(int k = 0; k < g_area_count; k++) {
+        if(((g_area_w[k][0] ^ w3) | (g_area_w[k][1] ^ w4) | (g_area_w[k][2] ^ w5)) == 0) return (uint32_t)k;
+        else {}
+    }
+    if(g_area_count < AREA_MAX) {
+        g_area_w[g_area_count][0] = w3; g_area_w[g_area_count][1] = w4; g_area_w[g_area_count][2] = w5;
+        return (uint32_t)g_area_count++;
+    } else {}
+    return (uint32_t)(AREA_MAX + state);
+}
+
+/** The frame's first state (begin_frame's carried-over entry 0) in emptied tables. */
+static void state_table_reset(void) {
+    shz_memset8(g_sdedup, 0, sizeof g_sdedup);
+    g_area_count = 0;
+    if(g_state_count > 0) {
+        gstate_t* p = &g_states[0];
+        g_sdedup[state_hash(p->w[0], p->w[1], p->w[2], p->w[3], p->w[6])] = 1;
+        p->area = (uint16_t)area_index(p->w[3], p->w[4], p->w[5], 0);
+    } else {}
+}
+
+/** Names the state with these words (gstate_t's `w`: the page, palette, window, the buffer's corner,
+ *  the drawing area's corners, then depth, blend and flags): the current one when it is that — the
+ *  runtime sends a state only when its own fields change — else one the frame recorded, else a new
+ *  record. Compared as seven words in one test, written as words where fourteen fields went one by
+ *  one through r0. */
+static inline void state_enter(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3, uint32_t w4,
+                               uint32_t w5, uint32_t w6) {
+    if(g_state_count > 0 && state_same(&g_states[g_state_cur], w0, w1, w2, w3, w4, w5, w6)) return;
+    else {}
+    uint32_t h = state_hash(w0, w1, w2, w3, w6);
+    for(;;) {
+        const int k = g_sdedup[h];
+        if(k == 0) break;
+        else {}
+        if(state_same(&g_states[k - 1], w0, w1, w2, w3, w4, w5, w6)) {
+            g_state_cur = k - 1;
+            return;
+        } else {}
+        h = (h + 1) & ((1u << SDEDUP_BITS) - 1);
+    }
+    if(g_state_count >= GPU_MAX_STATES) {
+        /* Unreachable: a state is recorded only when it differs, and each primitive latches at
+         * most one; if it ever fires, that reasoning broke. */
+        static int warned;
+        if(!warned) { warned = 1; bp_log(BP_LOG_WARN, "gpu: state table overflow — impossible"); }
+        return;
+    } else {}
+    gstate_t* s = &g_states[g_state_count];
+    shz_dcache_alloc_line(s);       /* every word is written below */
+    s->w[0] = w0; s->w[1] = w1; s->w[2] = w2; s->w[3] = w3;
+    s->w[4] = w4; s->w[5] = w5; s->w[6] = w6;
+    s->w[7] = area_index(w3, w4, w5, g_state_count) << 16;   /* tris 0, and its area */
+    if(g_state_count < SDEDUP_FILL) g_sdedup[h] = (uint16_t)(g_state_count + 1);
+    else {}
+    g_state_cur = g_state_count++;
+}
+
+/* A state from the runtime: its words with the drawing area latched by bp_gpu_clip. */
+static inline void state_record(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3, uint32_t w6) {
+    begin_frame_if_needed();
+    const uint32_t w4 = ((uint32_t)g_clip_x0 & 0xFFFFu) | ((uint32_t)g_clip_y0 << 16);
+    const uint32_t w5 = ((uint32_t)g_clip_x1 & 0xFFFFu) | ((uint32_t)g_clip_y1 << 16);
+    state_enter(w0, w1, w2, w3, w4, w5, w6);
+}
+
+/* The words of a state's line from its values: halfword pairs, and depth, blend and flags in bytes
+ * (pad 0). Every value is within its field (pages, palettes and corners within VRAM, depth and blend
+ * 0-3, flags 0-7), so the words compare as the fields did. */
+#define STATE_W0(lo, hi)    (((uint32_t)(lo) & 0xFFFFu) | ((uint32_t)(hi) << 16))
+#define STATE_W6(d, sm, f)  (((uint32_t)(d) & 0xFFu) | (((uint32_t)(sm) & 0xFFu) << 8) | (((uint32_t)(f) & 0xFFu) << 16))
 
 void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
                   int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
                   int draw_x, int draw_y) {
-    begin_frame_if_needed();
-    /* Recorded only when it differs from the last one: primitives arrive in runs that share a
-     * page, so the table stays a fraction of the command count. */
-    if(g_state_count > 0) {
-        const gstate_t* p = &g_states[g_state_count - 1];
-        if(p->tex_x == tex_base_x && p->tex_y == tex_base_y && p->depth == tex_depth
-           && p->clut_x == clut_x && p->clut_y == clut_y && p->semi_mode == semi_mode
-           && p->flags == flags && p->window == (uint32_t)tex_window
-           && p->draw_x == draw_x && p->draw_y == draw_y
-           && p->clip_x0 == g_clip_x0 && p->clip_y0 == g_clip_y0
-           && p->clip_x1 == g_clip_x1 && p->clip_y1 == g_clip_y1)
-            return;
-    }
-    if(g_state_count >= GPU_MAX_STATES) {
-        /* Unreachable by the bound above; if it ever fires, the bound's reasoning broke. */
-        static int warned;
-        if(!warned) { warned = 1; bp_log(BP_LOG_WARN, "gpu: state table overflow — impossible"); }
-        return;
-    }
-    gstate_t* s = &g_states[g_state_count++];
-    shz_dcache_alloc_line(s);       /* every field is written below */
-    s->tex_x = (uint16_t)tex_base_x;
-    s->tex_y = (uint16_t)tex_base_y;
-    s->depth = (uint8_t)tex_depth;
-    s->clut_x = (uint16_t)clut_x;
-    s->clut_y = (uint16_t)clut_y;
-    s->semi_mode = (uint8_t)semi_mode;
-    s->flags = (uint8_t)flags;
-    s->window = (uint32_t)tex_window;
-    s->draw_x = (int16_t)draw_x;
-    s->draw_y = (int16_t)draw_y;
-    s->clip_x0 = (int16_t)g_clip_x0; s->clip_y0 = (int16_t)g_clip_y0;
-    s->clip_x1 = (int16_t)g_clip_x1; s->clip_y1 = (int16_t)g_clip_y1;
-    s->pad = 0;
-    s->tris = 0;
+    state_record(STATE_W0(tex_base_x, tex_base_y), STATE_W0(clut_x, clut_y), (uint32_t)tex_window,
+                 STATE_W0(draw_x, draw_y), STATE_W6(tex_depth, semi_mode, flags));
+}
+
+/* bp_gpu_state from the runtime's words (ADR-0047): read after nothing that could change them,
+ * nothing held across the frame's begin. Forced inline: LTO takes it into the runtime's polygon
+ * path. */
+__attribute__((always_inline))
+void bp_gpu_state_w(const int* w) {
+    state_record(STATE_W0(w[0], w[1]), STATE_W0(w[3], w[4]), (uint32_t)w[7], STATE_W0(w[8], w[9]),
+                 STATE_W6(w[2], w[5], w[6]));
 }
 
 /* A new record's line, allocated in the cache without a read (see gcmd_t). The caller writes
@@ -199,12 +302,18 @@ static inline gcmd_t* cmd_alloc(void) {
     return c;
 }
 
-static inline gcmd_t* cmd_new(void) {
+/* A new record's line: the frame begun, the scene marked, the buffer's end kept. */
+static inline gcmd_t* cmd_line(void) {
     begin_frame_if_needed();
     g_scene_dirty = 1;
     if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }
-    gcmd_t* c = cmd_alloc();
-    c->state = (uint16_t)(g_state_count > 0 ? g_state_count - 1 : 0);
+    return cmd_alloc();
+}
+
+static inline gcmd_t* cmd_new(void) {
+    gcmd_t* c = cmd_line();
+    if(!c) return NULL;
+    c->state = (uint16_t)(g_state_count > 0 ? g_state_cur : 0);
     return c;
 }
 
@@ -219,7 +328,7 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
     if(!c) return;
     /* Counted where it is recorded, on the state line just written, so that palette_priority
      * reads the few states instead of walking every record — a cache miss each — again. */
-    if(g_state_count > 0) g_states[g_state_count - 1].tris++;
+    if(g_state_count > 0) g_states[g_state_cur].tris++;
     else {}
     c->is_rect = GCMD_TRI;
     c->x[0] = (int16_t)x0; c->y[0] = (int16_t)y0; c->u[0] = (uint8_t)u0; c->v[0] = (uint8_t)v0;
@@ -230,6 +339,30 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
     c->argb[0] = (uint32_t)c0 & 0x00FFFFFFu;
     c->argb[1] = (uint32_t)c1 & 0x00FFFFFFu;
     c->argb[2] = (uint32_t)c2 & 0x00FFFFFFu;
+}
+
+/* bp_gpu_tri from the runtime's words (ADR-0047): the same record, written as the line's eight
+ * words (gcmd_t's `w`) — positions in halfword pairs, colours masked, u0-u2 v0 and v1 v2 with the
+ * tag, the state index and the kind in one store — each word made from words read after the line
+ * is allocated, so nothing of the triangle is held across cmd_line. The texture words' bits 16-31
+ * are zero (the ABI says so). Forced inline for the same reason as bp_gpu_tri (LTO takes it into the
+ * runtime's polygon path). */
+__attribute__((always_inline))
+void bp_gpu_tri_w(const int* w) {
+    gcmd_t* c = cmd_line();
+    if(!c) return;
+    uint32_t state = 0;
+    if(g_state_count > 0) { state = (uint32_t)g_state_cur; g_states[state].tris++; }
+    else {}
+    const uint32_t t0 = (uint32_t)w[3], t1 = (uint32_t)w[7], t2 = (uint32_t)w[11];
+    c->w[0] = ((uint32_t)w[0] & 0xFFFFu) | ((uint32_t)w[4] << 16);
+    c->w[1] = ((uint32_t)w[8] & 0xFFFFu) | ((uint32_t)w[1] << 16);
+    c->w[2] = ((uint32_t)w[5] & 0xFFFFu) | ((uint32_t)w[9] << 16);
+    c->w[3] = (uint32_t)w[2] & 0x00FFFFFFu;
+    c->w[4] = (uint32_t)w[6] & 0x00FFFFFFu;
+    c->w[5] = (uint32_t)w[10] & 0x00FFFFFFu;
+    c->w[6] = (t0 & 0xFFu) | ((t1 & 0xFFu) << 8) | ((t2 & 0xFFu) << 16) | ((t0 & 0xFF00u) << 16);
+    c->w[7] = (t1 >> 8) | (t2 & 0xFF00u) | (((state & 0x3FFFu) | ((uint32_t)GCMD_TRI << 14)) << 16);
 }
 
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
@@ -339,14 +472,11 @@ static void mark_vram(int x, int y, int w, int h) {
 void bp_gpu_clip(int x0, int y0, int x1, int y1) {
     g_clip_x0 = x0; g_clip_y0 = y0; g_clip_x1 = x1; g_clip_y1 = y1;
     begin_frame_if_needed();
-    if(g_state_count <= 0 || g_state_count >= GPU_MAX_STATES) return;
-    const gstate_t* p = &g_states[g_state_count - 1];
-    if(p->clip_x0 == x0 && p->clip_y0 == y0 && p->clip_x1 == x1 && p->clip_y1 == y1) return;
-    gstate_t* n = &g_states[g_state_count++];
-    *n = *p;
-    n->clip_x0 = (int16_t)x0; n->clip_y0 = (int16_t)y0;
-    n->clip_x1 = (int16_t)x1; n->clip_y1 = (int16_t)y1;
-    n->tris = 0;
+    if(g_state_count <= 0) return;
+    const gstate_t* p = &g_states[g_state_cur];
+    state_enter(p->w[0], p->w[1], p->w[2], p->w[3],
+                ((uint32_t)x0 & 0xFFFFu) | ((uint32_t)y0 << 16),
+                ((uint32_t)x1 & 0xFFFFu) | ((uint32_t)y1 << 16), p->w[6]);
 }
 
 /* Recorded, not yet applied. The PVR has no stencil; the browser backend models these with one. */
@@ -640,6 +770,13 @@ static inline void vert_set(gvert_t* t, float sx, float sy, int ox, int oy, floa
  *  volatile, so the queue's stores keep their order and the `pref` its place. */
 static inline void sq_vertex(uint32_t end, uint32_t flags, float x, float y, float u, float v,
                              uint32_t argb) {
+#if RECOMPSX_TA_HASH
+    {
+        pvr_vertex_t h;
+        h.flags = flags; h.x = x; h.y = y; h.z = 1.0f; h.u = u; h.v = v; h.argb = argb; h.oargb = 0;
+        TA_HASH(&h);
+    }
+#endif
     __asm__ __volatile__(
         "mov.l   %[zero], @-%[p]\n\t"   /* oargb */
         "mov.l   %[argb], @-%[p]\n\t"
@@ -673,6 +810,30 @@ static inline uint32_t put_tri_at(uint32_t a, const gcmd_t* c, const uint32_t* c
 
 /** An untextured triangle: the same, with no texture coordinates to compute. An untextured
  *  header's vertex (the TA's packed-colour type 0) ignores the two words where U and V go. */
+/* A texel coordinate of the common binding — a whole 256-texel page, no patch origin (`ou` and `ov` 0)
+ * — as put_tri_at works it out, (2 * u + 1) * (1 / 512): the texel's centre. Exact either way (an odd
+ * integer below 2^9 times a power of two), so a table read gives the bits the arithmetic did, where
+ * that was a byte load through r0's address forms, an add, a subtract, a conversion and a multiply
+ * for each of six coordinates a triangle. Filled by build_scene's first call. */
+static float g_uv256[256];
+
+/** put_tri_at for the common binding (g_uv256): the record's texture words read whole, each
+ *  coordinate a byte of them and an indexed load. */
+static inline uint32_t put_tri_uv256_at(uint32_t a, const gcmd_t* c, const uint32_t* col, const gvert_t* t) {
+    const uint32_t w6 = c->w[6], w7 = c->w[7];
+    const uint32_t uv[6] = { w6 & 0xFFu, (w6 >> 8) & 0xFFu, (w6 >> 16) & 0xFFu, w6 >> 24, w7 & 0xFFu,
+                             (w7 >> 8) & 0xFFu };
+    for(int k = 0; k < 3; k++) {
+        const float x = (float)(c->x[k] - t->ox) * t->sx;
+        const float y = (float)(c->y[k] - t->oy) * t->sy;
+        const float u = g_uv256[uv[k]];
+        const float v = g_uv256[uv[3 + k]];
+        a ^= 32;
+        sq_vertex(a + 32, (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, x, y, u, v, col[k]);
+    }
+    return a;
+}
+
 static inline uint32_t put_tri_col_at(uint32_t a, const gcmd_t* c, const uint32_t* col, const gvert_t* t) {
     for(int k = 0; k < 3; k++) {
         const float x = (float)(c->x[k] - t->ox) * t->sx;
@@ -687,21 +848,75 @@ static inline void put_tri(const gcmd_t* c, const uint32_t* col, const gvert_t* 
     pvr_dr_addr = put_tri_at(pvr_dr_addr, c, col, t);
 }
 
-/* The current run's header and its brightening header, as build_scene last emitted them. */
+/** A header into the store queue that ends at `end`, and the queue sent to the TA: its eight words
+ *  through two integer registers, written backwards as sq_vertex writes a vertex. For run_tris,
+ *  which keeps the queue's address in a register and the vertex terms in the FPU's: put_hdr goes
+ *  through pvr_dr_addr and copies with the FPU's pair moves, which clobber eight of its registers. */
+static inline void sq_header(uint32_t end, const pvr_poly_hdr_t* h) {
+    TA_HASH(h);
+    uint32_t t0, t1;
+    __asm__ __volatile__(
+        "mov.l   @(28,%[h]), %[t0]\n\t"
+        "mov.l   @(24,%[h]), %[t1]\n\t"
+        "mov.l   %[t0], @-%[p]\n\t"
+        "mov.l   @(20,%[h]), %[t0]\n\t"
+        "mov.l   %[t1], @-%[p]\n\t"
+        "mov.l   @(16,%[h]), %[t1]\n\t"
+        "mov.l   %[t0], @-%[p]\n\t"
+        "mov.l   @(12,%[h]), %[t0]\n\t"
+        "mov.l   %[t1], @-%[p]\n\t"
+        "mov.l   @(8,%[h]), %[t1]\n\t"
+        "mov.l   %[t0], @-%[p]\n\t"
+        "mov.l   @(4,%[h]), %[t0]\n\t"
+        "mov.l   %[t1], @-%[p]\n\t"
+        "mov.l   @%[h], %[t1]\n\t"
+        "mov.l   %[t0], @-%[p]\n\t"
+        "mov.l   %[t1], @-%[p]\n\t"
+        "pref    @%[p]"
+        : [p] "+r" (end), [t0] "=&r" (t0), [t1] "=&r" (t1)
+        : [h] "r" (h), "m" (*(const uint8_t (*)[32])h));
+}
+
+/* The current run's header and its brightening header, as build_scene last emitted them; restated
+ * from where g_run_hdr_p points: g_run_hdr, or a state's entry in g_sres. */
 static pvr_poly_hdr_t g_run_hdr __attribute__((aligned(32)));
 static pvr_poly_hdr_t g_run_over __attribute__((aligned(32)));
+static const pvr_poly_hdr_t* g_run_hdr_p = &g_run_hdr;
 
-/* The scene's binding as build_scene last emitted it, and what put_tri adds after scaling. */
+/* What build_scene worked out for a state of this build, by its index (states are recorded once a
+ * frame by content, state_enter): the textures it binds — as g_tbind keeps them by what they bind,
+ * without the hash — and the header made for that binding, sent again from here at each return to
+ * the state, where emit_header hashed, searched and copied it every time. Direct-mapped; an entry is
+ * its state's while `tag` says so in this build (`gen`). */
+#define SRES_BITS 7
+typedef struct __attribute__((aligned(32))) {
+    pvr_poly_hdr_t hdr;         /* the header made for (mem, fmt, dim), when hdr_ok */
+    pvr_ptr_t mir, mem;
+    int       fmt, dim;
+    float     alpha;
+    union {
+        struct { uint16_t tag, gen; };
+        uint32_t key;           /* tag | gen << 16: the entry's state in this build, one compare */
+    };
+    int16_t   bank, slot;
+    uint8_t   patch8, bind_ok, hdr_ok;
+} gsres_t;
+static gsres_t g_sres[1 << SRES_BITS];
+
+/* A binding of the semi-transparent path, as semi_bind made it (see g_semi_binds). */
+typedef struct gsemibind gsemibind_t;
+
+/* The scene's placement and clipping, the semi-transparent path's current binding, and the terms
+ * the clipper adds after scaling. */
 typedef struct {
     float     scale_x, scale_y;
-    int       state, fmt, dim, ou, ov, kind;
-    pvr_ptr_t mem;
-    /* The reciprocal of the bound texture's size, so the vertex loop multiplies where it used to
-     * divide. The divisor is constant for a whole run of primitives and SH-4's FDIV is expensive
-     * and poorly pipelined; at three vertices and two coordinates each, a busy scene was asking
-     * for nine thousand divisions a frame to compute a number that changes a few dozen times. */
+    /* The semi-transparent path's binding — its header, the terms put_tri adds, the vertex alpha —
+     * when its header was the last one sent; NULL when another went out after it. */
+    const gsemibind_t* e;
+    /* What put_clipped adds after scaling, for the triangle it is given: the reciprocal of the bound
+     * texture's size, so the clipper multiplies where it used to divide — SH-4's FDIV is expensive
+     * and poorly pipelined — and the offsets. */
     float     rdim, xo, yo, uo, vo;
-    uint32_t  a;              /* the vertex alpha the header's blend wants, in place */
     /* The current state's buffer corner in VRAM (screen_origin) and its drawing area, both in
      * VRAM units: the area as integers for the inside test, and as the edges the clipper cuts
      * at — the right and bottom one past the last pixel, since pixel x covers [x, x + 1). */
@@ -713,7 +928,6 @@ typedef struct {
      * arena brightens a quarter of them. Now the run's header is kept when first emitted and
      * copied back (`restate`), and the brightening header is looked up once per run. */
     int       restate, over_ready;
-    gvert_t   t;              /* put_tri's form of the same binding (vert_set) */
 } gscene_t;
 
 /* A texture, bound: where it is, its format and size, and the patch origin in texels. */
@@ -953,6 +1167,7 @@ static void put_clipped(const gcmd_t* c, const uint32_t* col, const gscene_t* g)
         d->argb = a | ((uint32_t)(q->r + 0.5f) << 16) | ((uint32_t)(q->g + 0.5f) << 8)
                 | (uint32_t)(q->b + 0.5f);
         d->oargb = 0;
+        TA_HASH(d);
         pvr_dr_commit(d);
     }
 }
@@ -978,54 +1193,28 @@ static inline int tri_inside(const gcmd_t* c, const gscene_t* g) {
     return 1;
 }
 
-static inline void emit_tri(const gcmd_t* c, const uint32_t* col, const gscene_t* g) {
-    if(tri_inside(c, g)) {
-        if(g->mem) put_tri(c, col, &g->t);
-        else pvr_dr_addr = put_tri_col_at(pvr_dr_addr, c, col, &g->t);   /* an untextured pass */
-    } else
-        put_clipped(c, col, g);
-}
-
 /* The passes of a semi-transparent primitive (semi_prim), and their parts. Opaque primitives —
  * nearly all of them — keep build_scene's own loop, which is where this machinery first lived:
  * spread over calls, it cost Crash Bash a second of its 32 s window and Crash 3 a fifth of its
  * scene build. */
 
-/** A new binding: its header, and the offsets put_tri adds under it. */
-__attribute__((noinline))
-static void scene_header(gscene_t* g, int state, const gstate_t* s, const gbind_t* b, int kind) {
-    g->state = state; g->mem = b->mem; g->fmt = b->fmt; g->dim = b->dim;
-    g->ou = b->ou; g->ov = b->ov; g->kind = kind;
-    g->rdim = 1.0f / (float)b->dim;
-    const float alpha = emit_header(b->mem, b->fmt, b->dim, s, 0, kind, &g_run_hdr);
-    g->restate = 0;
-    g->over_ready = 0;
-    /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture the
-     * texel centre less the patch origin. rdim is a power of two, so the texture terms are exact
-     * either way round. */
-    g->xo = -(float)g->ox * g->scale_x;
-    g->yo = -(float)g->oy * g->scale_y;
-    g->uo = (0.5f - (float)b->ou) * g->rdim;
-    g->vo = (0.5f - (float)b->ov) * g->rdim;
-    vert_set(&g->t, g->scale_x, g->scale_y, g->ox, g->oy, g->rdim, b->ou, b->ov);
-    g->a = (uint32_t)(alpha * 255.0f) << 24;
-}
-
 /* The bindings a run of semi-transparent primitives goes back and forth between — a subtraction's
- * inverting and adding passes, a split CLUT's solid and STP ones — each set up once for the scene
- * and then restated from here. scene_header hashed and searched the header cache, divided for
- * rdim and set the vertex terms up again at every change, three to four times for each triangle
- * Crash 3 subtracts (a hundred a frame on its title screen). Keyed by everything scene_pass
- * compares; the state index is only a state's own for one scene, so build_scene clears them. */
+ * inverting and adding passes, a split CLUT's solid and STP ones — each set up once for the scene:
+ * its header compiled, its vertex terms worked out, and from then on pointed at (gscene_t's `e`),
+ * the header sent again from the entry. Copying the terms back at every change was most of a
+ * change, three to four times for each triangle Crash 3 subtracts (a hundred a frame on its title
+ * screen). Keyed by everything a pass compares; the state index is only a state's own for one
+ * scene, so build_scene clears them. */
 #define SEMI_BINDS 4
-typedef struct __attribute__((aligned(32))) {
+struct __attribute__((aligned(32))) gsemibind {
     pvr_poly_hdr_t hdr;
     gvert_t   t;
     int       state, fmt, dim, ou, ov, kind;
     pvr_ptr_t mem;
     float     rdim, xo, yo, uo, vo;
-    uint32_t  a;
-} gsemibind_t;
+    uint32_t  a;              /* the vertex alpha the header's blend wants, in place */
+    int       uv256;          /* the common binding: put_tri_uv256_at's coordinates */
+};
 static gsemibind_t g_semi_binds[SEMI_BINDS];
 static int g_semi_next;
 
@@ -1034,43 +1223,73 @@ static void semi_binds_clear(void) {
     g_semi_next = 0;
 }
 
-/** scene_header, answered from g_semi_binds when this scene has seen the binding: the header sent
- *  again as it was compiled, and the terms put back. */
-static void scene_bind(gscene_t* g, int state, const gstate_t* s, const gbind_t* b, int kind) {
+/** A pass's binding: its entry of g_semi_binds when this scene has made it, else a new one — the
+ *  header compiled or found (emit_header), the offsets put_tri adds under it worked out — and its
+ *  header sent. */
+static const gsemibind_t* semi_bind(gscene_t* g, int state, const gstate_t* s, const gbind_t* b,
+                                    int kind) {
+    g->restate = 0;
+    g->over_ready = 0;
     for(int k = 0; k < SEMI_BINDS; k++) {
         const gsemibind_t* e = &g_semi_binds[k];
         if(e->state == state && e->mem == b->mem && e->fmt == b->fmt && e->dim == b->dim
            && e->ou == b->ou && e->ov == b->ov && e->kind == kind) {
-            shz_memcpy32_1(&g_run_hdr, &e->hdr);
-            put_hdr(&g_run_hdr);
-            g->state = state; g->mem = b->mem; g->fmt = b->fmt; g->dim = b->dim;
-            g->ou = b->ou; g->ov = b->ov; g->kind = kind;
-            g->rdim = e->rdim; g->xo = e->xo; g->yo = e->yo; g->uo = e->uo; g->vo = e->vo;
-            g->t = e->t; g->a = e->a;
-            g->restate = 0;
-            g->over_ready = 0;
-            return;
+            put_hdr(&e->hdr);
+            g->e = e;
+            return e;
         } else {}
     }
-    scene_header(g, state, s, b, kind);
     gsemibind_t* e = &g_semi_binds[g_semi_next];
     g_semi_next = (g_semi_next + 1) & (SEMI_BINDS - 1);
-    shz_memcpy32_1(&e->hdr, &g_run_hdr);
     e->state = state; e->mem = b->mem; e->fmt = b->fmt; e->dim = b->dim;
     e->ou = b->ou; e->ov = b->ov; e->kind = kind;
-    e->rdim = g->rdim; e->xo = g->xo; e->yo = g->yo; e->uo = g->uo; e->vo = g->vo;
-    e->t = g->t; e->a = g->a;
+    e->rdim = 1.0f / (float)b->dim;
+    const float alpha = emit_header(b->mem, b->fmt, b->dim, s, 0, kind, &e->hdr);
+    /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture the texel
+     * centre less the patch origin. rdim is a power of two, so the texture terms are exact either
+     * way round. */
+    e->xo = -(float)g->ox * g->scale_x;
+    e->yo = -(float)g->oy * g->scale_y;
+    e->uo = (0.5f - (float)b->ou) * e->rdim;
+    e->vo = (0.5f - (float)b->ov) * e->rdim;
+    vert_set(&e->t, g->scale_x, g->scale_y, g->ox, g->oy, e->rdim, b->ou, b->ov);
+    e->a = (uint32_t)(alpha * 255.0f) << 24;
+    e->uv256 = e->t.ou2 == -1 && e->t.ov2 == -1 && e->t.rh == 1.0f / 512.0f;
+    g->e = e;
+    return e;
+}
+
+/* What every pass of a semi-transparent primitive shares, worked out once by semi_prim: whether it
+ * lies within its drawing area (a rectangle always: the runtime clipped it), its colours — doubled
+ * for a textured one, its alpha the pass's own — and whether one of them brightens. */
+typedef struct {
+    int      inside, bright;
+    uint32_t rgb[3];
+} gprim_t;
+
+/** A triangle of one pass under binding e: within its drawing area straight to the store queue (the
+ *  common binding's coordinates from g_uv256), else through the clipper with e's terms. */
+static void semi_tri(gscene_t* g, const gsemibind_t* e, const gcmd_t* c, const uint32_t* col,
+                     int inside) {
+    if(inside) {
+        if(!e->mem) pvr_dr_addr = put_tri_col_at(pvr_dr_addr, c, col, &e->t);   /* untextured */
+        else if(e->uv256) pvr_dr_addr = put_tri_uv256_at(pvr_dr_addr, c, col, &e->t);
+        else put_tri(c, col, &e->t);
+    } else {
+        g->rdim = e->rdim; g->xo = e->xo; g->yo = e->yo; g->uo = e->uo; g->vo = e->vo;
+        put_clipped(c, col, g);
+    }
 }
 
 /** A rectangle: four vertices, untextured (the runtime clipped it already). */
 __attribute__((noinline))
-static void scene_rect(const gscene_t* g, const gcmd_t* c, int kind) {
-    const float x0 = (float)c->x[0] * g->scale_x + g->xo;
-    const float y0 = (float)c->y[0] * g->scale_y + g->yo;
-    const float x1 = (float)(c->x[0] + c->x[1]) * g->scale_x + g->xo;
-    const float y1 = (float)(c->y[0] + c->y[1]) * g->scale_y + g->yo;
+static void scene_rect(const gscene_t* g, const gsemibind_t* e, const gcmd_t* c, int kind) {
+    const float x0 = (float)c->x[0] * g->scale_x + e->xo;
+    const float y0 = (float)c->y[0] * g->scale_y + e->yo;
+    const float x1 = (float)(c->x[0] + c->x[1]) * g->scale_x + e->xo;
+    const float y1 = (float)(c->y[0] + c->y[1]) * g->scale_y + e->yo;
     const uint32_t argb = kind == HK_INVERT ? 0xFFFFFFFFu
-                        : ((bgr_to_argb(c->argb[0]) & 0x00FFFFFFu) | g->a);
+                        : (bgr_to_rgb(c->argb[0]) | e->a);
     for(int k = 0; k < 4; k++) {
         pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
         v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -1080,6 +1299,7 @@ static void scene_rect(const gscene_t* g, const gcmd_t* c, int kind) {
         v->u = 0.0f; v->v = 0.0f;
         v->argb = argb;
         v->oargb = 0;
+        TA_HASH(v);
         pvr_dr_commit(v);
     }
 }
@@ -1090,8 +1310,8 @@ static void scene_rect(const gscene_t* g, const gcmd_t* c, int kind) {
  *  second, additive pass of the same triangle (emit_header's `over`); only primitives that
  *  brighten pay for it. */
 __attribute__((noinline))
-static void scene_bright(gscene_t* g, const gcmd_t* c, const gstate_t* s, const gbind_t* b,
-                         int kind) {
+static void scene_bright(gscene_t* g, const gsemibind_t* e, const gcmd_t* c, const gstate_t* s,
+                         const gbind_t* b, int kind, int inside) {
     if(g->over_ready) put_hdr(&g_run_over);
     else {
         emit_header(b->mem, b->fmt, b->dim, s, 1, kind, &g_run_over);
@@ -1099,8 +1319,8 @@ static void scene_bright(gscene_t* g, const gcmd_t* c, const gstate_t* s, const 
     }
     uint32_t col[3];
     for(int k = 0; k < 3; k++)
-        col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | g->a;
-    emit_tri(c, col, g);
+        col[k] = bgr_to_rgb_over(c->argb[k]) | e->a;
+    semi_tri(g, e, c, col, inside);
     g->restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
     g_bright_prims++;
@@ -1133,34 +1353,32 @@ static inline int bind_texture(const gcmd_t* c, const gstate_t* s, int am, grun_
 
 /** One pass of one primitive: its header when the binding changed, then its vertices by KOS
  *  direct rendering (put_tri), where pvr_prim built each one on the stack and copied it through
- *  a call. */
+ *  a call. What the passes share comes worked out (`p`); a pass adds its binding's alpha. */
 static void scene_pass(gscene_t* g, const gcmd_t* c, int state, const gstate_t* s,
-                       const gbind_t* b, int kind) {
-    if(state != g->state || b->mem != g->mem || b->fmt != g->fmt || b->dim != g->dim
-       || b->ou != g->ou || b->ov != g->ov || kind != g->kind) {
-        scene_bind(g, state, s, b, kind);
+                       const gbind_t* b, int kind, const gprim_t* p) {
+    const gsemibind_t* e = g->e;
+    if(!e || state != e->state || b->mem != e->mem || b->fmt != e->fmt || b->dim != e->dim
+       || b->ou != e->ou || b->ov != e->ov || kind != e->kind) {
+        e = semi_bind(g, state, s, b, kind);
     } else if(g->restate) {
-        put_hdr(&g_run_hdr);
+        put_hdr(&e->hdr);
         g->restate = 0;
     }
     if(c->is_rect) {
-        scene_rect(g, c, kind);
+        scene_rect(g, e, c, kind);
         return;
     }
     uint32_t col[3];
-    int bright = 0;
     if(kind == HK_INVERT) {
         col[0] = col[1] = col[2] = 0xFFFFFFFFu;     /* an inverting pass is white */
     } else {
-        const uint32_t a = g->a;
-        for(int k = 0; k < 3; k++) {
-            col[k] = ((b->mem ? bgr_to_argb_mod(c->argb[k]) : bgr_to_argb(c->argb[k]))
-                      & 0x00FFFFFFu) | a;
-            if(b->mem && bgr_brightens(c->argb[k])) bright = 1;
-        }
+        const uint32_t a = e->a;
+        col[0] = p->rgb[0] | a; col[1] = p->rgb[1] | a; col[2] = p->rgb[2] | a;
     }
-    emit_tri(c, col, g);
-    if(bright && kind != HK_ADD && !(s->flags & BP_GPU_RAW)) scene_bright(g, c, s, b, kind);
+    semi_tri(g, e, c, col, p->inside);
+    if(p->bright && b->mem && kind != HK_INVERT && kind != HK_ADD && !(s->flags & BP_GPU_RAW))
+        scene_bright(g, e, c, s, b, kind, p->inside);
+    else {}
 }
 
 /** B - F, which the PVR's blender cannot subtract, as 1 - ((1 - B) + F) in three passes of the
@@ -1171,11 +1389,11 @@ static void scene_pass(gscene_t* g, const gcmd_t* c, int state, const gstate_t* 
  *  Warped fades every transition with a full-screen quad in this mode, its colour stepping from
  *  FFFFFF (black) to 121212; drawn half-and-half, the screen went a flat grey instead. */
 static void subtract_passes(gscene_t* g, const gcmd_t* c, int state, const gstate_t* s,
-                            const gbind_t* b) {
+                            const gbind_t* b, const gprim_t* p) {
     const gbind_t none = { NULL, 0, TEX_DIM, 0, 0 };
-    scene_pass(g, c, state, s, &none, HK_INVERT);
-    scene_pass(g, c, state, s, b, HK_ADD);
-    scene_pass(g, c, state, s, &none, HK_INVERT);
+    scene_pass(g, c, state, s, &none, HK_INVERT, p);
+    scene_pass(g, c, state, s, b, HK_ADD, p);
+    scene_pass(g, c, state, s, &none, HK_INVERT, p);
 }
 
 /** A semi-transparent primitive, as the PlayStation draws it: per texel for a textured one —
@@ -1187,14 +1405,31 @@ static void subtract_passes(gscene_t* g, const gcmd_t* c, int state, const gstat
  *  against the hardware's sixty-four (split that way, the banks ran out and the frame went 10 %
  *  slower). A primitive sampling more than one patch, or one on a windowed page, is still drawn
  *  whole, every visible texel blended. Uka Uka's jaw in Crash 3's intro is such a CLUT — black
- *  opaque texels and two STP ones in a 50 % blend — and drawn whole it was see-through red. */
+ *  opaque texels and two STP ones in a 50 % blend — and drawn whole it was see-through red.
+ *
+ *  What its passes share — the inside test, the colours, whether one brightens — is worked out
+ *  here, once (`gprim_t`), where each pass did all of it again. */
 __attribute__((noinline))
 static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const gstate_t* s) {
     static const gbind_t none = { NULL, 0, TEX_DIM, 0, 0 };
     const int sub = s->semi_mode == 2;
+    gprim_t p;
+    p.bright = 0;
+    if(c->is_rect) p.inside = 1;
+    else {
+        p.inside = tri_inside(c, g);
+        if(s->flags & BP_GPU_TEXTURED) {
+            for(int k = 0; k < 3; k++) {
+                p.rgb[k] = bgr_to_rgb_mod(c->argb[k]);
+                p.bright |= bgr_brightens(c->argb[k]);
+            }
+        } else {
+            for(int k = 0; k < 3; k++) p.rgb[k] = bgr_to_rgb(c->argb[k]);
+        }
+    }
     if(!(s->flags & BP_GPU_TEXTURED) || c->is_rect) {
-        if(sub) subtract_passes(g, c, state, s, &none);
-        else scene_pass(g, c, state, s, &none, HK_NORMAL);
+        if(sub) subtract_passes(g, c, state, s, &none, &p);
+        else scene_pass(g, c, state, s, &none, HK_NORMAL, &p);
         return;
     }
     if(state != r->state) run_begin(r, s, state);
@@ -1202,58 +1437,120 @@ static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const 
     gbind_t b;
     if(r->cls == CLS_SOLID) {
         /* No texel blends: drawn as the opaque primitive it is. */
-        if(bind_texture(c, s, AM_VIS, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);
+        if(bind_texture(c, s, AM_VIS, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE, &p);
         return;
     }
     if(r->cls == CLS_MIXED && s->depth == 0 && r->mir) {
         gbind_t solid;
         if(bind_baked(c, s, AM_SOLID, &solid) && bind_baked(c, s, AM_STP, &b)) {
-            scene_pass(g, c, state, s, &solid, HK_OPAQUE);
-            if(sub) subtract_passes(g, c, state, s, &b);
-            else scene_pass(g, c, state, s, &b, HK_NORMAL);
+            scene_pass(g, c, state, s, &solid, HK_OPAQUE, &p);
+            if(sub) subtract_passes(g, c, state, s, &b, &p);
+            else scene_pass(g, c, state, s, &b, HK_NORMAL, &p);
             return;
         }
     }
     const int split = r->cls == CLS_MIXED && s->depth != 0;
-    if(split && bind_texture(c, s, AM_SOLID, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE);
+    if(split && bind_texture(c, s, AM_SOLID, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE, &p);
     if(!bind_texture(c, s, split ? AM_STP : AM_VIS, r, &b)) return;
-    if(sub) subtract_passes(g, c, state, s, &b);
-    else scene_pass(g, c, state, s, &b, HK_NORMAL);
+    if(sub) subtract_passes(g, c, state, s, &b, &p);
+    else scene_pass(g, c, state, s, &b, HK_NORMAL, &p);
 }
 
-/** The rest of an opaque run: the triangles after `c` recorded under the same state (one compare
- *  of the record's tag), drawn with the binding `c` was. Everything else build_scene's loop asks of
- *  a record — its state's area and blending, its texture, the header — is the same for all of them,
- *  and each was ~40 instructions of that loop a triangle. Stops at the first record that needs more
- *  than its colours and three vertices, a brightened one (a second pass) or one reaching past the
- *  drawing area (the clipper), which build_scene then takes as before; returns it. Its own function,
- *  so that the binding's terms and the queue address stay in registers for the run. */
+/* What a run's triangles need of build_scene's header bookkeeping: whether the run's header must be
+ * said again before the next triangle (`restate`: a brightening pass or a VRAM mark went out after
+ * it), whether g_run_over holds the binding's brightening header, and what that header is made
+ * from when it does not — the binding's texture, format, size and state, as the run's header was. */
+typedef struct {
+    int restate, over_ready;
+    pvr_ptr_t mem;
+    int fmt, dim;
+    const gstate_t* s;
+} gpass_t;
+
+/** The brightening header (emit_header's `over`), the first time a run asks for it: compiled or
+ *  found, kept in g_run_over and sent. Out of line: once per binding at most. */
+__attribute__((noinline))
+static void over_header(gpass_t* h) {
+    emit_header(h->mem, h->fmt, h->dim, h->s, 1, HK_NORMAL, &g_run_over);
+    h->over_ready = 1;
+}
+
+/** An opaque run: `c` and the triangles after it recorded under the same state (one compare of
+ *  the record's tag), drawn with the binding `c` was, up to `end`. Everything else build_scene's
+ *  loop asks of a record — its state's area and blending, its texture, the header — is the same for
+ *  all of them, and each was ~40 instructions of that loop a triangle. A brightened triangle's second
+ *  pass goes out here too, under the brightening header, and the run's header after it (`restate`):
+ *  in Crash Bash two of every three textured triangles brighten, and each went back through
+ *  build_scene's loop, whose frame is too large for the SH-4's registers. Stops at the first triangle
+ *  reaching past the drawing area (the clipper), which build_scene then takes as before; returns
+ *  it. Its own function, so that the binding's terms and the queue address stay in registers. */
 __attribute__((noinline))
 static const gcmd_t* run_tris(const gcmd_t* c, const gcmd_t* end, uint32_t a, int textured, int raw,
-                              const gscene_t* g, const gvert_t* bt) {
+                              const gscene_t* g, const gvert_t* bt, gpass_t* h) {
     const uint16_t tag = c->tag;
     const gvert_t t = *bt;
     uint32_t q = pvr_dr_addr;
     uint32_t col[3];
-    c++;
+    /* The common binding's coordinates from g_uv256 (see there): ou2 and ov2 are 2 * 0 - 1, rh 1/512. */
+    const int uv256 = t.ou2 == -1 && t.ov2 == -1 && t.rh == 1.0f / 512.0f;
     if(textured) {
         for(; c < end && c->tag == tag; c++) {
             SHZ_PREFETCH(c + 4);
-            int bright = 0;
-            for(int k = 0; k < 3; k++) {
-                col[k] = (bgr_to_argb_mod(c->argb[k]) & 0x00FFFFFFu) | a;
-                bright |= bgr_brightens(c->argb[k]);
-            }
-            if((bright && !raw) || !tri_inside(c, g)) break;
+            if(!tri_inside(c, g)) break;
             else {}
-            q = put_tri_at(q, c, col, &t);
+            int bright = 0;
+            /* A flat triangle's three colours are the command word's (the polygon core writes it
+             * for each vertex): converted once. */
+            const uint32_t c0 = c->argb[0];
+            if(c->argb[1] == c0 && c->argb[2] == c0) {
+                col[0] = col[1] = col[2] = bgr_to_rgb_mod(c0) | a;
+                bright = bgr_brightens(c0);
+            } else {
+                for(int k = 0; k < 3; k++) {
+                    col[k] = bgr_to_rgb_mod(c->argb[k]) | a;
+                    bright |= bgr_brightens(c->argb[k]);
+                }
+            }
+            if(h->restate) {
+                q ^= 32;
+                sq_header(q + 32, g_run_hdr_p);
+                h->restate = 0;
+            } else {}
+            q = uv256 ? put_tri_uv256_at(q, c, col, &t) : put_tri_at(q, c, col, &t);
+            if(bright && !raw) {
+                /* The part above 1.0, added (see build_scene): its header, the triangle again in
+                 * what the clamp lost, and the run's header before the next one. */
+                if(h->over_ready) {
+                    q ^= 32;
+                    sq_header(q + 32, &g_run_over);
+                } else {
+                    pvr_dr_addr = q;
+                    over_header(h);
+                    q = pvr_dr_addr;
+                }
+                if(c->argb[1] == c0 && c->argb[2] == c0) col[0] = col[1] = col[2] = bgr_to_rgb_over(c0) | a;
+                else {
+                    for(int k = 0; k < 3; k++)
+                        col[k] = bgr_to_rgb_over(c->argb[k]) | a;
+                }
+                q = uv256 ? put_tri_uv256_at(q, c, col, &t) : put_tri_at(q, c, col, &t);
+                h->restate = 1;
+#if RECOMPSX_DC_PROFILE
+                g_bright_prims++;
+#endif
+            } else {}
         }
     } else {
         for(; c < end && c->tag == tag; c++) {
             SHZ_PREFETCH(c + 4);
-            for(int k = 0; k < 3; k++) col[k] = (bgr_to_argb(c->argb[k]) & 0x00FFFFFFu) | a;
             if(!tri_inside(c, g)) break;
             else {}
+            for(int k = 0; k < 3; k++) col[k] = bgr_to_rgb(c->argb[k]) | a;
+            if(h->restate) {
+                q ^= 32;
+                sq_header(q + 32, g_run_hdr_p);
+                h->restate = 0;
+            } else {}
             q = put_tri_col_at(q, c, col, &t);
         }
     }
@@ -1280,6 +1577,11 @@ typedef struct {
 static gtbind_t g_tbind[1 << TBIND_BITS];
 static uint16_t g_tbind_gen;
 
+/* A g_sres entry's key for a state of this build: its tag and gen as one word. */
+static inline uint32_t sres_key(int state) {
+    return (uint32_t)(uint16_t)state | ((uint32_t)g_tbind_gen << 16);
+}
+
 static inline gtbind_t* tbind_at(uint32_t page, uint32_t clut, uint32_t window, int depth) {
     uint32_t h = page * 2654435761u + clut;
     h = h * 2654435761u + window + (uint32_t)depth;
@@ -1294,42 +1596,59 @@ static inline int slot_holds(int i, const gstate_t* s) {
         && (s->depth != 1 || (g_tex[i].clut_x == s->clut_x && g_tex[i].clut_y == s->clut_y));
 }
 
+/** A state's binding into its g_sres entry, the entry taken for it if another state had it. */
+static inline void sres_bind(gsres_t* sr, int state, pvr_ptr_t mir, int bank, int slot, int patch8) {
+    const uint32_t key = sres_key(state);
+    if(sr->key != key) {
+        sr->key = key; sr->hdr_ok = 0;
+    } else {}
+    sr->mir = mir; sr->bank = (int16_t)bank; sr->slot = (int16_t)slot; sr->patch8 = (uint8_t)patch8;
+    sr->bind_ok = 1;
+}
+
 PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
     if(sw <= 0 || sh <= 0) return;
     const float scale_x = 640.0f / (float)sw;
     const float scale_y = 480.0f / (float)sh;
 
     pvr_list_begin(PVR_LIST_TR_POLY);
+#if RECOMPSX_TA_HASH
+    g_ta_hash = 2166136261u;
+    g_ta_hashing = 1;
+#endif
 
     if(with_background) {
         put_hdr(&g_hdr);
         draw_quad(sw, sh);
     }
 
+    if(g_uv256[255] == 0.0f) {
+        for(int u = 0; u < 256; u++) g_uv256[u] = (float)(2 * u + 1) * (1.0f / 512.0f);
+    } else {}
+
     g_pal_memo_gen++;         /* VRAM may have changed since the last build */
     palette_priority();
     semi_binds_clear();
     if(++g_tbind_gen == 0) {   /* a wrapped generation would find last builds' answers valid */
         for(int k = 0; k < (1 << TBIND_BITS); k++) g_tbind[k].gen = 0;
+        for(int k = 0; k < (1 << SRES_BITS); k++) g_sres[k].gen = 0;
         g_tbind_gen = 1;
     } else {}
+    g_run_hdr_p = &g_run_hdr;
 
     /* The semi-transparent path's own binding and texture answers (semi_prim), and what both
      * paths share: the scale, and the current state's buffer corner and drawing area. */
     gscene_t g;
     g.scale_x = scale_x; g.scale_y = scale_y;
-    g.state = -1; g.fmt = -1; g.dim = 0; g.ou = 0; g.ov = 0; g.kind = -1;
-    g.mem = NULL;
+    g.e = NULL;
     g.rdim = 1.0f / (float)TEX_DIM;
     g.xo = 0.0f; g.yo = 0.0f; g.uo = 0.0f; g.vo = 0.0f;
-    g.a = 0xFF000000u;
     g.restate = 0; g.over_ready = 0;
     g.ox = 0; g.oy = 0; g.clx0 = 0; g.cly0 = 0; g.clx1 = 1023; g.cly1 = 511;
     g.cut_x = 0; g.cut_y = 0;
     grun_t semi_run;
     semi_run.state = -1;
-    int placed_state = -1, placed = 0;
-    int area[6] = { -1, -1, -1, -1, -1, -1 };
+    int placed_state = -1, placed = 0, placed_area = -1;
 
     int cur_state = -1, cur_fmt = -1, cur_dim = 0, cur_ou = 0, cur_ov = 0;
     /* The reciprocal of the bound texture's size, so the vertex loop multiplies where it used to
@@ -1347,7 +1666,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * state compared, the cache hashed and searched — twice per brightened primitive, and a busy
      * arena brightens a quarter of them. Now the run's header is kept when first emitted and
      * copied back (`restate`), and the brightening header is looked up once per run. */
-    int restate = 0, over_ready = 0;
+    gpass_t h;
+    h.restate = 0; h.over_ready = 0; h.mem = NULL; h.fmt = 0; h.dim = TEX_DIM; h.s = NULL;
     float cur_xo = 0.0f, cur_yo = 0.0f, cur_uo = 0.0f, cur_vo = 0.0f;
     gvert_t cur_t;
     vert_set(&cur_t, scale_x, scale_y, 0, 0, cur_rdim, 0, 0);
@@ -1362,7 +1682,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
          * end it touches the memory after the array, which is harmless. */
         SHZ_PREFETCH(c + 4);
         if(c->is_rect == GCMD_VRAM) {
-            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) { restate = 1; g.state = -1; }
+            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) { h.restate = 1; g.e = NULL; }
             else {}
             continue;
         } else {}
@@ -1376,10 +1696,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
          * because a new state always re-emits the header. */
         if((int)c->state != placed_state) {
             placed_state = (int)c->state;
-            if(s->draw_x != area[0] || s->draw_y != area[1] || s->clip_x0 != area[2]
-               || s->clip_y0 != area[3] || s->clip_x1 != area[4] || s->clip_y1 != area[5]) {
-                area[0] = s->draw_x; area[1] = s->draw_y; area[2] = s->clip_x0;
-                area[3] = s->clip_y0; area[4] = s->clip_x1; area[5] = s->clip_y1;
+            if((int)s->area != placed_area) {
+                placed_area = (int)s->area;
                 int ow = 0, oh = 0;   /* unset when not placed, and then never read */
                 placed = screen_origin(s, &g.ox, &g.oy, &ow, &oh);
                 /* Only the edges of the drawing area that lie inside the picture are cut here;
@@ -1413,12 +1731,19 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 run_state = (int)c->state;
                 const uint32_t pk = (uint32_t)s->tex_x | ((uint32_t)s->tex_y << 16);
                 const uint32_t ck = (uint32_t)s->clut_x | ((uint32_t)s->clut_y << 16);
-                gtbind_t* tb = tbind_at(pk, ck, s->window, s->depth);
-                if(tb->gen == g_tbind_gen && tb->page == pk && tb->clut == ck
+                gsres_t* sr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
+                gtbind_t* tb;
+                if(sr->key == sres_key(c->state) && sr->bind_ok
+                   && (sr->slot < 0 || slot_holds(sr->slot, s))) {
+                    run_mir = sr->mir; run_bank = sr->bank; run_slot = sr->slot;
+                    run_patch8 = sr->patch8;
+                } else if(tb = tbind_at(pk, ck, s->window, s->depth),
+                   tb->gen == g_tbind_gen && tb->page == pk && tb->clut == ck
                    && tb->window == s->window && tb->depth == s->depth
                    && (tb->slot < 0 || slot_holds(tb->slot, s))) {
                     run_mir = tb->mir; run_bank = tb->bank; run_slot = tb->slot;
                     run_patch8 = tb->patch8;
+                    sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
                 } else {
                     run_bank = -1; run_slot = -1; run_mir = NULL;
                     /* The page grid is the mirror's index, so a page origin that is not on
@@ -1445,6 +1770,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                     tb->depth = s->depth; tb->gen = g_tbind_gen;
                     tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
                     tb->patch8 = (uint8_t)run_patch8;
+                    sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
                 }
             }
             if(run_mir && run_bank >= 0) {
@@ -1494,9 +1820,28 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
            || dim != cur_dim || ou != cur_ou || ov != cur_ov) {
             cur_state = (int)c->state;
             cur_mem = mem; cur_fmt = fmt; cur_ou = ou; cur_ov = ov;
-            alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &g_run_hdr);
-            restate = 0;
-            over_ready = 0;
+            /* A state's own binding (not a baked patch's): its header from g_sres when this build
+             * made it for this binding, else made, sent and kept there. */
+            gsres_t* sr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
+            if(!per_state) {
+                alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &g_run_hdr);
+                g_run_hdr_p = &g_run_hdr;
+            } else if(sr->key == sres_key(c->state) && sr->hdr_ok && sr->mem == mem
+                      && sr->fmt == fmt && sr->dim == dim) {
+                put_hdr(&sr->hdr);
+                alpha = sr->alpha;
+                g_run_hdr_p = &sr->hdr;
+            } else {
+                if(sr->key != sres_key(c->state)) {
+                    sr->key = sres_key(c->state); sr->bind_ok = 0;
+                } else {}
+                alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &sr->hdr);
+                sr->mem = mem; sr->fmt = fmt; sr->dim = dim; sr->alpha = alpha; sr->hdr_ok = 1;
+                g_run_hdr_p = &sr->hdr;
+            }
+            h.restate = 0;
+            h.over_ready = 0;
+            h.mem = mem; h.fmt = fmt; h.dim = dim; h.s = s;
             /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture
              * the texel centre less the patch origin. rdim is a power of two, so the texture
              * terms are exact either way round. They depend on the size, the patch and the
@@ -1515,10 +1860,10 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 vs_alpha = alpha;
                 cur_a = (uint32_t)(alpha * 255.0f) << 24;
             } else {}
-            g.state = -1;           /* the semi-transparent path's header is not the last one now */
-        } else if(restate) {
-            put_hdr(&g_run_hdr);
-            restate = 0;
+            g.e = NULL;             /* the semi-transparent path's header is not the last one now */
+        } else if(h.restate) {
+            put_hdr(g_run_hdr_p);
+            h.restate = 0;
         } else {}
 
         /* Vertices go by KOS direct rendering (put_tri), where pvr_prim built each one on the
@@ -1529,7 +1874,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             const float y0 = (float)c->y[0] * scale_y + cur_yo;
             const float x1 = (float)(c->x[0] + c->x[1]) * scale_x + cur_xo;
             const float y1 = (float)(c->y[0] + c->y[1]) * scale_y + cur_yo;
-            const uint32_t argb = (bgr_to_argb(c->argb[0]) & 0x00FFFFFFu) | a;
+            const uint32_t argb = bgr_to_rgb(c->argb[0]) | a;
             for(int k = 0; k < 4; k++) {
                 pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
                 v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -1539,52 +1884,54 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 v->u = 0.0f; v->v = 0.0f;
                 v->argb = argb;
                 v->oargb = 0;
+                TA_HASH(v);
                 pvr_dr_commit(v);
             }
         } else {
-            /* A textured primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to
-             * nearly 2.0 — which the PVR's modulate cannot, so a menu's text drawn in a bright
-             * gradient over a grey font came out at half its brightness, dull and olive. The part
-             * above 1.0 is drawn as a second, additive pass of the same triangle (emit_header's
-             * `over`); only primitives that brighten pay for it. */
+            /* This triangle and the records after it under the same binding: run_tris, unless this
+             * one reaches past the drawing area. A baked patch binds one record (per_state 0). */
+            const gcmd_t* next = run_tris(c, per_state ? &g_cmds[g_cmd_count] : c + 1, a, mem != NULL,
+                                          (s->flags & BP_GPU_RAW) != 0, &g, &cur_t, &h);
+            if(next != c) {
+                i = (int)(next - g_cmds) - 1;
+                continue;
+            } else {}
+            /* Cut to the drawing area where it reaches past an edge inside the picture. A textured
+             * primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to nearly 2.0 —
+             * which the PVR's modulate cannot, so a menu's text drawn in a bright gradient over a
+             * grey font came out at half its brightness, dull and olive. The part above 1.0 is
+             * drawn as a second, additive pass of the same triangle (emit_header's `over`); only
+             * primitives that brighten pay for it. */
             uint32_t col[3];
             int bright = 0;
             for(int k = 0; k < 3; k++) {
-                col[k] = ((mem ? bgr_to_argb_mod(c->argb[k]) : bgr_to_argb(c->argb[k]))
-                          & 0x00FFFFFFu) | a;
+                col[k] = (mem ? bgr_to_rgb_mod(c->argb[k]) : bgr_to_rgb(c->argb[k])) | a;
                 if(mem && bgr_brightens(c->argb[k])) bright = 1;
             }
-            /* Cut to the drawing area where it reaches past an edge inside the picture. */
-            const int inside = tri_inside(c, &g);
-            if(!inside) {
-                g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.uo = cur_uo; g.vo = cur_vo;
-            } else {}
-            if(inside) {
-                if(mem) put_tri(c, col, &cur_t);
-                else pvr_dr_addr = put_tri_col_at(pvr_dr_addr, c, col, &cur_t);
-            } else put_clipped(c, col, &g);
+            g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.uo = cur_uo; g.vo = cur_vo;
+            put_clipped(c, col, &g);
             if(bright && !(s->flags & BP_GPU_RAW)) {
-                if(over_ready) put_hdr(&g_run_over);
-                else {
-                    emit_header(mem, fmt, dim, s, 1, HK_NORMAL, &g_run_over);
-                    over_ready = 1;
-                }
+                if(h.over_ready) put_hdr(&g_run_over);
+                else over_header(&h);
                 for(int k = 0; k < 3; k++)
-                    col[k] = (bgr_to_argb_over(c->argb[k]) & 0x00FFFFFFu) | a;
-                if(inside) put_tri(c, col, &cur_t);
-                else put_clipped(c, col, &g);
-                restate = 1;      /* the next primitive of the run restates its header */
+                    col[k] = bgr_to_rgb_over(c->argb[k]) | a;
+                put_clipped(c, col, &g);
+                h.restate = 1;      /* the next primitive of the run restates its header */
 #if RECOMPSX_DC_PROFILE
                 g_bright_prims++;
 #endif
             } else {}
-            if(per_state && !restate) {
-                const gcmd_t* next = run_tris(c, &g_cmds[g_cmd_count], a, mem != NULL,
-                                              (s->flags & BP_GPU_RAW) != 0, &g, &cur_t);
-                i = (int)(next - g_cmds) - 1;
-            } else {}
         }
     }
+#if RECOMPSX_TA_HASH
+    g_ta_hashing = 0;
+    {
+        static unsigned scenes;
+        char m[48];
+        snprintf(m, sizeof m, "ta hash %u %08x", ++scenes, (unsigned)g_ta_hash);
+        bp_log(BP_LOG_WARN, m);
+    }
+#endif
 #if RECOMPSX_DC_PROFILE_OVERLAY
     /* Last: the list is drawn in submission order, so anything submitted before the game's
      * primitives is painted over by them — as the overlay was, when it followed the background. */

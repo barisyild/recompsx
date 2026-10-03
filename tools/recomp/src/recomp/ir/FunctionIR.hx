@@ -21,9 +21,11 @@ class FunctionIR {
 		for (id in 0...order.length) {
 			final source = fn.blocks.get(order[id]);
 			final block = new BlockIR(id, source.addr);
+			final ranges = new recomp.analysis.RegisterRanges();
 			for (n in 0...source.length) {
 				final addr = source.addr + n * 4;
 				final instruction = new InstructionIR(Decoder.decode(addr, image.readWord(addr)));
+				ranges.visit(instruction);
 				block.instructions.push(instruction);
 				block.cycles += instruction.cycles;
 				if (block.transfer == null) {
@@ -145,6 +147,14 @@ class InstructionIR {
 			case SYSCALL | BREAK: effects = Effect.TRAP;
 			case INVALID: effects = Effect.UNKNOWN;
 		}
+		if (i.op == Op.ADD || i.op == Op.SUB || i.op == Op.ADDI) effects |= Effect.TRAP;
+	}
+
+	/** Called only after a signed-range proof; decoded opcodes and cycle costs stay intact. */
+	public function proveNoOverflow():Void {
+		if (decoded.op != Op.ADD && decoded.op != Op.SUB && decoded.op != Op.ADDI)
+			throw 'overflow proof on a non-arithmetic instruction';
+		effects &= ~(Effect.TRAP : Int);
 	}
 
 	inline function read(r:Int):Void { reads = reads.withRegister(r); }

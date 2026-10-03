@@ -38,9 +38,999 @@ import shim.MemA;
 **/
 // The register file (shim.GteFile) must be declared in every translation unit that inlines a GTE
 // access, and reflaxe does not carry an extern's include along an inlining chain; this header is the
-// one they all include, as Memory's is for guest memory — recompsx_gte.h, which is the arena's and
-// GteFile.dot3's. Ignored by targets without C++ headers.
-@:headerCode("#include \"recompsx_gte.h\"")
+// one they all include, as Memory's is for guest memory: the arena's, and GteFile.dot3's one
+// computation, written here because a C implementation lives only in a backend (the owner's rule)
+// while C injected into Haxe is the shims' and the runtime's own way to reach the machine.
+//
+// recompsx_gte_dot3(m, v) is the low 32 bits of the sum of three products of signed halfwords of the
+// register file: halfwords m, m+1, m+2 with v, v+1, v+2, halfword h being word h/2's low half for an
+// even h and its high half for an odd one. The packed rotation matrix (RTP) keeps a row as three
+// consecutive halfwords, and so is each vertex RTPS/RTPT transforms. The products are within 2^30 and
+// the sum wraps, so every target computes the same number: the JavaScript and JVM shims from the
+// words, and this one on any host as the C below.
+//
+// On the SH-4 it is the multiply-accumulate unit, straight from memory: three `mac.w @Rm+,@Rn+` after
+// a `clrmac`, the sum read once. The C form is three `mul.l`, and the SH-4 has one MACL, so each
+// product waited for the multiplier and was read out alone — nine of those were a third of RTPS
+// (E-048). Little-endian only, as the Dreamcast is: halfword h is then at byte 2h. With SR.S clear
+// (nothing on the Dreamcast sets it) MACH:MACL is 64 bits wide and MACL is the wrapped sum. Only the
+// MAC registers are clobbered, and the words read are named as inputs (two per operand: three
+// halfwords from any start span two words), so the compiler orders the asm after the stores that set
+// them without a "memory" clobber, which would make it reload everything it held from the file.
+// Ignored by targets without C++ headers.
+@:headerCode("#include \"recompsx_arena.h\"
+#ifndef RECOMPSX_GTE_DOT3
+#define RECOMPSX_GTE_DOT3
+static inline __attribute__((always_inline)) int recompsx_gte_dot3(int m, int v) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__)
+	const short* pm = (const short*)recompsx_gte + m;
+	const short* pv = (const short*)recompsx_gte + v;
+	int r;
+	__asm__(\"clrmac\\n\\t\"
+	        \"mac.w   @%1+, @%2+\\n\\t\"
+	        \"mac.w   @%1+, @%2+\\n\\t\"
+	        \"mac.w   @%1+, @%2+\\n\\t\"
+	        \"sts     macl, %0\"
+	        : \"=r\" (r), \"+r\" (pm), \"+r\" (pv)
+	        : \"m\" (*(const int (*)[2])(recompsx_gte + (m >> 1))),
+	          \"m\" (*(const int (*)[2])(recompsx_gte + (v >> 1)))
+	        : \"macl\", \"mach\");
+	return r;
+#else
+#define RECOMPSX_GTE_HALF(h) ((int)(short)(unsigned short)((unsigned)recompsx_gte[(h) >> 1] >> (((h) & 1) << 4)))
+	return (int)((unsigned)(RECOMPSX_GTE_HALF(m) * RECOMPSX_GTE_HALF(v))
+	           + (unsigned)(RECOMPSX_GTE_HALF(m + 1) * RECOMPSX_GTE_HALF(v + 1))
+	           + (unsigned)(RECOMPSX_GTE_HALF(m + 2) * RECOMPSX_GTE_HALF(v + 2)));
+#undef RECOMPSX_GTE_HALF
+#endif
+}
+#endif
+#ifndef RECOMPSX_GTE_RTP
+#define RECOMPSX_GTE_RTP
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM)
+#define RECOMPSX_GTE_RARE __attribute__((noinline, cold))
+#else
+#define RECOMPSX_GTE_RARE
+#endif
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM)
+extern \"C\" void recompsx_gte_rtp1(void);
+extern \"C\" void recompsx_gte_rtp1n(void);
+static inline __attribute__((always_inline)) int recompsx_gte_rtp_run(int* g, int vh, int lm, int last) {
+	register int r0 __asm__(\"r0\");
+	register int* r4 __asm__(\"r4\") = g + (vh >> 1);
+	register int r5 __asm__(\"r5\") = lm;
+	register int* r6 __asm__(\"r6\") = g;
+	void (*fn)(void) = last ? recompsx_gte_rtp1 : recompsx_gte_rtp1n;
+	__asm__ __volatile__(\"jsr @%5\\n\\tnop\"
+	        : \"=r\" (r0), \"+r\" (r4), \"+r\" (r5), \"+r\" (r6), \"+m\" (*(int (*)[656])g)
+	        : \"r\" (fn)
+	        : \"r1\", \"r2\", \"r3\", \"r7\", \"pr\", \"macl\", \"mach\", \"t\");
+	return r0;
+}
+#if RECOMPSX_GTE_RTP_CHECK
+#include <cstdio>
+#include \"backend_c_api.h\"
+struct recompsx_gte_rtp_state { int shadow[656]; int rc, tables; unsigned calls, done, declined, bad; };
+inline recompsx_gte_rtp_state& recompsx_gte_rtp_st() { static recompsx_gte_rtp_state s; return s; }
+inline int recompsx_gte_rtp_check(int vh, int lm, int last) {
+	recompsx_gte_rtp_state& s = recompsx_gte_rtp_st();
+	if(!s.tables) { for(int i = 0; i < 656; i++) s.shadow[i] = recompsx_gte[i]; s.tables = 1; }
+	for(int i = 0; i < 81; i++) s.shadow[i] = recompsx_gte[i];
+	for(int i = 648; i < 653; i++) s.shadow[i] = recompsx_gte[i];
+	s.rc = recompsx_gte_rtp_run(s.shadow, vh, lm, last);
+	s.calls++;
+	return 1;
+}
+inline void recompsx_gte_rtp_checked(void) {
+	recompsx_gte_rtp_state& s = recompsx_gte_rtp_st();
+	if(s.rc == 0) {
+		s.done++;
+		for(int i = 0; i < 81; i++) {
+			if(s.shadow[i] != recompsx_gte[i]) {
+				if(++s.bad <= 8) {
+					char b[96];
+					snprintf(b, sizeof b, \"gte rtp check: word %d %d, the C form %d\", i, s.shadow[i], recompsx_gte[i]);
+					bp_log(BP_LOG_WARN, b);
+				} else {}
+				break;
+			} else {}
+		}
+	} else s.declined++;
+	if((s.calls & 0xFFFF) == 0) {
+		char b[120];
+		snprintf(b, sizeof b, \"gte rtp check: %u calls, %u done, %u declined, %u differ\", s.calls, s.done, s.declined, s.bad);
+		bp_log(BP_LOG_WARN, b);
+	} else {}
+}
+#endif
+#endif
+static inline __attribute__((always_inline)) int recompsx_gte_rtp(int vh, int lm, int last) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM)
+#if RECOMPSX_GTE_RTP_CHECK
+	return recompsx_gte_rtp_check(vh, lm, last);
+#else
+	return recompsx_gte_rtp_run(recompsx_gte, vh, lm, last);
+#endif
+#else
+	(void)vh; (void)lm; (void)last;
+	return 1;
+#endif
+}
+static inline __attribute__((always_inline)) void recompsx_gte_rtp_after(void) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM) && RECOMPSX_GTE_RTP_CHECK
+	recompsx_gte_rtp_checked();
+#endif
+}
+#endif")
+// <dc-sched scripts/sh4/rtp1.blk scripts/sh4/rtp1n.blk> written by scripts/dc-sched.py --into: never edit by hand
+@:cppFileCode("#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM)
+__asm__(R\"ASM(
+	.pushsection .text.recompsx_gte_rtp1,\"ax\",@progbits
+	.align	5
+.Lrtp1_wneg0:
+	mov	#0,r2
+	mov	#6,r3
+	bra	.Lrtp1_wpush
+	shll16	r3
+.Lrtp1_wdiv0:
+	mov	r10,r2
+	mov	#2,r3
+	bra	.Lrtp1_wpush
+	shll16	r3
+.Lrtp1_undo0:
+	mov.l	@(48,r11),r1
+	mov.l	r1,@(0,r11)
+	mov.l	@(44,r11),r1
+	mov.l	r1,@(48,r11)
+	mov.l	@(40,r11),r1
+	mov.l	r1,@(44,r11)
+	mov.l	r7,@(40,r11)
+.Lrtp1_decline0:
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+	.global	_recompsx_gte_rtp1
+	.type	_recompsx_gte_rtp1,@function
+_recompsx_gte_rtp1:
+	mov	r5,r0
+	tst	#1,r0
+	mov.l	.Lrtp1_k2592,r0
+	mov	r4,r1
+	clrmac
+	add	r6,r0
+	mov.l	r8,@-r15
+	mac.w	@r0+,@r1+
+	mov.l	r9,@-r15
+	mov.l	r10,@-r15
+	mac.w	@r0+,@r1+
+	mov.l	@r4,r2
+	mov.l	r11,@-r15
+	mov	r6,r11
+	mac.w	@r0+,@r1+
+	mov	r4,r1
+	mov.l	@(4,r4),r3
+	mov.l	.Lrtp1_k3fff,r5
+	bf	.Lrtp1_decline0
+	sts	macl,r8
+	clrmac
+	mac.w	@r0+,@r1+
+	mov.l	.Lrtp1_km4000,r7
+	add	#64,r11
+	mac.w	@r0+,@r1+
+	mac.w	@r0+,@r1+
+	mov	r4,r1
+	exts.w	r2,r4
+	cmp/gt	r5,r4
+	sts	macl,r9
+	clrmac
+	mac.w	@r0+,@r1+
+	bt	.Lrtp1_decline0
+	cmp/ge	r7,r4
+	bf	.Lrtp1_decline0
+	cmp/gt	r5,r3
+	mac.w	@r0+,@r1+
+	bt	.Lrtp1_decline0
+	cmp/ge	r7,r3
+	mov	r2,r3
+	bf	.Lrtp1_decline0
+	mac.w	@r0+,@r1+
+	shll	r3
+	mov.l	.Lrtp1_k296,r0
+	xor	r2,r3
+	mov.l	@(36,r6),r1
+	mov	#-12,r5
+	cmp/pz	r3
+	mov.l	@(r0,r6),r0
+	shad	r5,r8
+	sts	macl,r10
+	bf	.Lrtp1_decline0
+	mov.l	@(40,r6),r2
+	add	r1,r8
+	tst	r0,r0
+	shad	r5,r9
+	bf	.Lrtp1_decline0
+	exts.w	r8,r1
+	mov.l	@(44,r6),r3
+	add	r2,r9
+	cmp/eq	r8,r1
+	shad	r5,r10
+	bf	.Lrtp1_decline0
+	exts.w	r9,r2
+	mov.l	@(56,r6),r1
+	add	r3,r10
+	cmp/eq	r9,r2
+	exts.w	r10,r3
+	bf	.Lrtp1_decline0
+	cmp/eq	r10,r3
+	mov	r10,r2
+	bf	.Lrtp1_decline0
+	cmp/pz	r10
+	extu.w	r1,r1
+	bf	.Lrtp1_wneg0
+	add	r2,r2
+	mov	r10,r0
+	cmp/gt	r1,r2
+	shlr8	r0
+	bf	.Lrtp1_wdiv0
+	tst	r0,r0
+	movt	r5
+	mov	r10,r2
+	neg	r5,r3
+	mov.l	@(44,r11),r4
+	and	r10,r3
+	mov.l	@(40,r11),r7
+	or	r3,r0
+	mov.l	.Lrtp1_k1568,r3
+	shll2	r0
+	mov.l	r4,@(40,r11)
+	add	r6,r3
+	mov.l	@(48,r11),r4
+	shll2	r5
+	mov.l	@(r0,r3),r3
+	shll	r5
+	mov.l	r4,@(44,r11)
+	add	r5,r3
+	mov.l	@(0,r11),r4
+	shld	r3,r2
+	clrt
+	mov	r2,r0
+	shld	r3,r1
+	add	#64,r0
+	mov.l	.Lrtp1_km512,r3
+	mov	#-7,r5
+	mov.l	r4,@(48,r11)
+	shld	r5,r0
+	mov.l	.Lrtp1_k101,r5
+	shll2	r0
+	mov.l	.Lrtp1_k80,r4
+	add	r6,r3
+	mov.l	r10,@(0,r11)
+	mov.l	@(r0,r3),r3
+	mov.l	.Lrtp1_k2000080,r0
+	add	r5,r3
+	mov.l	r8,@(4,r11)
+	mul.l	r3,r2
+	mov	#-8,r5
+	mov.l	r8,@(16,r11)
+	mov.l	r9,@(8,r11)
+	sts	macl,r2
+	mov.l	r9,@(20,r11)
+	mov.l	r10,@(12,r11)
+	sub	r2,r0
+	mov.l	.Lrtp1_k8000,r2
+	shad	r5,r0
+	mov.l	r10,@(24,r11)
+	mul.l	r3,r0
+	mov	#0,r3
+	sts	macl,r0
+	add	r4,r0
+	mov.l	@(52,r6),r4
+	shad	r5,r0
+	mov.l	.Lrtp1_k4000000,r5
+	dmulu.l	r1,r0
+	sts	macl,r1
+	sts	mach,r0
+	addc	r2,r1
+	mov.l	.Lrtp1_kFFFF,r2
+	addc	r3,r0
+	mov.l	@(60,r11),r3
+	xtrct	r0,r1
+	mul.l	r1,r8
+	cmp/hi	r2,r1
+	mov.l	@(48,r6),r2
+	bt	.Lrtp1_wq1
+	mov	#64,r0
+	sts	macl,r8
+	mul.l	r1,r9
+	addv	r8,r2
+	bt	.Lrtp1_undo1
+	sts	macl,r9
+	mul.l	r1,r3
+	addv	r9,r4
+	mov.l	@(r0,r11),r9
+	mov	r2,r1
+	mov	r4,r3
+	sts	macl,r10
+	bt	.Lrtp1_undo1
+	add	r5,r1
+	add	r5,r3
+	mov.l	.Lrtp1_k8000000,r5
+	addv	r10,r9
+	or	r3,r1
+	bt	.Lrtp1_undo1
+	cmp/hs	r5,r1
+	bt	.Lrtp1_sat
+	mov	r4,r0
+	shlr16	r0
+	xtrct	r0,r2
+	mov	#0,r3
+.Lrtp1_join_sat:
+	mov	#-12,r5
+	mov	r9,r1
+	shad	r5,r1
+	cmp/pz	r1
+	bt	.Lrtp1_ir0pos
+	mov.l	.Lrtp1_k1000,r5
+	mov	#0,r1
+	or	r5,r3
+.Lrtp1_join_ir0:
+	mov.l	@(32,r11),r4
+	mov.l	.Lrtp1_k292,r0
+	mov.l	r4,@(28,r11)
+	mov.l	@(r0,r6),r4
+	mov.l	@(36,r11),r5
+	shar	r4
+	mov.l	r2,@(36,r11)
+	mov.l	r5,@(32,r11)
+	mov.l	r9,@(52,r11)
+	mov.l	r1,@(56,r11)
+	mov.l	r4,@(r0,r6)
+	mov	#0,r0
+	mov.l	@r15+,r11
+	mov.l	@(60,r6),r4
+	mov.l	@r15+,r10
+	or	r3,r4
+	mov.l	r4,@(60,r6)
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+.Lrtp1_undo1:
+	mov.l	@(48,r11),r1
+	mov.l	r1,@(0,r11)
+	mov.l	@(44,r11),r1
+	mov.l	r1,@(48,r11)
+	mov.l	@(40,r11),r1
+	mov.l	r1,@(44,r11)
+	mov.l	r7,@(40,r11)
+.Lrtp1_decline1:
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+.Lrtp1_ir0pos:
+	mov.l	.Lrtp1_k1000,r5
+	cmp/gt	r5,r1
+	bf	.Lrtp1_join_ir0
+	mov	r5,r1
+	bra	.Lrtp1_join_ir0
+	or	r5,r3
+.Lrtp1_sat:
+	mov	#0,r3
+	mov	#-4,r1
+	shll8	r1
+	not	r1,r5
+	mov	r2,r0
+	shlr16	r0
+	exts.w	r0,r0
+	cmp/ge	r1,r0
+	bt	.Lrtp1_xnotlo
+	mov	r1,r0
+	mov	#64,r7
+	shll8	r7
+	bra	.Lrtp1_xdone
+	or	r7,r3
+.Lrtp1_xnotlo:
+	cmp/gt	r5,r0
+	bf	.Lrtp1_xdone
+	mov	r5,r0
+	mov	#64,r7
+	shll8	r7
+	or	r7,r3
+.Lrtp1_xdone:
+	extu.w	r0,r8
+	mov	r4,r0
+	shlr16	r0
+	exts.w	r0,r0
+	cmp/ge	r1,r0
+	bt	.Lrtp1_ynotlo
+	mov	r1,r0
+	mov	#32,r7
+	shll8	r7
+	bra	.Lrtp1_ydone
+	or	r7,r3
+.Lrtp1_ynotlo:
+	cmp/gt	r5,r0
+	bf	.Lrtp1_ydone
+	mov	r5,r0
+	mov	#32,r7
+	shll8	r7
+	or	r7,r3
+.Lrtp1_ydone:
+	shll16	r0
+	or	r0,r8
+	bra	.Lrtp1_join_sat
+	mov	r8,r2
+.Lrtp1_wq1:
+	mov	#2,r2
+	shll16	r2
+	cmp/hs	r2,r1
+	bf	.Lrtp1_wqn
+	mov	r2,r1
+	add	#-1,r1
+.Lrtp1_wqn:
+	mov	#0,r3
+.Lrtp1_wide:
+	mov.l	r8,@(4,r11)
+	mov.l	r9,@(8,r11)
+	mov.l	r10,@(12,r11)
+	mov.l	r8,@(16,r11)
+	mov.l	r9,@(20,r11)
+	mov.l	r10,@(24,r11)
+	dmuls.l	r8,r1
+	mov.l	@(48,r6),r2
+	mov	r2,r0
+	shll	r0
+	subc	r0,r0
+	sts	macl,r4
+	sts	mach,r5
+	clrt
+	addc	r2,r4
+	addc	r0,r5
+	mov	r4,r0
+	shll	r0
+	subc	r0,r0
+	cmp/eq	r0,r5
+	bt	.Lrtp1_wx
+	cmp/pz	r5
+	movt	r0
+	mov.l	.Lrtp1_k8000,r2
+	shld	r0,r2
+	or	r2,r3
+.Lrtp1_wx:
+	xtrct	r5,r4
+	mov	#-4,r2
+	shll8	r2
+	cmp/ge	r2,r4
+	bt	.Lrtp1_wxlo
+	mov	r2,r4
+	mov	#64,r0
+	shll8	r0
+	bra	.Lrtp1_wxd
+	or	r0,r3
+.Lrtp1_wxlo:
+	not	r2,r2
+	cmp/gt	r2,r4
+	bf	.Lrtp1_wxd
+	mov	r2,r4
+	mov	#64,r0
+	shll8	r0
+	or	r0,r3
+.Lrtp1_wxd:
+	extu.w	r4,r7
+	dmuls.l	r9,r1
+	mov.l	@(52,r6),r2
+	mov	r2,r0
+	shll	r0
+	subc	r0,r0
+	sts	macl,r4
+	sts	mach,r5
+	clrt
+	addc	r2,r4
+	addc	r0,r5
+	mov	r4,r9
+	mov	r4,r0
+	shll	r0
+	subc	r0,r0
+	cmp/eq	r0,r5
+	bt	.Lrtp1_wy
+	cmp/pz	r5
+	movt	r0
+	mov.l	.Lrtp1_k8000,r2
+	shld	r0,r2
+	or	r2,r3
+.Lrtp1_wy:
+	xtrct	r5,r4
+	mov	#-4,r2
+	shll8	r2
+	cmp/ge	r2,r4
+	bt	.Lrtp1_wylo
+	mov	r2,r4
+	mov	#32,r0
+	shll8	r0
+	bra	.Lrtp1_wyd
+	or	r0,r3
+.Lrtp1_wylo:
+	not	r2,r2
+	cmp/gt	r2,r4
+	bf	.Lrtp1_wyd
+	mov	r2,r4
+	mov	#32,r0
+	shll8	r0
+	or	r0,r3
+.Lrtp1_wyd:
+	shll16	r4
+	or	r4,r7
+	mov.l	@(60,r11),r2
+	dmuls.l	r2,r1
+	mov	#64,r0
+	mov.l	@(r0,r11),r2
+	mov	r2,r0
+	shll	r0
+	subc	r0,r0
+	sts	macl,r9
+	sts	mach,r5
+	clrt
+	addc	r2,r9
+	addc	r0,r5
+	mov	r9,r0
+	shll	r0
+	subc	r0,r0
+	cmp/eq	r0,r5
+	bt	.Lrtp1_wdq
+	cmp/pz	r5
+	movt	r0
+	mov.l	.Lrtp1_k8000,r2
+	shld	r0,r2
+	or	r2,r3
+.Lrtp1_wdq:
+	bra	.Lrtp1_join_sat
+	mov	r7,r2
+.Lrtp1_wpush:
+	mov.l	@(44,r11),r0
+	mov.l	r0,@(40,r11)
+	mov.l	@(48,r11),r0
+	mov.l	r0,@(44,r11)
+	mov.l	@(0,r11),r0
+	mov.l	r0,@(48,r11)
+	mov.l	r2,@(0,r11)
+	mov	#2,r1
+	shll16	r1
+	bra	.Lrtp1_wide
+	add	#-1,r1
+	.align	2
+.Lrtp1_k2592:	.long	2592
+.Lrtp1_k3fff:	.long	0x3FFF
+.Lrtp1_km4000:	.long	-0x4000
+.Lrtp1_k296:		.long	296
+.Lrtp1_km512:	.long	-512
+.Lrtp1_k101:		.long	0x101
+.Lrtp1_k2000080:	.long	0x2000080
+.Lrtp1_k80:		.long	0x80
+.Lrtp1_k8000:	.long	0x8000
+.Lrtp1_kFFFF:	.long	0xFFFF
+.Lrtp1_k4000000:	.long	0x4000000
+.Lrtp1_k8000000:	.long	0x8000000
+.Lrtp1_k292:		.long	292
+.Lrtp1_k1000:	.long	0x1000
+.Lrtp1_k1568:	.long	1568
+	.size	_recompsx_gte_rtp1, .-_recompsx_gte_rtp1
+	.popsection
+	.pushsection .text.recompsx_gte_rtp1n,\"ax\",@progbits
+	.align	5
+.Lrtp1n_wneg0:
+	mov	#0,r2
+	mov	#6,r3
+	bra	.Lrtp1n_wpush
+	shll16	r3
+.Lrtp1n_wdiv0:
+	mov	r10,r2
+	mov	#2,r3
+	bra	.Lrtp1n_wpush
+	shll16	r3
+.Lrtp1n_undo0:
+	mov.l	@(48,r11),r1
+	mov.l	r1,@(0,r11)
+	mov.l	@(44,r11),r1
+	mov.l	r1,@(48,r11)
+	mov.l	@(40,r11),r1
+	mov.l	r1,@(44,r11)
+	mov.l	r7,@(40,r11)
+.Lrtp1n_decline0:
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+	.global	_recompsx_gte_rtp1n
+	.type	_recompsx_gte_rtp1n,@function
+_recompsx_gte_rtp1n:
+	mov	r5,r0
+	tst	#1,r0
+	mov.l	.Lrtp1n_k2592,r0
+	mov	r4,r1
+	clrmac
+	add	r6,r0
+	mov.l	r8,@-r15
+	mac.w	@r0+,@r1+
+	mov.l	r9,@-r15
+	mov.l	r10,@-r15
+	mac.w	@r0+,@r1+
+	mov.l	@r4,r2
+	mov.l	r11,@-r15
+	mov	r6,r11
+	mac.w	@r0+,@r1+
+	mov	r4,r1
+	mov.l	@(4,r4),r3
+	mov.l	.Lrtp1n_k3fff,r5
+	bf	.Lrtp1n_decline0
+	sts	macl,r8
+	clrmac
+	mac.w	@r0+,@r1+
+	mov.l	.Lrtp1n_km4000,r7
+	add	#64,r11
+	mac.w	@r0+,@r1+
+	mac.w	@r0+,@r1+
+	mov	r4,r1
+	exts.w	r2,r4
+	cmp/gt	r5,r4
+	sts	macl,r9
+	clrmac
+	mac.w	@r0+,@r1+
+	bt	.Lrtp1n_decline0
+	cmp/ge	r7,r4
+	bf	.Lrtp1n_decline0
+	cmp/gt	r5,r3
+	mac.w	@r0+,@r1+
+	bt	.Lrtp1n_decline0
+	cmp/ge	r7,r3
+	mov	r2,r3
+	bf	.Lrtp1n_decline0
+	mac.w	@r0+,@r1+
+	shll	r3
+	mov.l	.Lrtp1n_k296,r0
+	xor	r2,r3
+	mov.l	@(36,r6),r1
+	mov	#-12,r5
+	cmp/pz	r3
+	mov.l	@(r0,r6),r0
+	shad	r5,r8
+	sts	macl,r10
+	bf	.Lrtp1n_decline0
+	mov.l	@(40,r6),r2
+	add	r1,r8
+	tst	r0,r0
+	shad	r5,r9
+	bf	.Lrtp1n_decline0
+	exts.w	r8,r1
+	mov.l	@(44,r6),r3
+	add	r2,r9
+	cmp/eq	r8,r1
+	shad	r5,r10
+	bf	.Lrtp1n_decline0
+	exts.w	r9,r2
+	mov.l	@(56,r6),r1
+	add	r3,r10
+	cmp/eq	r9,r2
+	exts.w	r10,r3
+	bf	.Lrtp1n_decline0
+	cmp/eq	r10,r3
+	mov	r10,r2
+	bf	.Lrtp1n_decline0
+	cmp/pz	r10
+	extu.w	r1,r1
+	bf	.Lrtp1n_wneg0
+	add	r2,r2
+	mov	r10,r0
+	cmp/gt	r1,r2
+	shlr8	r0
+	bf	.Lrtp1n_wdiv0
+	tst	r0,r0
+	movt	r5
+	mov	r10,r2
+	neg	r5,r3
+	mov.l	@(44,r11),r4
+	and	r10,r3
+	mov.l	@(40,r11),r7
+	or	r3,r0
+	mov.l	.Lrtp1n_k1568,r3
+	shll2	r0
+	mov.l	r4,@(40,r11)
+	add	r6,r3
+	mov.l	@(48,r11),r4
+	shll2	r5
+	mov.l	@(r0,r3),r3
+	shll	r5
+	mov.l	r4,@(44,r11)
+	add	r5,r3
+	mov.l	@(0,r11),r4
+	shld	r3,r2
+	clrt
+	mov	r2,r0
+	shld	r3,r1
+	add	#64,r0
+	mov.l	.Lrtp1n_km512,r3
+	mov	#-7,r5
+	mov.l	r4,@(48,r11)
+	shld	r5,r0
+	mov.l	.Lrtp1n_k101,r5
+	shll2	r0
+	mov.l	.Lrtp1n_k80,r4
+	add	r6,r3
+	mov.l	r10,@(0,r11)
+	mov.l	@(r0,r3),r3
+	mov.l	.Lrtp1n_k2000080,r0
+	add	r5,r3
+	mov.l	r8,@(4,r11)
+	mul.l	r3,r2
+	mov	#-8,r5
+	mov.l	r8,@(16,r11)
+	mov.l	r9,@(8,r11)
+	sts	macl,r2
+	mov.l	r9,@(20,r11)
+	mov.l	r10,@(12,r11)
+	sub	r2,r0
+	mov.l	.Lrtp1n_k8000,r2
+	shad	r5,r0
+	mov.l	r10,@(24,r11)
+	mul.l	r3,r0
+	mov	#0,r3
+	sts	macl,r0
+	add	r4,r0
+	mov.l	@(52,r6),r4
+	shad	r5,r0
+	mov.l	.Lrtp1n_k4000000,r5
+	dmulu.l	r1,r0
+	sts	macl,r1
+	sts	mach,r0
+	addc	r2,r1
+	mov.l	.Lrtp1n_kFFFF,r2
+	addc	r3,r0
+	xtrct	r0,r1
+	mul.l	r1,r8
+	cmp/hi	r2,r1
+	mov.l	@(48,r6),r2
+	bt	.Lrtp1n_wq1
+	sts	macl,r8
+	mul.l	r1,r9
+	addv	r8,r2
+	bt	.Lrtp1n_undo1
+	mov	r2,r1
+	sts	macl,r9
+	add	r5,r1
+	addv	r9,r4
+	mov	r4,r3
+	bt	.Lrtp1n_undo1
+	add	r5,r3
+	mov.l	.Lrtp1n_k8000000,r5
+	or	r3,r1
+	mov	r4,r9
+	cmp/hs	r5,r1
+	bt	.Lrtp1n_sat
+	mov	r4,r0
+	shlr16	r0
+	xtrct	r0,r2
+	mov	#0,r3
+.Lrtp1n_join_sat:
+	mov.l	@(32,r11),r4
+	mov.l	.Lrtp1n_k292,r0
+	mov.l	r4,@(28,r11)
+	mov.l	@(r0,r6),r4
+	mov.l	@(36,r11),r5
+	shar	r4
+	mov.l	r2,@(36,r11)
+	mov.l	r5,@(32,r11)
+	mov.l	r9,@(52,r11)
+	mov.l	r4,@(r0,r6)
+	mov	#0,r0
+	mov.l	@r15+,r11
+	mov.l	@(60,r6),r4
+	mov.l	@r15+,r10
+	or	r3,r4
+	mov.l	r4,@(60,r6)
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+.Lrtp1n_undo1:
+	mov.l	@(48,r11),r1
+	mov.l	r1,@(0,r11)
+	mov.l	@(44,r11),r1
+	mov.l	r1,@(48,r11)
+	mov.l	@(40,r11),r1
+	mov.l	r1,@(44,r11)
+	mov.l	r7,@(40,r11)
+.Lrtp1n_decline1:
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+.Lrtp1n_sat:
+	mov	#0,r3
+	mov	#-4,r1
+	shll8	r1
+	not	r1,r5
+	mov	r2,r0
+	shlr16	r0
+	exts.w	r0,r0
+	cmp/ge	r1,r0
+	bt	.Lrtp1n_xnotlo
+	mov	r1,r0
+	mov	#64,r7
+	shll8	r7
+	bra	.Lrtp1n_xdone
+	or	r7,r3
+.Lrtp1n_xnotlo:
+	cmp/gt	r5,r0
+	bf	.Lrtp1n_xdone
+	mov	r5,r0
+	mov	#64,r7
+	shll8	r7
+	or	r7,r3
+.Lrtp1n_xdone:
+	extu.w	r0,r8
+	mov	r4,r0
+	shlr16	r0
+	exts.w	r0,r0
+	cmp/ge	r1,r0
+	bt	.Lrtp1n_ynotlo
+	mov	r1,r0
+	mov	#32,r7
+	shll8	r7
+	bra	.Lrtp1n_ydone
+	or	r7,r3
+.Lrtp1n_ynotlo:
+	cmp/gt	r5,r0
+	bf	.Lrtp1n_ydone
+	mov	r5,r0
+	mov	#32,r7
+	shll8	r7
+	or	r7,r3
+.Lrtp1n_ydone:
+	shll16	r0
+	or	r0,r8
+	bra	.Lrtp1n_join_sat
+	mov	r8,r2
+.Lrtp1n_wq1:
+	mov	#2,r2
+	shll16	r2
+	cmp/hs	r2,r1
+	bf	.Lrtp1n_wqn
+	mov	r2,r1
+	add	#-1,r1
+.Lrtp1n_wqn:
+	mov	#0,r3
+.Lrtp1n_wide:
+	mov.l	r8,@(4,r11)
+	mov.l	r9,@(8,r11)
+	mov.l	r10,@(12,r11)
+	mov.l	r8,@(16,r11)
+	mov.l	r9,@(20,r11)
+	mov.l	r10,@(24,r11)
+	dmuls.l	r8,r1
+	mov.l	@(48,r6),r2
+	mov	r2,r0
+	shll	r0
+	subc	r0,r0
+	sts	macl,r4
+	sts	mach,r5
+	clrt
+	addc	r2,r4
+	addc	r0,r5
+	mov	r4,r0
+	shll	r0
+	subc	r0,r0
+	cmp/eq	r0,r5
+	bt	.Lrtp1n_wx
+	cmp/pz	r5
+	movt	r0
+	mov.l	.Lrtp1n_k8000,r2
+	shld	r0,r2
+	or	r2,r3
+.Lrtp1n_wx:
+	xtrct	r5,r4
+	mov	#-4,r2
+	shll8	r2
+	cmp/ge	r2,r4
+	bt	.Lrtp1n_wxlo
+	mov	r2,r4
+	mov	#64,r0
+	shll8	r0
+	bra	.Lrtp1n_wxd
+	or	r0,r3
+.Lrtp1n_wxlo:
+	not	r2,r2
+	cmp/gt	r2,r4
+	bf	.Lrtp1n_wxd
+	mov	r2,r4
+	mov	#64,r0
+	shll8	r0
+	or	r0,r3
+.Lrtp1n_wxd:
+	extu.w	r4,r7
+	dmuls.l	r9,r1
+	mov.l	@(52,r6),r2
+	mov	r2,r0
+	shll	r0
+	subc	r0,r0
+	sts	macl,r4
+	sts	mach,r5
+	clrt
+	addc	r2,r4
+	addc	r0,r5
+	mov	r4,r9
+	mov	r4,r0
+	shll	r0
+	subc	r0,r0
+	cmp/eq	r0,r5
+	bt	.Lrtp1n_wy
+	cmp/pz	r5
+	movt	r0
+	mov.l	.Lrtp1n_k8000,r2
+	shld	r0,r2
+	or	r2,r3
+.Lrtp1n_wy:
+	xtrct	r5,r4
+	mov	#-4,r2
+	shll8	r2
+	cmp/ge	r2,r4
+	bt	.Lrtp1n_wylo
+	mov	r2,r4
+	mov	#32,r0
+	shll8	r0
+	bra	.Lrtp1n_wyd
+	or	r0,r3
+.Lrtp1n_wylo:
+	not	r2,r2
+	cmp/gt	r2,r4
+	bf	.Lrtp1n_wyd
+	mov	r2,r4
+	mov	#32,r0
+	shll8	r0
+	or	r0,r3
+.Lrtp1n_wyd:
+	shll16	r4
+	or	r4,r7
+	bra	.Lrtp1n_join_sat
+	mov	r7,r2
+.Lrtp1n_wpush:
+	mov.l	@(44,r11),r0
+	mov.l	r0,@(40,r11)
+	mov.l	@(48,r11),r0
+	mov.l	r0,@(44,r11)
+	mov.l	@(0,r11),r0
+	mov.l	r0,@(48,r11)
+	mov.l	r2,@(0,r11)
+	mov	#2,r1
+	shll16	r1
+	bra	.Lrtp1n_wide
+	add	#-1,r1
+	.align	2
+.Lrtp1n_k2592:	.long	2592
+.Lrtp1n_k3fff:	.long	0x3FFF
+.Lrtp1n_km4000:	.long	-0x4000
+.Lrtp1n_k296:		.long	296
+.Lrtp1n_km512:	.long	-512
+.Lrtp1n_k101:		.long	0x101
+.Lrtp1n_k2000080:	.long	0x2000080
+.Lrtp1n_k80:		.long	0x80
+.Lrtp1n_k8000:	.long	0x8000
+.Lrtp1n_kFFFF:	.long	0xFFFF
+.Lrtp1n_k4000000:	.long	0x4000000
+.Lrtp1n_k8000000:	.long	0x8000000
+.Lrtp1n_k292:		.long	292
+.Lrtp1n_k1568:	.long	1568
+	.size	_recompsx_gte_rtp1n, .-_recompsx_gte_rtp1n
+	.popsection
+)ASM\");
+#endif")
+// </dc-sched>
 class Gte {
 	// ---- the data registers ----------------------------------------------------------------------
 	//
@@ -346,13 +1336,23 @@ class Gte {
 		rfc = 0; gfc = 0; bfc = 0;
 		ofx = 0; ofy = 0; h = 0; dqa = 0; dqb = 0; zsf3 = 0; zsf4 = 0;
 		flag = 0;
+		GteFile.set(SXY_WIDE, 0);
+		GteFile.set(TR_WIDE, 0);
+		GteFile.set(FC_WIDE, 0);
 		buildUnrTable();
 		buildClzTable();
 	}
 
 	// ---- data register access ----------------------------------------------------------------------
 
-	public static inline function getData(ctx:CpuState, reg:Int):Int {
+	public static inline function getData(ctx:CpuState, reg:Int):Int return readData(reg);
+
+	/**
+		The register file needs no CPU state: these four are what `getData`, `setData`, `getCtrl`
+		and `setCtrl` do, for code that holds the guest's registers itself (the recompiler's scalar
+		helpers, ADR-0044). `reg` is a constant at every site, so each is one direct access.
+	**/
+	public static inline function readData(reg:Int):Int {
 		return switch (reg) {
 			case 0: vxy0;
 			case 1: vz0;
@@ -392,7 +1392,9 @@ class Gte {
 		}
 	}
 
-	public static inline function setData(ctx:CpuState, reg:Int, value:Int):Void {
+	public static inline function setData(ctx:CpuState, reg:Int, value:Int):Void writeData(reg, value);
+
+	public static inline function writeData(reg:Int, value:Int):Void {
 		switch (reg) {
 			case 0: vxy0 = value;
 			case 1: vz0 = sext16(value);
@@ -406,9 +1408,9 @@ class Gte {
 			case 9: ir1 = sext16(value);
 			case 10: ir2 = sext16(value);
 			case 11: ir3 = sext16(value);
-			case 12: sxy0 = value;
-			case 13: sxy1 = value;
-			case 14: sxy2 = value;
+			case 12: { sxy0 = value; GteFile.set(SXY_WIDE, (GteFile.get(SXY_WIDE) & 6) | sxyWide(value)); }
+			case 13: { sxy1 = value; GteFile.set(SXY_WIDE, (GteFile.get(SXY_WIDE) & 5) | (sxyWide(value) << 1)); }
+			case 14: { sxy2 = value; GteFile.set(SXY_WIDE, (GteFile.get(SXY_WIDE) & 3) | (sxyWide(value) << 2)); }
 			// Writing the mirror pushes the queue: this is how a game feeds three projected
 			// vertices in and reads them back as a triangle.
 			case 15: pushSxy(value);
@@ -438,6 +1440,15 @@ class Gte {
 		sxy0 = sxy1;
 		sxy1 = sxy2;
 		sxy2 = value;
+		GteFile.set(SXY_WIDE, (GteFile.get(SXY_WIDE) >> 1) | (sxyWide(value) << 2));
+	}
+
+	/** pushSxy for a pair of saturated coordinates (RTPS, RTPT): within +-0x400, never wide. */
+	static inline function pushSxyNarrow(value:Int):Void {
+		sxy0 = sxy1;
+		sxy1 = sxy2;
+		sxy2 = value;
+		GteFile.set(SXY_WIDE, GteFile.get(SXY_WIDE) >> 1);
 	}
 
 	/** The three IR registers as five bits each, which is what a game hands the GPU. */
@@ -475,7 +1486,9 @@ class Gte {
 
 	// ---- control register access ---------------------------------------------------------------------
 
-	public static inline function getCtrl(ctx:CpuState, reg:Int):Int {
+	public static inline function getCtrl(ctx:CpuState, reg:Int):Int return readControl(reg);
+
+	public static inline function readControl(reg:Int):Int {
 		return switch (reg) {
 			case 0: pack(rt11, rt12);
 			case 1: pack(rt13, rt21);
@@ -514,16 +1527,18 @@ class Gte {
 		}
 	}
 
-	public static inline function setCtrl(ctx:CpuState, reg:Int, value:Int):Void {
+	public static inline function setCtrl(ctx:CpuState, reg:Int, value:Int):Void writeControl(reg, value);
+
+	public static inline function writeControl(reg:Int, value:Int):Void {
 		switch (reg) {
 			case 0: { rt11 = lowOf(value); rt12 = highOf(value); GteFile.set(RTP, value); }
 			case 1: { rt13 = lowOf(value); rt21 = highOf(value); GteFile.set(RTP + 1, value); }
 			case 2: { rt22 = lowOf(value); rt23 = highOf(value); GteFile.set(RTP + 2, value); }
 			case 3: { rt31 = lowOf(value); rt32 = highOf(value); GteFile.set(RTP + 3, value); }
 			case 4: { rt33 = sext16(value); GteFile.set(RTP + 4, value); }
-			case 5: trX = value;
-			case 6: trY = value;
-			case 7: trZ = value;
+			case 5: { trX = value; updateTrWide(); }
+			case 6: { trY = value; updateTrWide(); }
+			case 7: { trZ = value; updateTrWide(); }
 			case 8: { l11 = lowOf(value); l12 = highOf(value); }
 			case 9: { l13 = lowOf(value); l21 = highOf(value); }
 			case 10: { l22 = lowOf(value); l23 = highOf(value); }
@@ -537,9 +1552,9 @@ class Gte {
 			case 18: { lg2 = lowOf(value); lg3 = highOf(value); }
 			case 19: { lb1 = lowOf(value); lb2 = highOf(value); }
 			case 20: lb3 = sext16(value);
-			case 21: rfc = value;
-			case 22: gfc = value;
-			case 23: bfc = value;
+			case 21: { rfc = value; updateFcWide(); }
+			case 22: { gfc = value; updateFcWide(); }
+			case 23: { bfc = value; updateFcWide(); }
 			case 24: ofx = value;
 			case 25: ofy = value;
 			case 26: h = sext16(value);
@@ -594,11 +1609,43 @@ class Gte {
 		RTPT transform is three (VXY0 and VZ0 are words 33 and 34: halfwords 66-68, `V0H`), and a
 		row times the vertex is one `GteFile.dot3` — on the Dreamcast the SH-4's multiply-accumulate
 		unit, reading both from memory, where the nine products were nine trips through its one
-		MACL (native/recompsx_gte.h). setCtrl keeps it beside the unpacked elements, which every
+		MACL (`recompsx_gte_dot3`, this class's header). setCtrl keeps it beside the unpacked elements, which every
 		other command reads.
 	**/
 	static inline var RTP = 648;
 	static inline var V0H = 66;
+
+	/**
+		Two range facts kept where their registers are written, so the commands that need them read
+		one word instead of testing every value again.
+
+		`SXY_WIDE`: bit k set when SXYk has a coordinate outside -2^14..2^14-1 (`sxyWide`), which is
+		what NCLIP's 32-bit form needs of all three. RTPS and RTPT push saturated coordinates (within
+		+-0x400), so their push only shifts the bits; MTC2 to SXY0-2 or the mirror tests the value.
+		NCLIP tested six coordinates at every command, ~1,350 a frame in Crash Bandicoot: Warped.
+
+		`TR_WIDE`: 1 when a translation component is outside -2^30..2^30-1, the premise of RTPS and
+		RTPT's 32-bit rows (`project`); set by CTC2 5-7, where they tested all three at every vertex.
+
+		`FC_WIDE`: 1 when a far colour component is outside -2^18..2^18-1, where FC * 1000h less a
+		colour no longer fits 32 bits: the premise of DPCS and DPCT's form at their call sites
+		(`GteQuick.dpcs`); set by CTC2 21-23.
+	**/
+	static inline var SXY_WIDE = 73;
+	static inline var TR_WIDE = 74;
+	static inline var FC_WIDE = 75;
+
+	static inline function sxyWide(v:Int):Int {
+		return (((((v << 16) >> 16) + 0x4000) | ((v >> 16) + 0x4000)) & -0x8000) != 0 ? 1 : 0;
+	}
+
+	static inline function updateTrWide():Void {
+		GteFile.set(TR_WIDE, ((trX + 0x40000000) | (trY + 0x40000000) | (trZ + 0x40000000)) < 0 ? 1 : 0);
+	}
+
+	static inline function updateFcWide():Void {
+		GteFile.set(FC_WIDE, (((rfc + 0x40000) | (gfc + 0x40000) | (bfc + 0x40000)) & ~0x7FFFF) != 0 ? 1 : 0);
+	}
 
 	static function buildUnrTable():Void {
 		// Built unconditionally, not behind `if (unrTable != null)`.
@@ -837,12 +1884,33 @@ class Gte {
 		call to it does not link.
 	**/
 	static inline function project(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, vh:Int, last:Bool):Void {
+		#if recompsx_rtp_capture RtpCapture.before(sf, lm, vh, last); #end
+		// On the SH-4 the common vertex at sf = 1 is the core in assembly (ADR-0046: `GteFile.rtp`,
+		// scripts/sh4/rtp1.blk, scheduled by scripts/dc-sched.py): every output written and 0, or 1
+		// with the file as it was but MAC1-3 and IR1-3, which the form below writes again. Elsewhere
+		// it is 1 and this is the whole of it.
+		if (sf != 0 && GteFile.rtp(vh, lm, last) == 0) {} else {
+		project32(sf, lm, vx, vy, vz, vh, last);
+		GteFile.rtpChecked();
+		}
+		#if recompsx_rtp_capture RtpCapture.after(); #end
+	}
+
+	/**
+		project's 32-bit forms, and the general ones where their premises fail. A function of its
+		own: on the SH-4 with the core (RECOMPSX_GTE_RARE: noinline, cold) it runs only for what the
+		core declines — sf = 0, lm = 1, a vertex or translation out of range, an overflow — so each
+		RTPS the generated code issues is the core's call and this call, not this body inline
+		(E-088); elsewhere it is the whole transform, the compiler's to inline.
+	**/
+	@:specifier("RECOMPSX_GTE_RARE")
+	static function project32(sf:Int, lm:Bool, vx:Int, vy:Int, vz:Int, vh:Int, last:Bool):Void {
 		final tx = trX, ty = trY, tz = trZ;
 		var mac3Shifted = 0;
 		// Each `v + 0x4000` is within 0..0x7FFF exactly when v is within -0x4000..0x3FFF, each
 		// `t + 0x40000000` is non-negative exactly when t is within -2^30..2^30-1: one test each.
 		if (MemA.likely((((vx + 0x4000) | (vy + 0x4000) | (vz + 0x4000)) >>> 15) == 0
-				&& (((tx + 0x40000000) | (ty + 0x40000000) | (tz + 0x40000000)) >= 0))) {
+				&& GteFile.get(TR_WIDE) == 0)) {
 			// Each row times the vertex, which is at halfword `vh` of the register file (RTP).
 			final r1 = GteFile.dot3(RTP << 1, vh);
 			final r2 = GteFile.dot3((RTP << 1) + 3, vh);
@@ -864,9 +1932,20 @@ class Gte {
 			mac3Shifted = rowsWide(sf, vx, vy, vz);
 		}
 
-		ir1 = saturateIr(mac1, lm, F_IR1);
-		ir2 = saturateIr(mac2, lm, F_IR2);
-		ir3 = saturateIr3(mac3, mac3Shifted, lm);
+		// The common vertex: MAC1-3 within IR's range and the depth's >>12 form within 16 bits
+		// signed (IR3's flag is judged on it) — one test for all four, where each IR took two and
+		// a constant, and no flag to raise. A value outside its range sets a bit of 16 or above
+		// (15 for lm's unsigned range) in its term, which the OR keeps. Otherwise each saturates
+		// and flags as before.
+		final m1 = mac1, m2 = mac2, m3 = mac3;
+		if (MemA.likely(lm ? (((m1 | m2 | m3) >>> 15) == 0 && ((mac3Shifted + 0x8000) >>> 16) == 0)
+				: (((m1 + 0x8000) | (m2 + 0x8000) | (m3 + 0x8000) | (mac3Shifted + 0x8000)) >>> 16) == 0)) {
+			ir1 = m1; ir2 = m2; ir3 = m3;
+		} else {
+			ir1 = saturateIr(m1, lm, F_IR1);
+			ir2 = saturateIr(m2, lm, F_IR2);
+			ir3 = saturateIr3(m3, mac3Shifted, lm);
+		}
 
 		pushSz(saturateSz3(mac3Shifted));
 
@@ -878,7 +1957,10 @@ class Gte {
 		// A sum overflowed exactly when both addends share a sign the result does not.
 		if (MemA.likely(n <= 0xFFFF && (((ofx ^ sx) & (px ^ sx)) | ((ofy ^ sy) & (py ^ sy))) >= 0)) {
 			mac0 = sy;
-			pushSxy(pack(saturateSxy(sx >> 16, F_SX2), saturateSxy(sy >> 16, F_SY2)));
+			// Both coordinates on the screen's -0x400..0x3FF in one test, as the IRs above.
+			final x = sx >> 16, y = sy >> 16;
+			pushSxyNarrow(MemA.likely((((x + 0x400) | (y + 0x400)) >>> 11) == 0) ? pack(x, y)
+				: pack(saturateSxy(x, F_SX2), saturateSxy(y, F_SY2)));
 		} else {
 			screenWide(n);
 		}
@@ -935,7 +2017,7 @@ class Gte {
 		m = Acc.mac(Acc.of(ofy), ir2, n);
 		mac0 = mac0From32(m);
 		final sy = saturateSxy(Acc.shr16(m), F_SY2);
-		pushSxy(pack(sx, sy));
+		pushSxyNarrow(pack(sx, sy));
 	}
 
 	/**
@@ -1000,8 +2082,8 @@ class Gte {
 		// regroup as (x1-x0)(y2-y0) - (x2-x0)(y1-y0), whose factors stay under 2^15 and whose
 		// result under 2^31: two 32-bit multiplies where the 64-bit form took six, and no flag
 		// can arise. A game that writes wider coordinates into the queue gets the 64-bit form.
-		if (MemA.likely((((x0 + 0x4000) | (y0 + 0x4000) | (x1 + 0x4000) | (y1 + 0x4000) | (x2 + 0x4000)
-				| (y2 + 0x4000)) & -0x8000) == 0)) {
+		// Which entries are wide is kept as they are written (SXY_WIDE), not tested here.
+		if (MemA.likely(GteFile.get(SXY_WIDE) == 0)) {
 			mac0 = IntMath.mul(x1 - x0, y2 - y0) - IntMath.mul(x2 - x0, y1 - y0);
 		} else {
 			nclipWide(x0, y0, x1, y1, x2, y2);
@@ -1452,11 +2534,8 @@ class Gte {
 	}
 
 	static function saturateColor(v:Int, bit:Int):Int {
-		if (v < 0) { flag |= (1 << bit); return 0; }
-		else {}
-		if (v > 0xFF) { flag |= (1 << bit); return 0xFF; }
-		else {}
-		return v;
+		// In range is having no bits above the low byte: one test for the two bounds.
+		return MemA.likely((v & ~0xFF) == 0) ? v : clampFlag(v, 0, 0xFF, bit);
 	}
 
 	/** The colour FIFO, three deep, keeping RGBC's code byte with each entry as the hardware does. */
@@ -1522,8 +2601,10 @@ class Gte {
 		of two tests, a dozen taken branches an RTPS on the SH-4, and the clamp the straight line.
 	*/
 	static function saturateIr(v:Int, lm:Bool, bit:Int):Int {
-		final lo = lm ? 0 : -0x8000;
-		return MemA.likely(v >= lo && v <= 0x7FFF) ? v : clampFlag(v, lo, 0x7FFF, bit);
+		// In range is being its own sixteen-bit sign extension (and, with lm, not negative): on the
+		// SH-4 `exts.w` and one compare, where the two bounds were two constants and two branches.
+		return MemA.likely(((v << 16) >> 16) == v && (!lm || v >= 0)) ? v
+			: clampFlag(v, lm ? 0 : -0x8000, 0x7FFF, bit);
 	}
 
 	/** A value outside lo..hi, clamped, with its flag raised. Inline, not a call: the hint already

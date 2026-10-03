@@ -13,6 +13,8 @@ enum abstract Effect(Int) from Int to Int {
 	var TRAP = 128;
 	var CONTROL = 256;
 	var UNKNOWN = 512;
+	/** Function-summary effect: a checked return may unwind frames, without calling a target. */
+	var NONLOCAL_RETURN = 1024;
 
 	public inline function has(effect:Effect):Bool return (this & effect) != 0;
 }

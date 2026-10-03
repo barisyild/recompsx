@@ -188,8 +188,219 @@ class Discovery {
 		}
 
 		markCheckedReturns();
+		if (cutShared) {
+			cutAtEntries();
+			// Again, over the functions as they now are: a hand-over's own check (checkedHops).
+			markCheckedReturns();
+		} else {}
 		claimTables();
 		markPadding();
+	}
+
+	/**
+		Whether functions hand over at other functions' entries instead of carrying their code
+		(`cutAtEntries`): `--cut-shared`. Off by default: exact, and smaller (Crash 3's image
+		-376 KB, Crash Bash's -194 KB), but slower where the copies ran — each copy carried only the
+		paths its own entry takes, so the hot code was hardly smaller, and the hand-overs' calls and
+		entries cost instruction fills (docs/perf/dreamcast-ledger.md E-077).
+	**/
+	public var cutShared = false;
+	/**
+		The entries a function may hand over to: the emitted code calls the one handed to by its
+		class, so not an address whose occupant is decided at run time — the executable's own code
+		inside an overlay window (Main.analyseBase).
+	**/
+	public var cutTarget:Int -> Bool = _ -> true;
+
+	/**
+		One copy of code that several functions reach by branches.
+
+		The multi-entry policy keeps every entry and gives each function every block it can reach,
+		so code that several entries run into is emitted once per entry. Compiled code rarely does
+		that; hand-written code does it on purpose: Crash Bandicoot: Warped's renderer hops between
+		routines through `jr`, and each routine branches back into a shared loop — five functions
+		carried their own copy of it, and the game's emitted guest code was 1.54 times its own. Here
+		every function is traced again, stopping where it reaches another function's entry by a
+		branch, by running into it or as a call's continuation, and handing over to that function
+		there (`Func.hops`): a direct tail call in the emitted code, entered past its pump and
+		checkpoint, so time is charged and events are taken where the inline copy took them.
+
+		It is kept only where that is the same program. A hand-over is a host call, so functions on
+		a cycle of hand-overs and tail calls keep their copies (a loop between two entries would
+		otherwise recurse). So does a function whose own `$ra` analysis reached into code it would
+		now hand over: a `jr $ra` there jumped to an address the function had built (`raJumps`).
+	**/
+	function cutAtEntries():Void {
+		final cut:Map<Int, Bool> = [];
+		for (k in functions.keys()) if (cutTarget(Vaddr.canonRam(k))) cut.set(Vaddr.canonRam(k), true); else {}
+		final entries = [for (k in functions.keys()) k];
+		entries.sort((a, b) -> (a ^ 0x80000000) < (b ^ 0x80000000) ? -1 : ((a ^ 0x80000000) > (b ^ 0x80000000) ? 1 : 0));
+		final calls = indirectCalls.length;
+		final traced:Map<Int, Func> = [];
+		for (e in entries) {
+			final old = functions.get(e);
+			final fn = traceFunction({addr: old.entry, name: old.name, confidence: old.confidence}, cut);
+			if (!fn.abandoned && fn.hops.keys().hasNext() && sameReturns(old, fn)) traced.set(e, fn);
+			else {}
+		}
+		// The second tracing must not count each indirect call twice in the coverage report.
+		indirectCalls.resize(calls);
+		final cycle = handOverCycles(traced);
+		for (e in cycle.keys()) traced.remove(e);
+		// Where the generated code takes events must not move: keep only the hand-overs whose code
+		// pumps where the copy did, until that holds for every one kept (keeping a copy can only
+		// change the functions that hand over to it).
+		var changed = true;
+		while (changed) {
+			changed = false;
+			for (e in entries) {
+				final fn = traced.get(e);
+				if (fn == null || samePumps(functions.get(e), fn, traced)) continue;
+				else {}
+				traced.remove(e);
+				changed = true;
+			}
+		}
+		for (e => fn in traced) {
+			final old = functions.get(e);
+			final pumped = pumpPoints(old);
+			// Entering a function past its pump, unless the copy pumped at that entry's block — and
+			// that block does not pump of its own (a loop's head), which would be a second time.
+			for (h in fn.hops.keys()) {
+				final target = traced.exists(h) ? traced.get(h) : functions.get(h);
+				if (pumped.exists(h) && !pumpPoints(target).exists(h)) fn.pumpedHops.set(h, true);
+				else {}
+			}
+		}
+		for (e => fn in traced) functions.set(e, fn);
+	}
+
+	/**
+		Where generated code pumps (FunctionIR): every block an edge reaches from a block at the
+		same address or above, by canonical address.
+	**/
+	static function pumpPoints(fn:Func):Map<Int, Bool> {
+		final out:Map<Int, Bool> = [];
+		for (b in fn.blocks) for (to in b.successors) if (to <= b.addr) out.set(Vaddr.canonRam(to), true); else {}
+		return out;
+	}
+
+	/**
+		Whether `whole`'s code pumps where it did once `cutFn` and the functions it reaches by
+		hand-overs run it (each in the form it will have: `traced`, or as it is): every pump point
+		any of them has on that code is one of `whole`'s, and every one of `whole`'s is a pump
+		point of each of them whose code holds it — or the entry of a function handed over to, which
+		pumps on the way in exactly when the copy that hands over pumped there (`Func.pumpedHops`;
+		each hand-over on the way must agree with `whole`). A block of the copy pumps for every edge
+		to it, so one an edge from code that stays behind made a pump point cannot be handed over:
+		then the copy is kept.
+	**/
+	function samePumps(whole:Func, cutFn:Func, traced:Map<Int, Func>):Bool {
+		final before = pumpPoints(whole);
+		final runners:Array<Func> = [cutFn];
+		final seen:Map<Int, Bool> = [Vaddr.canonRam(cutFn.entry) => true];
+		var i = 0;
+		while (i < runners.length) {
+			final from = runners[i++];
+			// The function handing over pumps on the way in where its own copy pumped.
+			final fromCopy = pumpPoints(functions.get(Vaddr.canonRam(from.entry)) != null
+				? functions.get(Vaddr.canonRam(from.entry)) : from);
+			for (h in from.hops.keys()) {
+				if (fromCopy.exists(h) != before.exists(h)) return false;
+				else {}
+				if (seen.exists(h)) continue;
+				else {}
+				seen.set(h, true);
+				final next = traced.exists(h) ? traced.get(h) : functions.get(h);
+				if (next == null) return false;
+				else {}
+				runners.push(next);
+			}
+		}
+		for (r in runners) {
+			final theirs = pumpPoints(r);
+			for (p in theirs.keys()) if (covers(whole, p) && !before.exists(p)) return false;
+			for (p in before.keys()) {
+				if (!covers(r, p) || theirs.exists(p) || p == Vaddr.canonRam(r.entry)) continue;
+				else {}
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+		Whether `cutFn` (traced with hand-overs) returns as `whole` (traced with the code) does: no
+		`jr $ra` that jumps to an address `whole` built (`raJumps`), and no `jr` through the copy of
+		`$ra` its entry block made (`registerReturns`), is left in the code handed over.
+		Return checks need nothing here: a hand-over passes the entry's `$ra` on (Runtime.hopRa),
+		so the function handed to checks against the value the inline code checked against, and
+		where `$ra` may be foreign at the hand-over the caller checks its return (`checkedHops`).
+	**/
+	function sameReturns(whole:Func, cutFn:Func):Bool {
+		final built = raJumps.get(whole.entry);
+		if (built != null) for (at in built.keys()) if (!covers(cutFn, at)) return false;
+		// A `jr` through the copy of `$ra` the entry block made is a return only in the function
+		// whose entry made it (findRegisterReturns).
+		for (at in whole.registerReturns.keys()) if (!covers(cutFn, at)) return false;
+		return true;
+	}
+
+	static function covers(fn:Func, at:Int):Bool {
+		for (b in fn.blocks) if ((at ^ 0x80000000) >= (b.addr ^ 0x80000000) && (at ^ 0x80000000) < (b.endAddr() ^ 0x80000000)) return true;
+		return false;
+	}
+
+	/**
+		Entries on a cycle of hand-overs and direct tail calls (Tarjan's strongly connected
+		components), which keep their copies: each such transfer is a host call.
+	**/
+	function handOverCycles(traced:Map<Int, Func>):Map<Int, Bool> {
+		final edges:Map<Int, Array<Int>> = [];
+		for (e => fn in functions) {
+			final f = traced.exists(e) ? traced.get(e) : fn;
+			final out = [for (t in f.hops.keys()) t];
+			for (c in f.tailCalls) if (c.target != 0) out.push(Vaddr.canonRam(c.target)); else {}
+			edges.set(Vaddr.canonRam(e), out);
+		}
+		final index:Map<Int, Int> = [];
+		final low:Map<Int, Int> = [];
+		final onStack:Map<Int, Bool> = [];
+		final stack:Array<Int> = [];
+		final result:Map<Int, Bool> = [];
+		var next = 0;
+		function connect(v:Int):Void {
+			index.set(v, next); low.set(v, next); next++;
+			stack.push(v); onStack.set(v, true);
+			for (w in edges.get(v)) {
+				if (!edges.exists(w)) continue;
+				else {}
+				if (!index.exists(w)) {
+					connect(w);
+					if (low.get(w) < low.get(v)) low.set(v, low.get(w)); else {}
+				} else if (onStack.exists(w) && index.get(w) < low.get(v)) low.set(v, index.get(w));
+				else {}
+			}
+			if (low.get(v) == index.get(v)) {
+				final members = [];
+				while (true) {
+					final w = stack.pop();
+					onStack.remove(w);
+					members.push(w);
+					if (w == v) break;
+					else {}
+				}
+				if (members.length > 1 || edges.get(v).indexOf(v) >= 0) for (m in members) result.set(m, true);
+				else {}
+			} else {}
+		}
+		final keys = [for (k in edges.keys()) k];
+		keys.sort((a, b) -> (a ^ 0x80000000) < (b ^ 0x80000000) ? -1 : ((a ^ 0x80000000) > (b ^ 0x80000000) ? 1 : 0));
+		for (k in keys) if (!index.exists(k)) connect(k); else {}
+		// `traced` and `functions` share keys as found; a cycle names canonical entries.
+		final out:Map<Int, Bool> = [];
+		for (e in traced.keys()) if (result.exists(Vaddr.canonRam(e))) out.set(e, true); else {}
+		return out;
 	}
 
 	/**
@@ -358,6 +569,7 @@ class Discovery {
 	function markCheckedReturns():Void {
 		for (fn in functions) {
 			fn.checkedReturns.clear();
+			fn.checkedHops.clear();
 			final ownSlots:Map<Int, Bool> = [];
 			for (b in fn.blocks) {
 				for (i in 0...b.length) {
@@ -390,6 +602,10 @@ class Discovery {
 							|| (ins.op == Op.JALR && ins.rd == 31)) f = false;
 					else {}
 				}
+				// A hand-over where `$ra` may be foreign: the callee's return goes where `$ra` points,
+				// as this function's own `jr $ra` would have gone from the code it carried.
+				if (f && b.exits && fn.hops.keys().hasNext()) fn.checkedHops.set(a, true);
+				else {}
 				for (succ in b.successors) {
 					final known = foreign.get(succ);
 					if (known == null || (f && !known)) {
@@ -443,8 +659,14 @@ class Discovery {
 		that each contain the shared tail, which reads fine in a report and would emit the same
 		instructions twice in generated code.
 	**/
-	function traceFunction(seed:Seed):Func {
+	function traceFunction(seed:Seed, ?cut:Map<Int, Bool>):Func {
 		final fn = new Func(seed.addr, seed.name, seed.confidence);
+		// With `cut` (cutAtEntries): another function's entry reached by a branch, by running into
+		// it or as a call's continuation is handed over to (`fn.hops`), not traced into.
+		inline function hopsTo(target:Int):Bool {
+			final t = Vaddr.canonRam(target);
+			return cut != null && t != Vaddr.canonRam(fn.entry) && cut.exists(t) && image.containsWord(target);
+		}
 		final leaders:Map<Int, Bool> = [seed.addr => true];
 		final reachable:Map<Int, Bool> = [];
 		final overlapReported:Map<Int, Bool> = [];
@@ -480,6 +702,10 @@ class Discovery {
 
 				if (!instr.op.hasDelaySlot) {
 					addr += 4;
+					if (hopsTo(addr)) {
+						fn.hops.set(Vaddr.canonRam(addr), true);
+						break;
+					} else {}
 					continue;
 				}
 
@@ -543,12 +769,17 @@ class Discovery {
 
 					case JALR:
 						fn.calls.push(new CallSite(instr.addr, 0, true));
-						indirectCalls.push(new CallSite(instr.addr, 0, true));
+						if (cut == null) indirectCalls.push(new CallSite(instr.addr, 0, true));
+						else {}
+						// A call's continuation is never handed over to: it must be a block here, where a
+						// cooperative slice suspended in the callee resumes this function.
 						follow(leaders, queue, afterSlot);
 
 					case JAL:
 						fn.calls.push(new CallSite(instr.addr, instr.target, false));
 						addSeed(instr.target, defaultName(instr.target), Confidence.Called);
+						// A call's continuation is never handed over to: it must be a block here, where a
+						// cooperative slice suspended in the callee resumes this function.
 						follow(leaders, queue, afterSlot);
 
 					case J:
@@ -566,8 +797,10 @@ class Discovery {
 						}
 
 					case BEQ | BNE | BLEZ | BGTZ | BLTZ | BGEZ:
-						follow(leaders, queue, instr.target);   // taken
-						follow(leaders, queue, afterSlot);      // not taken
+						if (hopsTo(instr.target)) fn.hops.set(Vaddr.canonRam(instr.target), true);
+						else follow(leaders, queue, instr.target);   // taken
+						if (hopsTo(afterSlot)) fn.hops.set(Vaddr.canonRam(afterSlot), true);
+						else follow(leaders, queue, afterSlot);      // not taken
 
 					case BLTZAL | BGEZAL:
 						// A conditional call: the link register is written whether or not the
@@ -575,6 +808,8 @@ class Discovery {
 						// it behaves like a branch that falls through.
 						fn.calls.push(new CallSite(instr.addr, instr.target, false));
 						addSeed(instr.target, defaultName(instr.target), Confidence.Called);
+						// A call's continuation is never handed over to: it must be a block here, where a
+						// cooperative slice suspended in the callee resumes this function.
 						follow(leaders, queue, afterSlot);
 
 					case _:
@@ -612,6 +847,14 @@ class Discovery {
 					}
 					block.exits = !instr.op.fallsThrough || instr.isRegisterJump;
 					recordSuccessors(fn.entry, block, instr, addr + 8, leaders);
+					// A hand-over leaves the function, like a tail call (a branch's arms only).
+					if (fn.hops.exists(Vaddr.canonRam(addr + 8)) && instr.op != Op.J && instr.op.fallsThrough
+							&& instr.op != Op.JAL && instr.op != Op.JALR && instr.op != Op.BLTZAL
+							&& instr.op != Op.BGEZAL) block.exits = true;
+					else {}
+					if (instr.op != Op.J && !instr.isRegisterJump && fn.hops.exists(Vaddr.canonRam(instr.target))
+							&& instr.op != Op.JAL && instr.op != Op.BLTZAL && instr.op != Op.BGEZAL) block.exits = true;
+					else {}
 					break;
 				}
 
@@ -619,6 +862,11 @@ class Discovery {
 				if (leaders.exists(addr)) {
 					// Falls through into the next block.
 					block.successors.push(addr);
+					break;
+				}
+				if (!reachable.exists(addr) && fn.hops.exists(Vaddr.canonRam(addr))) {
+					// Runs into another function's entry: handed over there.
+					block.exits = true;
 					break;
 				}
 			}

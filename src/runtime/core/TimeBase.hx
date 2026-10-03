@@ -116,9 +116,43 @@ class TimeBase {
 		of a frame would report a line that does not exist.
 	**/
 	public static function line(cycles:Int):Int {
-		final l = IntMath.div(intoFrame(cycles), perLine);
-		return l > lastLine ? lastLine : l;
+		final d = (cycles - lineFrom) | 0;
+		if (d >= 0 && d < lineLen) return lineHeld;
+		else return lineFound(cycles);
 	}
+
+	// The line the last `line` found, kept with the cycles it lasts for: a game polling GPUSTAT
+	// reads it a few hundred cycles apart and a line is ~2150, so nearly every read is the line the
+	// one before found — a subtraction and a compare where it was a remainder and a quotient, two
+	// __sdivsi3 on the SH-4 (Crash Bash's disc loads poll GPUSTAT ~2,900 times a vblank, ledger
+	// E-109). The same answer either way: the cycles kept are those for which the arithmetic below
+	// gives this line. Forgotten every frame (`forgetLine`), so no read can come back to them a
+	// whole wrap of the cycle counter later.
+	static var lineFrom = 0;
+	static var lineLen = 0;
+	static var lineHeld = 0;
+
+	static function lineFound(cycles:Int):Int {
+		final into = intoFrame(cycles);
+		final q = IntMath.div(into, perLine);
+		final l = q > lastLine ? lastLine : q;
+		// From the line's first cycle to its last — the frame's last for the last line, which the
+		// clamp lengthens — and not past 0x7FFFFFFF, where `cycles` turns negative and intoFrame's
+		// frames start again from another phase. (Zero is a frame boundary on both sides of it.)
+		final start = IntMath.mul(l, perLine);
+		final end = l == lastLine ? perFrame : (start + perLine) | 0;
+		final from = (cycles - (into - start)) | 0;
+		var len = (end - start) | 0;
+		if (from >= 0 && ((from + len) | 0) < 0) len = (0x7FFFFFFF - from + 1) | 0;
+		else {}
+		lineFrom = from;
+		lineLen = len;
+		lineHeld = l;
+		return l;
+	}
+
+	/** Drops the line `line` keeps: called every frame, so what it keeps never outlives one. */
+	public static inline function forgetLine():Void lineLen = 0;
 
 	/** Cycles elapsed since the start of the current frame. */
 	public static function intoFrame(cycles:Int):Int {

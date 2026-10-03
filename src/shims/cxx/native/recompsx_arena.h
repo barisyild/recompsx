@@ -24,6 +24,8 @@
 #define RECOMPSX_GPU_WORDS     64         /* the GPU's hot state, one word each (shim.GpuFile) */
 #define RECOMPSX_SPU_WORDS     1176       /* the SPU's per-voice tables (shim.SpuFile, spu.Spu.SpuArray) */
 #define RECOMPSX_TIMER_WORDS   40         /* the root counters' state (shim.TimerFile, timers.Timers.TimerArray) */
+#define RECOMPSX_SCHED_WORDS   16         /* the scheduler's deadlines and bookkeeping (shim.SchedFile,
+                                             core.Scheduler): two 32-byte lines */
 
 /* RAM and the scratchpad are one array, so that one index addresses either: a run of guest
  * accesses through one base register is checked once and then indexed (mem.Memory.span, the
@@ -50,6 +52,7 @@ extern int recompsx_gte[RECOMPSX_GTE_WORDS];
 extern int recompsx_gpu[RECOMPSX_GPU_WORDS];
 extern int recompsx_spu[RECOMPSX_SPU_WORDS];
 extern int recompsx_timers[RECOMPSX_TIMER_WORDS];
+extern int recompsx_sched[RECOMPSX_SCHED_WORDS];
 
 #ifdef __cplusplus
 }

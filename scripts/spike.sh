@@ -85,4 +85,7 @@ clang++ "${CXXFLAGS[@]}" -Iout/_spike/fnptr/include -Itests/spike/fnptr out/_spi
 out/_spike/fnptr/fnptr | grep -q 'v=127' || { echo "FAIL: calls through kept addresses"; exit 1; }
 say "  addresses taken, kept and called: OK"
 
+say "spike: short circuit (conditional inlined arguments and evaluation order)"
+RECOMPSX_JS_ONLY=0 "$ROOT/scripts/conformance.sh" ShortCircuit
+
 printf '\033[32mspike.sh: clean\033[0m\n'

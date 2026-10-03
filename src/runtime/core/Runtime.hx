@@ -195,6 +195,14 @@ class Runtime {
 	}
 
 	/**
+		The `$ra` a function was entered with, handed on when it hands over to another function's
+		entry (the recompiler's Discovery.cutAtEntries): that function's return checks (ADR-0027)
+		compare with it, as the code did when it ran inline. Written before each hand-over and
+		read at the entry it calls, nowhere else.
+	**/
+	public static var hopRa:Int = 0;
+
+	/**
 		A return to somewhere other than the caller (ADR-0027).
 
 		`jr $ra` is a return when `$ra` holds the address the function was called with, and a
@@ -363,7 +371,14 @@ class Runtime {
 		Order matters: events first, because firing one is what raises the interrupt that the
 		second half then delivers. Reversing them would cost a whole pump of latency on every
 		vblank.
+
+		One call on C++, never inlined: left to itself GCC split it, put the call to `runDue` and
+		the token test at every pump site in generated code and the rest behind a second call —
+		two calls a pump, and both sequences at each of the thousands of sites. Most pumps are a
+		stretch of the GPU's list walk (~200 a frame), with nothing posted and nothing pending
+		after it: that path is the events and two tests, and what the tests guard is out of line.
 	**/
+	@:specifier("__attribute__((noinline))")
 	public static function pump(ctx:CpuState):Void {
 		#if recompsx_cooperative
 		Cooperative.blocked++;
@@ -377,11 +392,15 @@ class Runtime {
 		if (ctx.unwindToken != 0) return;
 		else {}
 		// Events a device raised from inside one of the game's own instructions, where there was
-		// no safe way back into game code. Here there is.
-		kernel.KEvents.drain(ctx);
-		if (ctx.unwindToken != 0) return;
+		// no safe way back into game code. Here there is. (`drain` with nothing posted returns.)
+		if (kernel.KEvents.posted()) {
+			kernel.KEvents.drain(ctx);
+			if (ctx.unwindToken != 0) return;
+			else {}
+		} else {}
+		// `dispatch` with nothing pending at the controller does nothing at all.
+		if (Irq.pending()) Irq.dispatch(ctx);
 		else {}
-		Irq.dispatch(ctx);
 	}
 
 	/**

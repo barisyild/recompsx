@@ -208,10 +208,18 @@ class Timers {
 			// is a compare, not a divide: `0 <= elapsed < period` is exactly when the quotient is
 			// zero. The polling loop that made this the hottest read in the machine was libetc's
 			// VSync, counting hblanks on timer 1.
-			final n = (elapsed >= 0 && elapsed < period) ? 0 : unsignedDiv(elapsed, period);
+			// One period is the next most common — the first read in the next line — and a compare
+			// too; as is a base that has not reached the wrap, whose remainder is itself. Crash
+			// Bash's disc loads read timer 1 ~5,800 times a vblank, and the line changes ~260 times
+			// in it: two __sdivsi3 each, until this (ledger E-109).
+			var n = 0;
+			if (elapsed >= 0 && elapsed < period) n = 0;
+			else if (elapsed >= period && elapsed - period < period) n = 1;
+			else n = unsignedDiv(elapsed, period);
 			if (n > 0) {
 				final wrapAt = wrapPoint(t);
-				base[t] = IntMath.mod((base[t] + IntMath.mul(n, periodTicks(t))) | 0, wrapAt);
+				final sum = (base[t] + IntMath.mul(n, periodTicks(t))) | 0;
+				base[t] = (sum >= 0 && sum < wrapAt) ? sum : IntMath.mod(sum, wrapAt);
 				anchor[t] = (anchor[t] + IntMath.mul(n, period)) | 0;
 			} else {}
 		} else {}

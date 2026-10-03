@@ -119,10 +119,22 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
                   int clut_x, int clut_y, int semi_mode, int flags, int tex_window,
                   int draw_x, int draw_y);
 
+/* The same state as ten words, the way the runtime holds one (ADR-0047): w[0..9] are bp_gpu_state's
+ * arguments in order. The backend reads them before it returns. */
+void bp_gpu_state_w(const int* w);
+
 /* One triangle. Quads arrive as two. */
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2);
+
+/* The same triangle as twelve words, the way the runtime holds one (ADR-0047): for each vertex in
+ * turn x, y, the colour word (BGR in bits 0-23, the rest ignored) and the texture word (u in bits
+ * 0-7, v in bits 8-15, bits 16-31 zero; 0 untextured). It is exactly bp_gpu_tri(w[0], w[1],
+ * w[2] & 0xFFFFFF, w[3] & 0xFF, w[3] >> 8, w[4], ...), and the backend reads the words before it
+ * returns. A record built from words read one at a time holds nothing across its own
+ * work, where fifteen arguments made in one frame were spilled around it on the SH-4. */
+void bp_gpu_tri_w(const int* w);
 
 /* An axis-aligned rectangle in one flat colour: sprites and GP0(02h) fills both land here. A
  * fill ignores the mask bits on the PlayStation, so it arrives under bp_gpu_mask(0, 0). */

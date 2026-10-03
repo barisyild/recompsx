@@ -59,6 +59,14 @@ class Backend {
 			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void
 		BackendNative.bp_gpu_tri(x0, y0, c0, u0, v0, x1, y1, c1, u1, v1, x2, y2, c2, u2, v2);
 
+	/** The state the GPU file's words 52-61 hold (the polygon core's, ADR-0047): bp_gpu_state_w. */
+	public static inline function gpuStateWords():Void
+		GpuFile.backendState();
+
+	/** The triangle the GPU file's words 36-47 hold (gpu.Gpu.triWords): bp_gpu_tri_w. */
+	public static inline function gpuTriWords():Void
+		GpuFile.backendTri();
+
 	public static inline function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void
 		BackendNative.bp_gpu_rect(x, y, w, h, bgr, semi, semiMode);

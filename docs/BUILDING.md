@@ -9,6 +9,10 @@ Everything here is the JavaScript path, which is the active development and veri
 The reflaxe.CPP path remains in the repository for its later return, but is intentionally skipped
 by the default test commands because its code generation is too slow for the current loop.
 
+`build/common.hxml` enables `-D analyzer-optimize` and `-dce full` for game builds, tests and
+benchmarks on both JavaScript and reflaxe.CPP. Include it in custom Haxe commands too. JavaScript
+builds additionally use `-D js-es=6`; the optimizer settings preserve that output target.
+
 ## 0. Once per machine
 
     ./scripts/setup.sh
@@ -17,8 +21,10 @@ Downloads the pinned Haxe 4.3.7 and Neko into the repository, initialises the su
 registers the vendored compilers with haxelib. It does not touch the system Haxe; nothing in this
 project ever uses one.
 
-`setup.sh` applies the compiler patches idempotently, including the scalar-local declaration
-fix and the contiguous Array patch. Do not blindly reapply them to an already patched checkout.
+`setup.sh` applies the compiler patches idempotently, including scalar-local declarations,
+short-circuit evaluation (0006) and contiguous Arrays. Do not blindly reapply them to an
+already patched checkout. Patch 0006 keeps inlined RHS computations inside their `&&`/`||`
+guard; without it even an empty scheduler can read before its deadline buffer on C++.
 See `vendor/patches/README.md`; the Array rationale is in ADR-0009.
 
 ## Every shell

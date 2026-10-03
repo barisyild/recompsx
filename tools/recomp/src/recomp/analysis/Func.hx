@@ -66,6 +66,25 @@ class Func {
 	public final tailCalls:Array<CallSite> = [];
 
 	/**
+		Other functions' entries this one reaches by a branch, by running into them or as a call's
+		continuation, and hands over to there instead of carrying their code: a tail call in the
+		emitted code, which skips the entry's pump and checkpoint as the code would have done
+		inline (`Discovery.cutAtEntries`). Keyed by the entry.
+	**/
+	public final hops:Map<Int, Bool> = [];
+	/**
+		Hand-overs after which `$ra` may hold something other than this function's entry value:
+		the callee's return goes where `$ra` points, as a return of this function's own would
+		(`Discovery.markCheckedReturns`). Keyed by the block that hands over.
+	**/
+	public final checkedHops:Map<Int, Bool> = [];
+	/**
+		Hand-overs that enter with the pump and checkpoint: the code they replace pumped at that
+		entry's block, which an edge back to it made a pump point (FunctionIR). Keyed by the entry.
+	**/
+	public final pumpedHops:Map<Int, Bool> = [];
+
+	/**
 		BIOS calls, as `{from, vector, fnNumber}`.
 
 		Psy-Q reaches the kernel by loading a vector into $t2 and jumping through it, with the

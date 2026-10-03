@@ -51,10 +51,28 @@
  * copy: four paired 64-bit moves and the `pref` that sends them. Both types are 32-byte aligned
  * (KOS declares them so), which the paired moves need. Every header and every vertex that is not
  * written straight into the queue goes this way, never through pvr_prim. */
+/* What the scene build sends the TA, hashed (RECOMPSX_TA_HASH builds only): every header and vertex
+ * build_scene writes, eight words each, in order — logged a scene, so two builds that send the PVR
+ * the same scenes log the same hashes (docs/perf/dreamcast-ledger.md, How to measure). Other builds
+ * compile none of it. */
+#if RECOMPSX_TA_HASH
+extern uint32_t g_ta_hash;
+extern int g_ta_hashing;
+static inline void ta_hash_words(const uint32_t* w) {
+    if(g_ta_hashing) { for(int i = 0; i < 8; i++) g_ta_hash = (g_ta_hash ^ w[i]) * 16777619u; }
+    else {}
+}
+#define TA_HASH(p) ta_hash_words((const uint32_t*)(const void*)(p))
+#else
+#define TA_HASH(p) ((void)0)
+#endif
+
 static inline void put_hdr(const pvr_poly_hdr_t* h) {
+    TA_HASH(h);
     shz_sq_memcpy32_1(pvr_dr_target(), h);
 }
 static inline void put_vtx(const pvr_vertex_t* v) {
+    TA_HASH(v);
     shz_sq_memcpy32_1(pvr_dr_target(), v);
 }
 
@@ -146,36 +164,46 @@ enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2 };
  * misses would otherwise fetch 32 bytes only to overwrite them), and build_scene reads the buffer
  * as a stream it prefetches ahead of. It was 36 bytes, so most records straddled two lines. The
  * state index and the kind share the last halfword: states <= GPU_MAX_STATES < 2^14. `tag` is that
- * halfword whole, so a run of triangles under one state is told by one compare (build_scene). */
-typedef struct __attribute__((aligned(32))) {
-    int16_t  x[3], y[3];
-    uint32_t argb[3];
-    uint8_t  u[3], v[3];
-    union {
-        struct {
-            uint16_t state   : 14;
-            uint16_t is_rect : 2;
+ * halfword whole, so a run of triangles under one state is told by one compare (build_scene).
+ * `w` is the line as eight words: a triangle is written as eight stores (bp_gpu_tri_w), where its
+ * fields one by one were byte and halfword stores the SH-4 makes only through r0, and the two
+ * bitfields two read-modify-writes. */
+typedef union __attribute__((aligned(32))) {
+    struct {
+        int16_t  x[3], y[3];
+        uint32_t argb[3];
+        uint8_t  u[3], v[3];
+        union {
+            struct {
+                uint16_t state   : 14;
+                uint16_t is_rect : 2;
+            };
+            uint16_t tag;
         };
-        uint16_t tag;
     };
+    uint32_t w[8];
 } gcmd_t;
 _Static_assert(sizeof(gcmd_t) == 32, "a command record is one cache line");
 _Static_assert(GPU_MAX_STATES <= (1 << 14), "a state index fits the record's 14 bits");
 
 /* Texture and blend state, recorded once per run of primitives that share it. */
 /* One cache line too, for the same reasons as gcmd_t: appended into a line allocated without a
- * read, and prefetched ahead of the command walk that reads it. 29 bytes of fields, padded. */
-typedef struct __attribute__((aligned(32))) {
-    uint16_t tex_x, tex_y;      /* texture page origin, in VRAM halfwords */
-    uint16_t clut_x, clut_y;
-    uint32_t window;            /* GP0(E2h) raw: the tile-repeat mask and offset */
-    int16_t  draw_x, draw_y;    /* the buffer being drawn into — NOT the one being displayed */
-    int16_t  clip_x0, clip_y0, clip_x1, clip_y1;   /* the drawing area, GP0(E3h)/(E4h), inclusive */
-    uint8_t  depth;             /* 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct */
-    uint8_t  semi_mode;
-    uint8_t  flags;             /* BP_GPU_TEXTURED | BP_GPU_SEMI | BP_GPU_RAW */
-    uint8_t  pad;
-    uint16_t tris;              /* triangles recorded under it, for palette_priority */
+ * read, and prefetched ahead of the command walk that reads it. 31 bytes of fields, padded. */
+typedef union __attribute__((aligned(32))) {
+    struct {
+        uint16_t tex_x, tex_y;      /* texture page origin, in VRAM halfwords */
+        uint16_t clut_x, clut_y;
+        uint32_t window;            /* GP0(E2h) raw: the tile-repeat mask and offset */
+        int16_t  draw_x, draw_y;    /* the buffer being drawn into — NOT the one being displayed */
+        int16_t  clip_x0, clip_y0, clip_x1, clip_y1;   /* the drawing area, GP0(E3h)/(E4h), inclusive */
+        uint8_t  depth;             /* 0 = 4bpp indexed, 1 = 8bpp indexed, 2 = 15bpp direct */
+        uint8_t  semi_mode;
+        uint8_t  flags;             /* BP_GPU_TEXTURED | BP_GPU_SEMI | BP_GPU_RAW */
+        uint8_t  pad;
+        uint16_t tris;              /* triangles recorded under it, for palette_priority */
+        uint16_t area;              /* the frame's index of its drawing area (state_enter) */
+    };
+    uint32_t w[8];      /* the line as words: bp_gpu_state compares and writes a state as seven */
 } gstate_t;
 _Static_assert(sizeof(gstate_t) == 32, "a state record is one cache line");
 

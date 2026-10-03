@@ -15,4 +15,3 @@ build/common.hxml
 -cp tests/spike
 -main GenMain
 --jvm out/_gen/game.jar
--dce full

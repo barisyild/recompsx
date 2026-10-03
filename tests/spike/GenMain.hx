@@ -127,7 +127,7 @@ class GenMain {
 		// deterministic, so two runs — or two targets — that disagree here have diverged.
 		shim.Backend.log(shim.Backend.LOG_INFO,
 			"frames " + kernel.Kernel.vblankCount
-			+ " | events fired " + core.Scheduler.fired
+			+ " | events fired " + core.Scheduler.fired()
 			+ " | irqs delivered " + core.Irq.delivered
 			+ " | handler calls " + kernel.KHandlers.calls
 			+ " | kernel events delivered " + kernel.KEvents.delivered
@@ -157,7 +157,7 @@ class GenMain {
 		var d = core.Hash.rect(core.Hash.FNV_OFFSET, gpu.Vram.data, gpu.Vram.WIDTH,
 			0, 0, gpu.Vram.WIDTH, gpu.Vram.HEIGHT);
 		d = core.Hash.word(d, kernel.Kernel.vblankCount);
-		d = core.Hash.word(d, core.Scheduler.fired);
+		d = core.Hash.word(d, core.Scheduler.fired());
 		d = core.Hash.word(d, core.Irq.delivered);
 		d = core.Hash.word(d, kernel.KHandlers.calls);
 		d = core.Hash.word(d, kernel.KEvents.delivered);

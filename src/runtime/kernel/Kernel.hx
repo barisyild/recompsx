@@ -638,6 +638,7 @@ class Kernel {
 	**/
 	public static function onFrame(ctx:CpuState):Void {
 		vblankCount++;
+		core.TimeBase.forgetLine();
 		// The display latches its window here, which is where a game swaps buffers. A pure read of
 		// VRAM and two registers: it cannot change what the machine does, so a headless target
 		// dropping it on the floor stays bit-identical to one drawing it.
@@ -700,7 +701,7 @@ class Kernel {
 		if (vblankCount % 60 != 0) return;
 		else {}
 		core.Runtime.note("frame " + vblankCount
-			+ " | events " + core.Scheduler.fired
+			+ " | events " + core.Scheduler.fired()
 			+ " | irqs " + core.Irq.delivered
 			+ " | handlers " + KHandlers.calls
 			+ " | claims " + KHandlers.claims + " | hooks " + KThreads.hookEntries

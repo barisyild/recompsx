@@ -20,8 +20,11 @@ import recomp.codegen.IdleLoopPlan;
 	return, a pump or a trap sees is always the machine's own, and nothing is copied at those
 	boundaries (ADR-0029, which replaced ADR-0007's scalar locals). A looping leaf — no guest
 	call, trap or unknown instruction — keeps them in locals instead, where no copy can go stale.
-	Linear
-	CFGs become sequences, natural loops with one exit become native `while` loops, and
+	A bounded leaf uses scalar parameters/results, with checked spans for plain-memory effects.
+	Its wrapper and guarded direct callers preserve all entry work and accounting (ADR-0044).
+	Pure intervals and opt-in bounded acyclic regions inside other functions use local values, with
+	all changed registers published before the next observation. Linear CFGs become sequences, natural loops with one
+	exit become native `while` loops, and
 	single-entry regions inside other CFGs become sequences and choices. Remaining control flow
 	uses a region/block dispatcher. Every guest block stays addressable without duplicating its
 	body (ADR-0007/0008).
@@ -49,6 +52,12 @@ class Emitter {
 	final discovery:Discovery;
 	final optimize:Bool;
 	final structureRegions:Bool;
+	final scalarFunctions:Bool;
+	final valueRegions:Bool;
+	final valueCfg:Bool;
+	var valueScope:Null<ValueCfg> = null;
+	var valuePrefix = "";
+	var suppressValueCfg = false;
 	var ir:FunctionIR;
 	var functionAddr:Int;
 	/** Program substitutes a pinned handle after body deduplication; fixtures use addresses. */
@@ -59,6 +68,11 @@ class Emitter {
 	var callReturnAddr:Int = 0;
 	// The function has returns checked against the `$ra` it was entered with, kept in `entryRa`.
 	var entryRaLocal = false;
+	/** Whether another function hands over to the one being emitted (Discovery.cutAtEntries). */
+	var hopTarget = false;
+	var hopTargets:Null<Map<Int, Bool>> = null;
+	/** The function being emitted. */
+	var curFn:Null<Func> = null;
 	// A native loop consumes transfers to this block instead of re-entering the dispatcher.
 	var nativeLoop:Null<Int>;
 	var linearNext:Null<Int>;
@@ -90,6 +104,7 @@ class Emitter {
 	// Function spans (planFunctionSpans): a base register's span for the whole function, by
 	// register, set wherever the register's value may have changed. Null: none.
 	var fspans:Null<Map<Int, FunctionSpan>> = null;
+	var scalarBorrows:Map<Int, ScalarBorrow> = [];
 	// Where each function span must be taken again (planFspanLiveness), and the block being emitted.
 	var fspanLive:Null<FspanLive> = null;
 	var curBlock = -1;
@@ -126,22 +141,88 @@ class Emitter {
 	**/
 	public var writesOf:Int -> Int = _ -> ALL_REGS;
 	public static inline final ALL_REGS = 0xFFFFFFFE;
+	/** Proven scalar body for an always-resident direct callee; Program resolves universes. */
+	public var scalarTargetOf:Int -> Null<ScalarPlan>;
+	final scalarPlans:Map<Int, Null<ScalarPlan>> = [];
+	public var projectedTargetOf:(Int, Int, String) -> Null<ScalarPlan>;
+	/** Program-wide pure helper sharing; standalone emitters retain self-contained output. */
+	public var scalarPool:Null<ScalarPool> = null;
+	var callLive:Map<Int, Int> = [];
+	var projections:Array<{plan:ScalarPlan, owner:String, borrowed:Bool}> = [];
 
 	/**
 		Function entries a mod hooks (ADR-0033), set by `Program` from the manifests `gen --mods`
 		was given. Null — the build without mods — emits exactly what it always has.
 	**/
-	public var hooks:Null<Map<Int, Bool>> = null;
+	public var hooks(default, set):Null<Map<Int, Bool>> = null;
+	function set_hooks(value:Null<Map<Int, Bool>>):Null<Map<Int, Bool>> {
+		scalarPlans.clear(); return hooks = value;
+	}
 
 	/** Which hooked entries were emitted, so `gen` can refuse a hook that matched nothing. */
 	public final hooked:Map<Int, Bool> = [];
 
-	public function new(image:Image, discovery:Discovery, optimize:Bool = true, structureRegions:Bool = true) {
+	public function new(image:Image, discovery:Discovery, optimize:Bool = true, structureRegions:Bool = true,
+			scalarFunctions:Bool = true, valueRegions:Bool = true, valueCfg:Bool = false) {
 		this.image = image;
 		this.discovery = discovery;
 		this.optimize = optimize;
 		this.structureRegions = structureRegions;
+		this.scalarFunctions = scalarFunctions;
+		this.valueRegions = valueRegions;
+		this.valueCfg = valueCfg;
+		scalarTargetOf = a -> {
+			final fn = discovery.functions.get(a);
+			return fn == null ? null : scalarPlan(fn);
+		};
+		projectedTargetOf = (a, required, suffix) -> {
+			final fn = discovery.functions.get(a);
+			return fn == null ? null : scalarProjection(fn, required, suffix);
+		};
 	}
+
+	public function scalarProjection(fn:Func, required:Int, suffix:String):Null<ScalarPlan> {
+		if (!optimize || !scalarFunctions || relocatable || (hooks != null && hooks.exists(fn.entry))) return null;
+		final plan = ScalarPlan.analyze(fn, image, required, suffix);
+		return plan != null && plan.omitted != 0 ? plan : null;
+	}
+
+	function finishFunction(buf:StringBuf):String {
+		for (projection in projections) {
+			final text = projection.plan.emitHelper()
+				+ (projection.borrowed ? ScalarEntry.borrowedAdapter(projection.plan, null, projection.owner)
+					: ScalarEntry.projectedAdapter(projection.plan, projection.owner));
+			buf.add(text);
+			lastProjections.push({helper: projection.plan.helperName(), text: text,
+				adapter: projection.borrowed ? projection.plan.borrowedName() : projection.plan.projectedName()});
+		}
+		return buf.toString();
+	}
+
+	/** The memory projections the last `emitFunction` appended to its text, in that order:
+	    `Program` shares equal ones within a class (ProjectionShare). */
+	public var lastProjections(default, null):Array<ProjectionShare.ProjectionText> = [];
+
+	/** Call sites may use proved helpers: direct scalar calls, borrowed-span adapters and
+	    caller-specific projections. Off (`--no-scalar-calls`), every call goes to the callee's
+	    CpuState entry, which keeps its own helper; for measuring where helpers cost or pay. */
+	public var scalarCalls = true;
+
+	public function scalarPlan(fn:Func):Null<ScalarPlan> {
+		if (!optimize || !scalarFunctions || relocatable || (hooks != null && hooks.exists(fn.entry))) return null;
+		if (!scalarPlans.exists(fn.entry)) {
+			// A recursive edge sees no proved signature. It cannot consume an unfinished plan.
+			scalarPlans.set(fn.entry, null);
+			scalarPlans.set(fn.entry, ScalarPlan.analyze(fn, image, ALL_REGS, '', a -> {
+				final target = Vaddr.canonRam(a); final owner = staticTargetOf(target);
+				if (owner == null) return null;
+				final plan = scalarTargetOf(target);
+				return plan == null ? null : new ScalarCall(plan, owner);
+			}));
+		}
+		return scalarPlans.get(fn.entry);
+	}
+	public function clearScalarPlans():Void scalarPlans.clear();
 
 	/**
 		Stable block entry indices, shared by the dispatch tables and both output shapes.
@@ -177,9 +258,16 @@ class Emitter {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
 		ir = new FunctionIR(fn, image);
+		projections = [];
+		lastProjections = [];
+		callLive = optimize && scalarFunctions && scalarCalls && !relocatable
+			? new recomp.analysis.BoundaryLiveness(fn, ir).afterCall : [];
 		leafUsed = optimize ? leafRegisters(ir) : null;
 		functionAddr = fn.entry;
-		entryRaLocal = fn.checkedReturns.keys().hasNext();
+		curFn = fn;
+		// A hand-over passes the entry's `$ra` on (Runtime.hopRa), for the callee's checks.
+		entryRaLocal = fn.checkedReturns.keys().hasNext() || fn.hops.keys().hasNext();
+		hopTarget = isHopTarget(fn.entry);
 		nativeLoop = null;
 		linearNext = null;
 		capturedBranch = null;
@@ -193,6 +281,7 @@ class Emitter {
 		span = null;
 		spanCount = 0;
 		fspans = null;
+		scalarBorrows = [];
 		fspanLive = null;
 		curBlock = -1;
 		cycLocal = optimize;
@@ -219,23 +308,59 @@ class Emitter {
 		// First, before anything can call out and let another relocatable function set it.
 		if (relocatable) buf.add('\t\tfinal rbase = core.Reloc.base;\n');
 		// The address this call returns to, before anything can overwrite `$ra` (ADR-0027).
-		if (entryRaLocal) buf.add('\t\tvar entryRa = ctx.ra;\n');
+		if (entryRaLocal) buf.add(hopTarget ? '\t\tvar entryRa = entry <= $HOP ? core.Runtime.hopRa : ctx.ra;\n'
+			: '\t\tvar entryRa = ctx.ra;\n');
+		if (hopTarget) {
+			// A hand-over (Discovery.cutAtEntries) enters the first block: past the checkpoint and the
+			// pump where the code it replaces ran on into here inline, with them where that code
+			// pumped at this block ($HOP_PUMP); never through a mod's hook.
+			buf.add('\t\tfinal hopped = entry <= $HOP;\n');
+			buf.add('\t\tfinal pumping = entry != $HOP;\n');
+			buf.add('\t\tif (hopped) entry = 0; else {}\n');
+		} else {}
 		buf.add('\t\t#if recompsx_cooperative\n');
 		buf.add('\t\tvar entryPump = true;\n');
 		buf.add('\t\tif (core.Cooperative.resumeEntry >= 0) {\n');
 		buf.add('\t\t\tentry = core.Cooperative.resumeEntry; entryPump = core.Cooperative.resumePump;\n');
 		if (entryRaLocal) buf.add('\t\t\tentryRa = core.Cooperative.resumeRa;\n');
 		buf.add('\t\t\tcore.Cooperative.resumeEntry = -1;\n\t\t} else {}\n');
-		buf.add('\t\tif (entryPump) {\n');
+		buf.add(hopTarget ? '\t\tif (entryPump && pumping) {\n' : '\t\tif (entryPump) {\n');
 		emitCheckpoint(buf, '\t\t\t', 'entry', true);
-		buf.add(PUMP_ENTRY);
+		buf.add(hopTarget ? PUMP_ENTRY_HOP : PUMP_ENTRY);
 		buf.add('\t\t} else {}\n\t\t#else\n');
-		buf.add(PUMP_ENTRY);
+		buf.add(hopTarget ? PUMP_ENTRY_HOP : PUMP_ENTRY);
 		buf.add('\t\t#end\n');
 		if (hooks != null && !relocatable && hooks.exists(fn.entry)) emitModEntry(buf, fn.entry);
+		final scalar = scalarPlan(fn);
+		if (scalar != null) {
+			// Keep the original entry checkpoint and pump, including resumption; only the
+			// computation has a recovered signature. There are no internal safe points.
+			final guarded = scalar.memory != null || scalar.accounting != null;
+			var ind = '\t\t';
+			if (scalar.accounting != null) {
+				buf.add(ind + 'if (entry == 0' + (scalar.horizon == 0 ? '' : ' && (' + ScalarEntry.callWindow(scalar.horizon) + ')') + ') {\n');
+				ind += '\t';
+			}
+			if (scalar.memory != null) { buf.add(scalar.memory.guard(ind)); ind += '\t'; }
+			buf.add(scalar.apply(ind));
+			cycLocal = false;
+			emitScalarCharges(buf, ind, scalar);
+			if (!guarded) {
+				buf.add('\t}\n');
+				buf.add(scalar.emitHelper() + ScalarEntry.borrowedAdapter(scalar));
+				return finishFunction(buf);
+			} else {
+				buf.add(ind + 'return;\n');
+				if (scalar.memory != null) { ind = ind.substr(1); buf.add(ind + '} else {}\n'); }
+				if (scalar.accounting != null) { ind = ind.substr(1); buf.add(ind + '} else {}\n'); }
+				// Interior CFG entries and failed memory guards keep the original body.
+				cycLocal = optimize;
+			}
+		}
 		if (cycLocal) buf.add('\t\tvar cyc = ctx.cycles;\n');
 		if (leafUsed != null) for (r in leafUsed) buf.add('\t\tvar ${Instr.regName(r)} = ctx.${Instr.regName(r)};\n');
 		fspans = optimize ? planFunctionSpans(ir) : null;
+		scalarBorrows = planScalarBorrows();
 		fspanLive = fspans != null ? planFspanLiveness() : null;
 		if (fspans != null) for (r in 1...32) {
 			final f = fspans.get(r);
@@ -254,7 +379,8 @@ class Emitter {
 			if (regions.sequences > 0 || regions.choices > 0 || regions.loops > 0) {
 				emitRegions(buf, fn, regions, indexOf);
 				buf.add('\t}\n');
-				return buf.toString();
+				if (scalar != null) buf.add(scalar.emitHelper() + ScalarEntry.borrowedAdapter(scalar));
+				return finishFunction(buf);
 			}
 		}
 		final dispatch = !flat && !linear;
@@ -295,7 +421,8 @@ class Emitter {
 			buf.add('\t\t}\n');
 		}
 		buf.add('\t}\n');
-		return buf.toString();
+		if (scalar != null) buf.add(scalar.emitHelper() + ScalarEntry.borrowedAdapter(scalar));
+		return finishFunction(buf);
 	}
 
 	function emitRegions(buf:StringBuf, fn:Func, plan:RegionPlan, indexOf:Map<Int, Int>):Void {
@@ -329,6 +456,11 @@ class Emitter {
 	**/
 	function emitRegion(buf:StringBuf, fn:Func, region:Region, indexOf:Map<Int, Int>,
 			ind:String, follow:Null<Int>):Void {
+		if (optimize && valueRegions && valueCfg && !suppressValueCfg && valueScope == null
+				&& leafUsed == null && capturedBranch == null && scalarPlan(fn) == null) {
+			final values = ValueCfg.analyze(ir, region);
+			if (values != null && emitValueCfg(buf, fn, region, values, indexOf, ind, follow)) return;
+		}
 		switch (region.body) {
 			case Block(block):
 				linearNext = follow;
@@ -393,6 +525,40 @@ class Emitter {
 				linearNext = follow;
 		}
 	}
+
+	/** Local merge values for every public entry of a pure acyclic region. */
+	function emitValueCfg(buf:StringBuf, fn:Func, region:Region, plan:ValueCfg,
+			indexOf:Map<Int, Int>, ind:String, follow:Null<Int>):Bool {
+		for (pc in plan.returnSites)
+			if (fn.checkedReturns.exists(pc) || discovery.raJumpOf(fn.entry, pc) != null) return false;
+		// The proof excludes effects, loops and calls: trial emission cannot add projections,
+		// span variables or loop plans. Restore the block and transfer routing cursors below.
+		final oldBlock = curBlock; final oldNext = linearNext;
+		final oldContinuation = continuation; final oldReturn = callReturnAddr;
+		suppressValueCfg = true;
+		final original = new StringBuf(); emitRegion(original, fn, region, indexOf, ind, follow);
+		curBlock = oldBlock; linearNext = oldNext;
+		valueScope = plan; valuePrefix = 'vc_${ir.byAddress.get(region.entry).resumeId}_';
+		final candidate = new StringBuf();
+		candidate.add(ind + '// Value CFG: ' + region.members.length + ' blocks, public entries retained.\n');
+		for (r in plan.used) candidate.add('${ind}var ${reg(r)} = ctx.${Instr.regName(r)};\n');
+		emitRegion(candidate, fn, region, indexOf, ind, follow);
+		if (plan.continuation != null) publishValues(candidate, ind);
+		valueScope = null; valuePrefix = ""; suppressValueCfg = false;
+		curBlock = oldBlock; linearNext = oldNext;
+		continuation = oldContinuation; callReturnAddr = oldReturn;
+		final text = candidate.toString();
+		if (text.split('ctx.').length >= original.toString().split('ctx.').length) return false;
+		buf.add(text);
+		return true;
+	}
+
+	/** No emulated effect may run while this scope is active; publish at every actual escape. */
+	function publishValues(buf:StringBuf, ind:String):Void {
+		if (valueScope != null) for (r in valueScope.written)
+			buf.add('${ind}ctx.${Instr.regName(r)} = ${reg(r)};\n');
+	}
+	function leavesValues(target:Int):Bool return valueScope != null && !valueScope.members.exists(target);
 
 	/** Consecutive stable IDs become ranges, keeping resume guards small without a host table. */
 	static function containsEntry(region:Null<Region>):String {
@@ -486,6 +652,7 @@ class Emitter {
 	/** A leaf's written registers back to CpuState, before anything outside it can look. */
 	function publish(buf:StringBuf, ind:String):Void {
 		if (cycLocal) buf.add('${ind}ctx.cycles = cyc;\n');
+		publishValues(buf, ind);
 		if (leafUsed != null) for (r in leafWritten) buf.add('${ind}ctx.${Instr.regName(r)} = ${Instr.regName(r)};\n');
 	}
 
@@ -498,6 +665,42 @@ class Emitter {
 	function emitReturn(buf:StringBuf, ind:String):Void {
 		publish(buf, ind);
 		buf.add(ind + 'return;\n');
+	}
+
+	/**
+		A hand-over to another function's entry (Discovery.cutAtEntries): a direct tail call that
+		enters past its pump and checkpoint, with this function's entry `$ra` for its return checks.
+		A token it leaves is this function's caller's to act on, as it was when the code ran inline;
+		a plain return goes where `$ra` points, checked as this function's own return would be
+		(`Func.checkedHops`).
+	**/
+	function emitHop(buf:StringBuf, ind:String, target:Int):Void {
+		final t = Vaddr.canonRam(target);
+		final cls = staticTargetOf(t);
+		publish(buf, ind);
+		if (cls == null) {
+			// An address whose occupant is decided at run time (Main.analyseBase keeps these out):
+			// by address, as any call there is.
+			buf.add('${ind}ctx.pc = ${hex(t)};\n');
+			buf.add('${ind}$dynamicCall(ctx, ${hex(t)});   // runs on into another function\n');
+		} else {
+			buf.add('${ind}core.Runtime.hopRa = entryRa;\n');
+			buf.add('${ind}$cls.${Discovery.defaultName(t)}(ctx, ${curFn.pumpedHops.exists(t) ? HOP_PUMP : HOP});   // runs on into another function\n');
+		}
+		buf.add('${ind}if (ctx.unwindToken != 0) return;\n');
+		if (curFn.checkedHops.exists(curBlock)) {
+			buf.add('${ind}if (ctx.ra != entryRa) Runtime.returnTo(ctx, ctx.ra);   // a return elsewhere\n');
+			buf.add('${ind}else {}\n');
+		} else {}
+		buf.add('${ind}return;\n');
+	}
+
+	function isHopTarget(entry:Int):Bool {
+		if (hopTargets == null) {
+			hopTargets = [];
+			for (f in discovery.functions) for (h in f.hops.keys()) hopTargets.set(h, true);
+		} else {}
+		return hopTargets.exists(Vaddr.canonRam(entry));
 	}
 
 	/**
@@ -535,10 +738,11 @@ class Emitter {
 	**/
 	function emitModEntry(buf:StringBuf, addr:Int):Void {
 		hooked.set(addr, true);
+		final notHop = hopTarget ? '!hopped && ' : '';
 		buf.add('\t\t#if recompsx_cooperative\n');
-		buf.add('\t\tif (entry == 0 && entryPump && mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
+		buf.add('\t\tif (entry == 0 && ${notHop}entryPump && mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
 		buf.add('\t\t#else\n');
-		buf.add('\t\tif (entry == 0 && mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
+		buf.add('\t\tif (entry == 0 && ${notHop}mod.ModHost.enter(ctx, ${hex(addr)})) return;   // a mod\'s hook\n');
 		buf.add('\t\t#end\n');
 	}
 
@@ -573,6 +777,16 @@ class Emitter {
 	static inline final PUMP_ENTRY =
 		"\t\tif (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0)) {\n"
 		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
+
+	/** PUMP_ENTRY for a function another one hands over to: not for the hand-over itself. */
+	static inline final PUMP_ENTRY_HOP =
+		"\t\tif (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0) && pumping) {\n"
+		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
+
+	/** The `entry` a hand-over calls with (Discovery.cutAtEntries): the first block, past the pump. */
+	static inline final HOP = -2;
+	/** The same, through the checkpoint and the pump (`Func.pumpedHops`). */
+	static inline final HOP_PUMP = -3;
 
 	/**
 		What makes `longjmp` able to leave.
@@ -627,6 +841,19 @@ class Emitter {
 		final spans = optimize ? planSpans(block.body, stackPlan) : null;
 		var i = 0;
 		while (i < block.body.length) {
+			final region = optimize && valueRegions && leafUsed == null
+				? valueRegion(block.body, i, block.resumeId, ind) : null;
+			if (region != null) {
+				buf.add(region.text);
+				for (at in i...region.end) {
+					resetFunctionSpans(buf, ind, at);
+					if (fspanLive != null) {
+						final steps = fspanLive.step.get(curBlock);
+						stepFunctionSpans(buf, ind, steps != null && steps.exists(at) ? steps.get(at) : 0, block.body[at].decoded);
+					}
+				}
+				i = region.end; continue;
+			}
 			if (stackPlan != null) {
 				switch (stackPlan[i]) {
 					case ForwardLoad(source):
@@ -669,9 +896,39 @@ class Emitter {
 				blockAddr, indexOf, ind, block.cycles, block.instructions.length, block.resumeId);
 		} else {
 			emitCharges(buf, ind, block.cycles, block.instructions.length);
+			final next = blockAddr + block.instructions.length * 4;
 			if (block.successors.length == 1) emitGoto(buf, ind, block.successors[0], indexOf, blockAddr);
+			// Runs on into another function's entry (Discovery.cutAtEntries).
+			else if (fn.hops.exists(Vaddr.canonRam(next))) emitHop(buf, ind, next);
 			else emitReturn(buf, ind);
 		}
+	}
+
+	/** Never replace field syntax alone: require fewer architectural field accesses than the
+	    existing fused emitter. A span refresh is also a boundary, preserving its exact inputs. */
+	function valueRegion(body:Array<recomp.ir.FunctionIR.InstructionIR>, start:Int, blockId:Int, ind:String):Null<{end:Int, text:String}> {
+		// Most body positions are effects or isolated arithmetic. Avoid constructing a graph
+		// for those, and bound span lookahead by the same interval limit as the value lift.
+		if (start + 1 >= body.length || (body[start].effects : Int) != 0 || body[start].writes.has(31)
+				|| (body[start + 1].effects : Int) != 0 || body[start + 1].writes.has(31)) return null;
+		var limit = start + 32 < body.length ? start + 32 : body.length;
+		if (fspanLive != null) {
+			final writes = fspanLive.write.get(curBlock); final steps = fspanLive.step.get(curBlock);
+			for (i in start...limit) if ((writes != null && writes.exists(i) && writes.get(i) != 0)
+					|| (steps != null && steps.exists(i) && steps.get(i) != 0)) { limit = i + 1; break; }
+		}
+		final region = ValueRegion.analyze(body, start, limit);
+		if (region == null) return null;
+		final original = new StringBuf(); var i = start;
+		while (i < region.end) {
+			final fused = PatternMatcher.match(body, i);
+			if (fused != null && i + fused.length <= region.end) {
+				emitFused(original, ind, body[i].decoded, body[i + 1].decoded, fused.kind); i += fused.length;
+			} else { emitSimple(original, ind, body[i].decoded); i++; }
+		}
+		final text = region.emit(ind, 'vr_${blockId}_${start}_', reg);
+		final storage = valueScope == null ? 'ctx.' : valuePrefix;
+		return text.split(storage).length < original.toString().split(storage).length ? {end:region.end, text:text} : null;
 	}
 
 	/**
@@ -793,6 +1050,23 @@ class Emitter {
 		return plan;
 	}
 
+	/** Reuse spans already worthwhile for this caller. Do not widen ranges or add new
+	    spans merely to specialize a call. Residency/hooks use the ordinary direct-call proof. */
+	function planScalarBorrows():Map<Int, ScalarBorrow> {
+		final plans:Map<Int, ScalarBorrow> = [];
+		if (!optimize || !scalarCalls || relocatable || fspans == null) return plans;
+		for (b in ir.blocks) {
+			if (b.transfer == null || b.transfer.decoded.op != Op.JAL) continue;
+			final target = Vaddr.canonRam(b.transfer.decoded.target);
+			if (staticTargetOf(target) == null) continue;
+			final scalar = scalarTargetOf(target);
+			if (scalar == null || scalar.memory == null) continue;
+			final borrowed = ScalarBorrow.analyze(scalar.memory, fspans, recomp.analysis.CallAliases.beforeCall(b));
+			if (borrowed != null) plans.set(b.addr, borrowed);
+		}
+		return plans;
+	}
+
 	/** The function span a load or store goes through, or null. */
 	function functionSpanOf(i:Instr):Null<SpanAccess> {
 		if (fspans == null || spanWidth(i.op) == 0 || i.rs == 0) return null;
@@ -910,6 +1184,12 @@ class Emitter {
 			if (block.transfer != null) {
 				final d = block.transfer.decoded;
 				final link = (block.transfer.writes : Int);
+				// The callee consumes the current pointer, after the slot and before its own
+				// writes. Keeping this use live also refreshes a last-use span changed by the
+				// body, delay slot or an earlier call, even without a later caller load.
+				final borrowed = scalarBorrows.get(block.addr);
+				if (borrowed != null) for (r in 1...32)
+					if ((borrowed.registers & (1 << r)) != 0) ev.push([0, r, -2]);
 				if (d.op == Op.BLTZAL || d.op == Op.BGEZAL) ev.push([3, 0, -2]);
 				else if (d.op == Op.JAL) ev.push([4, (callWrites(d.target) | link) & regs, -2]);
 				else if (d.op == Op.JALR) {
@@ -1215,6 +1495,11 @@ class Emitter {
 	}
 
 	/** Charge every original instruction, including eliminated instructions and delay slots. */
+	function emitScalarCharges(buf:StringBuf, ind:String, scalar:ScalarPlan):Void {
+		buf.add(ScalarEntry.charges(scalar, ind, cycExpr()));
+	}
+
+	/** Charge every original instruction, including eliminated instructions and delay slots. */
 	function emitCharges(buf:StringBuf, ind:String, cycles:Int, insns:Int):Void {
 		if (cycles > 0) buf.add('${ind}${cycExpr()} = (${cycExpr()} + $cycles) | 0;\n');
 		buf.add('${ind}#if recompsx_insns\n');
@@ -1408,6 +1693,7 @@ class Emitter {
 					if (takenKind == JUMP_FALL && notTakenKind == JUMP_FALL) {
 						// Both outcomes are the following block; the slot and cycles already ran.
 					} else if (takenKind == JUMP_DISPATCH && notTakenKind == JUMP_DISPATCH) {
+						publishValues(buf, ind);
 						buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
 					} else if (takenKind == JUMP_RETURN && notTakenKind == JUMP_RETURN) {
 						emitReturn(buf, ind);
@@ -1433,7 +1719,31 @@ class Emitter {
 		// Only a tail call reaches here from a leaf, and it leaves: publish, never reload.
 		publish(buf, ind);
 		if (cls != null) {
-			buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
+			var scalar = optimize && scalarCalls ? scalarTargetOf(t) : null;
+			var projected = false;
+			var borrowed = resumes ? scalarBorrows.get(curBlock) : null;
+			final transfer = ir.byAddress.get(curBlock).transfer;
+			if (resumes && !relocatable && transfer != null
+					&& transfer.decoded.op == Op.JAL && callLive.exists(transfer.decoded.addr)) {
+				final suffix = '_from_${StringTools.hex(functionAddr, 8)}_${StringTools.hex(transfer.decoded.addr, 8)}';
+				final projection = projectedTargetOf(t, callLive.get(transfer.decoded.addr), suffix);
+				// Borrow liveness/arguments were planned from the complete callee. A memory
+				// projection may only reuse them with exactly the same access/alias preflight.
+				if (projection != null) {
+					if (borrowed != null && (projection.memory == null || scalar == null || scalar.memory == null
+							|| projection.memory.guard('') != scalar.memory.guard(''))) borrowed = null;
+					scalar = projection;
+					projected = true;
+					// Memory and GTE projections stay with their caller: only pure ones are pooled.
+					if (scalarPool == null || scalar.memory != null || scalar.coprocessor) projections.push({plan:scalar, owner:cls, borrowed:borrowed != null});
+				}
+			}
+			// Borrowed adapters reuse caller coverage; fresh adapters build all access guards.
+			// Both own publication and fall back to the complete original entry.
+			if (projected && scalar.memory != null && borrowed == null) buf.add('$ind${scalar.projectedName()}(ctx);\n');
+			else if (scalar == null || (scalar.memory != null && borrowed == null)) buf.add('$ind$cls.${Discovery.defaultName(t)}(ctx);\n');
+			else if (borrowed != null) buf.add(ind + (projected ? '' : cls + '.') + '${scalar.borrowedName()}(ctx, ' + borrowed.args.join(', ') + ');\n');
+			else emitScalarCall(buf, ind, cls, scalar, projected);
 		} else if (!resumes) {
 			// A tail call by address: a jump, left for the caller to run (ADR-0026).
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
@@ -1448,6 +1758,21 @@ class Emitter {
 		// A tail call's callee returns to our caller: this frame is no one's continuation.
 		emitCallUnwind(buf, ind, resumes ? continuation : -1,
 			resumes ? pcExpr(callReturnAddr) : NO_CONTINUATION);
+	}
+
+	/** The slow arm owns all observable entry work. Do not call wantsYield here: its
+	    stress counter must advance exactly once, in the callee's original checkpoint. */
+	function emitScalarCall(buf:StringBuf, ind:String, cls:String, scalar:ScalarPlan, projected:Bool = false):Void {
+		buf.add(ScalarEntry.slowGuard(ind, projected, scalar.horizon == 0 ? null : ScalarEntry.callWindow(scalar.horizon)));
+		buf.add('${ind}\t$cls.${scalar.name}(ctx);\n');
+		buf.add('${ind}} else {\n');
+		final shared = projected && scalarPool != null && !scalar.coprocessor ? scalarPool.intern(scalar) : null;
+		buf.add(scalar.apply(ind + '\t', projected ? null : cls, shared));
+		final local = cycLocal;
+		cycLocal = false;
+		emitScalarCharges(buf, ind + '\t', scalar);
+		cycLocal = local;
+		buf.add('${ind}}\n');
 	}
 
 	/** After a call: `entry` is the block it resumes at, `cont` the guest address it returns to;
@@ -1496,6 +1821,7 @@ class Emitter {
 	static inline final JUMP_FORWARD = 3;    // a later part of an enclosing sequence, recorded
 	static inline final JUMP_DISPATCH = 4;   // another case of the block dispatcher
 	static inline final JUMP_RETURN = 5;     // outside the function: publish and return
+	static inline final JUMP_HOP = 6;        // another function's entry: hand over (cutAtEntries)
 
 	/**
 		How control reaches `target` from here. The order is the nesting: the block that follows
@@ -1506,6 +1832,8 @@ class Emitter {
 		outside it leaves.
 	**/
 	function jumpKind(target:Int, indexOf:Map<Int, Int>):Int {
+		// Another function's entry is no block here, whatever encloses the jump: it leaves.
+		if (!indexOf.exists(target) && curFn != null && curFn.hops.exists(Vaddr.canonRam(target))) return JUMP_HOP;
 		if (linearNext != null && target == linearNext) return JUMP_FALL;
 		if (loopHead != null && target == loopHead) return JUMP_CONTINUE;
 		if (loopHead != null && !loopMembers.exists(idOf(target))) return JUMP_BREAK;
@@ -1536,15 +1864,23 @@ class Emitter {
 		final kind = jumpKind(target, indexOf);
 		if (kind == JUMP_FALL) return;
 		if (kind == JUMP_RETURN) emitReturn(buf, ind);
-		else buf.add(ind + jumpText(kind, target, indexOf) + '\n');
+		else if (kind == JUMP_HOP) emitHop(buf, ind, target);
+		else {
+			if (kind == JUMP_DISPATCH || (kind != JUMP_FORWARD && leavesValues(target))) publishValues(buf, ind);
+			buf.add(ind + jumpText(kind, target, indexOf) + '\n');
+		}
 	}
 
 	/** One arm of a branch as a braced block: a one-liner inline, a return on its own lines. */
 	function arm(kind:Int, target:Int, indexOf:Map<Int, Int>, ind:String):String {
-		if (kind != JUMP_RETURN) return '{ ' + jumpText(kind, target, indexOf) + ' }';
+		if (kind != JUMP_RETURN && kind != JUMP_HOP && (valueScope == null || kind != JUMP_DISPATCH)
+				&& (kind == JUMP_FORWARD || !leavesValues(target)))
+			return '{ ' + jumpText(kind, target, indexOf) + ' }';
 		final lines = new StringBuf();
 		lines.add('{\n');
-		emitReturn(lines, ind + '\t');
+		if (kind == JUMP_RETURN) emitReturn(lines, ind + '\t');
+		else if (kind == JUMP_HOP) emitHop(lines, ind + '\t', target);
+		else { publishValues(lines, ind + '\t'); lines.add(ind + '\t' + jumpText(kind, target, indexOf) + '\n'); }
 		lines.add(ind + '}');
 		return lines.toString();
 	}
@@ -1664,7 +2000,7 @@ class Emitter {
 			case CTC2: 'Gte.setCtrl(ctx, ${i.rd}, ${reg(rt)});';
 			case LWC2: 'Gte.setData(ctx, ${i.rt}, ${spanLoad('spanRead32', 'read32', busAddr(i))});';
 			case SWC2: spanStore('spanWrite32', 'write32', busAddr(i), 'Gte.getData(ctx, ${i.rt})');
-			case COP2CMD: gteCommand(i.code, optimize, optimize && leafUsed == null);
+			case COP2CMD: gteCommand(i.code, optimize, optimize);
 
 			case _: '// unhandled: ${Disasm.text(i)}';
 		}
@@ -1679,14 +2015,30 @@ class Emitter {
 	   inline on C++): each is shorter than the call it was. */
 	/**
 		A COP2 command by name. `quick`: NCLIP, AVSZ3 and AVSZ4 run inline (gte.GteQuick).
-		`inlineRtps`: RTPS as well — not in a looping leaf, whose registers already hold the
-		host's registers: there the transform's own dozen values spilled, and Crash Bash's
-		hottest loop (a leaf, four RTPS) ran 0.2 ms a frame slower inlined, where Crash 3's model
-		loop (registers in CpuState) ran 0.15 ms faster. Measured again with the matrix rows on
-		the multiply-accumulate unit (GteFile.dot3), which keeps the nine elements out of
-		registers: still 0.08 ms slower (docs/perf/dreamcast-ledger.md, E-051).
+		`inlineRtps`: RTPS as well, wherever the code is optimized. Until the SH-4's RTPS core
+		(ADR-0046) a looping leaf kept it a call: inline, the transform's own dozen values spilled
+		the leaf's registers, and Crash Bash's hottest loop (a leaf, four RTPS) ran 0.2 ms a frame
+		slower (E-031; E-051: still 0.08 slower with the matrix rows on the multiply-accumulate
+		unit). With the core the inline transform is a call to it, its C form out of line
+		(Gte.project32), so a leaf's registers fare as they did around `Gte.cmdRtps` and the
+		wrapper's own call goes (E-088).
 	**/
 	static function gteCommand(code:Int, quick:Bool = false, inlineRtps:Bool = false):String {
+		return gteCommandText(code, quick, inlineRtps);
+	}
+
+	/**
+		A known COP2 command as a scalar helper issues it (ScalarGraph), without its `;`, or null for
+		a word the table does not know, whose `execute` needs the CPU state. Inline as everywhere
+		else (gteCommand): the quick ones and RTPS.
+	**/
+	public static function scalarGteCommand(code:Int):Null<String> {
+		final text = gteCommandText(code, true, true);
+		if (StringTools.startsWith(text, 'Gte.execute')) return null;
+		return (StringTools.startsWith(text, 'Gte.') ? 'gte.' : '') + text.substr(0, text.length - 1);
+	}
+
+	static function gteCommandText(code:Int, quick:Bool, inlineRtps:Bool):String {
 		final sf = (code & 0x80000) != 0 ? 12 : 0;
 		final lm = (code & 0x400) != 0 ? "true" : "false";
 		final args = '$sf, $lm';
@@ -1701,9 +2053,9 @@ class Emitter {
 			case 0x0C: 'Gte.cmdOp($args);';
 			case 0x3D: 'Gte.cmdGpf($args);';
 			case 0x3E: 'Gte.cmdGpl($args);';
-			case 0x10: 'Gte.cmdDpcs($args);';
-			case 0x2A: 'Gte.cmdDpct($args);';
-			case 0x11: 'Gte.cmdIntpl($args);';
+			case 0x10: quick ? 'gte.GteQuick.dpcs($args);' : 'Gte.cmdDpcs($args);';
+			case 0x2A: quick ? 'gte.GteQuick.dpct($args);' : 'Gte.cmdDpct($args);';
+			case 0x11: quick ? 'gte.GteQuick.intpl($args);' : 'Gte.cmdIntpl($args);';
 			case 0x29: 'Gte.cmdDcpl($args);';
 			case 0x1E: 'Gte.cmdNcs($args);';
 			case 0x20: 'Gte.cmdNct($args);';
@@ -1747,8 +2099,8 @@ class Emitter {
 		return '${reg(dest)} = ' + (wraps ? '($expr) | 0;' : '$expr;');
 	}
 
-	/** A pure GPR write. Every one is emitted: a register is machine state, and the next frame,
-	    pump or trap may read it (ADR-0029). */
+	/** A pure GPR write outside a selected value region. Keep it: a register is machine state,
+	    and the next frame, pump or trap may read it (ADR-0029/0044). */
 	function pureAssign(dest:Int, expr:String, wraps:Bool, block:Null<Int>, index:Int):String {
 		return assign(dest, expr, wraps);
 	}
@@ -1777,6 +2129,7 @@ class Emitter {
 	    register the idle prologue shadows is its shadow local while the dry turn is emitted. */
 	inline function reg(n:Int):String
 		return n == 0 ? "0" : (shadow != null && shadow.exists(n) ? shadow.get(n)
+			: valueScope != null && valueScope.used.indexOf(n) >= 0 ? valuePrefix + Instr.regName(n)
 			: (leafUsed != null && leafUsed.indexOf(n) >= 0 ? "" : "ctx.") + Instr.regName(n));
 
 	static function hex(v:Int):String {

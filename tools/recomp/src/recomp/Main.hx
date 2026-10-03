@@ -64,6 +64,9 @@ class Main {
 	static inline var EXIT_LOADER = 3;
 	static inline var EXIT_ANALYSIS = 4;
 
+	/** `gen --cut-shared` (ADR-0045): hand-overs between functions that share code. */
+	public static var cutShared = false;
+
 	public static function main():Void {
 		final args = Sys.args();
 		if (args.length == 0) {
@@ -107,14 +110,23 @@ usage:
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
 
-  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions] [--mods <id,id | all>]
+  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions | --no-scalar | --no-value-regions | --no-projection-share | --no-scalar-calls] [--value-cfg | --no-value-cfg] [--cut-shared] [--mods <id,id | all>]
       Emit a recompiled program. Given a disc image, its SYSTEM.CNF names the executable
       and its product code, and games/<code>/game.json, when there is one, supplies the
       overlays and hints; without one the executable alone is compiled. Given a code or a
       config, the disc is the one that game's gitignored local.json names. Given a bare
       executable, seeds come from --seed.
       --no-opt keeps block dispatch, without fusion or forwarding, for differential testing.
+      --no-scalar disables recovered parameter/return helpers, keeping other optimizations.
+      --no-value-regions disables pure value SSA between observation boundaries.
+      --value-cfg enables experimental propagation across pure structured CFG regions (off by default).
+      --no-value-cfg disables it while retaining linear value regions.
+      --no-projection-share emits every memory projection at its own call site, for comparisons.
+      --no-scalar-calls keeps recovered helpers inside their functions but calls every function
+        through its CpuState entry, for measuring call-site helper use.
       --no-regions keeps simple loops but disables region reductions.
+      --cut-shared: functions hand over at each other's entries instead of carrying the code
+        they share (ADR-0045): smaller, exact, and slower on the Dreamcast (ledger E-077).
       --mods builds in the named mods from games/<code>/mods (ADR-0033): their hooks are
       emitted, their sources copied beside the program; compile with -D recompsx_mods.
 
@@ -268,6 +280,11 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		var limit = 0;
 		var optimize = true;
 		var structureRegions = true;
+		var scalarFunctions = true;
+		var valueRegions = true;
+		var valueCfg = false;
+		var shareProjections = true;
+		var scalarCalls = true;
 		var modsWanted:Null<String> = null;
 		var i = 1;
 		while (i < args.length) {
@@ -277,6 +294,13 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				case "--seed" if (i + 1 < args.length): seeds.push(args[i + 1]); i++;
 				case "--no-opt": optimize = false;
 				case "--no-regions": structureRegions = false;
+				case "--no-scalar": scalarFunctions = false;
+				case "--no-value-regions": valueRegions = false;
+				case "--value-cfg": valueCfg = true;
+				case "--no-value-cfg": valueCfg = false;
+				case "--no-projection-share": shareProjections = false;
+				case "--no-scalar-calls": scalarCalls = false;
+				case "--cut-shared": cutShared = true;
 				case "--mods" if (i + 1 < args.length): modsWanted = args[i + 1]; i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
@@ -316,8 +340,10 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		} else {}
 
 		final program = new Program(universes, exe, limit, optimize, structureRegions,
-			input.relocSets);
+			input.relocSets, scalarFunctions, valueRegions, valueCfg);
 		program.setGame(input.serial != null ? input.serial : "", input.title != null ? input.title : "");
+		program.shareProjections = shareProjections;
+		program.scalarCalls = scalarCalls;
 		// Mods (ADR-0033): only with --mods does anything below change what is written.
 		final mods = modsWanted == null ? [] : modsFor(input, modsWanted);
 		final hooks = [for (m in mods) for (h in m.hooks) h];
@@ -350,6 +376,9 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		if (program.deduplicated > 0) {
 			Sys.println('${program.deduplicated} function bodies shared between universes');
 		}
+		if (program.projectionsShared > 0) {
+			Sys.println('${program.projectionsShared} memory projection call sites share an earlier site\'s helper');
+		}
 		return EXIT_OK;
 	}
 
@@ -371,6 +400,9 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 	public static function analyseBase(input:GenInput, extra:Array<Int>):Discovery {
 		final exe = input.exe;
 		final discovery = new Discovery(Image.ofExe(input.name, exe));
+		discovery.cutShared = cutShared;
+		// Its code inside an overlay window is called by address: never handed over to.
+		discovery.cutTarget = a -> !inAnyWindow(a, input.overlays);
 		discovery.addSeed(exe.initialPc, "entry_point", Confidence.Entry);
 		// Fed in before the run so everything they call is discovered too, exactly as if a `jal`
 		// had named them.
@@ -436,6 +468,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		}
 		final image = Image.ofExeWithOverlay('${input.name}:${o.id}', exe, bytes, o.loadAddr);
 		final d = new Discovery(image, o.loadAddr, o.endAddr(), true);
+		d.cutShared = cutShared;
 		for (t in input.tableHints) d.addTableHint(t.jrAddr, t.tableBase, t.count, t.targets);
 		for (h in o.entryHints) {
 			// A hint here is a guess recovered from a run, and a window holds artwork as well as

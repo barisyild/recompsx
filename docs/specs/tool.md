@@ -133,7 +133,11 @@ as code (`plausibleEntry`) becomes a seed, and the base is analysed again with t
 such as libcard's `_card_info`, used only by a save screen — is otherwise never traced, and the
 overlay's call finds nothing at run time. **Overlap/multi-entry policy**: entries inside another function's extent → both
 kept, shared blocks duplicated into each (always correct; avoids fragile function splitting —
-same policy as N64Recomp). Entries must be 4-aligned (hard error otherwise); zero-word/nop
+same policy as N64Recomp). With `gen --cut-shared` (ADR-0045, off by default: smaller but slower on the
+Dreamcast) every function is then traced again, stopping at other functions' entries reached by
+a branch arm or by running on into them, and hands over there (`Func.hops`, a direct tail call
+entered past the pump); it keeps its copy where that would move a pump point, on a cycle of
+hand-overs, or where its `$ra` analysis reached the code handed over. Entries must be 4-aligned (hard error otherwise); zero-word/nop
 padding classified `padding`.
 
 **CFG** — leader algorithm; delay slots belong to their branch's block. Edge kinds: Fall,
@@ -253,11 +257,194 @@ and keep the one that identifies the most functions consistently.
   unwinds and every boundary sees the machine's own state. A looping leaf — no guest call, trap or
   unknown instruction, a loop, at most 20 registers — keeps them in locals, declared at every
   entry, published at every way out and read again after a due pump; nothing can change them
-  under it. Every register write is made. (The locals of ADR-0007, with ADR-0012's boundary liveness and
+  under it. Observable register values are always retained; pure value regions below may remove
+  intermediate definitions that no boundary can observe. (The locals of ADR-0007, with ADR-0012's boundary liveness and
   ADR-0017's dead-write elimination, were replaced: publishing a copy that a callee had since
   changed ran Crash Bandicoot: Warped differently from vblank 9898, and on the SH-4 the copying
   cost more than it saved.) `RegisterMask` and `Effect` remain allocation-free `Int`
   abstractions in the build-time tool.
+- **Scalar signatures (ADR-0044)**: `ScalarPlan` gives each pure register definition a value
+  and recovers parameters from its computed outputs. A bounded one-block leaf ending in
+  `jr ra` can become an ordinary `<function>_value(...):Int` method with no CpuState parameter.
+  Additional distinct computed outputs use `ScalarResult.valueN` ABI words, never register-indexed
+  state or heap tuples. Callers immediately bind these words before publishing any register.
+  Constants and exact affine incoming values are reconstructed, capturing original inputs before
+  any output overwrites them; aliases reuse results. Exact affine identity also proves restored
+  registers unchanged. These rules apply to scratch registers as well as conventionally returned ones.
+  Its entry wrapper retains checkpoints and pumps; a proven direct call uses the helper when
+  neither can run. Every observable final register, delay slot, cycle and instruction count
+  is preserved. Memory leaves take one or more `shim.Span` parameters: the wrapper
+  proves every load/store fits aligned plain RAM or scratchpad, including unused/zero-target
+  reads. Addresses are incoming-register-plus-constant, literals, or immutable loaded values
+  with a proved entry read as described below. The body uses at most six total GPR/span/sample
+  parameters; preflight separately retains at most six complete spans, which may alias.
+  `ScalarMemoryValues` forwards a prior load/store value to a fully covered read, with exact
+  byte/halfword extension. Every write invalidates overlapping facts within its checked span
+  and all facts in other spans, which may alias. Disjoint ranges within one checked contiguous
+  span can retain values. Eliminated reads still enter preflight, so MMIO uses the original
+  stream. A forwarded word can recover an incoming pointer; a load retains its precise
+  source range, signedness and preceding possible writes for dependent-address recovery.
+  CFG predecessors carry snapshots of these facts; joins retain only identical byte ranges
+  and immutable values present on every incoming path. This can prove a saved return address
+  across branches without assuming that a stack slot is private.
+  Writes are mandatory graph roots emitted in instruction order; remaining loads retain their
+  original position, including a returned load preceding an aliasing store. A setter with no
+  changed GPR returns `Void`, without a dummy result or result slots. Every span is checked
+  before the first guest effect: failure runs the entire original body, preserving MMIO order
+  without repeating an earlier RAM write. Memory helpers use the callee wrapper unless a
+  direct caller's existing function spans cover every callee anchor/access. Such calls pass
+  spans anchored at callee inputs to a shared `_withSpans` adapter, which owns validity/alignment and
+  due-event/cooperative guards, rebasing, result publication and accounting. Failed guards use
+  the full wrapper; the actual `_value` helper remains state-free. No extra guest checkpoint is
+  introduced, and full DCE drops unused adapters. Block-local `CallAliases` can prove an input
+  equals another span's current register plus a constant. It tracks immutable value versions,
+  resets at effects/public entries and includes link writes before the delay slot. Shifted
+  anchors and every byte must fit the donor; caller rebasing is conditional on donor validity.
+  Donor registers become span-liveness uses after the delay slot and before callee writes,
+  including when no later caller load exists. No new spans/range widening is introduced;
+  covered rebasing uses `Memory.spanOffset` only behind validity checks. Coprocessor effects,
+  traps, changed return addresses, hooks and relocatable functions keep
+  the general path. Helpers are not forced inline.
+  `ScalarCall` composes a resident direct `jal` to another proved helper using ordinary Haxe
+  arguments/results. Link writes precede the delay slot; `jr ra` must sample the incoming
+  return address and the final value must be restored. Callee spans translate into the caller's
+  complete preflight. `ScalarMemory.stores` describes all possible child writes as individual
+  byte ranges, preserving gaps between them. Same-view disjoint ranges preserve caller facts.
+  In composed call trees, a possibly aliased write can leave a conditional saved-value fact;
+  consuming it requires an explicit `Memory.spansDisjoint` check before any guest effect.
+  These use physical arena indices, so virtual RAM mirrors cannot evade an exclusion. Joins
+  union the exclusions required on all predecessor paths. Child preconditions translate into
+  the parent guard, including when two child views collapse to one parent view; proved overlap
+  rejects composition. Borrowed adapters check the same ranges in their input-span coordinates.
+  Adjacent/overlapping exclusion ranges with an identical opposite range merge into an exact
+  connected union; gaps never merge. At most 16 resulting exclusions are admitted per helper;
+  more keeps the original function.
+  Child results/accounting
+  are captured before another call can overwrite the ABI words. Local functions remain bounded
+  to 256 analyzed instructions and six parameters. After output reconstruction/liveness,
+  at most 96 body-cost units are allowed: live SSA definitions/effects plus transported
+  numeric results plus one for path-accounting publication. This bounds source emission,
+  not runtime duration; dead guest operations still contribute all original charges.
+  The entire acyclic call tree must fit all three 10-bit
+  accounting lanes. Before skipping its internal checkpoints, the adapter proves that this
+  maximum cycle cost finishes strictly before the next event and cooperative deadline, with
+  no unwind/stress suspension. Failure uses the original body. Recursion, unknown calls and
+  unproved address bases remain excluded. No callee body is inlined by this pass.
+  `ScalarRead` identifies an immutable memory version, including a returned loaded pointer.
+  On use as an address, every earlier possible write must be disjoint from its source range:
+  known overlap rejects the helper, uncertain overlap requests a physical alias guard.
+  Entry preflight checks each source's plain-memory range/alignment before reading it, then
+  recursively checks the dependent spans. All final validity and exclusion checks precede
+  guest effects. These reads are side-effect-free RAM/scratchpad samples. `ScalarSignature`
+  can pass an active sample as an ordinary Int input and replace its body load, preserving
+  the load's reach predicate. Other loads keep their instruction order. A later write may
+  therefore alias the source without changing the saved pointer value.
+  Child provenance imports caller-prefix and child-prefix writes, excluding child writes
+  after the read. Distinct invocations have distinct versions. No MMIO read or speculative
+  store is allowed in preflight. Loaded views retain the complete entry adapter, not borrowed
+  caller spans; general changed-pointer continuations and differing-pointer phis remain open.
+  Signature lowering tracks span uses on live SSA nodes, including child call arguments.
+  A span unused in the body is omitted only from the signature, never from entry guards.
+  It prefers samples which remove a span argument, then samples replacing more loads, within
+  the same six-argument cap. A sample that cannot fit stays an ordered helper load.
+  Entry reads with the same source view/offset/width/signedness share one numeric sample;
+  distinct guest versions retain every preceding-write exclusion. Inactive/unproved reads
+  cannot use that sample even when they have the same source key. Calls pass child samples
+  as value nodes at call entry, allowing parent lowering to reuse its own preflight too.
+  A separate unconditional sample-equality proof removes already-known outputs from result
+  roots before liveness. Adapters reconstruct these values and wrapped affine offsets from
+  preflight samples; boundary-only values need neither helper parameters nor return words.
+  Memory helpers may return Void when every output is reconstructable, retaining ordered
+  effects and path accounting. Calls capture such child outputs before writes using distinct
+  imported read identities. Conditional loads/calls and opaque returned-pointer provenance
+  alone cannot establish unconditional sample equality. All span/alias guards remain.
+  Unconditional calls can import a child's separate numeric-result proof, even if only the
+  parent activates the read's entry guard. A call disappears only when no result, effect or
+  dynamic charge remains live. Fixed packed charges propagate through nested summaries and
+  fold at build time; removed host calls still retain their full guest accounting/horizons.
+  Narrow forwarded reads preserve their exact subrange/extension as a new read version,
+  without adding a body load. Their earlier-write exclusions prevent stale entry sampling.
+  `FunctionSummary` solves inputs/may-writes/effects and call edges across the known call graph;
+  unknown calls, traps and hooks remain conservative, and overlay residency decides which
+  callee can be summarized. `BoundaryLiveness` requires all state at runtime observations.
+  A direct `jal` to a bounded pure or memory leaf/acyclic function may use a helper returning only the
+  needed outputs if every other changed GPR is overwritten on all paths before any observation
+  or read. Its public entry still produces every result. Existing unwind tokens force the
+  full-state call, as do due events and cooperative entry work. Memory, subsequent calls,
+  returns, traps and loop pumps stop omission proofs. This does not infer an ABI or privatize
+  guest RAM. Projection remains preferred even when the whole callee has a multi-result helper;
+  general state reconstruction at internal observations remains unimplemented.
+  Memory projections keep every original access/alias guard and ordered write, even when all
+  read results are dead and the helper becomes Void. A caller-specific adapter either uses
+  proved borrowed spans with the identical full-plan preflight or constructs the complete
+  preflight after the slow-entry checks. Failure invokes the original owning class's full
+  callee; no device read is speculated or dropped. Hooks, unresolved residency, indirect/tail/
+  conditional calls and relocatable callers remain excluded.
+  `ScalarPool` shares identical pure projected computations across call sites and shards in
+  `ScalarValues.hx`, normalizing argument and live SSA names. Constants, operand order and
+  integer wrapping and all returned value computations remain in the exact key. Register mappings, residency proofs, original fallback
+  callees and guest accounting remain call-specific. Memory helpers are not pooled.
+  A program with no projected calls emits no shared module; regeneration removes stale ones.
+  `--no-scalar` disables only this pass for measurement; `--no-opt` disables it too.
+- **Value SSA between observations (ADR-0044)**: `ValueRegion` lowers up to 32 consecutive pure
+  body instructions into immutable values inside otherwise ordinary functions. It reuses exact
+  expressions with the same operand versions, removes dead definitions, and reconstructs affine
+  results. Only used incoming registers are captured; all changed final registers are published
+  before memory, calls, coprocessors, HI/LO, possible traps, return-address writes or control flow.
+  A new region reads the current fields, so a callback's result cannot be overwritten by an old
+  register cache. No values cross a block entry, delay slot, pump or function-span refresh. Span
+  refreshes retain their original inputs and order. Existing looping-leaf locals stay unchanged.
+  Selection requires fewer GPR field references than the existing emission of that interval,
+  including its constant fusions. This is a static filter, not a promise of runtime speedup.
+  `--no-value-regions` disables both this pass and its CFG extension, independently of signatures.
+  Experimental `--value-cfg` promotes GPRs across bounded pure acyclic structured regions (2–16 blocks, at most
+  32 instructions), using Haxe branch assignments as merge values. Public/interior entry guards,
+  pre-slot predicates and original block costs remain in place. Every used or possibly written
+  register is initialized from current CpuState; all possible writes are published at each exit,
+  including dispatcher/loop escapes. Skipped definitions therefore preserve incoming state.
+  Only regions with fewer state references than the existing emission are selected. Calls,
+  memory, coprocessors, HI/LO, possible traps, `ra` writes/redirected returns and pumps are excluded;
+  actual IR back edges reject the plan even when region structuring hides them. Original span
+  updates use the promoted operands and retain their order. Whole-function scalar helpers and
+  looping-leaf locals keep their current lowering. It is off by default because measured time
+  ranges overlap and output grows; smaller static reference counts did not establish a speedup.
+  `--no-value-cfg` disables only this extension;
+  `--no-regions` also prevents it by disabling structured region emission.
+  No new helper calls, runtime storage, allocation or forced inline. Effectful/loop SSA and
+  general ABI/stack recovery remain future work.
+- **Acyclic value SSA**: `ScalarCfg` extends scalar signatures to acyclic CFGs within
+  the same size/input limits. `ScalarGraph` lifts instructions once for both linear and CFG
+  plans. Edge predicates select phi values at joins and exits; branch operands are captured
+  before delay slots. Eager evaluation is confined to effect-free integer operations. Checked
+  loads and stores execute under their block's reach predicate, after whole-function span
+  preflight. A bad span on any path falls back before effects, even if that path is not selected.
+  Memory-value facts are cleared between blocks; topological adjacency proves no forwarding.
+  Calls, coprocessors, HI/LO, unproved traps, unknown transfers and internal pumps remain excluded. Inputs
+  include timing dependencies even when the result is constant, unless all path costs agree.
+  Boolean proofs over immutable SSA comparisons simplify reach/phi expressions; separate
+  memory versions remain distinct. Accounting groups equal reach predicates, merges equal-cost
+  disjoint paths and selects between complementary costs without changing guest counts.
+  Inputs unused by results, effects and simplified accounting can disappear. Only entry zero takes the
+  helper; public interior entries bypass preflight and retain the original body and state.
+  Selected cycle/instruction/block counts use an allocation-free additional return word,
+  `core.ScalarResult.accounting` (10 bits each, whole-DAG bounds checked). The caller consumes
+  it immediately before any further call or observation. This ABI temporary is valid only for
+  non-reentrant helpers with no callbacks/suspension; it is not emulated state. Linear helpers
+  keep immediate counts. Void memory setters also return path accounting. Pure CFG helper
+  pooling includes accounting in the normalized key; memory CFG helpers are never pooled.
+  Loops and state reconstruction inside effectful regions remain
+  unimplemented. See ADR-0044 for the contract and measured coverage.
+- **Arithmetic range proofs**: `FunctionIR` runs `RegisterRanges` separately for each basic
+  block. Signed 32-bit bounds follow constants, masks, shifts, comparisons and arithmetic;
+  `ADD/ADDI/SUB` lose their trap effect only when the operands prove overflow impossible.
+  Those instructions can then enter scalar signatures and cease invalidating unrelated
+  call-summary/span facts. Unknown or overflowing arithmetic remains a barrier, even when
+  its destination is `$zero`. Memory and runtime effects clear bounds; loads do not imply
+  a successful access or a completed load delay. Calls retain pre-call facts through the
+  delay slot but invalidate their link destination. Every continuation/interior entry starts
+  unknown again. No predecessor facts, calling convention or host floating point are used.
+  Scalar value identities also remove inputs to `x-x`, `x^x` and same-value comparisons.
+  This refines analysis; it does not implement overflow exceptions or load-delay emulation.
 - **Pattern fusion**: `PatternMatcher` runs on adjacent instructions in a basic-block body before
   emission. It currently folds `lui → ori/addiu` into one constant assignment and routes
   `mult/multu/div/divu → mflo/mfhi` through fused `Ops` result helpers. HI:LO side effects remain
@@ -349,7 +536,10 @@ and keep the one that identifies the most functions consistently.
 - **Deliberate non-fidelity** (documented): add/addi/sub never trap on overflow; load delay is
   not implemented (a per-function accurate mode remains future work); hi/lo latency invisible;
   i-cache invisible (stale-cache
-  self-patching games out of scope v1); misaligned access raises no AdEL/AdES.
+  self-patching games out of scope v1); misaligned access raises no AdEL/AdES. Wide accesses
+  require alignment through `MemA`: violating it can produce different host results or a host
+  fault. Scalar alignment rejection preserves this existing fallback; it does not implement
+  guest address errors or make that fallback portable.
 
 ## 3.1 Why memory stays a flat 2 MB array
 

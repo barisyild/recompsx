@@ -43,6 +43,14 @@ made, in both forms; there is no liveness narrowing and no dead-write eliminatio
 `RegisterPlan` is gone. The rest of the optimised build — structured regions, native loops,
 pattern fusion, stack forwarding, idle-loop skipping — is unchanged.
 
+**2026-10-01 refinement (ADR-0044):** scalar helpers and pure `ValueRegion` intervals can replace
+unobservable intermediate field writes with value SSA. An interval is at most 32 pure body
+instructions; memory, traps, coprocessors, HI/LO, control, return-address writes and span refreshes
+end it. All changed outputs are published before the next observation, and the next interval
+reads current state anew. Nothing is cached across a call or pump. Only intervals reducing GPR
+field references against their existing emission are selected; looping-leaf locals are unchanged.
+This does not restore the per-function register cache or its liveness/publication bug above.
+
 ## Alternatives
 
 - Keep the locals and fix the liveness, making every publication point a use of every written

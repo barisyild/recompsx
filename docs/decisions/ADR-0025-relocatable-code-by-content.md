@@ -81,3 +81,18 @@ that has them is tried first. Positions can be negative — code a function reac
 entry. Crash 3: 1,173 keys, 83 shared; the attract loop runs 20000 frames through both demos
 with nothing missing. `tools/recomp/test/TestRelocatable.hx`.
 
+
+## Revision (2026-10-03): answers kept by address, checked against their words
+
+"No cache" above cost ~1,500 cycles a call on the Dreamcast — eight words hashed byte by byte and
+the keys searched once for every length in use — and Crash 3's play makes ~36 such calls a frame,
+most to a handful of addresses. `RelocTable` now keeps the answers it finds: 64 slots by the
+address's low bits, each holding the address (with bit 0 set, so a slot never written matches
+nothing), the handle and the `hashWords` words the answer was decided by. A call whose words are
+still those takes the handle after reading them; any other finds it the long way and keeps it.
+Only answers `resolve` took no part in are kept, since those depend on nothing but the hashed words;
+a key shared by several functions reads further words, and is always found the long way. The answer
+is the one the full lookup gives for the same memory, so nothing a game can observe changes (the
+digests do not move). JavaScript: 86 % of gameplay's calls take the kept answer, ~5 % need
+`resolve`. Measured on the Dreamcast model: `FnTable.call` 0.314 → 0.204 ms a frame of Crash 3's
+gameplay demo (docs/perf/dreamcast-ledger.md E-099).

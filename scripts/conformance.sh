@@ -46,10 +46,108 @@ fi
 mkdir -p "$OUT"
 FAILED=0
 
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarPointers" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarPointers --interp || exit 1
+    break
+  fi
+done
+
 # These fixtures must come from today's emitter, never from checked-in generated Haxe.
 for name in "${TESTS[@]}"; do
-  if [ "$name" = "Codegen" ] || [ "$name" = "Regions" ] || [ "$name" = "Yielding" ]; then
+  if [ "$name" = "Codegen" ] || [ "$name" = "Regions" ] || [ "$name" = "Yielding" ] || [ "$name" = "ScalarCodegen" ] || [ "$name" = "ScalarMemoryCodegen" ] || [ "$name" = "ScalarBorrow" ] || [ "$name" = "ScalarShare" ] || [ "$name" = "ScalarCompose" ] || [ "$name" = "ScalarPointers" ] || [ "$name" = "ScalarCalls" ] || [ "$name" = "RangeCodegen" ] || [ "$name" = "ScalarCfg" ] || [ "$name" = "ScalarResults" ] || [ "$name" = "ScalarEffects" ] || [ "$name" = "ScalarMemoryCfg" ] || [ "$name" = "ValueRegions" ] || [ "$name" = "ValueCfg" ]; then
     haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestCodegen --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarCompose" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarCompose --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarBorrow" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarBorrow --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarCop" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarCop --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "HandOver" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestHandOver --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarShare" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestProjectionShare --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarMemoryCfg" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarMemoryCfg --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarEffects" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarEffects --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ValueCfg" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestValueCfg --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ValueRegions" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestValueRegions --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarResults" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarResults --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarCfg" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarCfg --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "RangeCodegen" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestRangeCodegen --interp || exit 1
+    break
+  fi
+done
+
+for name in "${TESTS[@]}"; do
+  if [ "$name" = "ScalarCalls" ]; then
+    haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestScalarCalls --interp || exit 1
     break
   fi
 done
@@ -74,7 +172,9 @@ for name in "${TESTS[@]}"; do
   [ -f "$src" ] || { bad "$name" "no such test ($src)"; FAILED=1; continue; }
   # Keep the array nonempty: macOS Bash 3.2 treats an empty array as unset under `set -u`.
   DEFINES=(-D analyzer-optimize)
+  if [ "$name" = "ScalarPointers" ]; then DEFINES+=(-D recompsx_cooperative -D recompsx_insns); fi
   if [ "$name" = "Yielding" ]; then DEFINES+=(-D recompsx_cooperative); fi
+  if [ "$name" = "ScalarCodegen" ] || [ "$name" = "ScalarMemoryCodegen" ] || [ "$name" = "ScalarBorrow" ] || [ "$name" = "ScalarShare" ] || [ "$name" = "ScalarCop" ] || [ "$name" = "ScalarCompose" ] || [ "$name" = "ScalarCalls" ] || [ "$name" = "RangeCodegen" ] || [ "$name" = "ScalarCfg" ] || [ "$name" = "ScalarResults" ] || [ "$name" = "ValueRegions" ] || [ "$name" = "ValueCfg" ] || [ "$name" = "ScalarEffects" ] || [ "$name" = "ScalarMemoryCfg" ] || [ "$name" = "HandOver" ]; then DEFINES+=(-D recompsx_cooperative -D recompsx_insns); fi
 
   # ---- JavaScript ----
   js_log="$OUT/$name.js.log"

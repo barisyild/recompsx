@@ -17,4 +17,23 @@ extern class GpuFile {
 
 	@:nativeFunctionCode("(recompsx_gpu[({arg0})] = ({arg1}))")
 	public static function set(i:Int, v:Int):Void;
+
+	/** The polygon core (ADR-0047, gpu.Gpu.polygonHw): on the SH-4 its answer for the packet's first
+	    triangle (`second` 0) or a quad's second (1) — 0 drawn, 2 drawn with a state not the one last
+	    sent, 3 rejected, 1 for the C form; elsewhere 1 (gpu.Gpu's header). */
+	@:nativeFunctionCode("recompsx_gpu_poly_try(({arg0}), ({arg1}), ({arg2}), ({arg3}))")
+	public static function poly(ram:RawBuf, at:Int, op:Int, second:Int):Int;
+
+	/** The state words 52-61 hold (the polygon core's), to the backend as words (bp_gpu_state_w). */
+	@:nativeFunctionCode("bp_gpu_state_w(recompsx_gpu + 52)")
+	public static function backendState():Void;
+
+	/** The triangle words 36-47 hold (gpu.Gpu.triWords), to the backend as words (bp_gpu_tri_w). */
+	@:nativeFunctionCode("bp_gpu_tri_w(recompsx_gpu + 36)")
+	public static function backendTri():Void;
+
+	/** The core's check build (`-DRECOMPSX_GPU_POLY_CHECK=1`): after the C form drew a packet. */
+	@:nativeFunctionCode("recompsx_gpu_poly_after(({arg0}))")
+	public static function polyChecked(op:Int):Void;
+
 }

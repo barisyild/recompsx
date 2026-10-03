@@ -88,11 +88,19 @@ without it. To make a placement, or remake one when the hot code has changed muc
 1. Build, and make a bench image of it (`--dc-rxprof --dc-bench=FROM:TO` in its RECOMPSX.CFG).
 2. Run the model with a trace: `scripts/dc-flycast-model.sh <image> <out.txt> RXTRACE=48000000`.
    That writes `<out.txt>.cache.itrace`, the instruction entering each new line (192 MB).
+   A trace starts at the bench's first present and 24 M entries are ~100 frames of it: a window
+   with phases of its own needs a trace of each, from a bench image starting there, joined into
+   one. Ballistix's 18800:20300 is three — the match, a disc load (19840), the scene after it
+   (20100) — and a placement from its first frames left the load loop with 6.7 ms of conflicts a
+   frame (ledger E-108; out/_work/round3.sh).
 3. `scripts/dc-layout.py sections <build>/recompsx.map > sections.txt`.
 4. Build the simulator with `cc -O2 -o sim scripts/dc-icache-sim.c -lpthread`, then run
    `./sim opt <trace> sections.txt 120 2 12000000 colours.txt`.
 5. `scripts/dc-layout.py export <build>/recompsx.map colours.txt` gives the placement file. Keep
    the header saying where it came from.
+6. The operand side in the same round, from a build with the new colours: the data colours
+   (`dc-data-placement.txt`, global) and each game's literal-pool halves — docs/perf/dreamcast-ledger.md,
+   How to measure (E-100). `build-dc.sh --data-placement <file>` links with a candidate first.
 
 Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim <part>
 <sections>`, with `sections <map> <placed map>` once it is linked; then confirm under the model.

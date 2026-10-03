@@ -111,6 +111,10 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
     gpu_mix(clut_y); gpu_mix(semi_mode); gpu_mix(flags); gpu_mix(tex_window); gpu_mix(draw_x);
     gpu_mix(draw_y);
 }
+
+void bp_gpu_state_w(const int* w) {
+    bp_gpu_state(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9]);
+}
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2) {
@@ -118,6 +122,12 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
     gpu_call(1); gpu_mix(x0); gpu_mix(y0); gpu_mix(c0); gpu_mix(u0); gpu_mix(v0);
     gpu_mix(x1); gpu_mix(y1); gpu_mix(c1); gpu_mix(u1); gpu_mix(v1);
     gpu_mix(x2); gpu_mix(y2); gpu_mix(c2); gpu_mix(u2); gpu_mix(v2);
+}
+
+void bp_gpu_tri_w(const int* w) {
+    bp_gpu_tri(w[0], w[1], w[2] & 0xFFFFFF, w[3] & 0xFF, (w[3] >> 8) & 0xFF,
+               w[4], w[5], w[6] & 0xFFFFFF, w[7] & 0xFF, (w[7] >> 8) & 0xFF,
+               w[8], w[9], w[10] & 0xFFFFFF, w[11] & 0xFF, (w[11] >> 8) & 0xFF);
 }
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     if (!g_gpu_hashing) return;

@@ -19,4 +19,9 @@ class GteFile {
 	}
 
 	static inline function half(h:Int):Int return (f[h >> 1] << (16 - ((h & 1) << 4))) >> 16;
+
+	/** The SH-4's RTPS core (see the cxx twin): declined here, so the C form always runs. */
+	public static inline function rtp(vh:Int, lm:Bool, last:Bool):Int return 1;
+
+	public static inline function rtpChecked():Void {}
 }

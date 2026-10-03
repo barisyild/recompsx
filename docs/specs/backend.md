@@ -239,6 +239,12 @@ void bp_gpu_tri(int x0,int y0,int c0,int u0,int v0,
                 int x2,int y2,int c2,int u2,int v2);
 void bp_gpu_rect(int x,int y,int w,int h,int bgr,int semi,int semi_mode);
 void bp_gpu_dirty(int x,int y,int w,int h);
+/* The same state and triangle as words, the way the runtime holds them (ADR-0047): the state's ten
+   arguments in order; the triangle's x, y, colour word (BGR in bits 0-23), texture word (u bits 0-7,
+   v bits 8-15, bits 16-31 zero) a vertex. Read before returning. A backend may implement them by
+   calling bp_gpu_state / bp_gpu_tri with the words unpacked (the PC and null backends do). */
+void bp_gpu_state_w(const int* w);
+void bp_gpu_tri_w(const int* w);
 ```
 
 GP0 parsing, uploads, VRAM copies and device timing still run in the core. Rasterized pixels from
@@ -335,9 +341,10 @@ On big-endian targets, `u16Ptr` returns a pointer into a swizzled staging copy m
 shim — the documented byteswap seam. Backends never see it.
 
 `shim.Bulk` moves whole runs (ADR-0032): `copy` (memmove, offsets in bytes), `equal`, `fill16` and
-`prefetch`, with the same static API on every target. The C++ half is a header-only class over
-`native/recompsx_bulk.h`, which picks the machine's best routine — sh4zam on the Dreamcast
-(ADR-0031), the C library or a compiler builtin elsewhere. JavaScript uses `copyWithin` within a
+`prefetch`, with the same static API on every target. The C++ half is a header-only class whose
+header carries the C itself (`@:headerCode`: C lives in a file of its own only in a backend), which
+picks the machine's best routine — sh4zam on the Dreamcast (ADR-0031), the C library or a compiler
+builtin elsewhere. JavaScript uses `copyWithin` within a
 buffer and typed-array loops between two, never a view per call. The runtime calls it only where
 a run is provably what the per-element code would do, and keeps that code for the rest.
 

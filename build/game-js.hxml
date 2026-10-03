@@ -13,4 +13,3 @@ build/common.hxml
 -main GenMain
 -js out/_gen/game.js
 -D js-es=6
--dce full

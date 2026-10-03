@@ -56,6 +56,8 @@ class Backend {
 	public static function gpuTri(x0:Int, y0:Int, c0:Int, u0:Int, v0:Int,
 			x1:Int, y1:Int, c1:Int, u1:Int, v1:Int,
 			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {}
+	public static function gpuTriWords():Void {}
+	public static function gpuStateWords():Void {}
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void {}
 	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {}

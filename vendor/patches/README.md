@@ -7,17 +7,23 @@ is backed up with the rest of the repository and can be reapplied to any checkou
 
 ## Applying
 
-0001 targets `vendor/reflaxe.CPP`; 0002–0005 target `vendor/reflaxe`. Do not apply the whole
+0001 and 0007 target `vendor/reflaxe.CPP`; 0002–0006 target `vendor/reflaxe`. Do not apply the whole
 directory to one submodule. Check whether a patch is already present before applying it;
-several earlier fixes are included in the existing pins. Plain diffs (0004/0005) use `git apply`.
+several earlier fixes are included in the existing pins. Plain diffs (0004–0006) use `git apply`.
 
 Generated block dispatchers require 0004 and the scalar-register emitter requires 0005;
-`scripts/setup.sh` applies both idempotently. To apply
-it manually from the repository root, on a checkout missing it:
+safe short-circuit guards require 0006. `scripts/setup.sh` applies these idempotently. To apply
+0005 manually from the repository root, on a checkout missing it:
 
     git -C vendor/reflaxe apply --check ../patches/0005-reflaxe-reassigned-local-declarations.patch
     git -C vendor/reflaxe apply ../patches/0005-reflaxe-reassigned-local-declarations.patch
-    ./scripts/conformance.sh Codegen
+    RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh Codegen
+
+For 0006 on a checkout missing it:
+
+    git -C vendor/reflaxe apply --check ../patches/0006-reflaxe-short-circuit-scopes.patch
+    git -C vendor/reflaxe apply ../patches/0006-reflaxe-short-circuit-scopes.patch
+    RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ShortCircuit
 
 Keep existing local patches when updating the compiler. No submodule pin change is needed to
 apply a working-tree patch.
@@ -44,6 +50,20 @@ apply a working-tree patch.
   moving anything. `TestCodegen.constantStores`, `loadThenRedefine` and `storeThenRedefine`
   are synthetic MIPS reproductions;
   `scripts/conformance.sh Codegen` must build and pass on both targets (ADR-0007).
+
+- **0006 — keep short-circuit RHS computations conditional.** Expression lowering hoisted
+  inlined argument bindings out of the RHS of `&&`/`||`, running skipped calls and even reading
+  `Scheduler.due[-1]` before checking for an empty queue. Lower only RHS expressions requiring
+  statements to an `if` expression; preserve evaluation order and leave simple operators intact.
+  `ShortCircuit` conformance checks calls, assignments, nested branches, while/do-while and order.
+  `scripts/spike.sh` requires it to agree on JS/C++ with analyzer optimization and full DCE.
+
+- **0007 — `@:declarationOrder`.** reflaxe.CPP lays a class's instance variables out sorted by
+  type and then by name. With this metadata a class keeps the order its source declares, which
+  `core.CpuState` uses to put the 16 words generated code names most within the 64 bytes the
+  SH-4 reaches with a short displacement (docs/perf/dreamcast-ledger.md E-076). Plain diff,
+  `git -C vendor/reflaxe.CPP apply`; `scripts/setup.sh` applies it idempotently. Check the
+  order in the transpiled `core_CpuState.h`.
 
 - **reflaxe-cpp-array-is-vector.patch — contiguous Haxe Arrays.** Restored from commit
   `6819782` on `dreamcast-hardware-rendering`, alongside its native memory and dispatch paths.

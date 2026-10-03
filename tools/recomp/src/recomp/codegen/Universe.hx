@@ -32,6 +32,7 @@ class Universe {
 	public var emitter:Emitter;
 	/** Program.writesFor's summaries: what each function here may write, transitively. */
 	public var writes:Map<Int, Int> = null;
+	public var summaries:Map<Int, recomp.analysis.FunctionSummary> = null;
 
 	public function new(overlay:OverlayConfig, image:Image, discovery:Discovery, bytes:Bytes) {
 		this.overlay = overlay;

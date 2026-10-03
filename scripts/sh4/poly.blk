@@ -1,0 +1,656 @@
+! The GPU's polygon packet on the hardware path, the common case of Gpu.polygonHw (ADR-0047): a
+! triangle's texture keys, flags and triState's test, then its decode, size and line rejects, count
+! and GPU time, as one block scheduled by scripts/dc-sched.py for the SH-4's pairing and latencies
+! (the cache model's rules). The C++ around it hands what it drew to the backend (Gpu.triRecord).
+!   _recompsx_gpu_poly   in  r4 guest RAM's base, r5 the packet's address, r6 its command (20h-3Fh),
+!                            r7 the GPU's register file (recompsx_gpu): the triangle (0, 1, 2)
+!   _recompsx_gpu_poly2  the same for a quad's second triangle (1, 2, 3)
+!   out  r0 = 0: drawn, the backend's triangle in words 36-47 (bp_gpu_tri_w: x, y, the colour word,
+!        the texture word masked, a vertex), its state the one last sent;
+!        2: the same, its state for the backend first in words 52-61 (bp_gpu_state_w: Gpu.triState
+!        and sendState done here); 3: rejected, nothing to
+!        record; 1: the packet could wrap at the end of RAM — the C form runs it (texEnabled, texRaw
+!        and semiTransparent perhaps written, as it writes them)
+!   uses r0-r7, MACH/MACL, T; r8-r14 saved and restored
+! A palette or page not the one decoded last is decoded at .Lclut0 / .Lpage0 (Gpu.setClut,
+! setTexPage), and the packet starts again. Words: tpKey 0, clutKey 1, sentTp 2, sentClut 3, sentFlags 4,
+! sentAreaWord 5, textureWindow 6, drawAreaTopLeft 7, offsetX 8, offsetY 9, areaL/T/R/B 10-13, work 14,
+! primitives 15, texEnabled 16, texRaw 17, semiTransparent 18, sentWindow 19, texBaseX/Y 23/24,
+! texDepth 25, clutX/Y 26/27, semiMode 28 | out: the triangle's words 36-47 | 48 the command's row of .Lops,
+! 49 the answer, 50 vertex 0's colour word, 51 its position word | out: 52-61 the state for the
+! backend (texBaseX, texBaseY, texDepth, clutX, clutY, semiMode, flags, window, areaL, areaT)
+	.pushsection .text.recompsx_gpu_poly,"ax",@progbits
+	.align	5
+.Lwrap0:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#1,r0
+.Lclut0:
+	! Gpu.setClut (r11 the attribute): clutKey a & 0x7FFF, clutX (a & 0x3F) << 4, clutY (a >>> 6) & 0x1FF
+	mov	#-128,r0
+	extu.b	r0,r0
+	shll8	r0
+	add	#-1,r0
+	and	r11,r0
+	mov.l	r0,@(4,r7)
+	mov	r7,r2
+	add	#64,r2
+	mov	r11,r0
+	and	#63,r0
+	shll2	r0
+	shll2	r0
+	mov.l	r0,@(40,r2)
+	mov	r11,r0
+	shlr2	r0
+	shlr2	r0
+	shlr2	r0
+	mov	#2,r3
+	shll8	r3
+	add	#-1,r3
+	and	r3,r0
+	mov.l	r0,@(44,r2)
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	bra	.Lpoly
+	nop
+.Lpage0:
+	! Gpu.setTexPage (r13 the attribute): tpKey a & 0x1FF, texBaseX (a & 0xF) << 6, texBaseY
+	! ((a >>> 4) & 1) << 8, semiMode (a >>> 5) & 3, texDepth (a >>> 7) & 3
+	mov	#2,r3
+	shll8	r3
+	add	#-1,r3
+	and	r13,r3
+	mov.l	r3,@(0,r7)
+	mov	r7,r2
+	add	#64,r2
+	mov	r13,r0
+	and	#15,r0
+	shll2	r0
+	shll2	r0
+	shll2	r0
+	mov.l	r0,@(28,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	and	#1,r0
+	shll8	r0
+	mov.l	r0,@(32,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	shlr	r0
+	and	#3,r0
+	mov.l	r0,@(48,r2)
+	mov	r13,r0
+	shlr2	r0
+	shlr2	r0
+	shlr2	r0
+	shlr	r0
+	and	#3,r0
+	mov.l	r0,@(36,r2)
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	bra	.Lpoly
+	nop
+	.global	_recompsx_gpu_poly2
+	.type	_recompsx_gpu_poly2,@function
+_recompsx_gpu_poly2:
+	bra	.Lpoly
+	mov	#-1,r1
+	.global	_recompsx_gpu_poly
+	.type	_recompsx_gpu_poly,@function
+_recompsx_gpu_poly:
+	mov	#0,r1
+.Lpoly:
+@block P
+	mov.l	r8,@-r15		;; stack
+	mov.l	r9,@-r15		;; stack
+	mov.l	r10,@-r15		;; stack
+	mov.l	r11,@-r15		;; stack
+	mov.l	r12,@-r15		;; stack
+	mov.l	r13,@-r15		;; stack
+	mov.l	r14,@-r15		;; stack
+	! a packet that could wrap at the end of RAM (twelve words from its first) is the C form's
+	mov.l	.Lk1ffffc,r0
+	and	r5,r0
+	mov.l	.Lk1fffd0,r2
+	cmp/hi	r2,r0
+	bt	WRAP			;; exit
+	mov	r4,r2
+	add	r0,r2
+	! the command's row of .Lops: its step, the GPU time's shift and blend mask, the flags
+	! triState compares, texEnabled, texRaw, semiTransparent, the texture mask
+	mov	r6,r0
+	and	#31,r0
+	shll2	r0
+	shll2	r0
+	shll2	r0
+	mov	r0,r3
+	mova	.Lops,r0
+	add	r0,r3
+	mov.l	@r3,r14			;; table
+	mov.l	@(28,r3),r10		;; table
+	! the palette rides on vertex 0's texture word, the page on vertex 1's: each the one decoded
+	! last, or decoded at .Lclut0 / .Lpage0 and the packet started again (an untextured packet has neither)
+	mov.l	@(8,r2),r11
+	shlr16	r11
+	mov.w	.Lk7fff,r12
+	and	r11,r12
+	mov.l	@(4,r7),r13		;; word=1
+	xor	r13,r12
+	and	r10,r12
+	tst	r12,r12
+	bf	CLUT			;; exit use=r1,r4,r5,r6,r7,r11
+	mov	r2,r13
+	add	r14,r13
+	mov.l	@(8,r13),r13
+	shlr16	r13
+	mov.w	.Lk1ff,r12
+	and	r13,r12
+	mov.l	@(0,r7),r8		;; word=0
+	xor	r8,r12
+	and	r10,r12
+	tst	r12,r12
+	bf	PAGE			;; exit use=r1,r4,r5,r6,r7,r13
+	! vertex 0's position word: the command's next, a vertex on for a quad's second triangle; its
+	! colour word the one before with gouraud, the command word flat (for .Ljoin's words)
+	mov	r14,r9
+	and	r1,r9
+	mov.l	@(32,r3),r4		;; table
+	and	r9,r4
+	add	r2,r4
+	add	r2,r9
+	add	#4,r9
+	mov	r7,r5
+	add	#127,r5
+	add	#17,r5
+	mov.l	r4,@(56,r5)		;; word=50 free keep
+	mov.l	r9,@(60,r5)		;; word=51 free keep
+	! texEnabled, texRaw, semiTransparent
+	mov	r7,r6
+	add	#64,r6
+	mov.l	@(16,r3),r4		;; table
+	mov.l	@(20,r3),r5		;; table
+	mov.l	@(24,r3),r11		;; table
+	mov.l	r4,@(0,r6)		;; word=16 free keep
+	mov.l	r5,@(4,r6)		;; word=17 free keep
+	mov.l	r11,@(8,r6)		;; word=18 free keep
+	! Gpu.triState's test: are the page, palette, flags, window and drawing area those last sent?
+	! The five differences ORed: the answer 0, or 2 for the record to send the state first
+	mov.l	@(12,r3),r4		;; table
+	mov.l	@(16,r7),r5		;; word=4
+	xor	r5,r4
+	mov.l	@(0,r7),r5		;; word=0
+	mov.l	@(8,r7),r10		;; word=2
+	xor	r10,r5
+	or	r5,r4
+	mov.l	@(4,r7),r5		;; word=1
+	mov.l	@(12,r7),r10		;; word=3
+	xor	r10,r5
+	or	r5,r4
+	mov.l	@(24,r7),r5		;; word=6
+	mov.l	@(12,r6),r10		;; word=19
+	xor	r10,r5
+	or	r5,r4
+	mov.l	@(28,r7),r5		;; word=7
+	mov.l	@(20,r7),r10		;; word=5
+	xor	r10,r5
+	or	r5,r4
+	tst	r4,r4
+	movt	r0
+	add	#-1,r0
+	and	#2,r0
+	mov	r7,r6
+	add	#127,r6
+	add	#17,r6
+	mov.l	r3,@(48,r6)		;; word=48 free keep
+	mov.l	r0,@(52,r6)		;; word=49 free keep
+	! the three positions: x, y each eleven bits signed, plus the drawing offset (Gpu.sx, sy)
+	mov.l	@r9,r0
+	add	r14,r9
+	mov.l	@r9,r3
+	add	r14,r9
+	mov.l	@r9,r5
+	mov.w	.Lk21,r1
+	mov.w	.Lkm21,r2
+	mov.w	.Lk5,r4
+	mov.l	@(32,r7),r6		;; word=8
+	mov.l	@(36,r7),r14		;; word=9
+	mov	r0,r8
+	shld	r1,r8
+	shad	r2,r8
+	add	r6,r8
+	mov	r3,r10
+	shld	r1,r10
+	shad	r2,r10
+	add	r6,r10
+	mov	r5,r12
+	shld	r1,r12
+	shad	r2,r12
+	add	r6,r12
+	mov	r0,r9
+	shld	r4,r9
+	shad	r2,r9
+	add	r14,r9
+	mov	r3,r11
+	shld	r4,r11
+	shad	r2,r11
+	add	r14,r11
+	mov	r5,r13
+	shld	r4,r13
+	shad	r2,r13
+	add	r14,r13
+	! the size (Gpu.triPacket): its box at most 1023 across and 511 down, each pair of vertices
+	! within that, as compares (MT), which pair with the shifts (EX); and twice its area, signed by its
+	! winding (Gpu.edge) — a line is no triangle
+	mov	r10,r0
+	sub	r8,r0
+	mov	r12,r4
+	sub	r8,r4
+	mov	r11,r5
+	sub	r9,r5
+	mov	r13,r6
+	sub	r9,r6
+	mul.l	r0,r6
+	sts	macl,r1
+	mul.l	r5,r4
+	sts	macl,r2
+	sub	r2,r1
+	mov.w	.Lk1023,r3
+	mov.w	.Lkm1023,r14
+	cmp/gt	r3,r0
+	bt	REJ			;; exit
+	cmp/ge	r14,r0
+	bf	REJ			;; exit
+	cmp/gt	r3,r4
+	bt	REJ			;; exit
+	cmp/ge	r14,r4
+	bf	REJ			;; exit
+	mov	r12,r2
+	sub	r10,r2
+	cmp/gt	r3,r2
+	bt	REJ			;; exit
+	cmp/ge	r14,r2
+	bf	REJ			;; exit
+	mov.w	.Lk511,r3
+	mov.w	.Lkm511,r14
+	cmp/gt	r3,r5
+	bt	REJ			;; exit
+	cmp/ge	r14,r5
+	bf	REJ			;; exit
+	cmp/gt	r3,r6
+	bt	REJ			;; exit
+	cmp/ge	r14,r6
+	bf	REJ			;; exit
+	mov	r13,r2
+	sub	r11,r2
+	cmp/gt	r3,r2
+	bt	REJ			;; exit
+	cmp/ge	r14,r2
+	bf	REJ			;; exit
+	tst	r1,r1
+	bt	REJ			;; exit
+	! counted (Gpu.primitives)
+	mov.l	@(60,r7),r2		;; word=15
+	add	#1,r2
+	mov.l	r2,@(60,r7)		;; word=15 keep
+	! its pixels for the GPU time (Gpu.triangleWork): its area, |e| / 2, when every vertex is inside
+	! the drawing area — no more than its box then — or the box clipped to the area at .Lout. Inside
+	! is x - L unsigned at most R - L, an area not empty
+	mov	r1,r0
+	shll	r0
+	subc	r0,r0
+	xor	r0,r1
+	sub	r0,r1
+	shlr	r1
+	mov	r1,r0
+	mov.l	@(40,r7),r1		;; word=10
+	mov.l	@(48,r7),r2		;; word=12
+	mov.l	@(44,r7),r3		;; word=11
+	mov.l	@(52,r7),r4		;; word=13
+	sub	r1,r2
+	sub	r3,r4
+	mov	r2,r5
+	or	r4,r5
+	cmp/pz	r5
+	bf	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r8,r5
+	sub	r1,r5
+	cmp/hi	r2,r5
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r10,r6
+	sub	r1,r6
+	cmp/hi	r2,r6
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r12,r14
+	sub	r1,r14
+	cmp/hi	r2,r14
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r9,r5
+	sub	r3,r5
+	cmp/hi	r4,r5
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r11,r6
+	sub	r3,r6
+	cmp/hi	r4,r6
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+	mov	r13,r14
+	sub	r3,r14
+	cmp/hi	r4,r14
+	bt	OUT			;; exit use=r0,r8,r9,r10,r11,r12,r13
+@end
+	bra	.Ljoin
+	nop
+	! a rejected triangle's way out, between the size tests and the record's words to be in reach
+.Lrej1:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	mov.l	@r15+,r8
+	rts
+	mov	#3,r0
+.Lk1023:	.word	1023
+.Lkm1023:	.word	-1023
+.Lk511:		.word	511
+.Lkm511:	.word	-511
+.Lk21:		.word	21
+.Lkm21:		.word	-21
+.Lk5:		.word	5
+.Lk7fff:	.word	0x7FFF
+.Lk1ff:		.word	0x1FF
+.Ljoin:
+@block U
+	! the GPU time (Gpu.pixelWork): 5/8 of a cycle a pixel textured, 5/16 not, half as much again
+	! semi-transparent, and the setup; then the positions for the record
+	mov	r7,r6
+	add	#127,r6
+	add	#17,r6
+	mov.l	@(48,r6),r3		;; word=48
+	mov.l	@(4,r3),r1		;; table
+	mov.l	@(8,r3),r2		;; table
+	shld	r1,r0
+	mov	r0,r4
+	shlr2	r4
+	add	r4,r0
+	mov	r0,r4
+	shlr	r4
+	and	r2,r4
+	add	r4,r0
+	mov.l	@(56,r7),r4		;; word=14
+	add	#16,r0
+	add	r0,r4
+	mov.l	r4,@(56,r7)		;; word=14 keep
+	mov.l	r8,@(0,r6)		;; word=36 keep
+	mov.l	r9,@(4,r6)		;; word=37 keep
+	mov.l	r10,@(16,r6)		;; word=40 keep
+	mov.l	r11,@(20,r6)		;; word=41 keep
+	mov.l	r12,@(32,r6)		;; word=44 keep
+	mov.l	r13,@(36,r6)		;; word=45 keep
+	! the colour words a colour step apart (the step with gouraud, none flat), the texture words
+	! after each position, masked
+	mov.l	@(56,r6),r1		;; word=50
+	mov.l	@(60,r6),r2		;; word=51
+	mov.l	@r3,r4			;; table
+	mov.l	@(32,r3),r5		;; table
+	mov.l	@(28,r3),r14		;; table
+	and	r4,r5
+	mov.l	@r1,r8
+	add	r5,r1
+	mov.l	@r1,r9
+	add	r5,r1
+	mov.l	@r1,r10
+	mov.l	@(4,r2),r11
+	add	r4,r2
+	mov.l	@(4,r2),r12
+	add	r4,r2
+	mov.l	@(4,r2),r13
+	and	r14,r11
+	and	r14,r12
+	and	r14,r13
+	mov.l	r8,@(8,r6)		;; word=38 keep
+	mov.l	r11,@(12,r6)		;; word=39 keep
+	mov.l	r9,@(24,r6)		;; word=42 keep
+	mov.l	r12,@(28,r6)		;; word=43 keep
+	mov.l	r10,@(40,r6)		;; word=46 keep
+	mov.l	r13,@(44,r6)		;; word=47 keep
+	mov.l	@(52,r6),r0		;; word=49
+	tst	r0,r0
+	bf	SEND			;; exit use=r3,r7
+	mov.l	@r15+,r14		;; stack
+	mov.l	@r15+,r13		;; stack
+	mov.l	@r15+,r12		;; stack
+	mov.l	@r15+,r11		;; stack
+	mov.l	@r15+,r10		;; stack
+	mov.l	@r15+,r9		;; stack
+	rts				;; last
+@end
+	mov.l	@r15+,r8
+.Lout1:
+	! a vertex outside the drawing area: its box clipped to the area, and no more than its area
+	! (r0), as Gpu.triangleWork; then .Ljoin
+	mov	r8,r1
+	mov	r8,r2
+	cmp/gt	r10,r1
+	bf	.Lo1
+	mov	r10,r1
+.Lo1:
+	cmp/gt	r12,r1
+	bf	.Lo2
+	mov	r12,r1
+.Lo2:
+	cmp/gt	r2,r10
+	bf	.Lo3
+	mov	r10,r2
+.Lo3:
+	cmp/gt	r2,r12
+	bf	.Lo4
+	mov	r12,r2
+.Lo4:
+	mov	r9,r3
+	mov	r9,r4
+	cmp/gt	r11,r3
+	bf	.Lo5
+	mov	r11,r3
+.Lo5:
+	cmp/gt	r13,r3
+	bf	.Lo6
+	mov	r13,r3
+.Lo6:
+	cmp/gt	r4,r11
+	bf	.Lo7
+	mov	r11,r4
+.Lo7:
+	cmp/gt	r4,r13
+	bf	.Lo8
+	mov	r13,r4
+.Lo8:
+	mov.l	@(40,r7),r5
+	mov.l	@(48,r7),r6
+	cmp/gt	r6,r2
+	bf	.Lo9
+	mov	r6,r2
+.Lo9:
+	cmp/gt	r1,r5
+	bf	.Lo10
+	mov	r5,r1
+.Lo10:
+	sub	r1,r2
+	add	#1,r2
+	mov.l	@(44,r7),r5
+	mov.l	@(52,r7),r6
+	cmp/gt	r6,r4
+	bf	.Lo11
+	mov	r6,r4
+.Lo11:
+	cmp/gt	r3,r5
+	bf	.Lo12
+	mov	r5,r3
+.Lo12:
+	sub	r3,r4
+	add	#1,r4
+	cmp/pl	r2
+	bf	.Lnobox
+	cmp/pl	r4
+	bf	.Lnobox
+	mul.l	r2,r4
+	sts	macl,r1
+	cmp/gt	r1,r0
+	bf	.Ljoin
+	bra	.Ljoin
+	mov	r1,r0
+.Lnobox:
+	bra	.Ljoin
+	mov	#0,r0
+.Lsend1:
+	! the state is not the one last sent (Gpu.triState): the page, palette, flags and drawing area
+	! become the sent ones; then Gpu.sendState — the page, depth, blend and flags packed, the palette,
+	! the drawing area's corner and the window against what the backend has — and only when one
+	! differs does the backend hear of it: the ten words at 52-61 (bp_gpu_state_w) and answer 2,
+	! otherwise 0
+@block S2
+	mov.l	@(0,r7),r1		;; word=0
+	mov.l	@(4,r7),r2		;; word=1
+	mov.l	@(12,r3),r4		;; table
+	mov.l	@(28,r7),r5		;; word=7
+	mov.l	r1,@(8,r7)		;; word=2
+	mov.l	r2,@(12,r7)		;; word=3
+	mov.l	r4,@(16,r7)		;; word=4
+	mov.l	r5,@(20,r7)		;; word=5
+	mov	r7,r13
+	add	#64,r13
+	mov	r7,r14
+	add	#104,r14
+	add	#104,r14
+	mov.l	@(28,r13),r8		;; word=23
+	mov.l	@(32,r13),r9		;; word=24
+	mov.l	@(36,r13),r10		;; word=25
+	mov.l	@(40,r13),r11		;; word=26
+	mov.l	@(44,r13),r12		;; word=27
+	mov.l	@(48,r13),r6		;; word=28
+	mov.l	@(24,r7),r5		;; word=6
+	mov.l	@(40,r7),r1		;; word=10
+	mov.l	@(44,r7),r2		;; word=11
+	mov.l	r8,@(0,r14)		;; word=52
+	mov.l	r9,@(4,r14)		;; word=53
+	mov.l	r10,@(8,r14)		;; word=54
+	mov.l	r11,@(12,r14)		;; word=55
+	mov.l	r12,@(16,r14)		;; word=56
+	mov.l	r6,@(20,r14)		;; word=57
+	mov.l	r4,@(24,r14)		;; word=58
+	mov.l	r5,@(28,r14)		;; word=59
+	mov.l	r1,@(32,r14)		;; word=60
+	mov.l	r2,@(36,r14)		;; word=61
+	shll8	r2
+	shll2	r2
+	or	r1,r2
+	shll8	r12
+	shll2	r12
+	or	r11,r12
+	shll8	r9
+	shll2	r9
+	or	r8,r9
+	shll16	r10
+	shll2	r10
+	shll2	r10
+	or	r10,r9
+	shll16	r6
+	shll2	r6
+	shll2	r6
+	shll2	r6
+	or	r6,r9
+	shll16	r4
+	shll8	r4
+	or	r4,r9
+	mov.l	@(16,r13),r1		;; word=20
+	mov.l	@(20,r13),r8		;; word=21
+	mov.l	@(12,r13),r10		;; word=19
+	mov.l	@(24,r13),r11		;; word=22
+	xor	r9,r1
+	xor	r12,r8
+	xor	r5,r10
+	xor	r2,r11
+	or	r8,r1
+	or	r10,r1
+	or	r11,r1
+	tst	r1,r1
+	bt	.Lsame			;; last
+@end
+	mov.l	r9,@(16,r13)
+	mov.l	r12,@(20,r13)
+	mov.l	r5,@(12,r13)
+	mov.l	r2,@(24,r13)
+	bra	.Lsendpop
+	mov	#2,r0
+.Lsame:
+	mov	#0,r0
+.Lsendpop:
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+	.align	2
+.Lk1ffffc:	.long	0x1FFFFC
+.Lk1fffd0:	.long	0x1FFFD0
+	.align	5
+.Lops:
+	! a row a command 20h-3Fh: the step between vertices, the GPU time's shift (-1 textured, -2 not)
+	! and blend mask (-1 semi-transparent), the flags triState compares (textured, semi << 1,
+	! raw << 2), texEnabled, texRaw, semiTransparent, the texture mask (0xFFFF textured), the
+	! colour step's mask (-1 gouraud)
+	.long	4, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 20h
+	.long	4, -2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 21h
+	.long	4, -2, -1, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 22h
+	.long	4, -2, -1, 6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 23h
+	.long	8, -1, 0, 1, 1, 0, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 24h
+	.long	8, -1, 0, 5, 1, 1, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 25h
+	.long	8, -1, -1, 3, 1, 0, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 26h
+	.long	8, -1, -1, 7, 1, 1, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 27h
+	.long	4, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 28h
+	.long	4, -2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 29h
+	.long	4, -2, -1, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 2Ah
+	.long	4, -2, -1, 6, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 2Bh
+	.long	8, -1, 0, 1, 1, 0, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Ch
+	.long	8, -1, 0, 5, 1, 1, 0, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Dh
+	.long	8, -1, -1, 3, 1, 0, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Eh
+	.long	8, -1, -1, 7, 1, 1, 1, 65535, 0, 0, 0, 0, 0, 0, 0, 0	! 2Fh
+	.long	8, -2, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 30h
+	.long	8, -2, 0, 4, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 31h
+	.long	8, -2, -1, 2, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 32h
+	.long	8, -2, -1, 6, 0, 1, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 33h
+	.long	12, -1, 0, 1, 1, 0, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 34h
+	.long	12, -1, 0, 5, 1, 1, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 35h
+	.long	12, -1, -1, 3, 1, 0, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 36h
+	.long	12, -1, -1, 7, 1, 1, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 37h
+	.long	8, -2, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 38h
+	.long	8, -2, 0, 4, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 39h
+	.long	8, -2, -1, 2, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 3Ah
+	.long	8, -2, -1, 6, 0, 1, 1, 0, -1, 0, 0, 0, 0, 0, 0, 0	! 3Bh
+	.long	12, -1, 0, 1, 1, 0, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Ch
+	.long	12, -1, 0, 5, 1, 1, 0, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Dh
+	.long	12, -1, -1, 3, 1, 0, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Eh
+	.long	12, -1, -1, 7, 1, 1, 1, 65535, -1, 0, 0, 0, 0, 0, 0, 0	! 3Fh
+	.size	_recompsx_gpu_poly, .-_recompsx_gpu_poly
+	.popsection

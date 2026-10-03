@@ -4,7 +4,6 @@ import recomp.Vaddr;
 import recomp.analysis.Discovery;
 import recomp.analysis.Func;
 import recomp.analysis.Image;
-import recomp.mips.Op;
 import recomp.loader.PsxExe;
 import recomp.codegen.Shards;
 import recomp.codegen.Shards.Shard;
@@ -37,6 +36,7 @@ class Program {
 
 	/** Function bodies already emitted, keyed by their text, mapped to the class holding them. */
 	final emitted:Map<String, String> = [];
+	final scalarPool = new ScalarPool('ScalarValues');
 
 	public var filesWritten(default, null) = 0;
 	public var linesWritten(default, null) = 0;
@@ -44,8 +44,22 @@ class Program {
 	/** Function bodies a second universe did not need to emit because the first had them. */
 	public var deduplicated(default, null) = 0;
 
+	/**
+		Memory projections share one helper/adapter pair per class when their texts are equal up to
+		the pair's own names (ProjectionShare). Off only for comparisons (`--no-projection-share`).
+	**/
+	public var shareProjections = true;
+	/** Whether call sites use proved helpers (Emitter.scalarCalls); off only for measurements. */
+	public var scalarCalls(default, set) = true;
+	function set_scalarCalls(v:Bool):Bool {
+		for (u in universes) u.emitter.scalarCalls = v;
+		return scalarCalls = v;
+	}
+	/** Projection call sites that use an earlier site's pair in the same class. */
+	public var projectionsShared(default, null) = 0;
+
 	public function new(universes:Array<Universe>, exe:PsxExe, limit:Int = 0, optimize:Bool = true,
-			structureRegions:Bool = true, ?relocSets:Array<RelocSet>) {
+			structureRegions:Bool = true, ?relocSets:Array<RelocSet>, scalarFunctions:Bool = true, valueRegions:Bool = true, valueCfg:Bool = false) {
 		this.universes = universes;
 		this.exe = exe;
 		this.relocSets = relocSets == null ? [] : relocSets;
@@ -73,18 +87,22 @@ class Program {
 		}
 
 		for (u in universes) {
-			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions);
+			u.emitter = new Emitter(u.image, u.discovery, optimize, structureRegions, scalarFunctions, valueRegions, valueCfg);
 			u.emitter.staticTargetOf = a -> staticTargetFor(u, a);
 			u.emitter.writesOf = a -> writesFor(u, a);
+			u.emitter.scalarTargetOf = a -> scalarFor(u, a);
+			u.emitter.projectedTargetOf = (a, required, suffix) -> projectedFor(u, a, required, suffix);
+			u.emitter.scalarPool = scalarPool;
 			u.emitter.dynamicCall = "FnTable.run";
 		}
 		for (r in this.relocSets) {
 			for (unit in r.units) {
-				unit.emitter = new Emitter(unit.image, unit.discovery, optimize, structureRegions);
+				unit.emitter = new Emitter(unit.image, unit.discovery, optimize, structureRegions, scalarFunctions, valueRegions, valueCfg);
 				unit.emitter.relocatable = true;
 				unit.emitter.dynamicCall = "FnTable.run";
 				unit.emitter.staticTargetOf = a -> staticTargetFor(universes[0], a);
 				unit.emitter.writesOf = a -> writesFor(universes[0], a);
+				unit.emitter.scalarTargetOf = a -> scalarFor(universes[0], a);
 			}
 		}
 		checkFingerprintsDistinct();
@@ -151,85 +169,59 @@ class Program {
 		return u.writes.exists(a) ? u.writes.get(a) : Emitter.ALL_REGS;
 	}
 
+	/** Use the same residency proof as ordinary direct calls; hooks rule out a scalar ABI. */
+	function scalarFor(from:Universe, addr:Int):Null<ScalarPlan> {
+		final a = Vaddr.canonRam(addr);
+		final u = calleeUniverse(from, a);
+		if (u == null) return null;
+		final fn = u.discovery.functions.get(a);
+		return fn == null ? null : u.emitter.scalarPlan(fn);
+	}
+
+	function projectedFor(from:Universe, addr:Int, required:Int, suffix:String):Null<ScalarPlan> {
+		final a = Vaddr.canonRam(addr);
+		final u = calleeUniverse(from, a);
+		if (u == null) return null;
+		final summary = summaryFor(from, a);
+		// ScalarPlan proves the complete plain-memory preflight before dropping results.
+		// Calls, traps, unknown effects and nonlocal returns still require the original entry.
+		// Coprocessor flags pass here: ScalarGraph admits the GTE's operations alone, as
+		// ordered effects, and rejects coprocessor 0 itself.
+		final allowed = recomp.ir.Effect.CONTROL | recomp.ir.Effect.READ_MEMORY | recomp.ir.Effect.WRITE_MEMORY
+			| recomp.ir.Effect.READ_COP | recomp.ir.Effect.WRITE_COP;
+		if (summary == null || ((summary.effects : Int) & ~allowed) != 0) return null;
+		final fn = u.discovery.functions.get(a);
+		return fn == null ? null : u.emitter.scalarProjection(fn, required, suffix);
+	}
+
+	public function summaryFor(from:Universe, addr:Int):Null<recomp.analysis.FunctionSummary> {
+		final a = Vaddr.canonRam(addr);
+		final u = calleeUniverse(from, a);
+		if (u == null) return null;
+		if (u.summaries == null) computeWrites();
+		return u.summaries.get(a);
+	}
+
 	function computeWrites():Void {
-		final all = Emitter.ALL_REGS;
-		// Per function: its own writes, and the (universe, address) of each function it calls.
-		final own:Array<Map<Int, Int>> = [];
-		final edges:Array<Map<Int, Array<{u:Int, a:Int}>>> = [];
-		for (ui in 0...universes.length) {
-			final u = universes[ui];
-			u.writes = [];
-			final ownU:Map<Int, Int> = [];
-			final edgesU:Map<Int, Array<{u:Int, a:Int}>> = [];
-			final hooked = u.emitter.hooks;
-			for (entry in u.discovery.functions.keys()) {
-				final fn = u.discovery.functions.get(entry);
-				if (!u.shards.has(Vaddr.canonRam(entry))) continue;
-				else {}
-				var mask = 0;
-				final calls:Array<{u:Int, a:Int}> = [];
-				if (hooked != null && hooked.exists(fn.entry)) mask = all;
-				else {}
-				final ir = new recomp.ir.FunctionIR(fn, u.image);
-				inline function callTo(t:Int):Void {
-					final ta = Vaddr.canonRam(t);
-					final cu = calleeUniverse(u, ta);
-					if (cu == null) mask = all;
-					else calls.push({u: universes.indexOf(cu), a: ta});
-				}
-				for (block in ir.blocks) {
-					for (x in block.instructions) {
-						mask |= (x.writes : Int);
-						final op = x.decoded.op;
-						if (op == Op.SYSCALL || op == Op.BREAK || x.effects.has(recomp.ir.Effect.TRAP)
-								|| x.effects.has(recomp.ir.Effect.UNKNOWN)) mask = all;
-						else {}
-					}
-					final tr = block.transfer;
-					if (tr == null) continue;
-					else {}
-					final d = tr.decoded;
-					if (d.op == Op.JAL || d.op == Op.BLTZAL || d.op == Op.BGEZAL) callTo(d.target);
-					else if (d.op == Op.J) {
-						if (!ir.byAddress.exists(d.target)) callTo(d.target);   // a tail call
-						else {}
-					} else if (d.isRegisterJump) {
-						if (d.rs == 31) {
-							final ra = d.op == Op.JR ? u.discovery.raJumpOf(fn.entry, d.addr) : null;
-							if (ra != null && !ir.byAddress.exists(ra)) callTo(ra);
-							else {}
-						} else if (d.op == Op.JR && fn.registerReturns.exists(d.addr)) {}
-						else mask = all;      // a call or jump through a register, a table's default
-					} else {}
-				}
-				ownU.set(Vaddr.canonRam(fn.entry), mask);
-				edgesU.set(Vaddr.canonRam(fn.entry), calls);
-			}
-			own.push(ownU);
-			edges.push(edgesU);
-		}
-		// The least fixed point: a function writes what it writes and what its callees write.
-		for (ui in 0...universes.length) for (k in own[ui].keys()) universes[ui].writes.set(k, own[ui].get(k));
-		var changed = true;
-		while (changed) {
-			changed = false;
-			for (ui in 0...universes.length) {
-				final w = universes[ui].writes;
-				for (k in edges[ui].keys()) {
-					var m = w.get(k);
-					if (m == all) continue;
-					else {}
-					for (c in edges[ui].get(k)) {
-						final cw = universes[c.u].writes;
-						m |= cw.exists(c.a) ? cw.get(c.a) : all;
-					}
-					if (m != w.get(k)) {
-						w.set(k, m);
-						changed = true;
-					} else {}
-				}
+		final functions:Array<recomp.analysis.FunctionSummary> = [];
+		for (u in universes) {
+			u.summaries = []; u.writes = [];
+			for (shard in u.shards.shards) for (fn in shard.functions) {
+				final hooked = u.emitter.hooks != null && u.emitter.hooks.exists(fn.entry);
+				final summary = new recomp.analysis.FunctionSummary(fn, u.image,
+					a -> u.discovery.raJumpOf(fn.entry, a), hooked);
+				u.summaries.set(Vaddr.canonRam(fn.entry), summary);
+				functions.push(summary);
 			}
 		}
+		for (u in universes) for (f in u.summaries) for (c in f.calls) {
+			if (c.target == null) continue;
+			final a = Vaddr.canonRam(c.target);
+			final cu = calleeUniverse(u, a);
+			if (cu != null) c.callee = cu.summaries.get(a);
+		}
+		recomp.analysis.FunctionSummary.solve(functions);
+		for (u in universes) for (a => f in u.summaries) u.writes.set(a, f.writes);
 	}
 
 	/**
@@ -249,6 +241,8 @@ class Program {
 			final set:Map<Int, Bool> = [];
 			for (h in hooks) if (h.scope == null || h.scope == scopeOf(u)) set.set(h.addr, true);
 			u.emitter.hooks = set;
+			u.writes = null; u.summaries = null;
+			u.emitter.clearScalarPlans();
 		}
 	}
 
@@ -268,6 +262,9 @@ class Program {
 
 	public function writeTo(dir:String):Void {
 		ensureDir(dir);
+		for (u in universes) u.emitter.clearScalarPlans();
+		emitted.clear(); scalarPool.clear();
+		filesWritten = 0; linesWritten = 0; deduplicated = 0; projectionsShared = 0;
 		// Remove every previously generated file first. Shard names carry their split point, so
 		// when a discovery change moves a split, the old file's name no longer matches anything —
 		// and a directory that accumulates every layout it has ever had is a haunted one: twenty
@@ -287,6 +284,7 @@ class Program {
 		write('$dir/Overlays.hx', overlaysSource());
 		write('$dir/RelocTable.hx', relocTableSource());
 		write('$dir/GameInfo.hx', gameInfoSource());
+		if (scalarPool.count > 0) write('$dir/${scalarPool.className}.hx', scalarPool.source());
 	}
 
 	// ---- one shard --------------------------------------------------------------------------
@@ -303,10 +301,13 @@ class Program {
 		buf.add('**/\n');
 		buf.add('class ${shard.className} {\n');
 
+		// One sharing scope per class: what is shared is defined in the class that calls it.
+		final share = shareProjections ? new ProjectionShare() : null;
 		for (fn in shard.functions) {
-			buf.add(bodyOf(u, shard, fn));
+			buf.add(bodyOf(u, shard, fn, share));
 			buf.add("\n");
 		}
+		if (share != null) projectionsShared += share.shared;
 
 		// The shard's own dispatcher. Every function is reachable from here, which is also what
 		// keeps them alive through `-dce full` — `@:keep` is not honoured upstream.
@@ -343,7 +344,7 @@ class Program {
 		actually written cannot get that wrong, and the cases it does merge are exactly the ones
 		that are genuinely the same code — usually library routines that only call into the base.
 	**/
-	function bodyOf(u:Universe, shard:Shard, fn:Func):String {
+	function bodyOf(u:Universe, shard:Shard, fn:Func, ?share:ProjectionShare):String {
 		// Shared bodies retain the first owner's handle. Comparing before substitution preserves
 		// deduplication; resuming the handle cannot accidentally choose a new resident overlay.
 		final token = '__RECOMPSX_CONTINUATION_HANDLE__';
@@ -352,13 +353,17 @@ class Program {
 		final owner = emitted.get(text);
 		if (owner != null) {
 			deduplicated++;
+			final scalar = u.emitter.scalarPlan(fn);
 			return '\t/** Identical to `${owner}.${fn.name}`; one body serves both. */\n'
 				+ '\tpublic static function ${fn.name}(ctx:core.Ctx, entry:Int = 0):Void {\n'
 				+ '\t\t${owner}.${fn.name}(ctx, entry);\n'
-				+ '\t}\n';
+				+ '\t}\n' + (scalar == null ? '' : scalar.emitHelper(owner) + ScalarEntry.borrowedAdapter(scalar, owner));
 		}
 		emitted.set(text, shard.className);
-		return StringTools.replace(text, token, Std.string(u.shards.handleOf(fn.entry)));
+		// After the comparison above, which saw every projection under its own name: a body
+		// another universe forwards to is the one emitted here, with its class's shared pairs.
+		final body = StringTools.replace(text, token, Std.string(u.shards.handleOf(fn.entry)));
+		return share == null ? body : share.apply(body, u.emitter.lastProjections);
 	}
 
 	// ---- the dispatch table -------------------------------------------------------------------
@@ -861,7 +866,11 @@ private extern class FnPtr {
 		// Counts as constants and the lengths as a flat buffer: an Array is a deque on
 		// reflaxe.CPP, whose `length` and `[]` cost a call each (see `flatTables`).
 		buf.add('\tstatic inline var KEY_COUNT = ${keys.length};\n');
-		buf.add('\tstatic inline var LENGTH_COUNT = ${lengths.length};\n\n');
+		buf.add('\tstatic inline var LENGTH_COUNT = ${lengths.length};\n');
+		// A kept answer's words, as a shift: its tag, its handle and the HASH_WORDS words.
+		var memoShift = 0;
+		while ((1 << memoShift) < hashWords + 2) memoShift++;
+		buf.add('\tstatic inline var MEMO_SHIFT = $memoShift;\n\n');
 		emitTable(buf, "LENGTHS", "Key lengths in words, longest first.", lengths, a -> Std.string(a));
 		emitTable(buf, "KEYS", "FNV-1a over a function's first words, then their count, ascending.", keys, a -> hex(a));
 		emitTable(buf, "VALUES", "A handle, or -1 - group for a key several functions share.", values, a -> Std.string(a));
@@ -886,6 +895,19 @@ private extern class FnPtr {
 	static var STATES_F:shim.RawBuf;
 	static var ready:Bool = false;
 
+	/**
+		The answers already found, a slot an address (MEMO_SLOTS of them, by the address's low
+		bits): its tag (the address with bit 0 set, so a slot never written matches nothing), the
+		handle, and the HASH_WORDS words at the address the answer was decided by. A call to an
+		address whose words are still those gets the same answer, by reading them, where it was
+		hashing them byte by byte and searching the keys for every length: ~1,500 cycles a call on
+		the Dreamcast, and Crash Bandicoot: Warped's play makes ~36 a frame, most to a handful of
+		addresses. Only answers `resolve` took no part in are kept — those depend on nothing but
+		the words hashed; a group's answer reads words further in, and is found the long way.
+	**/
+	static inline var MEMO_SLOTS = 64;
+	static var MEMO_F:shim.RawBuf;
+
 	/** Initialize before guest execution; subsequent calls allocate nothing. */
 	public static function init():Void {
 		if (ready) return;
@@ -895,6 +917,7 @@ private extern class FnPtr {
 		VALUES_F = shim.RawMem.alloc((n + 1) << 2);
 		STATES_F = shim.RawMem.alloc((HASH_WORDS + 1) << 2);
 		LENGTHS_F = shim.RawMem.alloc((LENGTH_COUNT + 1) << 2);
+		MEMO_F = shim.RawMem.alloc((MEMO_SLOTS << MEMO_SHIFT) << 2);
 		var i = 0;
 		while (i < n) {
 			shim.MemA.set32(KEYS_F, i << 2, KEYS[i]);
@@ -957,24 +980,62 @@ private extern class FnPtr {
 		else {}
 		if (!ready) init();
 		else {}
+		final m = ((addr >>> 2) & (MEMO_SLOTS - 1)) << MEMO_SHIFT;
+		if (shim.MemA.get32(MEMO_F, m << 2) == (addr | 1) && memoHolds(m, addr)) {
+			enter(addr, shim.MemA.get32(MEMO_F, (m + 1) << 2), ctx);
+			return true;
+		} else {}
 		hashPrefixes(addr);
+		// Whether `resolve` has read words of its own: then the answer is not only the hashed
+		// words', even when a shorter length finds it.
+		var resolved = false;
 		var l = 0;
 		while (l < LENGTH_COUNT) {
 			final n = shim.MemA.get32(LENGTHS_F, l << 2);
 			final at = find(step(shim.MemA.get32(STATES_F, n << 2), n));
 			if (at >= 0) {
 				final value = shim.MemA.get32(VALUES_F, at << 2);
+				if (value < 0) resolved = true;
+				else {}
 				final handle = value >= 0 ? value : resolve(-1 - value, addr);
 				if (handle >= 0) {
-					core.Reloc.base = addr;
-					core.Reloc.calls = (core.Reloc.calls + 1) | 0;
-					FnTable.dispatch(handle, 0, ctx);
+					// Kept before the code runs: it may write the words.
+					if (!resolved) remember(m, addr, handle);
+					else {}
+					enter(addr, handle, ctx);
 					return true;
 				} else {}
 			} else {}
 			l++;
 		}
 		return false;
+	}
+
+	static inline function enter(addr:Int, handle:Int, ctx:CpuState):Void {
+		core.Reloc.base = addr;
+		core.Reloc.calls = (core.Reloc.calls + 1) | 0;
+		FnTable.dispatch(handle, 0, ctx);
+	}
+
+	/** Whether the HASH_WORDS words at `addr` are still the ones slot `m`'s answer was found by. */
+	static function memoHolds(m:Int, addr:Int):Bool {
+		var i = 0;
+		while (i < HASH_WORDS) {
+			if (Memory.read32(addr + (i << 2)) != shim.MemA.get32(MEMO_F, (m + 2 + i) << 2)) return false;
+			else {}
+			i++;
+		}
+		return true;
+	}
+
+	static function remember(m:Int, addr:Int, handle:Int):Void {
+		shim.MemA.set32(MEMO_F, m << 2, addr | 1);
+		shim.MemA.set32(MEMO_F, (m + 1) << 2, handle);
+		var i = 0;
+		while (i < HASH_WORDS) {
+			shim.MemA.set32(MEMO_F, (m + 2 + i) << 2, Memory.read32(addr + (i << 2)));
+			i++;
+		}
 	}
 
 	/**

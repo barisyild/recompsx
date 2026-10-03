@@ -142,6 +142,17 @@ else
   die "cannot apply compiler patch 0005; see vendor/patches/README.md"
 fi
 
+# Inlined RHS bindings must not escape a short-circuit boolean guard.
+SHORT_CIRCUIT_PATCH=../patches/0006-reflaxe-short-circuit-scopes.patch
+if git -C vendor/reflaxe apply --reverse --check "$SHORT_CIRCUIT_PATCH" 2>/dev/null; then
+  say "reflaxe short-circuit patch already applied"
+elif git -C vendor/reflaxe apply --check "$SHORT_CIRCUIT_PATCH"; then
+  git -C vendor/reflaxe apply "$SHORT_CIRCUIT_PATCH"
+  say "applied reflaxe short-circuit patch"
+else
+  die "cannot apply compiler patch 0006; see vendor/patches/README.md"
+fi
+
 # Console Array storage must match the implementation verified by the conformance gate.
 ARRAY_PATCH=../patches/reflaxe-cpp-array-is-vector.patch
 if git -C vendor/reflaxe.CPP apply --reverse --check "$ARRAY_PATCH" 2>/dev/null; then
@@ -151,6 +162,18 @@ elif git -C vendor/reflaxe.CPP apply --check "$ARRAY_PATCH"; then
   say "applied reflaxe.CPP contiguous-array patch"
 else
   die "cannot apply contiguous-array patch; see vendor/patches/README.md"
+fi
+
+# CpuState's fields in their declared order (@:declarationOrder): its hot words within the SH-4's
+# short displacements (docs/perf/dreamcast-ledger.md E-076).
+ORDER_PATCH=../patches/0007-reflaxe.CPP-declaration-order.patch
+if git -C vendor/reflaxe.CPP apply --reverse --check "$ORDER_PATCH" 2>/dev/null; then
+  say "reflaxe.CPP declaration-order patch already applied"
+elif git -C vendor/reflaxe.CPP apply --check "$ORDER_PATCH"; then
+  git -C vendor/reflaxe.CPP apply "$ORDER_PATCH"
+  say "applied reflaxe.CPP declaration-order patch"
+else
+  die "cannot apply compiler patch 0007; see vendor/patches/README.md"
 fi
 
 # --- project-local haxelib repository ---------------------------------------------------------

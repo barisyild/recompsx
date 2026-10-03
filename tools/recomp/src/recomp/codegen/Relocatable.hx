@@ -147,7 +147,9 @@ class RelocSet {
 				else {}
 			}
 			// No sweep: a data file is mostly not code, and the entries are all known. No table
-			// recovery either: position-independent code cannot hold absolute jump tables.
+			// recovery either: position-independent code cannot hold absolute jump tables. No
+			// hand-overs: a relocatable function is reached by its key, not called by its class.
+			d.cutShared = false;
 			d.run(false, false);
 			final unit = new RelocUnit(image, d);
 			var used = false;

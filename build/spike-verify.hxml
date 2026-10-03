@@ -5,4 +5,3 @@ build/reflaxe-cpp.hxml
 -D mainClass=Verify
 -main Verify
 -D cpp-output=out/_spike/verify
--dce full

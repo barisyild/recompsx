@@ -1,0 +1,28 @@
+diff --git a/src/reflaxe/preprocessors/implementations/everything_is_expr/EverythingIsExprSanitizer.hx b/src/reflaxe/preprocessors/implementations/everything_is_expr/EverythingIsExprSanitizer.hx
+index 6f4a55e..babceda 100644
+--- a/src/reflaxe/preprocessors/implementations/everything_is_expr/EverythingIsExprSanitizer.hx
++++ b/src/reflaxe/preprocessors/implementations/everything_is_expr/EverythingIsExprSanitizer.hx
+@@ -329,6 +329,15 @@ class EverythingIsExprSanitizer {
+ 					handleValueExpr(e2, "index")
+ 				);
+ 			}
++			case TBinop(op, e1, e2) if((op.isBoolAnd() || op.isBoolOr()) && isDisallowedInWhile(e2)): {
++				// A block/assignment on the RHS may produce preceding statements (notably
++				// argument bindings from Haxe's inliner). Keep those inside the branch;
++				// hoisting them before the operator loses short circuiting and LHS order.
++				// Simple boolean expressions keep their native &&/|| representation.
++				final skipped = makeTExpr(TConst(TBool(op.isBoolOr())), expr.pos, expr.t);
++				final conditional = op.isBoolAnd() ? TIf(e1, e2, skipped) : TIf(e1, skipped, e2);
++				handleValueExpr(expr.copy(conditional), "bool").expr;
++			}
+ 			case TBinop(op, e1, e2): {
+ 				final leftExpr = handleValueExpr(e1, "left", op.isAssign());
+ 				final rightExpr = handleValueExpr(e2, "right");
+@@ -1036,6 +1045,7 @@ class EverythingIsExprSanitizer {
+ 			case TTry(_, _): true;
+ 			case TBinop(OpAssign, _, _): true;
+ 			case TBinop(OpAssignOp(_), _, _): true;
++			case TBinop(OpNullCoal, _, _) if(options.convertNullCoalescing): true;
+ 			case TUnop(OpIncrement | OpDecrement, _, _): true;
+ 			case TParenthesis(e1) | TMeta(_, e1): isDisallowedInWhile(e1);
+ 			case _: {

@@ -8,10 +8,17 @@
 #if RECOMPSX_DC_PROFILE_OVERLAY
 #define TXT_USED 120
 #define TXT_LINE 24
+#define TXT_LINES 5
 pvr_ptr_t      g_txt;
 pvr_poly_hdr_t g_txt_hdr;
-static uint16_t g_txt_buf[TXT_W * TXT_H] __attribute__((aligned(32)));
-_Static_assert(sizeof(g_txt_buf) % 32 == 0, "g_txt_buf is cleared by shz_memset8 and sent by txr_put");
+/* One row of the texture at a time: built here, where it stays in the operand cache, and sent to
+ * texture memory through the store queues. The whole texture had a 128 KB buffer, cleared, drawn
+ * and sent in one present every two seconds — ~4.7 ms of that present under the cache model, which
+ * put Ballistix's heavy present over two frames' worth once in every 120 (ledger E-108). */
+static uint16_t g_txt_row[TXT_W] __attribute__((aligned(32)));
+_Static_assert(sizeof(g_txt_row) % 32 == 0, "g_txt_row is cleared by shz_memset8 and sent by txr_put");
+static char     g_txt_text[TXT_LINES][48];
+static int      g_txt_next = TXT_LINES;   /* the line the next present draws; TXT_LINES: none */
 static int      g_txt_ready;
 
 /* The overlay's glyphs, copied out of the BIOS font once. The font is in the boot ROM, on the G1
@@ -43,25 +50,37 @@ void glyphs_load(void) {
     g_glyphs_ok = 1;
 }
 
-/* One line of text at buf, as bfont_draw_str_ex(buf, TXT_W, 0xFFFF, 0, 16, true, s) drew it —
- * two 12-bit rows in every three bytes of a glyph, leftmost pixel in the top bit — except that
- * a line stops at the texture's edge instead of running on into the next. */
-static void txt_line(uint16_t* buf, const char* s) {
+/* Row y of a line of text into g_txt_row, the rest of the row clear, as bfont_draw_str_ex(buf,
+ * TXT_W, 0xFFFF, 0, 16, true, s) drew it — two 12-bit rows in every three bytes of a glyph,
+ * leftmost pixel in the top bit — except that a line stops at the texture's edge instead of running
+ * on into the next. */
+static void txt_row(int y, const char* s) {
+    shz_memset8(g_txt_row, 0, sizeof(g_txt_row));
     if(!g_glyphs_ok) return;
     else {}
     for(int cx = 0; *s && cx + BFONT_THIN_WIDTH <= TXT_W; s++, cx += BFONT_THIN_WIDTH) {
         const int c = (uint8_t)*s;
-        const uint8_t* g = g_glyph[(c >= GLYPH_FIRST && c < GLYPH_FIRST + GLYPH_COUNT) ? c - GLYPH_FIRST : 0];
-        uint16_t* row = buf + cx;
-        for(int y = 0; y < BFONT_HEIGHT; y += 2, g += 3, row += TXT_W * 2) {
-            const unsigned w0 = ((unsigned)g[0] << 4) | (g[1] >> 4);
-            const unsigned w1 = ((unsigned)(g[1] & 0x0F) << 8) | g[2];
-            for(int x = 0; x < BFONT_THIN_WIDTH; x++) {
-                row[x] = (w0 & (0x800u >> x)) ? 0xFFFF : 0;
-                row[TXT_W + x] = (w1 & (0x800u >> x)) ? 0xFFFF : 0;
-            }
-        }
+        const uint8_t* g = g_glyph[(c >= GLYPH_FIRST && c < GLYPH_FIRST + GLYPH_COUNT) ? c - GLYPH_FIRST : 0]
+                           + (y >> 1) * 3;
+        const unsigned w = (y & 1) ? (((unsigned)(g[1] & 0x0F) << 8) | g[2]) : (((unsigned)g[0] << 4) | (g[1] >> 4));
+        for(int x = 0; x < BFONT_THIN_WIDTH; x++)
+            g_txt_row[cx + x] = (w & (0x800u >> x)) ? 0xFFFF : 0;
     }
+}
+
+/* The pending line into its rows of the texture, one row at a time, and the next line pending:
+ * the five a report formats are drawn by the five presents after it. */
+static void txt_step(void) {
+    const int k = g_txt_next;
+    for(int y = 0; y < TXT_LINE; y++) {
+        txt_row(y, g_txt_text[k]);
+        txr_put(g_txt_row, (pvr_ptr_t)((uintptr_t)g_txt + (uintptr_t)(k * TXT_LINE + y) * TXT_W * 2u),
+                sizeof(g_txt_row));
+    }
+    sq_wait();
+    g_txt_next = k + 1;
+    if(g_txt_next == TXT_LINES) g_txt_ready = 1;
+    else {}
 }
 #endif
 
@@ -476,6 +495,12 @@ static uint64_t g_bench_bin_us[BENCH_BINS];
 static uint64_t g_bench_bin_emu[BENCH_BINS], g_bench_bin_pres[BENCH_BINS];
 uint32_t g_frame_emu_us, g_frame_present_us;
 
+/* The bench's slowest presents (over two frames' worth, 33.4 ms), by their number from boot, for
+ * the serial log: which frames a game's spikes are, so they can be looked at on JavaScript. */
+#define BENCH_SLOW 24
+static uint32_t g_bench_slow_n, g_bench_slow_at[BENCH_SLOW], g_bench_slow_us[BENCH_SLOW];
+static uint32_t g_bench_slow_emu[BENCH_SLOW];
+
 void bench_frame_busy(uint64_t busy_us) {
     if(g_bench_state != 1) return;
     else {}
@@ -485,6 +510,12 @@ void bench_frame_busy(uint64_t busy_us) {
     g_bench_bin_us[i] += busy_us;
     g_bench_bin_emu[i] += g_frame_emu_us;
     g_bench_bin_pres[i] += g_frame_present_us;
+    if(busy_us > 33400 && g_bench_slow_n < BENCH_SLOW) {
+        g_bench_slow_at[g_bench_slow_n] = g_presents;
+        g_bench_slow_us[g_bench_slow_n] = (uint32_t)busy_us;
+        g_bench_slow_emu[g_bench_slow_n] = g_frame_emu_us;
+        g_bench_slow_n++;
+    } else {}
 }
 static uint32_t g_bench_frames;
 static char     g_bench_line[48];
@@ -501,6 +532,11 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
     g_bench_frames += (uint32_t)g_prof_frames;
     if(g_presents < (uint32_t)g_bench_to) return;
     g_bench_state = 2;
+    /* The recording ends here, before the lines below: ~900 characters spun out of the serial port
+     * were the profile's last ~40 ms, 0.13 ms of each of a 300-frame window's frames (scif_write).
+     * The profiling Flycast quits at "exit", after them. */
+    if(g_rxprof) { printf("@@rxprof stop\n"); fflush(stdout); }
+    else {}
     /* Milliseconds per frame, tenths: full speed is 16.7. */
     unsigned long t[5];
     for(int i = 0; i < 5; i++) t[i] = (unsigned long)(g_bench_sum[i] / ((uint64_t)g_bench_frames * 100u));
@@ -539,7 +575,13 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
         at += snprintf(hist + at, sizeof(hist) - (size_t)at, " [%d] %lu.%lu/%lu.%lu", i, e / 10, e % 10, q / 10, q % 10);
     }
     bp_log(BP_LOG_WARN, hist);
-    if(g_rxprof) { printf("@@rxprof stop\n@@rxprof exit\n"); fflush(stdout); }
+    /* The slowest presents: number, cost and its emulation, in tenths of a ms. */
+    at = snprintf(hist, sizeof(hist), "bench slow presents:");
+    for(uint32_t k = 0; k < g_bench_slow_n && at < (int)sizeof(hist) - 24; k++)
+        at += snprintf(hist + at, sizeof(hist) - (size_t)at, " %lu:%lu/%lu", (unsigned long)g_bench_slow_at[k],
+                       (unsigned long)(g_bench_slow_us[k] / 100u), (unsigned long)(g_bench_slow_emu[k] / 100u));
+    bp_log(BP_LOG_WARN, hist);
+    if(g_rxprof) { printf("@@rxprof exit\n"); fflush(stdout); }
     else {}
 }
 
@@ -549,6 +591,10 @@ void profile_report(void) {
      * is the same frame in every build and every emulator, which is how a bench range is found. */
     if(g_rxprof && g_presents % 150 == 0) { printf("@@rxprof shot p%05lu\n", (unsigned long)g_presents); fflush(stdout); }
     else {}
+#if RECOMPSX_DC_PROFILE_OVERLAY
+    if(g_txt_next < TXT_LINES) txt_step();
+    else {}
+#endif
     if(g_bench_state == 0 && g_bench_from >= 0 && g_presents == (uint32_t)g_bench_from) {
         profile_reset();        /* the range starts with a window of its own */
         g_bench_state = 1;
@@ -607,53 +653,48 @@ void profile_report(void) {
     /* The overlay's text redrawn every OVERLAY_EVERY windows, two seconds: formatting it, finding
      * the six hottest functions among every symbol, drawing five lines a pixel at a time and
      * uploading them was ~0.14 ms of every frame under the cache model, for numbers a person reads
-     * once a second at best. The window itself (bench_add above) is still every PROFILE_EVERY. */
+     * once a second at best. The window itself (bench_add above) is still every PROFILE_EVERY.
+     * Here the lines are formatted; the five presents after this one draw and send one each. */
     static int s_overlay_window;
     if(g_txt && (s_overlay_window++ % OVERLAY_EVERY) == 0) {
-        char l0[48], l1[48], l2[48], l3[48], l4[48];
+        char* l0 = g_txt_text[0];
+        char* l1 = g_txt_text[1];
+        char* l2 = g_txt_text[2];
+        char* l3 = g_txt_text[3];
+        char* l4 = g_txt_text[4];
         const unsigned long tenths = total ? (unsigned long)((uint64_t)g_prof_frames * 10000000u / total) : 0;
         /* The window is always PROFILE_EVERY presents, so it is not printed; the disc's wait is
          * followed by what the drive delivered in it, which is what tells a slow drive from a busy
          * one. */
-        snprintf(l0, sizeof(l0), "%lu ms %lu.%lu fps pace %lu disc %lu/%luk",
+        snprintf(l0, sizeof(g_txt_text[0]), "%lu ms %lu.%lu fps pace %lu disc %lu/%luk",
                  (unsigned long)(total / 1000), tenths / 10, tenths % 10,
                  (unsigned long)(g_prof_pace / 1000), (unsigned long)(g_prof_disc_us / 1000),
                  (unsigned long)(g_prof_disc_bytes / 1024));
         /* Line 1 is the emulated frame, line 2 the drawing: the GPU's share of the frame, then the
          * texture uploads, the scene build and hand-over at present, and the wait for the PVR. */
         if(g_hw_voices)
-            snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu aica %lu/%d/%d",
+            snprintf(l1, sizeof(g_txt_text[0]), "emu %lu gte %lu spu %lu aica %lu/%d/%d",
                      (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
                      (unsigned long)(spu_us / 1000),
                      (unsigned long)(g_prof_aica / 1000), g_prof_aica_decodes, g_prof_aica_declined);
         else
-            snprintf(l1, sizeof(l1), "emu %lu gte %lu spu %lu",
+            snprintf(l1, sizeof(g_txt_text[0]), "emu %lu gte %lu spu %lu",
                      (unsigned long)(emu / 1000), (unsigned long)(gte_us / 1000),
                      (unsigned long)(spu_us / 1000));
         /* fin and wait (hand-over and the PVR's wait) have read 0 for a long while; they stay in the
          * serial line, and their room goes to the texture decodes. */
-        snprintf(l2, sizeof(l2), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d+%d",
+        snprintf(l2, sizeof(g_txt_text[0]), "gpu %lu up %lu build %lu x2 %d dec %d/%d/%d+%d",
                  (unsigned long)(gpu_us / 1000),
                  (unsigned long)(g_prof_upload / 1000), (unsigned long)(g_prof_build / 1000),
                  g_bright_prims, g_win_mir, g_win_slot, g_win_bake, g_win_patch);
         /* Lines 3 and 4: where the samples landed, by function, in ms of this window. The skip and
          * header counts that were here are in the serial line. */
-        syms_top(l3, l4, sizeof(l3));
-        if(g_bench_state == 2) shz_memcpy(l4, g_bench_line, sizeof(l4));
-        else if(g_fm_line[0]) shz_memcpy(l4, g_fm_line, sizeof(l4));
+        syms_top(l3, l4, sizeof(g_txt_text[0]));
+        if(g_bench_state == 2) shz_memcpy(l4, g_bench_line, sizeof(g_txt_text[0]));
+        else if(g_fm_line[0]) shz_memcpy(l4, g_fm_line, sizeof(g_txt_text[0]));
         else {}
 
-        {
-            shz_memset8(g_txt_buf, 0, sizeof(g_txt_buf));
-            txt_line(g_txt_buf,                        l0);
-            txt_line(g_txt_buf + TXT_W * TXT_LINE,     l1);
-            txt_line(g_txt_buf + TXT_W * TXT_LINE * 2, l2);
-            txt_line(g_txt_buf + TXT_W * TXT_LINE * 3, l3);
-            txt_line(g_txt_buf + TXT_W * TXT_LINE * 4, l4);
-            txr_put(g_txt_buf, g_txt, sizeof(g_txt_buf));
-            sq_wait();
-            g_txt_ready = 1;
-        }
+        g_txt_next = 0;     /* drawn by the next five presents (txt_step) */
     } else syms_clear();
 #endif
 

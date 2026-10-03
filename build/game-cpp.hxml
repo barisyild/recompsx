@@ -12,4 +12,3 @@ build/reflaxe-cpp.hxml
 -D mainClass=GenMain
 -main GenMain
 -D cpp-output=out/_gen/cpp
--dce full

@@ -2,6 +2,1696 @@
 
 ## Status snapshot
 
+**2026-10-03 (later): Dreamcast — Ballistix's slow presents named and all but the game's own gone;
+Crash 3's gameplay unchanged.** Global and exact (digests unchanged: C3 4523 88c8b426, 5000 47853ef7;
+CB+mods 20300 95e17b07; demo 329de455), on the cache model (docs/perf/dreamcast-ledger.md E-108..E-110):
+- **What the 17 were** (E-108; the bench names its presents over 33.4 ms, "bench slow presents",
+  and a JavaScript count of guest instructions per function says what ran in each): five were
+  **the FPS overlay's redraw** every 120 presents (~4.7 ms in one present) — now the five presents
+  after a report draw a line each, a row at a time through a 1 KB row (the 128 KB buffer is gone);
+  ten were **a disc load** (19820-19885: nothing drawn, the game polling the drive in a loop of
+  ~15 functions with five VSync calls a turn, 218 K guest instructions a vblank — the PlayStation
+  at 100 %), which the placement had never seen: its trace was the window's first ~100 frames; the
+  rest are vblanks of the scene after the load where the game's own work runs on into the next
+  vblank (the PlayStation at 100 % for two). And the recording now ends before the bench's report,
+  whose serial output had been 0.13 ms of each gameplay frame.
+- **GPUSTAT's line and timer 1's hblanks without a divide** (E-109): `TimeBase.line` keeps the line
+  it found with the cycles it lasts for (forgotten every frame); `Timers.fold` takes one period by a
+  compare. The load loop: work 11.62 → 10.80 ms a frame. Fixture `BeamLine` (ffc5a49a, JS and C++).
+- **Placement rounds with every phase of a window traced** (E-108 r108, E-110 r109;
+  out/_work/round3.sh, src/backend/dreamcast/AGENTS.md step 2): Crash Bash's trace joins the match,
+  the load (cbdata-ldbench, 19840) and the scene after it (cbdata-pbbench, 20100), 16 + 4 + 4 M, 180
+  sections placed. Installed (games/*/dc-placement.txt, dc-data-placement.txt).
+- **Where it stands** (r109p2): the title 16.64 ms (pairs 31.8-32.6 within 33.4); **Ballistix 16.76**
+  (the bench's mean 16.7): heavy pairs 29.8 + 3.3 = **33.1 ms within 33.4**, the load's frames
+  11.6-13.4 ms, 7 of 1,500 presents over (the game's own double vblanks); **Crash 3's gameplay 25.88**
+  (heavy presents 39.5 ms) — the PlayStation is ~95 % busy in both vblanks there (250-310 K guest
+  instructions each), and the emulation runs such code at ~0.65 of real time. Hardware CDIs, sent to
+  the tester with the commit of this state: out/dc/crash3-r112-max.cdi (E-112's code, r109's
+  placements) and out/dc/crashbash-r109-max.cdi (E-109's code; E-112 is exact and changes nothing
+  Ballistix draws on the hardware path).
+- **Since** (E-111, E-112): `-freorder-blocks-algorithm=simple` for the game's code — images 3 % smaller,
+  gameplay's fetches unchanged: rejected. A flat triangle's rows carried rather than divided for
+  (`Gpu.flatSpans`; Crash 3's shadow is ~107 flat triangles a frame drawn into VRAM in software):
+  gameplay 25.88 → **25.49** (cf −0.10), exact (VRAM digests, Raster). Measured for the next steps:
+  the GPU walk's 168 stretches a frame cost the rest of the code 7.5 % of its instruction misses
+  (~0.45 ms) besides their own (~0.9 ms); the world loop is hand-written threaded code
+  (`jr $t9` between handlers), whose copies per entry E-077 found cheaper than hand-overs.
+
+**2026-10-03: Dreamcast — Crash 3's title screen and Crash Bash's Ballistix within their 30 Hz pairs
+under the cache model.** Global and exact (game digests unchanged: C3 4523 88c8b426, 5000 47853ef7;
+CB+mods 20300 95e17b07), judged on the cache model (docs/perf/dreamcast-ledger.md E-097..E-107):
+- **The pump's path for a stretch of the GPU's list walk** (E-098): ~210 of the title's ~230 pumps
+  a frame are DMA2 stretches (ADR-0039). The scheduler's state is one array (`shim.SchedFile`,
+  `recompsx_sched`, 16 words, the words a stretch touches on one line); REST, the earliest armed slot
+  but DMA_STEP, is kept as the others are armed, cancelled and fired, so a stretch's re-arm is a
+  compare instead of a scan; the other handlers are out of line (`fireRest`); `Runtime.pump` is one
+  call, never inlined (GCC had put half of it at each of the thousands of pump sites). Pump 101
+  instructions where ~385; images C3 −92 KB, CB −53 KB; conflict-free title −0.12, gameplay −0.17,
+  Ballistix work −0.19. New fixture `SchedulerOrder` (200,000 random arms, cancels and fires against
+  a search of every slot; e3bc279e on JS and C++, and the same with the old scheduler).
+- **Relocatable code's answers kept by address** (E-099, ADR-0025 revision): Crash 3's GOOL calls
+  (~36 a frame) no longer hash eight words byte by byte each time; 64 slots keep each answer with
+  the words it was found by (86 % hits on JS). Gameplay `FnTable.call` 0.314 → 0.204 ms a frame.
+- **Placement rounds** (E-097 r85; E-100 r99, which also remade the **data colours** — the five
+  backend tables E-091..E-095 added were never placed, and the code's literal pools sat on
+  `recompsx_gte`): `scripts/build-dc.sh --data-placement F` takes a candidate; the steps are
+  out/_work/round2.sh's (ledger E-100). Title 18.88 → 17.19 → **16.69 ms** a frame: heavy presents
+  26.6-27.8 ms with light ones 5.0, **a 30 Hz pair in 31.6-32.8 ms against 33.4**, and the pacer
+  waits 0.66 ms a frame. Ballistix 18.25 → 17.44 → **17.01** (heavy pairs ~33.4, 19 of 1,500
+  presents at 37.4). Gameplay 29.36 → 27.01 → **25.50** (heavy presents 38.8 ms).
+- **Set aside**: the span-fail paths `cold` and their address unmasked (E-101) — gameplay's capacity
+  fills +0.4 ms (the trampolines to far blocks spread the hot paths); the root counters first in the
+  slow reads (E-102) — cheaper counters, dearer other devices, a moved layout. Measured on the way: 29.5 % of
+  the bytes in the instruction-cache lines gameplay's generated code touches are never run there —
+  the game's own cold paths (62 % of the long cold runs), the inline scratchpad path (17 %),
+  literal pools and `bf`+`bra` trampolines.
+- **Crash Bash's margin** (E-103..E-107): a GP0 state command a list carries no longer calls `draw`
+  (~450 a frame, 0.11 ms); INTPL at its call sites (`GteQuick.intpl`, fixture `GteInterpolate`,
+  b7f03c86 on JS and C++; ~300 a frame, 0.22 ms through the general form); build_scene's area and
+  memo tests by one word, and a flat triangle's colour converted once (TA hash identical over
+  1,889 + 2,170 + 7,974 scenes); placement round r100 with the data colours. Ballistix 17.01 →
+  **16.87** ms (work 13.79 → 13.63): **heavy pairs 29.6 + 3.3 = 32.9 ms, within 33.4** — 17 of
+  1,500 presents still at ~37 ms (frames with ~8 ms more emulation). Title unchanged (pairs
+  31.6-32.9); gameplay 25.50 → 25.86 (capacity fills moved with the code).
+- **Where it stands.** The title screen fits; Ballistix fits but for 17 of 1,500 presents;
+  Crash 3's gameplay needs ~35 % less (a pair ~51 ms: heavy presents ~39 ms — ~29 of emulation,
+  ~9 of scene — and light ones ~12).
+  The title's light vblank is real work too (JS: 271 K guest instructions against the heavy one's
+  375 K). Confirm on hardware next (a CDI of this build).
+
+**2026-10-02 (evening): Dreamcast — RTPS and the polygon packet as scheduled SH-4 cores in the
+runtime (ADR-0046, ADR-0047).** Global, exact, judged on the cache model's conflict-free time
+(docs/perf/dreamcast-ledger.md E-083..E-086):
+- **RTPS's vertex** (E-083, E-084): scripts/sh4/rtp1.blk and rtp1n.blk, list-scheduled by
+  scripts/dc-sched.py (new) under the model's issue rules and written into Gte.hx: 155/144 cycles
+  a vertex against GCC's ~204 inline and 233 out of line; a vertex behind the camera, a divide that
+  overflows and a quotient above 16 bits finish in 64 bits on the core too (the title's last
+  vertices 28,310 of 28,318 there). The divisor's leading zeros from the register file's CLZ table:
+  no floating point anywhere (golden rule 1; `scripts/check.sh` had flagged the FPU's exact
+  int-to-float exponent, +6 cycles a vertex). Exact by scripts/dc-shrun.py (new: an SH-4
+  interpreter) over 76,000 vertices recorded from JavaScript, and check builds (5,308,416 vertices,
+  0 differ).
+- **The polygon packet** (E-085, E-086): scripts/sh4/poly.blk — texture keys, flags, triState's
+  test, the three positions, the size and line rejects, the count, the GPU time and the backend's
+  triangle as twelve words; the backend ABI gains `bp_gpu_tri_w` and `bp_gpu_state_w` (the same
+  calls as words), and the Dreamcast writes its records as words. Exact by scripts/dc-polyrun.py
+  (new) and a check build (2,293,760 packets, 0 differ); the JavaScript GPU-stream hash at Crash 3's
+  4050 unchanged (5f877994a1335867).
+- **The state path and RTPS everywhere** (E-087, E-088): when a triangle's state is not the one
+  last sent the core does triState's and sendState's work and leaves the state for
+  `bp_gpu_state_w` (the backend's state record compared and written as words) — Ballistix, half
+  of whose triangles change state, −0.23 cf; RTPS inline at every site with its C form cold and out
+  of line on the SH-4 (E-031's leaf rule dropped) — Ballistix work −0.28 (cmdRtps's wrapper gone).
+- **Where it stands** (g82, conflict-free a present, against g76 before the cores): title 16.74 →
+  15.84, gameplay 26.26 → 24.69, Ballistix 17.45 → 16.58 (work 15.71 → 14.88). Frames wait on the
+  placement round for this code (r81, in progress); the title's 30 Hz pair should land within
+  ~0.5 ms of 33.4, Ballistix's ~4-5 ms over.
+
+**2026-10-02 (later): Dreamcast toward full speed — the CpuState's layout, placement, GTE, the
+scratchpad test; three measured and set aside.** Global changes, judged on the cache model's
+conflict-free time (docs/perf/dreamcast-ledger.md E-073..E-082):
+- **Kept.** CpuState's 16 most-named words within the SH-4's 60-byte displacement (reflaxe.CPP
+  patch 0007, `@:declarationOrder`; E-076): title cf 16.92 → 16.76, Crash Bash work 15.74 → 15.68,
+  gameplay level. Placement rounds for the code of the time (E-073; E-079 for g70's; E-082 for
+  g75's): title 19.20 → 18.17 → 17.73 → 17.83, gameplay 30.29 → 29.06 → 28.80 → 28.53, Ballistix
+  19.34 → 19.12 → 18.89 → 18.96 (a round's own spread is 0.1-0.3 ms). `Memory.span`'s scratchpad
+  test as one compare an end (E-081): Crash 3's generated issue −0.055 ms, images −110 / −64 KB,
+  exact — the new `SpanTake` fixture checks every byte of every run taken against the full decode.
+  RTPS/RTPT's saturation as one test (E-074): Crash Bash's `cmdRtps` −0.05. Function summaries no
+  longer treat an unproved ADD/ADDI/SUB as a trap into unknown code (E-075): no speed, Crash 3
+  −33 KB. All 58 conformance tests agree on JavaScript and desktop C++ with these changes.
+- **Set aside.** Hand-overs where functions share code (ADR-0045, `gen --cut-shared`; E-077):
+  exact (digests, a pump trace, the `HandOver` fixture on both targets) and smaller (Crash 3
+  −376 KB, Crash Bash −194 KB) but gameplay cf +0.65 ms — each copy carried only its entry's
+  paths. The software rasteriser's row ends carried without a division (E-078): exact, and what the
+  divisions cost (0.1 ms) came back in the carried state's issue; reverted. Pre-RA scheduling for
+  the game's code (E-072), the triangle state flag (E-071).
+- **Set aside, not built** (then superseded the same day by E-083: scheduled, it is 155). RTPS by
+  hand in SH-4 assembly (E-080): timed first with scripts/dc-issue-sim.py (new; the cache model's
+  issue rules replayed over a path, 233 cycles for GCC's `cmdRtps` against the 232 measured): 211
+  cycles, where GCC's inline form is ~204.
+- **Where it stands** (the model): title 17.83 ms a present, its 30 Hz pairs 35.4 against 33.4;
+  Ballistix 18.96, its pairs 39.3 against 33.4; gameplay 28.53, its heavy presents 43.6. Full speed
+  is not reached; the levers left are in Next up 000. Measured for what comes next: gameplay runs ~290 K guest instructions a present
+  (title ~323 K) as 1.64 M SH-4 instructions of generated code over 13,869 distinct cache lines (an
+  8 KB cache holds 256), 5.4 of its 13.2 cf ms instruction fills a fully associative cache would
+  have too; the GPU path costs ~1,200-1,500 SH-4 instructions a polygon in every window (list walk,
+  polygonHw, the scene build); RTPS ~230 cycles (Crash Bash's out-of-line `cmdRtps`, 1,655 a
+  present), its 15 multiplies alone ~45 of them under the model's issue rules.
+
+**2026-10-02: The GTE and LWL/LWR in recovered scalar helpers (ADR-0044); no Dreamcast speed effect.**
+`ScalarGraph` admits coprocessor 2 and unaligned loads where effects are ordered: MTC2/CTC2 and
+named COP2 commands are ordered effects (predicated on their CFG arm), MFC2/CFC2 reads stay where
+they stand, LWC2/SWC2 go through checked spans, LWL/LWR through `Memory.spanLwl`/`spanLwr` (byte
+preflight, no alignment condition). Helpers call new CPU-state-free accessors (`Gte.readData`,
+`writeData`, `readControl`, `writeControl`; the ctx forms delegate). GTE helpers stay out of the
+pure pool; GTE projections stay with their caller. Two general fixes found on the model: a CFG arm
+no path reaches (`bgez $zero`'s other side) is no longer lifted or preflighted, and a constant CFG
+accounting word is charged at the call site instead of passing through `ScalarResult.accounting`.
+
+Helpers: Crash 3 151 -> 171, Crash Bash 175 -> 180. Share of the generated code's executed SH-4
+instructions in recovered functions (model, RXCOUNT): C3 gameplay 0.36 -> 1.71 %, title 0.13 ->
+0.33 %, Ballistix 0.25 -> 1.00 %. Dreamcast model (ledger E-067, E-068), frame / conflict-free ms:
+title g60 19.76 / 17.12, g63 19.74 / 17.13, g64 19.53 / 17.11, g65 (final) 19.77 / 17.12; gameplay
+30.80 / 27.21, 30.87 / 27.05, 30.72 / 27.32, 30.79 / 27.20; Ballistix 19.48 / 17.64, 19.46 / 17.62,
+g65 19.48 / 17.61 (work 15.98 -> 15.96). Issue time is the same in every build (gameplay 13.27 /
+13.29 / 13.27 / 13.27 ms); the cf moves are instruction fills
+that follow the layout (`dc-cmp.py g60g-c3 g64g-c3`: generated issue -0.015 ms, non-conflict fills
++0.171, +0.08 in f_80041d28, which did not change). The earlier ADR-0044 stages measure the same
+way: `--no-scalar` and `--no-scalar --no-value-regions` change executed instructions by <= 0.11 %.
+JS ES6: C3 25,409,681 -> 25,567,682 B, CB with mods 24,243,721 -> 24,264,455 B.
+
+Where the time is, measured (g60/g64 gameplay): generated code 13.6 of 27.1 cf ms; within it
+CpuState loads/stores are 14.9 % of executed instructions and literal-pool loads 13.3 %, half of
+those the address-decode constants of span and memory checks (0x1FFFFF, 0x1F9FFFFF, the arena,
+the scratchpad's). The three hottest generated functions are GTE loops (f_80041d28 1.93,
+f_80041550 1.43, f_8003fc50 1.27 ms). The hottest acyclic GTE/LWL functions stay unrecovered:
+indexed addresses (base + computed index) have no span anchor; their CpuState share is ~15 %.
+
+Acceptance (`out/_cop_validate`, `out/_cop_survey`; DC logs `$SP/g6[0-5]*.out`):
+```
+./scripts/test.sh
+all 61949 checks passed
+conformance: 57 test(s) x JS
+ok ScalarCop 10882ef3 values=237450
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCop ScalarCfg ScalarMemoryCfg ScalarEffects ScalarCompose ScalarResults ScalarBorrow ScalarShare ScalarCalls ScalarPointers ScalarCodegen ScalarMemoryCodegen RangeCodegen
+ok ScalarCop 10882ef3 values=237450
+ok ScalarCfg 750ee5b6 values=192290
+ok ScalarMemoryCfg bac8188c values=1682130
+ok ScalarEffects 3cfb6f71 values=1136641
+ok ScalarCompose 9868486c values=2768992
+ok ScalarResults 9c6ba8fc values=51714
+ok ScalarBorrow 09b9df4b values=1959395
+ok ScalarShare 670c3bdc values=77833
+ok ScalarCalls ff62afe6 values=96344
+ok ScalarPointers 3bdd733d values=5800672
+ok ScalarCodegen 4ebe3340 values=124013
+ok ScalarMemoryCodegen 852cd0fd values=3830
+ok RangeCodegen 33c5b85a values=10090
+conformance: all targets agree
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh Unaligned GteOps GteProject
+ok Unaligned 896889ce values=204
+ok GteOps de71ee8a values=5440
+ok GteProject 43a78d52 values=396010
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node <c3 g60|g65 JS> --headless-hash 20000   frames=20000 digest=36dcd8ee (both)
+node <cb+mods g60|g65 JS> --headless-hash 20000   frames=20000 digest=98109571 (both)
+```
+The other 56 JS group digests are unchanged. Deliberately removing the LWR merge, the predicate on
+GTE effects or the ordered emission each fails ScalarCop. Next: decide with the owner between the
+loop work (where the generated code's time is) and the measured global costs above (entry work,
+decode constants in literal pools); indexed spans would admit the remaining acyclic candidates.
+
+**2026-10-02: Equal memory projections share one helper/adapter pair per class.**
+`Program` emits one copy of a memory projection pair for all call sites of an emitted class whose
+pair texts are equal up to the pair's own two names (`ProjectionShare`, ADR-0044). The key is the
+complete text: parameters, results and publication, preflight, ordered effects, accounting,
+fallback owner/callee, borrowed/fresh form and entry guards. Sharing runs after the cross-universe
+body comparison and never crosses a class. `--no-projection-share` reproduces the preceding stage
+byte for byte (both games' generated Haxe and ES6 JS).
+
+Emitted pairs fall **73 -> 48 (C3) / 108 -> 69 (CB)** (25/39 call sites renamed); ES6 JS
+**25,451,666 -> 25,409,681 (-41,985 B)** and **24,220,093 -> 24,137,205 (-82,888 B)**. An out-of-tree
+check confirms that every call site runs a pair equal to its own former pair and that no other text
+changed (`out/_proj_share/{Structure,Equivalence}.py`). These are static properties.
+Timing on a loaded host (load average 8-16): five wall-clock pairs gave C3 median +4.86% (four pairs
+slower) and CB -0.78% (mixed); ten pairs with child CPU time gave pairwise medians C3 wall +0.68% /
+CPU -0.13% and CB wall +1.20% / CPU +1.73% (seven pairs slower), with overlapping ranges. No speed
+change is established; this is a size reduction.
+
+Acceptance (`out/_proj_share/{gate,cross-final,check,validation}.log`, timings `bench{,2}.json`):
+```
+./scripts/test.sh
+all 61906 checks passed
+conformance: 56 test(s) x JS
+ok ScalarShare 670c3bdc values=77833
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarShare ScalarBorrow ScalarResults ScalarCompose
+ok ScalarShare 670c3bdc values=77833
+ok ScalarBorrow 09b9df4b values=1959395
+ok ScalarResults 9c6ba8fc values=51714
+ok ScalarCompose 9868486c values=2768992
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_proj_share/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 shared: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb shared: frames=20000 digest=a9864f26
+```
+The other 55 JS group digests and value counts are unchanged. A key weakened to "same callee and
+form" fails ScalarShare with 60 mismatches. No C++ game was built. Next: the per-call entry cost of
+projections (adapter guards and preflight) and the earlier C3 timing question; general loops,
+conditional summaries and ABI/stack recovery remain open.
+
+Whole-pipeline A/B on the same tool, eight rotating rounds per game with child CPU time
+(`out/_proj_share/bench{3,4}.json`; new measurement flag `--no-scalar-calls` keeps helpers inside
+their functions but calls every function through its CpuState entry): default against
+`--no-scalar` gave CB CPU **+1.82%** (eight of eight rounds slower) in one run and **-0.94%** (four
+of eight) in the next; C3 **-1.50%** and **-0.23%**. Within a variant, C3 ran 19.6-35.7 s at load
+averages 7.8-14.8. On this host the JS timing cannot resolve these differences: neither a gain nor
+a cost of scalar recovery, its call-site use or its projections is established. A one-run CPU
+profile of CB attributes 17 ms to helpers/adapters of 5.4 s, while host I/O (`read`) alone varied
+by 126 ms between runs; about 60% of JS time is runtime (software rasterizer spans, GP0, audio).
+
+**2026-10-02 handoff:** the owner requested a detailed continuation prompt for another LLM.
+Use this same working tree: current recovery sources include uncommitted/untracked files and
+modified compiler submodules, so HEAD alone does not contain this state. No implementation or
+acceptance changed during handoff preparation. Next: safely share duplicate memory projections.
+
+**2026-10-02: Caller-specific memory results reach program generation; optimizer flags verified.**
+Direct resident JAL calls may now omit a bounded memory callee's outputs when every caller
+path overwrites them before a read or observation. Full access/alias preflight, ordered stores,
+path accounting and the original entry fallback remain. Adapters either reuse identical
+borrowed-span proofs or construct the complete preflight, including constant/loaded addresses.
+All-dead read results can use Void helpers. Public/interior entries retain full machine state;
+events, resumes, existing unwind tokens, MMIO and failed guards use the original path.
+Memory projections remain outside pure pooling and do not recover internal guest calls.
+
+An integration regression exposed Program's older pure-only summary gate: 13 new program-level
+checks failed although emitter fixtures passed. Its gate now admits control/read/write-memory
+effects for the independent value/access proof; calls, traps, unknown and nonlocal effects
+still reject projection. Program tests also verify cached hook invalidation. ScalarBorrow
+covers 47 programs, including partial/all-dead results, ordered aliases, conditional charges,
+missing donor spans, loaded pointers, constant addresses, public entries, every deadline,
+cooperative resumes, existing unwinds and dead-result FIFO reads on both adapter paths.
+
+Real generated call sites now contain **73 C3 / 108 CB** memory projections (3/1 borrowed,
+70/107 fresh; 34/66 Void helpers). They omit **80/125 static GPR publication sites** compared
+with existing full helpers; one additional C3 projection has no accepted full helper and is
+excluded from that reduction count. All **151/175 previous full helper bodies are unchanged**.
+ES6 JS grows **25,317,638 -> 25,451,666 (+134,028 B)** and
+**24,010,469 -> 24,220,093 (+209,624 B)**. These are static code properties, not dynamic savings.
+Exact keys/hashes: `out/_entry_cost/{projection-coverage,validated-sources}.json`.
+
+The requested optimizer settings were already enabled: all 16 build entries inherit
+`-D analyzer-optimize` and `-dce full` from `build/common.hxml`; JS retains `-D js-es=6`.
+No flag change was necessary. Fresh pinned JS demo still reports `frames=300 digest=329de455`.
+Acceptance (`out/_entry_cost/{gate-final,cross-full,check-final,validation,evidence}.log`):
+```
+./scripts/test.sh
+all 61848 checks passed
+conformance: 55 test(s) x JS
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarBorrow ScalarResults ScalarCompose
+ok ScalarBorrow 09b9df4b values=1959395
+ok ScalarResults 9c6ba8fc values=51714
+ok ScalarCompose 9868486c values=2768992
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_entry_cost/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 results: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb results: frames=20000 digest=a9864f26
+```
+The other 54 JS group digests are unchanged. Focused native fixtures validate emitted adapter
+semantics; final program-routing checks and real-game runs validate their integration. No C++
+game was built. Both baselines are the preceding stage's validated artifacts, with checked hashes.
+
+Five alternating timing pairs per game ran after builds finished; all 20 bounded digests agree.
+C3 baseline **22.5920 / 20.1061 / 22.5727 / 21.0986 / 25.8542 s**, projected
+**23.6054 / 20.9060 / 21.6444 / 21.7142 / 21.5792 s**: median **-4.11%**, but three pairs slower.
+CB baseline **4.3972 / 4.2579 / 4.2317 / 4.8483 / 5.3332 s**, projected
+**4.2298 / 4.5776 / 4.9053 / 4.1468 / 4.9857 s**: median **+4.10%**, but three pairs faster.
+Ranges overlap; neither a general speedup nor the prior C3 slowdown's cause is established.
+Before this change, sampled helper self time was a small part of the two profiles; inlined
+work prevents attributing the earlier regression from those samples alone. Evidence remains in
+`out/_entry_cost/`. Exact helper/adapter pairs within each owning class number only **48/69**
+for the 73/108 projections: sharing those repetitions is the next code-size opportunity.
+General loops, conditional/numeric summaries and ABI/stack recovery remain open.
+
+**2026-10-02: Larger functions recover by live-body cost; native short circuiting repaired.**
+`ScalarPlan` now separates its 256-guest-instruction analysis cap from a 96-unit surviving
+body budget (live SSA definitions/effects, transported results and accounting publication).
+The former 32-instruction limit rejected compact recovered calculations before liveness.
+Six parameters, six preflight spans, sixteen alias exclusions, 10-bit accounting lanes,
+effect order, fallback and observation boundaries remain bounded as before. No forced
+inline, runtime allocation, game-specific rule or generated-source edit was introduced.
+`ScalarPointers` now compares 58 programs, covering long dead prefixes, larger live/branch
+bodies, 40 ordered stores, a large summarized child and both budget rejection paths.
+
+A read-only survey of static function universes found 15 size-only candidates in each game
+under a 256-instruction scan; the live-body cap admits 11 C3 / 12 CB. Loop/unresolved-callee/
+unsupported-op counts are prioritized classifications, not independent exhaustive causes.
+Recovered whole helpers increase **C3 140 -> 151 / CB 163 -> 175**; all prior helper bodies
+remain byte-identical, with no removals. Typed child call sites increase **14 -> 21 / 17 -> 24**.
+ES6 JS grows **25,273,160 -> 25,317,638 (+44,478 B)** and
+**23,967,325 -> 24,010,469 (+43,144 B)**. These are static coverage/size results, not speedups.
+Survey evidence: `out/_recovery_survey/`; exact helper keys: `out/_body_budget/coverage.json`.
+
+Native validation exposed a pre-existing compiler error: statement-bearing RHS values of
+`&&`/`||` were evaluated before their guards. `Scheduler.init` consequently read `due[-1]`,
+intermittently faulting in either pointer or composition fixtures. A deterministic 22-value
+reproduction failed 11 C++ assertions; exported compiler patch 0006 fixes evaluation order
+and guarded execution. The expanded 53-value ShortCircuit fixture and the corrected generated
+scheduler branches prove the fix. Setup applies it idempotently and spike.sh runs it on both
+targets. Runtime source and analyzer/full-DCE/JS-ES6 flags remain unchanged; see defect 12.
+
+Acceptance (`out/_body_budget/{gate-fixed,cross-fixed,spike-fixed,check-fixed,validation}.log`):
+```
+./scripts/test.sh
+all 61528 checks passed
+conformance: 55 test(s) x JS
+ok ScalarPointers 3bdd733d values=5800672
+ok ShortCircuit 157a406f values=53
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ShortCircuit ScalarPointers ScalarCompose ScalarCalls
+ok ShortCircuit 157a406f values=53
+ok ScalarPointers 3bdd733d values=5800672
+ok ScalarCompose 9868486c values=2768992
+ok ScalarCalls ff62afe6 values=96344
+conformance: all targets agree
+./scripts/spike.sh
+spike.sh: clean
+./scripts/check.sh
+check.sh: clean
+python3 out/_body_budget/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 results: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb results: frames=20000 digest=a9864f26
+```
+Fresh pinned JS compilation of all four baseline/new artifacts on October 2 reproduces
+their already-validated hashes exactly. No C++ game was built: only focused conformance and
+compiler spikes. General loops, conditional/numeric call summaries, changed-pointer
+continuations and ABI/stack recovery remain open; this is not complete CpuState removal.
+
+After builds finished, five alternating pairs per game (Node startup included) retained
+C3's 9000-frame `4de78425` and CB's 3000-frame `db892c4b` in all 20 runs.
+C3 baseline **23.9714 / 21.7074 / 21.9441 / 22.4593 / 21.5237 s**;
+new **23.0600 / 22.9611 / 23.4738 / 23.4828 / 21.5534 s**.
+Median **21.9441 -> 23.0600 s (+5.09%)**, new slower in four of five pairs.
+CB baseline **5.4233 / 4.4406 / 4.4549 / 5.2132 / 5.0533 s**;
+new **4.6610 / 4.3675 / 4.2673 / 4.2743 / 6.5958 s**.
+Median **5.0533 -> 4.3675 s (-13.57%)**, but the last pair is 30.53% slower.
+Ranges overlap and host load varies materially; no general speedup is established and the
+C3 slowdown needs investigation. Preserve these measurements, not just the favorable CB
+median. `out/_body_budget/{bench.json,evidence.log}` verifies source hashes, unchanged prior
+helpers, all four 20k results, all tests and all 20 timing runs. Next: isolate entry/preflight
+and result-publication cost before further coverage expansion on performance grounds.
+
+**2026-10-01: Optimizer flags rechecked during recovered-body budget work.**
+`build/common.hxml` already enables `-D analyzer-optimize` and `-dce full`; JS and
+reflaxe.CPP game entries, conformance and benchmark commands include it. JS retains
+`-D js-es=6`. No additional flag changes were needed. Fresh pinned JS smoke output:
+```
+source scripts/env.sh && haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300
+[info] frames=300 digest=329de455
+```
+The larger recovered-body budget remains under validation; this smoke check does not
+establish native acceptance. Its two focused cross-target runs intermittently failed
+in different native fixtures (ScalarPointers, then ScalarCompose); investigation continues.
+
+**2026-10-01: Child result equalities and fixed charges cross recovered calls (ADR-0044).**
+An unconditional call imports its child's separate numeric `sampleRead` proof for normal
+and secondary results, preserving exact source/version/offset/extension and prefix writes.
+The read can become entry-proved only in the parent. Boundary reconstruction can then make
+a read-only child call dead; every effect, still-used result or dynamic charge keeps its
+dependency. All original spans remain in preflight, including zero-target reads and device
+fallback. Fixed packed charges now fold through nested summaries without requiring a child
+invocation just to read its accounting word. Guest instructions/cycles/blocks, original
+observation horizons and public interior entries remain unchanged. No child body is inlined.
+
+Narrow memory forwarding keeps an exact read identity for converted bytes/halfwords instead
+of losing provenance after a mask/sign extension. This emits only the existing conversion.
+Its new version includes every earlier write, so a converted value from an overlapping store
+cannot use stale entry bytes. Conditional conversions/calls do not export unconditional
+equality. `ScalarPointers` covers 51 programs: normal/secondary results, surviving primary
+with omitted secondary capture, nested constant/dynamic charges, conditional invocations,
+before/after writes, forwarded signedness/byte offsets and discarded-result MMIO fallback.
+Other 53 JS group digests remain unchanged.
+
+Both real-game JS outputs are **byte-identical to the prior stage**, so no timing comparison
+was run and no game speedup is claimed. This extends general recovery on the synthetic cases;
+the current game helper counts remain **C3 140 / CB 163**, child call sites **14/17**, static
+read sites **101/138** and result words **155/172**. Seven C3/thirteen CB Haxe helper bodies
+simplify constant accounting which Haxe's analyzer already folded. JS sizes stay
+**25,273,160 / 23,967,325 B**. Exact keys and source hashes are in
+`out/_call_results/{coverage,validated-sources}.json`. Acceptance:
+```
+./scripts/test.sh
+all 61486 checks passed
+conformance: 54 test(s) x JS
+ok ScalarPointers 8e96dd1b values=2606293
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarPointers ScalarCompose ScalarMemoryCfg
+ok ScalarPointers 8e96dd1b values=2606293
+ok ScalarCompose 9868486c values=2768992
+ok ScalarMemoryCfg bac8188c values=1682130
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_call_results/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 results: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb results: frames=20000 digest=a9864f26
+python3 out/_call_results/Evidence.py
+61486 tool checks; 54 JS groups; other 53 unchanged; 3 groups agree JS/C++; four 20k runs verified
+No timing comparison: both game JS files are byte-identical to baseline
+```
+Logs are `out/_call_results/{gate,cross,check,validation,evidence}.log`. Only the three
+focused fixtures were compiled for C++; no game C++ build was run. General loops, wider
+signatures, changed-pointer continuations, differing-pointer phis and ABI/stack recovery
+remain open. Next: conditional/numeric value recovery across calls and broader function
+coverage; this stage does not establish complete CpuState removal.
+
+**2026-10-01: Known entry values leave the helper result ABI (ADR-0044).**
+`ScalarValue.sampleRead` proves unconditional equality to an immutable entry read plus a
+wrapped constant offset; pointer provenance alone does not. Remove such outputs before
+helper liveness, reconstruct them from saved preflight samples at publication, and omit
+boundary-only sample arguments. Earlier-write exclusions and every original span check
+remain, including dead/zero-target accesses. All-known memory-helper outputs now permit
+`Void`, preserving effects and path accounting; pure-pool signatures keep an Int result.
+Nested calls capture reconstructed child outputs before effects, retaining separate read
+versions and conditional reach. Input snapshots protect values overwritten during output
+publication. No runtime allocation, forced inline, JIT or game-specific rule was added.
+
+Generated full-helper secondary-result writes fall **C3 80 -> 71 / CB 84 -> 74**; ordinary
+Int-returning helpers fall **115 -> 84 / 158 -> 98**. Source-level transported result words
+therefore fall **195 -> 155 / 242 -> 172** (static counts, not traffic per frame). Sample
+parameters fall **13 -> 2 / 23 -> 18**. Read sites remain **101/138**. Every prior helper
+survives; C3 additionally admits `f_800205f4_value`, with totals **140/163**. ES6 JS size is
+**25,271,622 -> 25,273,160 (+1,538 B)** / **23,968,254 -> 23,967,325 (-929 B)**. Exact helper
+keys, changed bodies and source hashes are in `out/_sample_results/{coverage,validated-sources}.json`.
+
+`ScalarPointers` now executes 38 programs, including sole/multiple/affine known outputs,
+Void effects and forwarding, input overwrite, predicated/nested calls and separate child
+read versions around a write. Its six-argument fallback now consumes the pointer in real
+arithmetic so removing an output alone cannot eliminate the budget case. Other 53 JS
+group digests remain unchanged. Acceptance (`out/_sample_results/{gate,cross,check,validation}.log`):
+```
+./scripts/test.sh
+all 61378 checks passed
+conformance: 54 test(s) x JS
+ok ScalarPointers 5dbfdd9f values=1823852
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarPointers ScalarBorrow ScalarResults
+ok ScalarPointers 5dbfdd9f values=1823852
+ok ScalarBorrow efe0d707 values=1229039
+ok ScalarResults 9c6ba8fc values=51714
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_sample_results/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 results: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb results: frames=20000 digest=a9864f26
+```
+Only the three focused conformance programs were built for C++; no C++ game build was run.
+Fresh baseline JS hashes match the preceding sample-input stage. After all builds/tests and
+20k validations finished, five alternating timing pairs (Node startup included) retained
+C3's 9000-frame 4de78425 and CB's 3000-frame db892c4b:
+C3 baseline **12.0866 / 11.9120 / 11.9709 / 11.9721 / 12.0026 s**;
+new **12.0060 / 11.9846 / 12.0058 / 11.9077 / 12.0369 s**. Median **11.9721 -> 12.0058 (+0.28%)**.
+CB baseline **2.7078 / 2.6849 / 2.7882 / 2.6219 / 2.6106 s**;
+new **2.6914 / 2.7050 / 2.6252 / 2.6133 / 2.5914 s**. Median **2.6849 -> 2.6252 (-2.22%)**.
+Ranges overlap and host load fell during the run. This does not establish a general speed
+benefit: C3 is mixed/slightly slower by median; CB is faster in four of five pairs. Never
+compare absolute times across sessions. `out/_sample_results/{bench.json,evidence.log}` records
+the timings and verification of all 20 runs, 54 groups, three cross-target groups and source
+hashes. General loops, changed-
+pointer continuations, ABI/stack recovery and opaque returned loads remain open. Next:
+propagate independently proved child result equalities without assuming opaque pointer
+provenance implies numeric equality or discarding child effects/accounting.
+
+**2026-10-01: Requested optimizer settings reverified after sample-input recovery.**
+All 15 HXMLs with a main class, plus the interpreter tool entry, inherit
+`-D analyzer-optimize` and `-dce full` from `build/common.hxml`. JS entries retain
+`-D js-es=6`; conformance and benchmark commands also include the common settings.
+No flag changes were necessary. Fresh pinned-toolchain smoke acceptance:
+```
+source scripts/env.sh && haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300
+[info] frames=300 digest=329de455
+./scripts/check.sh
+check.sh: clean
+git diff --check
+# no output; exit 0
+```
+This is a configuration/demo check; C++ was not rebuilt during this verification.
+
+**2026-10-01: Proved entry reads become ordinary Int helper inputs (ADR-0044).**
+`ScalarSignature` lowers live parameters after the complete memory proof. A real load node
+with active read provenance can use the entry's numeric sample, retaining its reach predicate.
+Spans unused by the lowered body leave the signature but remain in all preflight checks.
+Selection prefers fewer arguments, then more replaced reads, within six parameters; an
+unaffordable sample stays an ordered body load. Preflight separately stays within six spans.
+Equal entry sources/offsets/widths/signedness share a sample, with each original version's
+earlier-write exclusions intact. Inactive later versions still read RAM even with the same
+source key. Child calls pass explicit sample values which parent lowering can reuse too.
+There is no new runtime state, object allocation, forced inline, JIT or game-specific rule.
+
+Generated full-helper read sites fall **C3 114 -> 101; CB 161 -> 138**. Body span parameters
+fall **177 -> 164 / 230 -> 220**, replaced by **13/23 Int sample parameters in 13/21 helpers**.
+All prior full helpers remain; removing unused body span arguments admits one additional C3
+wrapper (`f_80071500_value`). Counts are **C3 138 -> 139; CB 163 -> 163**. These are static
+source counts, not reads saved per frame. ES6 JS changes **25,270,329 -> 25,271,622 (+1,293 B)**
+for C3 and **23,970,037 -> 23,968,254 (-1,783 B)** for CB. Rebuilt baselines match the preceding
+validated loaded-pointer hashes, and both baseline/new 20k runs match. Coverage/source hashes
+are in `out/_sample_inputs/{coverage.json,validated-sources.json}`.
+
+`ScalarPointers` now executes 30 programs. Added cases check distinct proved versions sharing
+one input, a later unproved version still loading after a write, signed/unsigned samples at
+one source, parameter-budget fallback, omitted source-only views and propagated child inputs.
+All alias/device/entry/event/wrap/suspension checks remain. The other 53 JS group digests are
+unchanged. The pointer and borrowed-adapter fixtures agree on JS and reflaxe.CPP.
+Acceptance (`out/_sample_inputs/{gate-final,tool-final,cross,check,validation}.log`):
+```
+./scripts/test.sh
+all 61274 checks passed
+conformance: 54 test(s) x JS
+ok ScalarPointers 9c9a264b values=1377981
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarPointers ScalarBorrow
+ok ScalarPointers 9c9a264b values=1377981
+ok ScalarBorrow efe0d707 values=1229039
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_sample_inputs/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 samples: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb samples: frames=20000 digest=a9864f26
+```
+Only small conformance programs were built for C++; no game C++ build was run.
+After all builds/tests/validation finished, five alternating timing pairs per game retained
+C3's 9000-frame 4de78425 and CB's 3000-frame db892c4b (Node startup included):
+C3 baseline **13.9944 / 14.4311 / 14.7316 / 14.0946 / 14.8459 s**;
+new **13.7825 / 13.8479 / 13.9180 / 13.8831 / 14.5064 s**. Median **14.4311 -> 13.8831 (-3.80%)**.
+CB baseline **3.0045 / 2.8700 / 2.8992 / 2.9060 / 2.9488 s**;
+new **2.9134 / 2.8574 / 2.8699 / 2.8133 / 2.8780 s**. Median **2.9060 -> 2.8699 (-1.24%)**.
+The new build is faster in each of the five pairs for each game. Ranges still overlap and
+host load changes; these bounded JS samples are not a general FPS or console-performance
+claim. Absolute times must not be compared with earlier sessions. Raw timings/load and source
+hashes are in `out/_sample_inputs/{bench.json,validated-sources.json}`; hashes stayed unchanged.
+Some sampled inputs still cross redundant result slots, and an opaque child's
+returned load is not replaced just because its pointer provenance is known. Next: eliminate
+redundant transport of already-known values with explicit boundary proofs; general changed-
+pointer continuations, loops, ABI/stack recovery and complete state removal remain open.
+
+**2026-10-01: Checked loaded pointers cross recovered Haxe signatures (ADR-0044).**
+`ScalarRead` tracks each immutable read's source range, width/signedness and preceding
+may-writes. Entry validates a plain RAM/scratchpad source before sampling its pointer and
+recursively constructing dependent spans. Earlier writes must be statically disjoint or
+pass physical alias exclusions; known overlap rejects the helper. Later writes can alias
+the source because actual helper loads remain ordered. Invalid/unaligned sources propagate
+invalid spans without reads. Final guards precede guest effects; failure executes the entire
+original body, with no speculative stores or device reads.
+
+`ScalarCall` imports source views and exact read versions through nested calls, including
+returned pointers unused as addresses in the child. Each call owns fresh provenance; its
+prefix includes caller writes and only child writes preceding the particular load. Return
+words carry this metadata directly, without additional SSA copies. Borrowed adapters exclude
+loaded views. All metadata is build-time; there is no new runtime state, allocation, forced
+inline, worker, JIT or game-specific rule. Existing event/deadline/entry bounds remain.
+
+Full helpers increase **C3 116 -> 138; CB 138 -> 163**, adding **8/2 ordinary helper-to-helper
+calls**. Every previous helper body is byte-identical. ES6 JS sizes are C3 **25,232,922 ->
+25,270,329 (+37,407 bytes)** and CB **23,916,235 -> 23,970,037 (+53,802 bytes)**. Baselines were
+rebuilt with the same runtime/common flags and match the preceding validated JS hashes.
+Both baseline/new builds retain their 20k digests. Source hashes and coverage are saved in
+`out/_loaded_pointers/{validated-sources.json,coverage.json}`.
+
+`ScalarPointers` executes 26 synthetic programs and probes source/target guards: chains,
+affine/wrapped pointers, signed/narrow reads, exact call versions, caller/child/nested write
+prefixes, later writes, conditional paths, every public root entry, events/cycle wrap and
+suspension mutations. Physical mirrors and FIFO source/target checks exercise fallback.
+One initial extended fixture changed a pointer's low byte before another wide load; both
+reference/optimized agreed within each target but differed across targets due to the existing
+unsupported misaligned-wide-access behavior. That fixture now keeps wide guest pointers
+aligned; separate guard-only tests retain invalid source/intermediate alignment coverage.
+No runtime alignment behavior changed. `ScalarCompose` now admits its returned-pointer case
+and exercises its nonzero observation horizon. The other 52 JS groups retain their digests.
+Acceptance (`out/_loaded_pointers/{gate-complete,cross-final,cross-pointers-final,check,validation}.log`):
+```
+./scripts/test.sh
+all 61178 checks passed
+conformance: 54 test(s) x JS
+ok ScalarPointers 30d209bf values=1208663
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarPointers ScalarCompose
+# Compose passed; this run exposed the unaligned pointer fixture described above.
+ok ScalarCompose 9868486c values=2768992
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarPointers  # corrected aligned fixture
+ok ScalarPointers 30d209bf values=1208663
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_loaded_pointers/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 pointers: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb pointers: frames=20000 digest=a9864f26
+```
+Only small conformance programs were compiled for C++; no game C++ build was run.
+After all builds/tests/validation finished, five alternating timing pairs per game retained
+C3's 9000-frame 4de78425 and CB's 3000-frame db892c4b (Node startup included):
+C3 baseline **19.3329 / 21.3130 / 21.2997 / 23.2679 / 22.1492 s**;
+new **21.8567 / 20.7596 / 21.9422 / 21.5886 / 20.5133 s**. Median **21.3130 -> 21.5886 (+1.29%)**.
+CB baseline **4.0445 / 3.9294 / 4.0312 / 4.7207 / 3.9117 s**;
+new **4.1408 / 4.4643 / 3.9438 / 4.1800 / 3.8544 s**. Median **4.0312 -> 4.1408 (+2.72%)**.
+Both ranges overlap and pair ordering reverses; there is no established speed gain. The
+sample medians increased, and the extra preflight/duplicate-read cost needs further work.
+Raw timings/load are in `out/_loaded_pointers/bench.json`; validated JS hashes stayed unchanged
+through the benchmark. Next: reduce that entry cost while preserving the dependent-read proof.
+General changed-pointer continuations, loops, larger ABI signatures and stack-object/escape
+recovery remain open; this stage does not remove all CpuState boundaries.
+
+**2026-10-01: Optimizer settings rechecked at the owner's request.** All 16 build-entry HXML
+files inherit `-D analyzer-optimize` and `-dce full` from `build/common.hxml`; all JS entries
+retain `-D js-es=6`. These settings were already enabled, so no additional flag change or
+performance gain is claimed. Fresh pinned-toolchain JS verification:
+```
+haxe build/js-demo.hxml && node out/_demo/js/demo.js --headless-hash 300
+[info] frames=300 digest=329de455
+./scripts/check.sh
+check.sh: clean
+git diff --check  # exit 0
+```
+C++ settings were inspected; C++ was not rebuilt for this request. Loaded-pointer recovery
+remains work in progress and is not covered by this demo verification.
+
+**2026-10-01: Precise child writes and physical alias guards preserve saved values (ADR-0044).**
+`ScalarMemory.stores` records every possible byte write, including conditional and translated
+child effects, without filling gaps. Same-view disjoint writes preserve facts. Composed call
+trees can retain conditional saved-value facts across other views; using one requests an
+entry exclusion against every possibly clobbering range. CFG joins union the exclusions from
+all predecessor paths. No ABI rule makes stack bytes private, and every guest store remains.
+Child alias preconditions translate into the parent; known overlap rejects composition.
+
+`Memory.spansDisjoint` compares already validated arena positions, so RAM/KSEG mirrors cannot
+hide an alias. All validity/alignment/exclusion checks precede guest effects; any failure uses
+the complete original body. Borrowed adapters use the same proof with input-span offsets,
+including after suspension changes a formerly disjoint pointer into an alias. This is a small
+ordinary runtime method, without forced inline, allocation or a backend-specific operation.
+Equivalent adjacent/overlapping exclusions merge on either side; gaps never merge. One real
+saved-register/three-store check shrinks from six calls to one. More than 16 resulting checks
+rejects the helper rather than dropping a condition. Existing event/deadline bounds remain.
+
+Current generated full helpers: **C3 113 -> 116; CB 124 -> 138**. All previous helper bodies
+remain byte-identical. The new helpers add **3/14 ordinary helper-to-helper calls** without
+intermediate CpuState publication. CB's last additional helper becomes eligible after guard
+coalescing brings it within the proof budget. Final ES6 sizes: C3 **25,226,928 -> 25,232,922
+(+5,994 bytes)**; CB **23,892,516 -> 23,916,235 (+23,719 bytes)**. No game-specific rules,
+workers, JIT or C++ game builds were added. Both rebuilt baselines match the preceding stage's
+validated JS hashes. Final manifests/coverage are in `out/_call_writes`.
+
+`ScalarCompose` now compares 36 programs, including holes/adjacent/partial clobbers, translated
+arguments, nested frames, conditional stores, path-specific exclusions, a child guard becoming
+a known overlap, borrowed entry, pointer mutation during suspension, and FIFO fallback after
+a preceding write. It retains all public entries, event offsets, cycle wrapping and existing
+unwind tests. `SpanAlias` checks 51,328 physical-range results, including coalesced widths,
+against explicit reference positions. A final 1,024-placement tool fixture proves that merging
+the six-condition conjunction retains exactly its original truth value. The other 51 existing
+JS conformance digests remain unchanged. Generated C++ inspection confirms validity checks
+precede arena-index conversion in the tested ordinary and borrowed entries.
+Acceptance (`out/_call_writes/{gate-final,tool-final,cross-final,check-final,validation,validation-final}.log`):
+```
+./scripts/test.sh
+all 60021 checks passed
+conformance: 53 test(s) x JS
+ok ScalarCompose 73a38c40 values=2760016
+ok SpanAlias 2429c7a5 values=51328
+test.sh: JS-only gate passed — 329de455
+haxe build/tests-tool.hxml  # final additional conjunction-equivalence fixture
+all 61045 checks passed
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCompose SpanAlias
+ok ScalarCompose 73a38c40 values=2760016
+ok SpanAlias 2429c7a5 values=51328
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_call_writes/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 writes: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb writes: frames=20000 digest=a9864f26
+python3 out/_call_writes/ValidateFinal.py  # final coalesced guards; unchanged baselines
+c3 merged: frames=20000 digest=36dcd8ee
+cb merged: frames=20000 digest=a9864f26
+```
+After all builds/tests/validation finished, five alternating timing pairs per game retained
+C3's 9000-frame 4de78425 and CB's 3000-frame db892c4b (Node startup included):
+C3 baseline **19.7282 / 19.8677 / 19.3443 / 19.2554 / 19.9124 s**;
+new **19.5714 / 19.3347 / 19.7159 / 19.2827 / 19.6331 s**. Median **19.7282 -> 19.5714 (-0.8%)**.
+CB baseline **4.0471 / 4.0057 / 3.9038 / 3.9179 / 3.8849 s**;
+new **3.9196 / 3.8978 / 3.9602 / 3.9574 / 3.8976 s**. Median **3.9179 -> 3.9196 (+0.05%)**.
+Ranges overlap; no repeatable game-speed improvement is established. Raw samples/load and
+source hashes remain in `out/_call_writes/{bench.json,validated-sources.json}`. The result is
+verified recovery of more ordinary calls, not a claim that CpuState costs have disappeared.
+Next: measure surviving entry costs and recover loaded-address inputs with correct continuation
+state; general loops, ABI/stack-object recovery and complete CpuState removal remain open.
+
+**2026-10-01: Bounded direct call trees use ordinary recovered Haxe signatures (ADR-0044).**
+`ScalarCall` composes resident, unhooked direct JAL callees as `_value` calls with explicit
+arguments/results, without expanding their bodies or publishing intermediate CpuState.
+Link writes precede delay slots; SSA must prove the sampled and final return address restored.
+CFG edges carry immutable memory snapshots, and joins intersect exact byte/value facts from
+every predecessor. This proves some saved stack words across read-only calls and branches;
+all guest stores remain observable. Child stores conservatively discard caller memory facts.
+Child spans translate into the caller's complete preflight, including alignment and anchors.
+Every secondary result/accounting word is captured before another helper can overwrite it.
+Pure-body normalization preserves ABI member names while renaming local SSA values.
+
+Whole-call bounds must fit all three 10-bit accounting lanes. Entry requires no existing
+unwind and enough time to finish strictly before the next event/cooperative deadline; stress
+yielding, interior entries and failed memory proofs use the original frames/checkpoints.
+Recursive, unknown, hooked and genuinely loaded-address calls remain ineligible. The local
+32-instruction/six-parameter limits remain. No runtime allocation, worker, JIT, game-specific
+rule, forced inline or game C++ build was added. Scalar caches reset when hooks/output change.
+
+Real-game coverage increases **CB 123 -> 124** full helpers; the new `f_80027a74_value` calls
+the existing `f_80012ffc_value`. CB ES6 grows **23,891,220 -> 23,892,516 (+1,296 bytes)**.
+All previous helper bodies stay identical. **C3 remains 113 helpers and 25,226,928 bytes**;
+its rebuilt JS is byte-identical to the preceding validated 20k build (36dcd8ee). Both baseline
+bundles match the prior stage's hashes. Final CLI regeneration also reproduces both generated
+Haxe sets byte for byte. The 39 survey candidates were possibilities, not proved eligibility;
+conservative memory clobbers and signature limits still exclude most ordinary callers.
+
+`ScalarCompose` covers 19 generated programs, all public root entries, aliasing/mirror/scratch
+memory, nested/conditional calls, multiple outputs, cooperative mutation, each event offset
+through the call bound, cycle wrap, unwind and FIFO order. Its initial cross-target mismatch
+came solely from two continuation fixtures dereferencing the harness's unaligned default v0;
+they now supply valid live pointers. No runtime alignment behavior was changed or hidden:
+the existing unsupported-wide-access issue remains in Blockers. All previous **51 JS group
+digests are unchanged**. All **16 build-entry HXMLs** inherit analyzer-optimize/full DCE and
+JS retains ES6; these flags were already active in the measured game baselines.
+Acceptance (`out/_scalar_profile/{gate-final,cross-final,check,validation,coverage,flags}.log`):
+```
+./scripts/test.sh
+all 59911 checks passed
+conformance: 52 test(s) x JS
+ok ScalarCompose b21f9b20 values=1468313
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCompose ScalarResults
+ok ScalarCompose b21f9b20 values=1468313
+ok ScalarResults 9c6ba8fc values=51714
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_scalar_profile/Validate.py
+cb baseline: frames=20000 digest=a9864f26
+cb compose: frames=20000 digest=a9864f26
+```
+Prior-stage Node profiles sampled borrowed adapters for only 8,001/1,208 us in C3 and zero
+in CB. Generated bodies dominate alongside GPU work, but sampling does not isolate CpuState
+assignments or prove that their cost disappeared. Profiles and corrected class-aware summaries
+remain in `out/_scalar_profile`; profiled durations are not speed measurements.
+After all builds/tests/validation finished, five alternating CB timing pairs (3000 frames,
+Node startup included) retained db892c4b. Baseline **4.7599 / 4.8648 / 5.2633 / 4.6794 / 4.3753 s**;
+composed **4.5651 / 4.8683 / 4.9419 / 4.8988 / 4.2783 s**. Medians **4.7599 -> 4.8683 s (+2.3%)**;
+ranges overlap and host load varies, so no repeatable speed improvement is established.
+C3 timing was not repeated for a byte-identical bundle. Raw samples/load and validated source
+hashes are saved in `out/_scalar_profile/{bench.json,validated-sources.json}`.
+Next: recover precise child memory effects and saved-value preservation before widening
+composed signatures; general loop/ABI/stack recovery and complete CpuState removal remain open.
+
+**2026-10-01: Affine call arguments can reuse checked spans on other registers (ADR-0044).**
+`CallAliases` proves exact wrapped relations between immutable GPR values inside each call's
+block. It starts fresh at every public entry, clears facts at observable effects, invalidates
+link writes before the delay slot, and snapshots before the callee runs. Copies retain their
+old value when the source changes. `ScalarBorrow` still prefers same-register coverage, then
+tries donors in register order. All callee bytes/anchors must fit; a nonzero shift must also
+keep its intermediate pointer within the donor range. Caller rebasing occurs only in the valid
+arm of `Memory.spanOk`, otherwise passing none. The shared adapter retains alignment/event/
+cooperative guards and full-entry fallback. Donor registers enter post-slot span liveness so
+last-use changes, previous calls and resumptions refresh/step the correct span. No new runtime
+state, allocation, guest checkpoint, worker, JIT, inline expansion or game-specific rule.
+
+Generation matches the read-only survey: **C3 187 -> 200 borrowed call sites, CB 0 -> 2**;
+one new shifted call per game. Full DCE retains **10/2 adapters** from 63/37 declarations.
+All **113/123 full state-free helper bodies remain byte-identical**, including signatures.
+ES6 JS grows C3 **25,224,926 -> 25,226,928 (+2,002 bytes)** and CB
+**23,890,302 -> 23,891,220 (+918 bytes)**. The expanded 32-program `ScalarBorrow` fixture
+compares every public entry, old/new source versions, positive/negative shifts, body/slot
+copies, donor refresh/steps, two shifted spans, effects, suspensions and due events.
+Tool tests check symbolic equalities against concrete edge-word executions and link timing.
+The generated C++ keeps positive/negative donor pointer arithmetic inside the validity arm.
+
+Rechecked the owner's optimizer request: all **16 build-entry HXML files** include common.hxml,
+which enables **analyzer-optimize and full DCE**; all JS entries retain **js-es=6**. Both flags
+were already active in the previous game builds, so this is not an additional flag speed gain.
+The current stage was built/tested with these same settings. All 50 other JS conformance
+groups retain their preceding digests; ScalarBorrow expands to efe0d707/1229039.
+Acceptance (`out/_scalar_alias/{gate,cross,check,validation,flags}.log`):
+```
+./scripts/test.sh
+all 59782 checks passed
+conformance: 51 test(s) x JS
+ok ScalarBorrow efe0d707 values=1229039
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarBorrow ScalarCalls Regions Yielding
+ok ScalarBorrow efe0d707 values=1229039
+ok ScalarCalls ff62afe6 values=96344
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_scalar_alias/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 aliases: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb aliases: frames=20000 digest=a9864f26
+```
+Both baselines and new builds use the same current runtime. C++ remained conformance-only.
+After builds and validation finished, five alternating pairs per game retained all timing
+digests (C3 9000: 4de78425, CB 3000: db892c4b); Node startup is included:
+C3 first round baseline 21.8249 / 20.7892 / 19.0984 / 19.6112 / 20.5460 s;
+new 20.6140 / 21.9976 / 24.3878 / 22.0609 / 23.0474 s. Medians **20.5460 -> 22.0609 (+7.4%)**.
+CB first round baseline 4.0059 / 4.2779 / 4.3802 / 4.1405 / 3.9411 s;
+new 3.8258 / 4.0560 / 4.2307 / 4.2264 / 4.1030 s. Medians **4.1405 -> 4.1030 (-0.9%)**.
+C3 reverse-order repeat baseline 21.5282 / 20.2897 / 20.5434 / 19.2154 / 19.5372 s;
+new 21.8299 / 21.5842 / 20.1877 / 20.4192 / 20.3915 s. Medians **20.2897 -> 20.4192 (+0.6%)**.
+C3's first +7.4% median increase prompted the second five-pair run with reversed order. The
+repeat is +0.6%; ranges overlap and host load changes. No repeatable game-speed improvement
+is established, and the first slower run is retained rather than discarded. Further profiling
+is needed before expanding this path on performance grounds. All four JS hashes still match
+`out/_scalar_alias/validated-sources.json`; raw samples/load, coverage, generated diffs and
+surveys live alongside it. Experimental `--value-cfg` remains off.
+Next: profile recovered-call entry/state costs before widening coverage; general ABI/stack
+recovery and complete CpuState removal remain open.
+
+**2026-10-01: Borrowed-span entry code is shared once per callee (ADR-0044).**
+A read-only boundary-liveness survey found no omittable GPR results among the 187 currently
+borrowable C3 calls (CB has none). Instead of adding an unused memory-projection path, this
+stage removes the concrete repetition from the preceding extension. `ScalarEntry` emits one
+`_withSpans` adapter per eligible memory callee. Callers pass current CpuState and unshifted
+existing spans; the adapter owns the original entry guards, span rebasing, result publication
+and accounting. It calls the original full entry on a failed guard, or the unchanged state-free
+`_value` helper otherwise. It adds no guest checkpoint, dispatch entry, runtime storage or
+allocation. The ordinary caller still owns after-call unwind/resumption and span refresh.
+Pure direct calls and ordinary scalar entries share the same build-time guard/charge emitter.
+Deduplicated adapters forward typed spans to the same owner as the entry and value helper.
+Constant-address callees have no borrowable register and emit no such adapter. The initial JS
+gate caught an attempted `ctx.zero` in their unused adapters; this was fixed in the generator,
+covered by a tool assertion and regenerated before the successful gate below.
+
+C3's **187 calls now use 5 shared adapters**. The generator emits 63 declarations, of which
+full DCE keeps those five. All **113/123 full state-free helper bodies remain byte-identical**.
+C3 ES6 JS shrinks **25,279,992 -> 25,224,926 bytes (-55,066)**: about 90% of the preceding
+borrow extension's 61,422-byte growth is recovered; net +6,356 bytes versus pre-borrowing.
+CB emits 37 unused adapter declarations but DCE removes all of them; its 23,890,302-byte JS
+is byte-identical to the previous validated build. This is code sharing/size evidence, not
+an established game-speed gain. No forced inline, worker, JIT or game-specific rule was added.
+`ScalarBorrow` retains its 16 programs/all public entries and adds forwarded-adapter tests
+with aliased/distinct spans and invalid spans. Tool tests enforce raw argument forwarding,
+centralized guards, constant exclusion and rebasing behind the guard. Its expanded digest is
+b6db50c1/649002; all other 50 JS groups retain their preceding digests. Generated C++ for the
+positive-offset fixture keeps pointer arithmetic inside the successful guarded arm.
+Acceptance (`out/_scalar_projection/{gate,cross,final-check,validation}.log`; pinned common/js-es=6):
+```
+./scripts/test.sh
+all 59671 checks passed
+conformance: 51 test(s) x JS
+ok ScalarBorrow b6db50c1 values=649002
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarBorrow ScalarCalls ScalarMemoryCfg Yielding
+ok ScalarBorrow b6db50c1 values=649002
+ok ScalarCalls ff62afe6 values=96344
+ok ScalarMemoryCfg bac8188c values=1682130
+ok Yielding f730beee values=7906
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_scalar_projection/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 adapters: frames=20000 digest=36dcd8ee
+```
+C3 baseline/new were built against the same current runtime. CB's identical binary matches the
+prior 20k-validated manifest (a9864f26) and was not run/timed again. C++ remained conformance-only.
+After builds and validation finished, five alternating C3 pairs (9000 frames, Node startup
+included) retained every 4de78425 digest:
+C3 baseline 20.0777 / 19.6209 / 19.7136 / 19.4660 / 19.3961 s;
+new 20.1425 / 19.1726 / 19.3469 / 19.8729 / 19.5475 s. Medians **19.6209 -> 19.5475 (-0.4%)**.
+Ranges overlap; no repeatable speed change is established. Binary hashes still match
+`out/_scalar_projection/validated-sources.json`; raw samples/load, source coverage and the
+projection survey live in the same directory. Experimental `--value-cfg` remains off.
+Next: investigate affine argument aliases at calls so a copied pointer can reuse an existing
+span on another register; general ABI/stack recovery and complete CpuState removal remain open.
+
+**2026-10-01: Direct scalar calls can borrow a caller's checked memory spans (ADR-0044).**
+`ScalarBorrow` proves that every callee anchor/access fits an existing function span on the same
+incoming GPR. No new caller span or range widening is introduced. Borrowed bases become liveness
+uses after the delay slot and before the callee's writes, so body/slot changes, previous calls,
+joins, loop paths and resumptions retain current pointers even without a later caller load.
+The fast arm keeps runtime span validity/alignment and the pure-call due-event/cooperative
+entry guards. Any failure invokes the full callee wrapper with its original checkpoint and
+preflight. All derived span arguments are rebased only inside that arm via `Memory.spanOffset`;
+the operation goes through the existing shim ABI and accesses no guest bytes. Effects may alias,
+all GPR results and path charges remain visible, and after-call unwind/span refresh is unchanged.
+Hooks, unknown residency, uncovered/constant spans and indirect/tail/relocatable callers keep
+their existing paths. No new CpuState field, runtime allocation, worker, JIT or forced inline.
+
+A read-only survey found 187 eligible calls out of 338 memory-helper calls in C3 and none out
+of 266 in CB. Final generation emits exactly **187 borrowed call sites / 236 rebased arguments**
+in eight C3 shard files. Full helper coverage remains 113/123. Full-DCE ES6 JS grows
+**25,218,570 -> 25,279,992 bytes (+61,422)**. CB's 38 Haxe files and 23,890,302-byte JS are
+byte-identical to the preceding validated build: no CB speed/coverage gain is claimed.
+`ScalarBorrow` conformance compares 16 programs at every public caller entry, including
+positive/negative offsets, last-use pointer refreshes/steps, prior unknown calls, callee writes,
+aliased spans, CFG stores, partial coverage, constants, unknown targets, joins and loops.
+Suspension changes pointers/RAM; due events halt before callee effects; FIFO fallback preserves
+read order. Tool checks cover alignment, byte-exact coverage, wrapped anchors, hooks and relocation.
+All 50 pre-existing JS conformance digests remain unchanged.
+Acceptance (`out/_scalar_borrow/{gate,cross,check,validation}.log`; pinned common flags/js-es=6):
+```
+./scripts/test.sh
+all 59655 checks passed
+conformance: 51 test(s) x JS
+ok ScalarBorrow 12845cf5 values=648458
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarBorrow ScalarCalls Regions Yielding
+ok ScalarBorrow 12845cf5 values=648458
+ok ScalarCalls ff62afe6 values=96344
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_scalar_borrow/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 borrow: frames=20000 digest=36dcd8ee
+```
+C3 baseline/new use the same current runtime. CB's byte identity was checked against the prior
+20k-validated JS manifest (a9864f26); its identical binary was not timed or run again. C++ stayed
+limited to conformance. After builds/checks/validation finished, five alternating C3 timing
+pairs (9000 frames, Node startup included) all retained 4de78425:
+C3 baseline 20.4429 / 19.3973 / 20.4183 / 21.7760 / 22.4339 s;
+new 20.0693 / 19.5983 / 22.3338 / 23.4779 / 19.9603 s. Medians **20.4429 -> 20.0693 (-1.8%)**.
+Ranges overlap widely and host load changes; no repeatable game-speed improvement is established.
+This is broader use of explicit memory signatures, with a measured code-size cost. All four JS
+hashes still match `out/_scalar_borrow/validated-sources.json`; raw samples/load, source coverage
+and survey counts are in that directory. Experimental `--value-cfg` remains off.
+Next: reduce duplicated entry guards and recover caller-specific memory results using the
+new complete-span proof; general ABI/stack recovery and complete CpuState removal remain open.
+
+**2026-10-01: Scalar CFG predicates, phi selections and path charges are simplified (ADR-0044).**
+`ScalarPredicates` shares comparisons by immutable SSA inputs and proves Boolean identities:
+complementary paths recover their incoming reach, repeated tests share a capture, and known
+phi arms/equal affine values collapse. Separate memory versions remain separate predicates;
+a store/reload cannot reuse an old condition. `ScalarAccounting` aggregates original packed
+block costs by reach, combines equal-cost disjoint paths and selects complementary costs.
+Equal results/effects/costs can remove a branch parameter entirely. Entry-unreachable arms
+can disappear from the helper but remain valid public interior entries in the original body.
+No runtime cache, allocation, new ABI storage, checkpoint change, forced inline, worker or JIT.
+The normal scalar pass retains its checked-memory restrictions and size/input bounds.
+
+C3 retains 113 full helpers; 21 changed bodies shrink **23,988 -> 18,893 bytes**, locals 471->342,
+ternaries 136->99. CB retains 123 helpers; 22 changed bodies shrink **25,902 -> 21,903 bytes**,
+locals 497->394, ternaries 150->124. Every full helper was audited for absence of CpuState/ctx.
+Full-DCE ES6 JS shrinks **25,220,891 -> 25,218,570 (-2,321)** / **23,892,103 -> 23,890,302 (-1,801)**
+bytes. These are static reductions, not a corresponding percentage improvement in game speed.
+Tool coverage adds complete truth tables for Boolean rewrites and checks SSA/cost identities.
+ScalarCfg now has 19 programs, including equal-cost constant returns and repeated comparisons;
+ScalarMemoryCfg has 22, adding nested partial joins and changed conditions after store/reload.
+All public entries, counters, memory effects and cooperative resumes retain reference behavior.
+The other 48 JS conformance digests are unchanged.
+Acceptance (`out/_scalar_conditions/{gate,cross,check,validation}.log`; pinned common flags/js-es=6):
+```
+./scripts/test.sh
+all 59573 checks passed
+conformance: 50 test(s) x JS
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCfg ScalarMemoryCfg ScalarCalls ScalarResults
+ok ScalarCfg 750ee5b6 values=192290
+ok ScalarMemoryCfg bac8188c values=1682130
+ok ScalarCalls ff62afe6 values=96344
+ok ScalarResults 9c6ba8fc values=51714
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_scalar_conditions/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 conditions: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb conditions: frames=20000 digest=a9864f26
+```
+Both game baselines were rebuilt against the same current runtime; C++ remained limited to
+conformance. After builds/checks/validation ended, five alternating timing pairs (Node startup
+included) retained every digest: C3 9000 frames 4de78425, CB 3000 frames db892c4b.
+C3 baseline 23.3740 / 22.4423 / 21.7183 / 22.7962 / 23.4572 s;
+new 22.5613 / 22.3550 / 21.3349 / 22.3888 / 21.5035 s. Medians **22.7962 -> 22.3550 (-1.9%)**.
+CB baseline 4.7543 / 4.3204 / 4.3021 / 4.7036 / 5.9066 s;
+new 4.1694 / 4.3767 / 4.2509 / 4.2093 / 4.6388 s. Medians **4.7036 -> 4.2509 (-9.6%)**.
+Ranges overlap and host load varies substantially; these samples favor the new version but
+do not establish a repeatable speed gain. All four JS hashes still match the validation manifest.
+Raw samples/load averages, coverage and exact binaries: `out/_scalar_conditions/bench.json`,
+`coverage.json`, `validated-sources.json`. Experimental `--value-cfg` remains off.
+Next: reduce checked-span and entry-adapter overhead using caller proofs before expanding to
+loaded addresses/loops; general ABI/stack recovery and complete CpuState removal remain open.
+
+**2026-10-01: Acyclic scalar signatures now include checked memory effects (ADR-0044).**
+`ScalarCfg` lifts affine plain-memory accesses under each block's reach predicate: loads use
+conditional expressions, stores explicit guarded statements. Only pure arithmetic is eager.
+Delay-slot stores preserve the already-captured branch decision, and selected effects retain
+their original order through joins and multiple exits. All possible spans are preflighted
+before the first effect, even if a path is not taken; a bad span falls back to the entire
+original body. Differing pointer phis, actual loaded addresses, known MMIO, incompatible
+alignment, calls, coprocessors, HI/LO, traps, changed return addresses and internal/back-edge
+pumps retain their original paths. Memory facts are cleared at each CFG block boundary,
+since topological adjacency is not an execution proof. In-block forwarding is unchanged.
+The adapter nests preflight inside `entry == 0`; public interior entries bypass both helper
+and preflight. Void setters also return original path accounting. The 32-instruction and
+six-parameter limits, pure-only projections/pooling and whole-pass `--no-scalar` remain.
+No runtime state/heap allocation, forced inline, worker, JIT or game-specific rules were added.
+Full helper coverage: C3 **99 -> 113**, CB **106 -> 123**, adding 14/17 memory CFG methods.
+Every full helper body/signature was audited for absence of CpuState/ctx. Full-DCE ES6 JS
+grows 25,195,938 -> 25,220,891 bytes (+24,953) / 23,861,618 -> 23,892,103 (+30,485).
+`ScalarMemoryCfg` runs 20 programs at every public block entry: conditional effects, aliasing
+arms, old load values, partial widths, equal/different pointer phis, loaded conditions,
+branch/return delay stores, nested diamonds, early returns, same-target edges, untaken FIFO
+paths and reads into zero, RAM/scratchpad aliases, mirror crossings, resumption changing
+registers/RAM and a due event before the first store. Two programs intentionally retain fallback.
+Acceptance (`out/_memory_cfg/{gate,cross,check,validation}.log`; pinned common flags/js-es=6):
+```
+./scripts/test.sh
+all 56988 checks passed
+conformance: 50 test(s) x JS
+ok ScalarMemoryCfg 995aef4a values=1227818
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarMemoryCfg ScalarCfg ScalarEffects ScalarResults
+ok ScalarMemoryCfg 995aef4a values=1227818
+ok ScalarCfg 2325fb2e values=159054
+ok ScalarEffects 3cfb6f71 values=1136641
+ok ScalarResults 9c6ba8fc values=51714
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+python3 out/_memory_cfg/Validate.py
+c3 baseline: frames=20000 digest=36dcd8ee
+c3 cfg: frames=20000 digest=36dcd8ee
+cb baseline: frames=20000 digest=a9864f26
+cb cfg: frames=20000 digest=a9864f26
+```
+All 49 pre-existing JS fixture digests are unchanged. Both game baselines were rebuilt with
+the same current runtime; C++ was limited to conformance. After builds/checks/validation
+completed, five alternating timing pairs (Node startup included) preserved every digest:
+C3 baseline 21.4184 / 20.7346 / 20.4455 / 20.6847 / 20.6512 s;
+new 21.8093 / 20.7605 / 20.3223 / 21.0797 / 21.5923 s. Medians **20.6847 -> 21.0797 (+1.9%)**.
+CB baseline 4.9558 / 4.5227 / 4.2841 / 4.3747 / 4.2893 s;
+new 4.5132 / 4.3387 / 4.2635 / 4.2924 / 4.3201 s. Medians **4.3747 -> 4.3201 (-1.2%)**.
+Ranges overlap and load varies; no game speed gain is established. The C3 samples lean slower.
+This extends the normal scalar pass's source/signature recovery, not a performance milestone.
+Raw samples, source coverage and exact validated hashes: `out/_memory_cfg/bench.json`,
+`coverage.json`, `validated-sources.json`. Experimental `--value-cfg` remains off and independent.
+Next: simplify reach/phi and packed-accounting expressions and reduce guard/call overhead
+before expanding to loaded addresses/loops; general ABI/stack recovery and CpuState removal
+remain unfinished.
+
+**2026-10-01: Checked scalar helpers reuse proved memory values (ADR-0044).**
+`ScalarMemoryValues` tracks byte ranges and immutable values at generation time. Fully covered
+loads reuse a preceding load/store value with exact byte/halfword sign or zero extension.
+Repeated equal reads share a result ABI word. Writes invalidate overlapping values in their
+own contiguous checked span and every value in other spans, including different inputs or
+separate spans that map to the same RAM mirror. All stores remain emitted. Every original
+access still enters preflight, including eliminated/zero-target reads; failed checks retain
+the complete original MMIO stream. No runtime cache, allocation, worker, inline expansion,
+guest accounting change or game-specific rule was added. A forwarded word may recover an
+incoming pointer for subsequent checked accesses; a truly loaded or alias-invalidated pointer
+still rejects signature recovery.
+`ScalarEffects` now compares 32 programs over signed edges, partial/disjoint writes, mixed
+widths, repeated reads, aliased spans, 2 MB mirrors, recovered pointers, FIFO fallback and
+cooperative resumes. JS passed first; C++ exposed an unsigned intermediate from nested `>>>`
+turning sign extension into a logical shift. Arithmetic extraction followed by truncation
+fixes this shape; minimal reproduction and upstream limitation are recorded as defect 11 below.
+Acceptance (`out/_memory_values/{final-gate,final-cross,cross,check}.log`):
+```
+./scripts/test.sh
+all 56848 checks passed
+conformance: 49 test(s) x JS
+ok ScalarEffects 3cfb6f71 values=1136641
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarEffects
+ok ScalarEffects 3cfb6f71 values=1136641
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+```
+The preceding three-group cross-target run passed ScalarResults 9c6ba8fc and
+ScalarMemoryCodegen 852cd0fd, but failed ScalarEffects before the signed-extraction fix.
+The final focused rerun above passes the repaired emitter. All 48 unchanged JS fixtures
+retain their prior digests. Final CLI regeneration of both games produces **byte-identical**
+Haxe: C3 40 files / 99 full helpers, CB 38 files / 106 helpers (`final-source-compare.log`).
+None of their currently eligible small helpers contains a newly reusable memory access;
+no game speed gain or increased game coverage is claimed, and no timing rerun is useful for
+identical generated input. This is generic optimization coverage proved on synthetic programs.
+Next: recover effectful functions across control flow with path/observation proofs so explicit
+values can cover more real code; general ABI/stack recovery and CpuState removal remain open.
+
+**2026-10-01: Analyzer optimization and full DCE share one build configuration.**
+`build/common.hxml` now supplies both `-D analyzer-optimize` and `-dce full`. Game/demo builds
+and benchmarks already used both; their redundant DCE flags were removed. Conformance and the
+remaining compiler spikes now inherit full DCE too. The `fnptr` and `ifdrop` spikes also include
+the common configuration, completing coverage of every build entry point. JavaScript retains
+`-D js-es=6`. This standardizes test/shipping flags; it is not a new game-performance gain.
+All 49 JS conformance digests match the preceding run, and the freshly rebuilt demo JS matches
+its pre-change SHA-256 byte for byte. Game C++ generation remains deferred; only the small
+compiler spikes and three focused conformance groups used C++.
+Acceptance (`out/_optimizer_flags/{js-gate,spike,cross,check}.log`):
+```
+./scripts/test.sh
+all 56668 checks passed
+conformance: 49 test(s) x JS
+test.sh: JS-only gate passed — 329de455
+./scripts/spike.sh
+spike.sh: clean
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarEffects Dispatch GteOps
+ok ScalarEffects af21ba89 values=351863
+ok Dispatch c98a0969 values=602
+ok GteOps de71ee8a values=5440
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+shasum -a 256 -c out/_optimizer_flags/demo-before.sha256
+out/_demo/js/demo.js: OK
+```
+Next: continue reducing recovered-signature guard/call overhead and redundant memory work.
+
+**2026-10-01: Scalar signatures include ordered RAM writes and multiple memory parameters (ADR-0044).**
+`ScalarGraph` now retains plain-memory writes as ordered effect roots, so a store's inputs enter
+the recovered signature even when no GPR result uses them. `ScalarMemory` groups affine incoming
+or constant addresses into checked spans; multiple spans can alias through equal pointers,
+RAM mirrors or scratchpad aliases. All spans are preflighted before any guest read/write. If one
+fails, the full original body executes, preserving MMIO and never repeating a speculative RAM
+update. Return loads preceding an aliasing store are materialized before the store, rather than
+being delayed to the return expression. Pure setters return `Void`, with no dummy result ABI.
+Input/output GPR recovery, entry/resume checkpoints and original accounting remain in place.
+Memory parameters count toward the six-parameter limit; functions remain bounded linear leaves
+of at most 32 instructions. No memory alias is assumed absent, no guest stack store is privatized,
+and no runtime field, allocation, forced inline, worker or game-specific rule was added.
+A diagnostic survey showed that memory effects, rather than large pure arithmetic bodies, excluded
+most candidate functions. Full helper counts (excluding shared caller projections) grow from
+30 to 99 in C3 and 32 to 106 in CB: memory helpers 12 -> 81 / 13 -> 87, including 24 / 5 Void
+setters. Full-DCE ES6 JS: C3 25,149,781 -> 25,195,938 bytes (+46,157); CB 23,830,171 -> 23,861,618
+(+31,447). This is recovered-signature coverage, not a claimed speedup. Existing pure pooling
+and caller projections still exclude memory helpers; all such calls retain the callee's adapter.
+`--no-scalar` disables them with the other recovered signatures. Experimental `--value-cfg`
+remains off by default and is independent of this extension.
+Acceptance (`out/_scalar_work/effects-*.log`; pinned common.hxml/analyzer-optimize/js-es=6):
+```
+./scripts/test.sh
+all 56668 checks passed
+conformance: 49 test(s) x JS
+ok ScalarEffects af21ba89 values=351863
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarEffects ScalarMemoryCodegen ScalarResults Codegen
+conformance: all targets agree
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarEffects
+ok ScalarEffects af21ba89 values=351863
+conformance: all targets agree
+node out/_effects_c3/game.js web/boot.exe web/disc.bin --headless-hash 20000
+frames=20000 digest=36dcd8ee
+```
+The initial four-group cross-target run preceded the final odd-span-base fixture; its
+ScalarEffects result was d22b00f5 (325223 values). The final standalone run includes that case.
+Crash Bash also retains `frames=20000 digest=a9864f26` using verified local media. Game builds and
+execution remain JS; C++ is used only for the focused conformance fixtures. `ScalarEffects`
+compares all registers/counters and changed memory bytes across 13 programs, signed edge inputs,
+aliasing/distinct addresses, RAM/scratchpad mirrors, mirror-boundary fallback, byte/halfword/word
+writes, loaded values before swaps, restored stack pointers, MMIO read/write fallback, suspension
+changing source RAM, a due entry event and a forwarded Void helper. Tool checks cover the
+parameter budget, distant constant spans, known I/O rejection and pure-pool exclusion.
+`./scripts/check.sh` reports `check.sh: clean`. After all builds and checks, five paired runs
+per game (alternating order, Node startup included) retained every digest:
+C3 baseline 21.3722 / 19.2081 / 19.4298 / 19.5789 / 19.6783 s; new 21.8757 / 19.7747 / 19.2232 / 19.9309 / 19.6277 s.
+Medians 19.5789 -> 19.7747 s (+1.0%).
+CB baseline 4.2013 / 3.9266 / 3.8878 / 4.2369 / 4.0232 s; new 4.0808 / 4.0058 / 4.3752 / 4.4525 / 4.1398 s.
+Medians 4.0232 -> 4.1398 s (+2.9%).
+Ranges overlap and host load varied; no speed gain is established. These samples lean slower,
+so reduced CpuState use must not be advertised as a performance win. The signature extension
+is part of the normal scalar pass; further work must address guard/call overhead and redundant
+memory computation. `--no-scalar` remains available for the entire recovered-signature pass.
+Raw results and runner: `out/_scalar_work/effects-bench.{json,log}`, `EffectsBench.py`.
+A source audit confirms all 99 C3 / 106 CB full helper signatures and bodies contain no
+CpuState/core.Ctx parameter or `ctx` reference. Their entry adapters still preserve machine state.
+Next: derive further computation elimination from explicit memory effects, then broaden signatures
+to control flow and loaded addresses with observation/alias proofs. General ABI, stack/data-layout
+recovery and whole-program CpuState removal remain unfinished.
+
+**2026-10-01: Opt-in pure CFG local promotion verified; no established speed gain (ADR-0044).**
+Experimental `--value-cfg` promotes GPRs across 2–16 pure acyclic blocks (at most 32 instructions), retaining
+ordinary Haxe branches, public/interior entry routing and original per-block guest accounting.
+All read or possibly written values are initialized from current CpuState; possible writes are
+published at every region exit, including dispatcher/loop escapes. The linear value pass can
+simplify expressions inside this scope. Calls, memory, coprocessors, HI/LO, possible traps,
+`ra` writes/redirected returns and actual IR pumps/back edges reject promotion. Original span
+refreshes/steps use the promoted operand at the same position. No value survives an emulated
+observation, so a callee's changed register cannot be replaced with a stale local. Existing scalar
+helpers and looping-leaf locals keep their previous lowering. No runtime fields, allocation,
+worker, JIT, forced inline or game-specific rules were added.
+The extension is **off by default**: it increases code size without an established speed gain.
+Opt-in selection requires fewer state references than ordinary emission. C3 selects 414 regions and
+reduces generated-Haxe GPR references 263,907 -> 263,128 (-779); CB selects 126 regions and
+245,646 -> 245,337 (-309). These are small static reductions, not dynamic traffic or speed claims.
+Full-DCE ES6 JS grows from 25,149,781 to 25,200,842 bytes (+51,061) for C3, and from 23,830,171
+to 23,847,591 (+17,420) for CB. The default and `--no-value-cfg` preserve the linear value pass;
+`--no-value-regions` disables both. Final CLI generation verifies all 40 default C3 Haxe
+files are byte-identical to the preceding implementation; explicit `--value-cfg` reproduces
+all 40 C3 / 38 CB already-tested Haxe files exactly.
+Acceptance (gitignored `out/_scalar_work/value-cfg-*.log`; common.hxml/analyzer-optimize/js-es=6):
+```
+./scripts/test.sh
+all 56578 checks passed
+conformance: 48 test(s) x JS
+ok ValueCfg 80afd5e6 values=596084
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ValueCfg ValueRegions Regions Yielding
+ok ValueCfg 80afd5e6 values=596084
+ok ValueRegions cdcffb6c values=57121
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+conformance: all targets agree
+node out/_valuecfg_c3/game.js web/boot.exe web/disc.bin --headless-hash 20000
+frames=20000 digest=36dcd8ee
+```
+Crash Bash also retains `frames=20000 digest=a9864f26` using its verified local media. Both
+previous generated source trees were rebuilt with the same runtime as `out/_values_{c3,cb}/cfg-baseline.js`
+and match these 20,000-frame digests, beyond ADR-0029's historical 9,898-frame regression.
+The new fixture compares reference, linear-value baseline and CFG promotion at every public
+block entry of 23 synthetic programs over signed edges, with joins, call mutation/observations,
+stores, span updates, cooperative suspension and due-loop pumps. The negative tool test injects
+unknown instructions into IR after discovery, since discovery correctly rejects malformed opcodes
+before a CFG can be analyzed. Only small conformance programs used C++; game runs remain JS.
+`./scripts/check.sh` reports `check.sh: clean`. After all build/check jobs completed, three paired
+runs per game (alternating order, Node startup included) kept every digest. C3 baseline
+20.4125 / 21.8341 / 23.2443 s vs opt-in 21.5246 / 21.0755 / 21.9028 s: median 21.8341 -> 21.5246
+(-1.4%). CB baseline 4.5243 / 4.1769 / 4.0732 s vs opt-in 4.2729 / 4.4172 / 4.0937 s:
+median 4.1769 -> 4.2729 (+2.3%). Both ranges overlap and system load varied; there is no established
+speed gain. This is why local promotion remains an experiment rather than a default optimization.
+Raw samples/load averages: `out/_scalar_work/value-cfg-bench.{json,log}`, runner `ValueCfgBench.py`.
+Next: proof-driven computation/signature elimination before expanding local promotion to effects
+and loops. General function signatures, stack/data-layout recovery and CpuState removal remain
+unfinished; a lower field-reference count alone is not enough to enable another JS pass.
+
+**2026-10-01: Pure value SSA reconstructs state at internal observation boundaries (ADR-0044).**
+`ValueRegion` now lowers pure arithmetic intervals inside ordinary functions, up to 32 body
+instructions each. Exact expression/operand versions share values; dead intermediate definitions
+are omitted and constants/affine results reconstructed. Used inputs are captured before output
+publication, so register swaps work. All changed final GPRs reach CpuState before memory,
+coprocessors, HI/LO, possible traps, control flow or a span refresh. No value survives into the
+next interval: a callee's changes cannot be overwritten with a stale register copy (ADR-0029).
+Existing looping-leaf locals, delay slots, entry/resume IDs, event boundaries and guest costs
+remain unchanged. Selection requires fewer GPR field references than the interval's existing
+fused emission. `--no-value-regions` isolates this pass independently of whole-function helpers.
+No new runtime storage, helper calls, forced inline, allocation, workers or game-specific rules.
+Static generated-Haxe GPR references: C3 293,125 -> 263,907 (-29,218, about 10%); CB 276,137 ->
+245,646 (-30,491, about 11%). These are unweighted code counts, not measured dynamic traffic.
+Full-DCE ES6 JS: C3 25,149,781 bytes (+126,966), CB 23,830,171 (+41,800).
+Acceptance (gitignored `out/_scalar_work/values-*.log`; pinned common.hxml/analyzer-optimize/js-es=6):
+```
+./scripts/test.sh
+all 56500 checks passed
+conformance: 47 test(s) x JS
+ok ValueRegions cdcffb6c values=57121
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ValueRegions Codegen Regions Yielding ScalarCalls ScalarCfg ScalarResults
+conformance: all targets agree
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ValueRegions
+ok ValueRegions cdcffb6c values=57121
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_values_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+node out/_values_c3/game.js web/boot.exe web/disc.bin --headless-hash 20000
+frames=20000 digest=36dcd8ee
+```
+The seven-group cross-target run preceded the final due-pump fixture (ValueRegions cb1c5154,
+57035 values); its final single-group run includes the halt after a reconstructed loop body.
+The conformance fixture compares reference, optimized-without-regions and optimized-with-regions
+forms, including callback observation traces, stale register outputs, discarded FIFO loads,
+function-span resets/steps, signed overflow barriers, public interior entries and suspension.
+Crash Bash, using its verified boot executable and local.json disc, retains 3000 db892c4b and
+matches its baseline at 20000 a9864f26. Both pre-change generated sources were rebuilt against
+the same runtime (`out/_scalar_multi_{c3,cb}/values-baseline.js`); their 20,000-frame digests match
+the new builds. The longer comparison passes ADR-0029's prior 9,898-frame failure point. Only
+small conformance programs used C++; game generation, execution and measurement remain JS.
+After all builds and gates, three paired runs per version (alternating pair order, Node startup
+included) retained every digest. C3 baseline 19.0169 / 18.9785 / 18.8846 s vs value regions
+18.4249 / 18.7451 / 18.4818 s: medians 18.9785 -> 18.4818 s, about 2.6% lower in this sample,
+with separated ranges. CB baseline 4.0731 / 3.8669 / 3.8931 s vs 3.8377 / 3.8685 / 3.8243 s:
+medians 3.8931 -> 3.8377 s, but overlapping ranges, so no established CB speed gain. Background
+system load remains a limitation; this is not a general performance guarantee. Raw samples,
+load averages and runner: `out/_scalar_work/values-bench.{json,log}`, `ValuesBench.py`.
+A final build-time-only cleanup rejects effect/isolated positions before allocating a graph and
+bounds span lookahead to the same 32-instruction interval. Tool checks still total 56500; both
+games were regenerated and SHA-256 compared with the already tested source files:
+```
+c3 40 generated Haxe files byte-identical
+cb 38 generated Haxe files byte-identical
+```
+The corresponding manifests are `out/_scalar_work/values-before-search-{c3,cb}.json`.
+Next: extend boundary-state reconstruction across CFG edges and then effectful/loop SSA;
+whole-program signature/stack recovery and general CpuState removal remain unfinished.
+
+**2026-10-01: Multiple-result scalar signatures and exact boundary reconstruction (ADR-0044).**
+Bounded linear/read-only and pure acyclic helpers now preserve every changed GPR, not just one
+output. Only unique computed values need transport: an ordinary Int return plus immediate-use
+`ScalarResult.valueN` ABI words. Constants, aliases and wrapped affine incoming values are
+reconstructed from captured originals; exact affine identities also prove restored registers.
+These slots have no guest-register identity, and helpers cannot call out, suspend or pump.
+No heap tuples, allocations, JIT, workers or game-specific assumptions. Multi-output caller
+projections still take priority over full callee helpers; public entries publish all outputs.
+Pooling distinguishes all computed return values, their order/arity and any CFG accounting.
+Full DCE leaves at most value1..value4 in both game builds, although the fixture covers all 30
+changed GPRs. Crash 3 helpers: 15 -> 33 (30 ordinary + 3 shared), 4 projected sites. Crash Bash:
+22 -> 38 (32 + 6), projected sites 43 -> 46. ES6 JS grows 27,297 / 44,396 bytes respectively:
+25,022,815 bytes C3, 23,788,371 CB. This is broader static coverage, not an assumed speedup.
+Acceptance (gitignored `out/_scalar_work/multi-*.log`; pinned common.hxml/analyzer-optimize/js-es=6):
+```
+./scripts/test.sh
+all 56456 checks passed
+conformance: 46 test(s) x JS
+ok ScalarResults 9c6ba8fc values=51714
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarResults
+ok ScalarResults 9c6ba8fc values=51714
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_multi_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+Crash Bash's regenerated `out/_scalar_multi_cb/game.js`, with its verified boot executable and
+local.json disc, retains `frames=3000 digest=db892c4b`. Eight other focused JS/C++ groups also
+agree: ScalarCalls ff62afe6, ScalarCfg 2325fb2e, ScalarMemoryCodegen 852cd0fd, ScalarCodegen
+4ebe3340, RangeCodegen 33c5b85a, Regions 9420e9fd, Yielding f730beee, Dispatch c98a0969.
+That initial nine-group command exposed an invalid unaligned `lw` in the new fixture: both
+implementations agreed within each target but MemA's unsupported input differed between targets.
+The corrected test executes the real generated alignment guard without dereferencing it; aligned
+boundary/MMIO fallbacks remain full optimized/reference comparisons. The runtime limitation is
+recorded in Blockers. Only small conformance programs used C++; the games remain JS builds.
+The previous CFG sources were rebuilt against the same runtime as
+`out/_scalar_cfg_{c3,cb}/multi-baseline.js` (sizes unchanged). Three paired Node runs per version,
+alternating pair order and including startup, retained every game digest. C3 baseline:
+18.8273 / 18.6836 / 18.9041 s; multiple results: 18.6481 / 18.6988 / 18.8918 s (medians 18.8273
+vs 18.6988). CB baseline: 3.8604 / 4.1278 / 3.8380 s; multiple results: 3.8135 / 3.8546 / 3.8376 s
+(medians 3.8604 vs 3.8376). Both ranges overlap. The discipline gate's generated-C++ text scan
+overlapped the early samples; system background load was also present. These are exploratory
+timings, not a demonstrated speedup or regression. Raw samples/load averages and the runner are
+`out/_scalar_work/multi-bench.{json,log}` and `MultiBench.py`; no additional game builds ran during
+the samples. The verified improvement is signature coverage, with a small JS size cost.
+Next: state reconstruction at internal observations, then loops/effectful regions; the broader
+CpuState-reduction objective remains in progress.
+
+**2026-10-01: Acyclic CFGs now lower to scalar value SSA (ADR-0044).**
+`ScalarGraph` shares instruction lifting with linear helpers; `ScalarCfg` carries edge predicates,
+phi values and all terminal register states through a pure acyclic CFG. Predicates are captured
+before delay slots. Only entry zero specializes; public interior entries retain their original
+body. Calls, memory, internal pumps and possible traps remain outside this speculation proof.
+The selected path's cycles/instructions/blocks return in `core.ScalarResult.accounting`, one
+packed Int consumed immediately under the no-callback/no-suspension helper contract. No tuple,
+runtime allocation, CpuState argument in helpers, worker, JIT or game-specific rule. CFG cost
+computations participate in helper-sharing keys; equal formulas with unequal costs stay distinct.
+Crash 3: 13 -> 15 helpers. Crash Bash: 16 -> 17 ordinary plus 2 -> 5 shared helpers (18 -> 22
+total), and 33 -> 43 projected call sites. ES6 JS grows by 2,254 bytes for C3 (24,995,518 total)
+and 19,702 for CB (23,743,975 total), because public/interior fallback bodies remain available.
+Acceptance (gitignored `out/_scalar_work/cfg-*.log`; pinned common.hxml/analyzer-optimize/js-es=6):
+```
+./scripts/test.sh
+all 56364 checks passed
+conformance: 45 test(s) x JS
+ok ScalarCfg 2325fb2e values=159054
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCfg ScalarCalls ScalarCodegen ScalarMemoryCodegen RangeCodegen Regions Yielding Dispatch
+conformance: all targets agree
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCfg
+ok ScalarCfg 2325fb2e values=159054
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_cfg_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+The final ScalarCfg comparison includes 17 fixtures: the earlier eight-group run used its initial
+15. Tests cover every ordinary conditional branch, joined/nested diamonds, same-target edges,
+delay-slot predicate changes, constant results with variable costs, caller projections/public
+outputs, arbitrary interior entries, consecutive calls, event halts and suspension-state traces.
+Program tests also cover CFG pooling across overlays, hook changes and opt-out regeneration.
+Crash Bash's regenerated `out/_scalar_cfg_cb/game.js`, with its verified boot executable and
+local.json disc, retains `frames=3000 digest=db892c4b`. Only small conformance programs used C++.
+Both game bundles use full DCE. Previous generated sources were rebuilt against the same runtime
+as `out/_scalar_range_{c3,cb}/cfg-baseline.js` (sizes unchanged). Three paired runs per version,
+alternating pair order after all compilations, include Node startup and retain every game digest:
+C3 baseline 13.1325 / 13.1771 / 13.3865 s vs CFG 13.0301 / 13.0913 / 13.0655 s (medians 13.1771
+vs 13.0655); CB baseline 3.0054 / 2.7533 / 2.7180 s vs CFG 2.7607 / 2.7038 / 2.7149 s (medians
+2.7533 vs 2.7149). C3 samples separate, CB ranges overlap; these small samples under normal
+background system load do not establish a broad speed gain. Raw samples/load averages and the
+runner are `out/_scalar_work/cfg-bench.{json,log}` and `CfgBench.py`.
+Next: general multiple-result signatures and state reconstruction at internal observations,
+then loops/effectful regions; the broader CpuState-reduction objective remains in progress.
+
+**2026-10-01: Block-local arithmetic range proofs feed scalar signatures (ADR-0044).**
+`RegisterRanges` follows signed word bounds through constants, masks, shifts and arithmetic.
+Only proved non-overflowing ADD/ADDI/SUB lose their trap effect in FunctionIR; ScalarPlan can
+then lift them into CpuState-free helpers. Same-value arithmetic removes unnecessary inputs.
+Every block entry starts unknown; memory/runtime effects and unproved traps clear facts.
+Call delay slots retain pre-call bounds except the link register. No cross-block assumptions,
+host Float, game-specific cases, runtime allocation or new overflow/load-delay emulation.
+The existing unknown-overflow barrier fixture now uses an unknown input rather than zero,
+which explains ScalarCalls' new digest. Existing runtime accuracy limits remain in tool.md.
+Acceptance (gitignored `out/_scalar_work/range-*.log`; pinned toolchain/common.hxml/js-es=6):
+```
+haxe build/tests-tool.hxml
+all 56218 checks passed
+./scripts/conformance.sh
+conformance: 44 test(s) x JS
+conformance: JavaScript passed
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh RangeCodegen ScalarCalls ScalarCodegen ScalarMemoryCodegen Codegen Regions Yielding Dispatch
+ok RangeCodegen 33c5b85a values=10090
+ok ScalarCalls ff62afe6 values=96344
+ok ScalarCodegen 4ebe3340 values=124013
+ok ScalarMemoryCodegen 852cd0fd values=3830
+ok Codegen 3d017147 values=15423
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+ok Dispatch c98a0969 values=602
+conformance: all targets agree
+haxe build/js-demo.hxml
+node out/_demo/js/demo.js --headless-hash 300  # twice
+frames=300 digest=329de455
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_range_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+Crash Bash's regenerated `out/_scalar_range_cb/game.js`, using its verified boot executable and
+local.json disc, retains `frames=3000 digest=db892c4b`. Games were built with full DCE; only the
+small conformance programs used C++. Both ES6 JS bundles are byte-identical to the pooled stage
+(C3 24,993,264 bytes, CB 23,724,273 bytes); helper counts stay 13 and 18. This extends the general
+proof machinery but demonstrates no game size/speed improvement; timing identical code again
+would not measure the new analysis.
+A temporary read-only survey (`out/_scalar_work/ScalarSurvey.hx`, `range-survey-*.log`) inspected
+base/overlay universes, excluding relocatable sets: C3 1124 functions/917 multi-block, CB
+1899/1701. Under the current <=32-instruction, no-effects/no-internal-pump limits, just 7/5
+multi-block candidates remain. None has identical cycles/instructions/block counts on every
+path. Next: CFG value SSA with path-dependent accounting and boundary-state reconstruction;
+merely admitting balanced branches would add no coverage on these images. The broader clean
+source/signature recovery objective is still in progress.
+
+**2026-10-01: Equivalent caller projections now share pure Haxe methods (ADR-0044).**
+`ScalarPool` interns the exact normalized parameter list and pure value-SSA calculation in
+`ScalarValues.hx`. Inputs are named by argument position; live definitions are renamed without
+dead-value gaps. Constants, operand order, shifts and 32-bit wrapping remain part of the key.
+Each call keeps its register mapping, resident fallback callee, entry/unwind guards and original
+instruction/block/cycle counts. Memory helpers stay outside the pool; no runtime allocation or
+forced inline. Sharing works across shards and overlay universes, without equating guest addresses.
+Regeneration resets helper/body ownership and removes unused modules on opt-out; standalone
+emitters still support self-contained output. All changes are in the tool/tests/docs.
+Crash Bash: 33 per-site definitions -> 2 shared definitions, still 33 specialized call sites;
+49 -> 18 total helper definitions. ES6 JS 23,729,769 -> 23,724,273 bytes (-5,496).
+Crash 3 stays byte-identical at 24,993,264 bytes (no eligible projected calls to share).
+Acceptance (gitignored logs: `out/_scalar_work/pool-*.log`):
+```
+./scripts/test.sh
+all 724 checks passed
+conformance: 43 test(s) x JS
+ok ScalarCalls 1bfb3dce values=96344
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCalls Dispatch
+ok ScalarCalls 1bfb3dce values=96344
+ok Dispatch c98a0969 values=602
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_pool_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+Crash Bash's regenerated `out/_scalar_pool_cb/game.js`, with its verified BOOT.EXE and local.json
+bin, retains `frames=3000 digest=db892c4b`. Builds used common.hxml/analyzer-optimize, js-es=6,
+full DCE. The prior generated CB sources were rebuilt against the same current runtime as
+`out/_scalar_calls_cb/pool-baseline.js` for comparison. Six alternating 3000-frame Node runs
+(startup included) all retained db892c4b: baseline 2.9123 / 2.7212 / 2.7930 s, pooled
+2.7958 / 2.7762 / 2.7818 s. Medians 2.7930 vs 2.7818 s overlap in range; background system CPU
+activity was present. This establishes a size reduction, not a speed win. Raw samples are in
+`out/_scalar_work/pool-cb-bench.json`. New fixtures cover different source/destination GPRs,
+dead definitions and unequal guest counts sharing code, while changed constants/operand order
+stay separate; program tests cover overlays, hook changes, repeat generation and opt-out cleanup.
+Next: CFG value SSA/boundary reconstruction and arithmetic range proofs, with size/time gates.
+
+**2026-10-01: Call summaries and caller-specific scalar outputs implemented (ADR-0044).**
+`FunctionSummary` now solves semantic inputs, may-writes, effects and call edges across resident
+functions/overlays, including recursion. Unknown callees and hooks stay conservative; linking
+returns and checked nonlocal returns follow Discovery/Emitter's existing control-flow rules.
+`BoundaryLiveness` permits a pure callee's extra GPR results to disappear only when every caller
+path overwrites them before a read or observable boundary. The caller emits a CpuState-free
+single-result helper; public entries and guarded fallback calls still publish all outputs.
+Pumps, MMIO, other calls, traps, returns and cooperative suspension retain full state; existing
+unwind tokens force the original call. No JIT, workers, runtime allocation or game-specific rule.
+This is a bounded projection proof, not general ABI/stack recovery or runtime state reconstruction.
+Coverage: Crash Bash adds 33 specialized call sites for two callees (16 -> 49 helper definitions);
+Crash 3 remains at 13 helpers. All games retain the same original public entries.
+ES6 JS size against the checked-read stage: C3 24,853,772 -> 24,993,264 bytes (+139,492),
+CB 23,707,791 -> 23,729,769 (+21,978). This is not a code-size or measured speed win: arithmetic
+trap effects now conservatively invalidate more span assumptions, and per-site helpers add code.
+The annotation does not add arithmetic overflow exception execution; that preexisting limitation
+remains. An initial treatment of checked returns as unknown calls was corrected: unwinding does
+not execute another callee before the caller continues. Next: CFG value SSA/boundary reconstruction,
+range proofs and sharing equivalent helper versions, with measured size/time gates before widening.
+Acceptance (logs under gitignored `out/_scalar_work/call-*.log`):
+```
+./scripts/test.sh
+all 672 checks passed
+conformance: 43 test(s) x JS
+ok ScalarCalls 8298013f values=78472
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCalls ScalarMemoryCodegen ScalarCodegen Codegen Regions Yielding Dispatch
+ok ScalarCalls 8298013f values=78472
+ok ScalarMemoryCodegen 852cd0fd values=3830
+ok ScalarCodegen 4ebe3340 values=124013
+ok Codegen 3d017147 values=15423
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+ok Dispatch c98a0969 values=602
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_calls_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+Crash Bash's regenerated `out/_scalar_calls_cb/game.js`, its verified BOOT.EXE and local.json
+bin also retain `frames=3000 digest=db892c4b`. Both game builds use common.hxml, analyzer-optimize,
+js-es=6 and full DCE. Only small conformance programs were built for reflaxe.CPP, not the games.
+The new fixtures exercise 17 call shapes, all GPRs, HI/LO, cycles/accounting, independent formulas,
+both/one-arm overwrites, delayed branch reads, public callee entries, effects, next-call visibility,
+loop/event halts, preexisting unwinds and intermediate cooperative suspension-state traces.
+
+**2026-10-01: rev.ng's signature recovery inspected in source; no codegen change this turn.**
+At revision `0f1f7d4ac301241db32552d52ab105c17aca4bdc`, register liveness/reaching definitions
+feed caller/callee fixed-point summaries; EnforceABI rewrites signatures/calls (including
+multiple return values), then CSV promotion exposes locals to LLVM. Stack separation and
+data-layout inference are separate stages. The documented executable recompilation branches
+precede ABI enforcement; decompilation also drops selected exceptional paths. Thus clean C is
+not evidence of PS1 state/timing preservation. Source links and implications are recorded in
+ADR-0044's upstream comparison. Next: explicit call-site summaries and boundary-state
+reconstruction, before expanding ScalarPlan beyond its present single-block/single-output proof.
+
+**2026-10-01: Scalar signatures now cover bounded read-only RAM/scratchpad leaves (ADR-0044).**
+`ScalarPlan` tracks affine incoming-register/constant addresses and proves a shared read span
+before invoking a CpuState-free helper taking `shim.Span`. Every load participates, including
+dead results and `$zero`; alignment, range and plain-memory checks precede all reads. Failed
+guards keep the original body and MMIO order. Pointer chasing, stores and multiple outputs
+remain excluded. Entry pumps/resumption/accounting stay in the wrapper; memory helpers are
+not called directly from callers. No game-specific logic, new runtime allocation or forced inline.
+Coverage: Crash 3 5 -> 13 helpers (8 read helpers), Crash Bash 9 -> 16 (7 read helpers).
+Crash 3 ES6 JS: 24,852,207 -> 24,853,772 bytes (+1,565), same current runtime and build flags.
+Speed benefit is unmeasured for this extension; concurrent builds make a timing comparison
+in this session unsuitable. Next for signature recovery: call-group read/output/effect analysis,
+with state reconstruction at observable boundaries, before relaxing the single-output rule.
+Acceptance commands/output (generated artifacts remain gitignored):
+```
+./scripts/test.sh
+all 559 checks passed
+conformance: 42 test(s) x JS
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarMemoryCodegen ScalarCodegen Codegen Regions Yielding Dispatch
+ok ScalarMemoryCodegen 852cd0fd values=3830
+ok ScalarCodegen 4ebe3340 values=124013
+ok Codegen 3d017147 values=15423
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+ok Dispatch c98a0969 values=602
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_read_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+Crash Bash's regenerated `out/_scalar_read_cb/game.js`, using its verified boot executable and
+local.json disc, also retains `frames=3000 digest=db892c4b`. Both games built with common.hxml,
+analyzer-optimize, js-es=6 and full DCE. New conformance covers signed/unsigned reads, wrapped
+affine addresses, RAM mirrors, scratchpad aliases, boundary fallback, dead/zero-target FIFO
+reads, due events and a RAM change while suspended before the callee's load. The initial FIFO
+test reused the preceding CPU's scheduler owner; resetting it per run fixed the fixture.
+
+**2026-10-01: Scalar Haxe function signatures implemented (ADR-0044), first bounded stage.**
+`ScalarPlan` lifts pure one-block leaves into value SSA, recovers live input parameters and
+one changed GPR as the return value, preserving every other final register (scratch registers
+included). Helpers have no CpuState argument or forced inline. Existing entry wrappers keep
+pumps/checkpoints; proven direct calls use helpers only when no entry work can run. Hooks,
+unknown/overlay dispatch, memory, traps, HI/LO, multiple outputs and relocatable functions keep
+the general path. Limits: 32 instructions, 6 inputs. `--no-scalar` isolates the pass for A/B.
+Generated coverage: Crash 3 5 helpers / 4 direct sites, Crash Bash 9 / 5; no broad speedup claim.
+Crash 3 ES6 JS grows 837 bytes (24,851,370 -> 24,852,207). Next: analyze live outputs across
+proven call groups before widening the signature recovery; do not drop ABI scratch outputs.
+Acceptance commands/output (new generated code, all local, no game artifacts committed):
+```
+source scripts/env.sh && haxe build/tests-tool.hxml
+all 539 checks passed
+./scripts/test.sh
+conformance: 41 test(s) x JS
+test.sh: JS-only gate passed — 329de455
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCodegen
+ok ScalarCodegen 4ebe3340 values=124013
+conformance: all targets agree
+RECOMPSX_JS_ONLY=0 ./scripts/conformance.sh ScalarCodegen Codegen Regions Yielding Dispatch
+ok ScalarCodegen 661b3b64 values=119813
+ok Codegen 3d017147 values=15423
+ok Regions 9420e9fd values=38333
+ok Yielding f730beee values=7906
+ok Dispatch c98a0969 values=602
+conformance: all targets agree
+./scripts/check.sh
+check.sh: clean
+node out/_scalar_c3/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+node out/_scalar_c3_base/game.js web/boot.exe web/disc.bin --headless-hash 9000
+frames=9000 digest=4de78425
+```
+The five-test cross-target run preceded the added restored-scratch cases; the standalone
+ScalarCodegen run above is the final version, `4ebe3340` / 124013 values.
+Crash 3 generated into `out/_scalar_c3` and `out/_scalar_c3_base` (the latter with `--no-scalar`);
+both built with common.hxml, analyzer-optimize and js-es=6 against the same current runtime.
+Crash Bash generated into `out/_scalar_cb`, same JS settings, local.json's disc and its verified
+boot executable: `frames=3000 digest=db892c4b`.
+JS A/B, 9000 frames, alternating process order, one warmup per mode then three samples
+(`out/scalar-benchmark.json`): no-scalar 19.5348/21.0066/23.9337 s, scalar
+18.9968/22.3200/23.7078 s; medians 21.0066 vs 22.3200 s. Both series drift upwards and
+their paired ordering changes; this run establishes no speed benefit. Every run retained
+`4de78425`. Treat this as bounded signature-recovery infrastructure, not a measured game win.
+
+**2026-10-01: CpuState-free function generation researched; no codegen change.**
+rev.ng's `enforce-abi` promotes register communication into locals, arguments and returns
+([reference](https://docs.rev.ng/references/artifacts/#enforce-abi-artifact)); its initial stack
+pointer remains shared. Our FunctionIR retains machine registers and Program.computeWrites
+already supplies transitive write masks for span invalidation. Proposed next experiment: add
+read-before-write/output/effect summaries and value SSA, then emit parameter/return helpers
+for proven functions and direct-call groups. Keep architectural-state adapters at unknown
+calls, hooks, traps and scheduling/resumption boundaries; preserve cycles, delay slots and
+all observable register/memory effects. ADR-0029's staleAcrossCalls regression rules out
+reviving the old local-register publication scheme. Speed and coverage remain unmeasured;
+validate against independent instruction semantics as well as cross-target digests.
+
 **2026-10-01 (later): Dreamcast full speed, round 4 — the caches. Crash 3's title screen 19.46 → 18.19 ms a frame,
 its gameplay demo (new window, 4700:5000) 35.47 → 29.26, Crash Bash's Ballistix 20.55 → 19.19 (work 16.03). Target
 16.7; ledger E-053..E-058.** Kept:
@@ -1257,6 +2947,32 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
+000. **Dreamcast full speed — what is left (2026-10-03, later; docs/perf/dreamcast-ledger.md E-108..E-110).**
+   Under the cache model the title screen fits its 30 Hz pairs (31.8-32.6 ms against 33.4) and so
+   does Ballistix (heavy pairs 33.1, its disc load 11.6-13.4 a frame; 7 of 1,500 presents over, the
+   game's own two-vblank frames). Crash 3's gameplay demo is at 25.88 ms a frame (heavy presents 39.5):
+   the PlayStation is ~95 % busy in both vblanks of its pairs, and the emulation runs such code at
+   ~0.65 of real time — every part has to give, none is a third of it. In order:
+   1. **Hardware.** `out/dc/crash3-r112-max.cdi` and `out/dc/crashbash-r109-max.cdi` (the
+      measured ELFs, the FPS overlay on; with the tester since the commit of 2026-10-03) — Crash 3 in several levels (E-053's
+      console run had the jungle at 89 % and the Uka Uka intro at 56 % with g40, against the
+      model's demo 35.5 ms then, 25.9 now), Ballistix in a match and across a load. Not booted here.
+   2. **Crash 3's gameplay**, by part (ms a frame, r100p2's profile): generated code 11.7 (instruction
+      fills 4.4), the scene build 4.2, GPU emulation 2.8, the GTE 2.5, core 1.6, DMA 0.8. Measured
+      leads: (a) literal-pool loads are 13 % of the generated code's executed instructions, half of
+      them the memory decode's constants (0x1FFFFF, 0x1F9FFFFF, the arena's address, 0x1F800000,
+      0x3FF); (b) the world loop's hot code is 281 lines against the cache's 256, 18 % of it the
+      inline decode of unspanned accesses; (c) the scene build costs ~3x a triangle what
+      Ballistix's does — bake_slot bakes ~49 patches a frame (its hash finds ~16 of 243 lookups),
+      pal_bank_at walks 64 banks on its 33 misses a frame, clipping and the semi-transparent path;
+      (d) Crash's shadow, drawn into VRAM in software (triangle, rowSpan, polygonRest ~1.1 ms).
+   3. **Ballistix**: three presents ~54 frames apart with ~3 ms more emulation than the others and
+      nothing different on the guest's side (19664, 19718, 19774); the list walk's packet path.
+   4. Relocatable calls (GOOL, ADR-0025): `FnTable.call` 0.2 ms of a gameplay frame.
+   Done since the last list: Ballistix's spikes named (E-108: the overlay's redraw, a disc load the
+   placement had never seen, the game's own double vblanks), GPUSTAT and timer 1 without divides
+   (E-109), rounds with every phase traced (E-108, E-110).
+
 00. **Dreamcast placement, the follow-ups (ADR-0043).**
    1. Confirm it on hardware: `out/dc/crash3-placed-max.cdi` against
       `out/dc/crash3-unplaced-max.cdi`, the same sources. The model reads the title screen at 29.5
@@ -1913,7 +3629,122 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
     and `storeThenRedefine` in `TestCodegen` reproduce the failures; the Codegen conformance
     test passes on JS and C++ after the fix. Setup applies the exported patch (ADR-0007).
 
+11. **Open: unsignedness leaks out of nested `>>>` into signed operations.** The minimal
+    `static function f(x:Int):Int return ((x >>> 24) << 24) >> 24;` returns -1 for `f(-1)` on JS,
+    but 255 on reflaxe.CPP. Generated C++ is
+    `((static_cast<unsigned int>(x) >> 24) << 24) >> 24`, so the final shift is logical despite
+    Haxe's signed `Int` semantics. Verified with the pinned common analyzer/full-DCE flags by
+    `out/_memory_values/ShiftProbe.hx`; logs `shift-js.log` / `shift-cpp.log` retain both results.
+    Scalar memory forwarding initially exposed 244 signed-byte/halfword failures. Its extraction
+    now uses arithmetic `>>` before masking/sign extension, which discards the same high bits
+    and passes `ScalarEffects` on both targets (3cfb6f71, 1136641 values). That transformation
+    is valid for byte extraction, not a general replacement of unsigned MIPS shifts. No vendor
+    compiler change was made; the defect remains an upstream/fork backlog item.
+
+12. **FIXED by patch 0006: short-circuit RHS bindings were evaluated unconditionally.**
+    Reflaxe's `EverythingIsExprSanitizer` processed both operands as ordinary values. When
+    Haxe inlined a call with a reused argument, its argument binding became a preceding
+    statement outside the boolean guard. This also evaluated the RHS before a side-effecting
+    LHS. Minimal `ShortCircuit` reproduction with analyzer/full DCE: JS `af4a1a9e` (22 values,
+    zero failures), unpatched C++ `26a99a13` (11 assertion failures). Logs:
+    `out/_body_budget/short-circuit-before.log`. The expanded 53-value fixture additionally
+    covers assignments, conditional branches, nested operands and while/do-while conditions.
+    Patched JS/C++ agree at `157a406f`.
+
+    The native fault was concrete: generated `Scheduler.scheduleAt` read `due[nextSlot]`
+    before `nextSlot < 0` could skip it, with `nextSlot == -1` at init; `runDue` had the same
+    problem under `&&`. Both macOS crash reports identified `Scheduler.init`, and their
+    fault addresses were four bytes before the allocation. The old executable sometimes
+    passed because those invalid bytes happened to be readable. Patch 0006 lowers only a
+    statement-requiring RHS into an if/else, preserving simple native operators. Generated
+    scheduler reads are now inside the appropriate branch. Runtime source and optimizer
+    flags are unchanged. Setup applies the exported patch idempotently and spike.sh runs
+    the cross-target regression. No submodule pin changed.
+
 ## Blockers & open questions
+
+- **Open (2026-10-02): entries for shared code no entry starts change Crash 3's picture.** On
+  top of `--cut-shared`, giving a block more functions carry than the block entering it an entry
+  of its own (114 such heads in Crash 3) changed the headless digest by frame 2522 (VRAM only;
+  every counter and the cycle count equal), while each subset of the heads tried alone kept it.
+  Not kept; the interaction is not understood (ADR-0045).
+
+- **Open (2026-10-02): ADR-0044 recovery has no measured Dreamcast speed effect.** All of it —
+  helpers, projections, value regions, now the GTE and LWL/LWR — changes the generated code's
+  executed instructions by <= 0.4 % in every window (E-067, E-068); recovered functions run 1-2 %
+  of them. Gameplay cf varies by +/-0.2 ms between builds with equal instructions (layout), so a
+  claim inside that needs `dc-cmp.py`'s issue column. The remaining acyclic GTE/LWL candidates need
+  spans anchored at computed addresses, and their CpuState share (~15 %) bounds the gain. Owner's
+  decision wanted before more recovery work: loops, or the global costs measured beside it.
+
+- **Open (2026-10-02): misaligned general-path word reads differ between targets.** JS
+  `MemA.get32` reads `i32[a >> 2]`, the aligned word; C++ reads the four bytes at `a`. A draft of
+  `ScalarShare` with a base of 0x80040022 agreed within each target (reference against optimized)
+  but its digests differed (JS 394b5777, C++ 107f793f). The R3000A raises an address error for a
+  misaligned `lw`/`lh`/`sw`/`sh`, which the runtime does not model; the fixture now avoids misaligned
+  bases. Decide one semantics (the exception, or a shared definition) before relying on either.
+
+- **Open (2026-10-02): memory projections reduce state publication but grow JS.** 73/108
+  caller-specific adapters add 134,028/209,624 B. Five alternating pairs have mixed signs:
+  C3 median -4.11% with three slower pairs; CB +4.10% with three faster pairs. Do not call this
+  a demonstrated speedup. Identical helper/adapter pairs within owning classes collapse to
+  48/69 distinct bodies; assess sharing before further specialization. Preserve the bounded
+  game digests, full memory preflight, original owner fallback and public-entry state.
+  Sharing now emits those 48/69 pairs (ES6 JS -41,985/-82,888 B); ten child-CPU-time pairs on a
+  loaded host show no established speed change (pairwise medians C3 -0.13%, CB +1.73%).
+
+- **Open (2026-10-02): wider whole-function recovery may cost JS execution time.** The live-body
+  budget adds 11 C3/12 CB helpers without changing prior helper bodies or 20k digests. Five
+  alternating pairs show C3 +5.09% by median (four slower pairs), CB -13.57% with a +30.53%
+  final-pair outlier. Host load varies and ranges overlap. Treat this as a coverage/clean-source
+  improvement with an unresolved performance tradeoff, not a demonstrated general speedup.
+  Investigate call-entry guards and state/result publication with `out/_body_budget` as the
+  preserved comparison; do not compare absolute times with another session.
+
+- **Resolved (2026-10-02): intermittent native scheduler fault.** Compiler defect 12 above
+  hoisted a guarded `due[-1]` read; patch 0006 preserves short circuiting. ShortCircuit and
+  rebuilt ScalarPointers/ScalarCompose now agree on JS/C++. Original failures remain in
+  `out/_body_budget/{cross,cross-final}.log`; corrected results are in `cross-fixed.log`.
+  The earlier LLVM 18 sanitizer attempt stalled before main and provides no memory-safety
+  evidence. Resolution rests on the deterministic before/after semantic regression and
+  inspection of the corrected generated control flow, not on repeated successful launches.
+
+- **Open (2026-10-01): general call/stack recovery remains bounded.** Checked immutable loaded
+  pointers now enter whole-helper preflight, including through nested signatures. A pointer
+  changed by earlier writes still needs either an exact forwarded value or continuation/state
+  reconstruction after those effects; it cannot use a stale entry sample or restart a partly
+  executed body. Different-pointer phis, general loops, larger signatures and stack-object/
+  escape recovery remain open. The loaded-pointer proof adds 22 C3/25 CB helpers; it does not establish
+  a speed benefit or complete state removal. Loaded-pointer sample medians increased 1.29%
+  (C3) / 2.72% (CB), with overlapping ranges and reversed pair order. The subsequent typed-
+  sample lowering removes 13/23 static body-read sites and improves its own paired sample
+  medians 3.80%/1.24%. The subsequent result lowering removes unconditional known-value
+  transport (40/70 static result words), with full guards and unchanged 20k game digests.
+  Unconditional child result proofs now propagate too, with constant nested charges and
+  exact narrow-forwarded read versions. That stage removed calls in synthetic cases and
+  left both game JS files byte-identical. The following live-body budget stage admits
+  another 11 C3/12 CB helpers, with a larger JS bundle and unchanged 20k game digests.
+  Entry work, conditional result proofs, HI/LO values and broader function/loop coverage
+  remain concrete optimization targets; no cross-session timing comparison is valid.
+
+- **Open (2026-10-01): affine call-span reuse has no established JS speed benefit.**
+  The new register-alias proof adds 13 C3 and two CB call sites and preserves both 20k digests.
+  Five-pair C3 timing medians increased 7.4%, then 0.6% in a reversed-order repeat; host load
+  varied and ranges overlap. CB was -0.9%. Keep both runs in `out/_scalar_alias`. The initial
+  Node profiles in `out/_scalar_profile` hardly sample the shared adapters and do not isolate
+  CpuState assignments inside generated bodies. Entry/state-publication and fallback costs
+  therefore remain unresolved before further expansion on performance grounds.
+
+- **Open (2026-10-01): misaligned guest wide accesses have no portable fallback semantics.**
+  `Memory` uses `MemA` with an alignment precondition, while the emitter still does not raise
+  AdEL/AdES (the existing tool.md limitation). A new scalar fixture's invalid `lw` at 80040001h
+  exposed JS rounding the typed-array index versus C++ loading at the byte address; a strict
+  alignment host may fault. This predates scalar signatures. Its guard correctly rejects the
+  fast path. `ScalarResults` now tests that generated guard without violating MemA's contract;
+  aligned mirror/scratchpad-boundary and MMIO fallbacks still run against the original bodies.
+  The loaded-pointer fixture also keeps guest wide pointers aligned after a byte mutation;
+  its invalid intermediate/source alignments are checked by guard-only probes.
+  Implement guest address errors before treating misaligned wide loads/stores as supported.
 
 - **Open (2026-09-28): the Dreamcast build diverged between identical Flycast runs.** One save
   state was run three times in the fork's interpreter, with no pad pressed and no change to the
@@ -1963,10 +3794,205 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Session log (append-only, newest-first)
 
+2026-10-03 [claude] DC: Ballistix's slow presents named (E-108), GPUSTAT/timer-1 without divides (E-109, BeamLine), rounds r108/r109 with every Ballistix phase traced (E-110, installed), flat-triangle rows carried (E-112); E-111 rejected.
+Model: Ballistix 16.87 -> 16.76 (heavy pairs 33.1, load 11.6-13.4, slow presents 17 -> 7), title 16.64, gameplay 25.88 -> 25.49 (PS1 ~95 % busy).
+Gates: test.sh JS (329de455); conformance JS all, BeamLine/VideoTime/Raster JS+C++; check.sh clean; digests 88c8b426/47853ef7/95e17b07. Committed and pushed at the owner's word.
+Next: the tester's run of crash3-r112-max / crashbash-r109-max against this commit; GPU walk batching, GTE core (Next up 000).
+
+2026-10-03 [claude] DC: Ballistix heavy pairs within 33.4 (E-103 state commands skip draw, E-104 INTPL call-site form + GteInterpolate, E-105/E-106 build_scene keys and flat colours, E-107 round r100).
+Model: Ballistix 17.01 -> 16.87 ms (pairs 32.9; 17/1500 presents ~37), title 16.69 (pairs 31.6-32.9), gameplay 25.86 (needs ~35 % less).
+Gates: test.sh JS (61,995 checks, 62 conformance, 329de455); GteInterpolate b7f03c86 JS+C++; TA hash identical (ta0/ta1/ta2); digests 88c8b426/47853ef7/95e17b07.
+Next: name Ballistix's slow presents (bench log added); gameplay's world loop is instruction-cache bound (Next up 000).
+
+2026-10-03 [claude] DC: scheduler pump path (SchedFile/REST, pump one call; E-098), relocatable answers kept (E-099, ADR-0025 rev.), rounds r85 (E-097) and r99 with data colours (E-100); E-101/E-102 rejected.
+Model: title 18.88 -> 16.69 ms (30 Hz pairs 31.6-32.8 within 33.4: full speed), gameplay 29.36 -> 25.50, Ballistix 18.25 -> 17.01 (heavy pairs ~33.4).
+Gates: test.sh JS (61,995 checks, SchedulerOrder new e3bc279e, 329de455); conformance 61/61 on JS and C++; C3 4523/5000 88c8b426/47853ef7, CB 20300 95e17b07.
+Next: a CDI of this build for hardware; Ballistix's last ~1 ms (list walk, scene build); gameplay needs structural work (Next up 000).
+
+2026-10-02 [claude] DC: RTPS (ADR-0046) and the polygon packet (ADR-0047) as dc-sched-scheduled SH-4 cores; ABI bp_gpu_tri_w/bp_gpu_state_w; RTPS inline everywhere.
+cf a present g76 -> g82: title 16.74 -> 15.84, gameplay 26.26 -> 24.69, Ballistix 17.45 -> 16.58 (E-083..E-088); exact: dc-shrun/dc-polyrun, check builds 0 differ.
+Gates: test.sh JS gate (61,995 checks, 59 groups, 329de455); C3 5000 47853ef7, CB 20300 95e17b07; GPU-stream 5f877994a1335867; check.sh float rule (FPU CLZ replaced).
+Next: placement round r81 -> CDIs; TA-list hash for backend changes; the backend's semi-transparent path (~1.5 ms a title present).
+
+2026-10-02 [claude] DC: CpuState hot words in the SH-4 displacement (patch 0007), scratchpad span test (E-081), three placement rounds (title 19.20->17.83, gameplay 30.29->28.53, CB 19.34->18.96).
+Set aside: hand-overs (ADR-0045, +0.65 ms gameplay; --cut-shared), span quotients (E-078), RTPS in assembly (E-080, timed by the new scripts/dc-issue-sim.py: no gain).
+61995 tool checks; 59 conformance groups (SpanTake new) on JS, 58 + SpanTake on C++; C3 4523/5000 88c8b426/47853ef7, CB 20300 95e17b07.
+Next: Next up 000 — the scene straight to the PVR (~1 ms a title pair), call overhead in generated code, gameplay's code footprint.
+
+2026-10-02 [claude] GTE ops and LWL/LWR in scalar helpers (ordered effects, span lwl/lwr), unreachable CFG arms pruned, constant accounting at call sites.
+C3/CB helpers 151->171/175->180; 61949 checks, 57 JS groups, ScalarCop 10882ef3 on JS/C++; 20k digests unchanged (36dcd8ee, CB+mods 98109571).
+DC model: no speed effect (issue equal; cf moves are layout fills, E-067/E-068). Pool loads 13.3 %, CpuState 14.9 % of generated instructions.
+Next: owner to choose loops vs. entry work / decode constants; indexed spans for the last acyclic GTE/LWL candidates.
+
+2026-10-02 [claude] Shared equal memory projection pairs per emitted class (ProjectionShare): C3/CB pairs 73->48/108->69, ES6 JS -41,985/-82,888 B.
+--no-projection-share reproduces prior Haxe/JS byte for byte; every site runs a text-equal pair; 61906 checks, 56 JS groups; ScalarShare+3 groups agree JS/C++.
+20k digests unchanged (36dcd8ee/a9864f26). Ten CPU-time pairs on a loaded host: no established speed change (C3 -0.13%, CB +1.73% medians).
+Found a JS/C++ difference in misaligned general-path word reads (blockers). Next: projection entry/guard cost; loops, conditional summaries, ABI/stack recovery.
+
+2026-10-02 [codex] Prepared LLM handoff from verified checkout, architecture, acceptance logs and remaining work; no implementation changes.
+Recorded dirty/untracked/submodule state and JS-first constraints; existing acceptance remains current.
+Next: share duplicate memory helper/adapter pairs with exact semantic keys, then measure size and execution cost.
+
+2026-10-02 [codex] Added guarded caller-specific memory results and repaired Program's pure-only integration filter; 73 C3/108 CB call sites.
+61848 checks/55 JS groups and three focused JS/C++ groups pass; old/new 20k game digests agree; full helper bodies unchanged.
+Static publications fall 80/125; JS grows 134,028/209,624 B. Five timing pairs are mixed (C3 median -4.11%, CB +4.10%); no general speed claim.
+Verified analyzer-optimize/full DCE across 16 build entries, retaining ES6; flags were already active and fresh demo remains 329de455.
+Next: share repeated memory projection bodies and investigate call cost; general loops, conditional summaries and ABI/stack recovery remain open.
+
+2026-10-02 [codex] Validated 256-instruction analysis/96-unit live-body recovery: C3/CB helpers 140->151/163->175; prior bodies unchanged.
+Fixed native due[-1] fault via reproducible reflaxe short-circuit patch 0006; setup/spike wiring and 53-value regression included.
+61528 tool checks/55 JS groups; four JS/C++ groups and compiler spikes pass; fresh game JS hashes retain four validated 20k digests.
+Five timing pairs: C3 +5.09%, CB -13.57% medians with overlap/outliers; no general speed claim. JS grows 44,478/43,144 B.
+Next: isolate guard/publication costs and possible C3 slowdown; general loops, conditional summaries and ABI/stack recovery remain open.
+
+2026-10-01 [codex] Reverified analyzer-optimize/full DCE in shared build settings and JS/C++ entry paths; JS retains ES6.
+No flag changes required; fresh pinned JS demo retains 329de455.
+Next: diagnose intermittent native Scheduler.init fault before accepting recovered-body budget expansion; general recovery remains open.
+
+2026-10-01 [codex] Imported body-proved child result equalities and fixed nested charges; retained effects, dynamic charges and all access guards.
+Narrow forwarded conversions retain exact read versions/extension. 61486 checks/54 JS groups; pointer/compose/memory-CFG agree on JS/C++.
+Four baseline/new 20k runs match. Both game JS files are byte-identical; no timing or game-speed claim.
+Next: conditional/numeric call recovery and wider function/loop/ABI/stack coverage; general state removal remains open.
+
+2026-10-01 [codex] Reconstructed proved entry-sample/affine outputs at call boundaries; removed redundant result words and boundary-only parameters.
+Void memory helpers retain effects/accounting; nested calls keep read versions/predicates. C3/CB helpers 140/163, transported result words 195->155/242->172.
+61378 checks/54 JS groups; pointer/borrow/result fixtures agree on JS/C++; both baseline/new games retain 20k digests.
+Five alternating pairs: C3 median +0.28%, CB -2.22%, overlapping ranges; no general speed claim.
+Next: independently proved child-result equalities, then broader ABI/loop/stack recovery; complete state removal remains open.
+
+2026-10-01 [codex] Reverified requested analyzer-optimize/full DCE in all build entries and script compile paths; JS keeps ES6.
+Flags were already active; fresh JS demo retains 329de455 and discipline/diff checks pass. No C++ rebuild.
+Next: eliminate redundant known-value result transport; general recovery remains open.
+
+2026-10-01 [codex] Added typed preflight sample inputs, source-only span pruning and equal entry-sample reuse with per-version guards.
+Static helper reads C3 114->101 / CB 161->138; helpers 139/163. 61274 checks/54 JS groups; pointer/borrow fixtures agree on JS/C++.
+Both games retain baseline/new 20k digests; five-pair median times -3.80%/-1.24%, bounded JS evidence only.
+Next: remove redundant known-value result transport and continue general recovery.
+
+2026-10-01 [codex] Added checked loaded-pointer provenance and nested-call import; earlier writes require exclusions, later loads retain order.
+C3 helpers 116->138; CB 138->163; previous bodies unchanged. 61178 tool checks/54 JS groups; pointer/composition fixtures agree on JS/C++.
+Both games retain baseline/new 20k digests; sample medians +1.29%/+2.72%, no established speed gain.
+Next: reduce preflight/duplicate-read cost; changed-pointer continuations and general ABI/loop/stack recovery remain open.
+
+2026-10-01 [codex] Rechecked optimizer flags: all 16 build entries inherit analyzer-optimize/full DCE; JS retains ES6.
+Fresh JS demo: frames=300 digest=329de455; discipline/diff checks clean. No flag changes or C++ rebuild required.
+Next: finish and validate loaded-pointer recovery; the demo check does not validate that ongoing codegen work.
+
+2026-10-01 [codex] Added precise child write summaries and guarded saved-value recovery; merged equivalent alias checks without filling holes.
+61045 tool checks/53 JS groups; final ScalarCompose and SpanAlias agree on JS/C++; both games retain baseline/final 20k digests.
+C3 helpers 113->116 (+5994 JS B), CB 124->138 (+23719 B); prior helper bodies unchanged; no new CpuState publication or forced inline.
+Five-pair medians: C3 -0.8%, CB +0.05%, overlapping ranges; no established speed improvement.
+Next: surviving entry costs and loaded-address continuation proofs; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Composed bounded direct scalar calls with CFG memory facts, return proofs and event/deadline guards; verified optimizer flags.
+59911 checks/52 JS groups; ScalarCompose and ScalarResults agree on JS/C++; CB baseline/new 20k a9864f26; C3 JS byte-identical.
+CB gains one helper (+1296 B), timing median +2.3% with overlap/no speed claim; fixed two invalid continuation fixtures, not runtime alignment.
+Next: precise child write/alias proofs and saved-value preservation; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Added block-local affine call aliases with donor-span liveness and guarded rebasing; checked optimizer flags.
+59782 tool checks/51 JS groups; four JS/C++ groups agree; both games retain baseline/new 20k digests.
+C3 borrowed calls 187->200, CB 0->2; JS +2002/+918 B; C3 timing +7.4%, repeat +0.6%, CB -0.9%; no speed gain established.
+Next: profile recovered-call entry/state costs before widening coverage; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Shared borrowed-span entry guards/publication/accounting in per-callee adapters; fixed constant exclusion.
+C3 187 calls -> 5 live adapters, JS -55066 B; CB JS identical; state-free helper bodies unchanged.
+59671 checks/51 JS groups, four JS/C++ groups agree; C3 20k36dcd8ee; median -0.4% within overlapping ranges.
+Next: investigate affine call-argument aliases; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Added caller-span borrowing for direct memory scalar calls, with post-slot liveness and entry guards.
+59655 checks/51 JS groups; four JS/C++ groups agree; C3 baseline/new 20k36dcd8ee; CB output byte-identical.
+C3 187 borrowed sites, JS +61422 B; five-pair median -1.8%, wide overlap, no established speed gain.
+Next: reduce duplicated guards and recover caller-specific memory results; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Simplified scalar CFG reach/phi expressions and grouped original packed block charges.
+59573 checks/50 JS groups; four JS/C++ groups agree; both rebuilt games retain their 20k digests.
+C3/CB JS -2321/-1801 B; five-pair medians -1.9%/-9.6%, overlapping; no established speed gain.
+Next: reduce span/entry-adapter overhead with caller proofs; general ABI/stack recovery remains open.
+
+2026-10-01 [codex] Added predicated plain-memory effects to acyclic scalar signatures; retained entry/pump proofs.
+C3 99->113 / CB 106->123 helpers; 56988 checks/50 JS groups; four JS/C++ groups agree, demo329de455.
+20k rebuilt baseline/new digests match (C3 36dcd8ee, CB a9864f26); JS +24953/+30485 B.
+Five-pair medians C3 +1.9%, CB -1.2%, overlapping; no speed claim. Next: simplify reach/accounting and guards.
+
+2026-10-01 [codex] Added alias-safe scalar memory value reuse and exact byte/halfword extraction.
+32 emitted programs; 56848 tool checks/49 JS groups; ScalarEffects JS/C++ 3cfb6f71/1136641 values.
+Caught and avoided nested unsigned-shift contamination in C++ (defect11); other result/memory groups agree.
+C3 40 / CB 38 Haxe files byte-identical: no game speed gain. Next: effectful CFG signature recovery.
+
+2026-10-01 [codex] Centralized analyzer-optimize/full DCE in common.hxml; added missing spike includes.
+56668 tool checks, 49 unchanged JS conformance digests, demo329de455; demo JS byte-identical.
+Spikes/check clean; ScalarEffects/Dispatch/GteOps agree on JS and C++. Game builds already used both flags.
+Next: reduce scalar signature guard/call overhead and redundant memory work; no speed gain claimed here.
+
+2026-10-01 [codex] Added ordered plain-memory effects, multiple checked span parameters and Void scalar setters.
+Full helpers C3 30->99 / CB 32->106; no CpuState in their bodies. 56668 checks/49 JS groups; demo329de455.
+Four focused JS/C++ groups agree; final ScalarEffects af21ba89/351863 values. C3/CB 20k 36dcd8ee/a9864f26.
+Five-pair timings overlap (medians +1.0%/+2.9%); no speed claim. Next: reduce guard/call costs and redundant memory work.
+
+2026-10-01 [codex] Added opt-in pure CFG local/merge values with exact public-entry and boundary publication.
+23 fixtures / 596084 values; 56578 tool checks, 48 JS groups; four JS/C++ groups agree; demo329de455.
+C3/CB 20k match rebuilt baselines (36dcd8ee/a9864f26). Static GPR refs -779/-309; JS +51061/+17420 B.
+Timing overlaps (C3 median -1.4%, CB +2.3%): keep --value-cfg off by default. Next: computation/signature elimination.
+
+2026-10-01 [codex] Added observation-bounded value SSA, exact CSE and state reconstruction inside ordinary functions.
+Static GPR references C3 -29,218 / CB -30,491; JS +126,966/+41,800 B. 56500 checks/47 JS groups; demo329de455.
+Seven focused JS/C++ groups agree; final ValueRegions cdcffb6c. Both 20k baselines match: C3 36dcd8ee / CB a9864f26.
+C3 sample median -2.6%; CB inconclusive. Bounded-search cleanup emits identical sources. Next: SSA across CFG edges.
+
+2026-10-01 [codex] Added multiple-result scalar signatures, unique-value transport and affine boundary reconstruction.
+C3 helpers 15->33; CB 22->38 (46 projections); JS +27,297/+44,396 B. 56456 checks/46 JS groups; demo329de455.
+Nine focused JS/C++ groups agree after removing invalid MemA dereferences from the alignment-guard fixture.
+C3 9000 4de78425 / CB 3000 db892c4b, including 12 A/B runs; no proven speed gain. Next: internal observation state.
+
+2026-10-01 [codex] Added acyclic CFG value SSA/phi selection and allocation-free path-accounting returns.
+C3 helpers 13->15; CB 18->22, projections 33->43; JS +2,254/+19,702 B. 56364 checks/45 JS groups, demo329de455.
+Eight JS+C++ groups agree; final ScalarCfg2325fb2e. C3 9000 4de78425 / CB 3000 db892c4b, including 12 A/B runs.
+Small timing improvements are not a broad speed claim. Next: multiple results and reconstruction at internal observations.
+
+2026-10-01 [codex] Added signed range proofs for scalar ADD/ADDI/SUB, with conservative effect/entry barriers.
+56218 tool checks, 44 JS groups, demo 329de455; eight JS+C++ groups agree (RangeCodegen 33c5b85a).
+C3 9000 4de78425 / CB 3000 db892c4b; both JS bundles byte-identical to pooling, no measured speed gain.
+Next: CFG value SSA with path-dependent accounting and boundary reconstruction; balanced-only survey found no candidates.
+
+2026-10-01 [codex] Interned equivalent pure call projections across shards/universes; retained call-specific
+state, guards and timing. CB 33 copies -> 2 helpers, JS -5,496 bytes; C3 output byte-identical.
+724 tool checks / 43 JS groups (329de455); ScalarCalls JS+C++ 1bfb3dce; C3 9000 4de78425, CB 3000 db892c4b.
+A/B times overlap: size win only. Next: CFG value SSA/boundary reconstruction and range proofs (ADR-0044).
+
+2026-10-01 [codex] Added fixed-point function/call summaries and guarded caller-specific scalar outputs;
+all results survive observation boundaries/public entries. CB adds 33 sites; C3 no new sites (ADR-0044).
+672 tool checks, 43 JS groups (329de455); seven cross-target groups agree, ScalarCalls 8298013f.
+C3 9000 4de78425 / CB 3000 db892c4b; size grows, no speed claim. Next: CFG SSA/range proofs and helper sharing.
+
+2026-10-01 [claude] The shims' C files moved into Haxe (E-066, owner: C files only in backends): GTE dot3 into
+gte.Gte's @:headerCode, bulk ops into shim.Bulk's; native/recompsx_gte.h and recompsx_bulk.h deleted; SH-4 code
+identical, conformance unchanged. Codex's ScalarPlan on the Dreamcast (E-065): both games build and run, desktop
+C++ C3 9000 4de78425 / CB 3000 db892c4b, model times unchanged (its helpers barely run). Next: GPU path per polygon.
+
+2026-10-01 [codex] Inspected rev.ng 0f1f7d4a: ABI liveness/reaching definitions and fixed point,
+signature/call rewriting, CSV promotion, stack segregation and layout recovery; sources in ADR-0044.
+Distinguished decompilation assumptions from executable recompilation; no generator change/tests.
+Next: per-call effects/outputs plus boundary-state reconstruction, then general signature lowering.
+
+2026-10-01 [codex] Extended scalar signatures with checked read-only spans; preserved MMIO,
+entry/resume behavior and all final GPRs. Coverage C3 5->13, CB 9->16 helpers; JS +1,565 bytes.
+559 tool checks, 42 JS groups (329de455); six JS/C++ groups agree, memory scalar 852cd0fd.
+C3 9000 4de78425 / CB 3000 db892c4b retained; no speed claim. Next: call-group output/effect proof.
+
 2026-10-01 [claude] Pushed the Dreamcast rounds (ledger E-001..E-063); Crash 3's placement is g44p3's, the one
 measured (round 5's colours were not built). Researched a CpuState-free translation (E-064): Crash 3's hot engine
 code takes 6-21 register inputs, Crash Bash's at most 4; Crash 3's hot shards compile 21-28 % larger with registers as
 statics or locals than as CpuState fields. Next: the GPU path per polygon, the per-call overhead.
+
+2026-10-01 [codex] Added bounded scalar signature recovery/value SSA, guarded direct calls and
+state-compatible wrappers (ADR-0044), --no-scalar control, hook/overlay/dedup regressions.
+539 tool checks; JS gate 329de455; scalar JS/C++ 4ebe3340 (124013 values); C3 9000 4de78425,
+CB 3000 db892c4b unchanged. Coverage 5/9 helpers. Next: proven call-group output/effect analysis.
+
+2026-10-01 [codex] Researched CpuState-free Haxe generation against current FunctionIR/Emitter,
+ADR-0029 and rev.ng's ABI promotion. No implementation or speed claim; existing write summaries
+are a starting point, not recovered function signatures. Next: prove a small parameter/return
+helper path with explicit effects and state reconstruction, including staleAcrossCalls coverage.
 
 2026-10-01 [claude] Dreamcast perf round 4 (ledger E-053..E-058): static CpuState, RTPT one copy (MemA.opaque),
 two-window code placement, stack 235 lines, data colours (58, CpuState incl.) and halves; RXCOUNT in the model.

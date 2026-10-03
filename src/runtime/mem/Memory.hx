@@ -210,11 +210,20 @@ class Memory {
 		final r = a & RAM_DECODE_MASK;
 		var at = shim.Arena.spanNone();
 		if (r + hi < RAM_SIZE && r + lo >= 0) at = shim.Arena.spanAt(r);
-		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) {
-			final s = a & (SCRATCH_SIZE - 1);
-			if (s + lo >= 0 && s + hi < SCRATCH_SIZE) at = shim.Arena.spanAt(SCRATCH_OFFSET + s);
+		else {
+			// The scratchpad: `d`, the address's distance from it with the segment bits dropped, is
+			// the offset into it for one of its 1 KB and at least 1 KB for anything else (another
+			// page, the BIOS at 0x1FC00000), so each end of the run is one compare — where a match
+			// of the page, a mask of the offset and the same two compares were nine instructions
+			// and four constants (23 cycles against 16 under the cache model's issue rules,
+			// scripts/dc-issue-sim.py). Crash Bandicoot: Warped's renderer keeps its state there
+			// and took one at nearly every call, Crash Bash keeps its stack there. A run whose
+			// base is just past the scratchpad and whose offsets are negative is taken here where
+			// the page match had declined it: its bytes are the scratchpad's either way.
+			final d = (a ^ SCRATCH_BASE) & 0x1FFFFFFF;
+			if (d + hi < SCRATCH_SIZE && d + lo >= 0) at = shim.Arena.spanAt(SCRATCH_OFFSET + d);
 			else {}
-		} else {}
+		}
 		return at;
 	}
 
@@ -223,6 +232,21 @@ class Memory {
 
 	/** Whether `s` is a span, rather than none. */
 	public static inline function spanOk(s:shim.Span):Bool return shim.Arena.spanOk(s);
+
+	/** Rebase an already checked span. The generator must prove that the new anchor and
+	    every access remain inside its checked range, and test spanOk before calling this.
+	    This changes only the pointer/index; it performs no guest read or address decode. */
+	public static inline function spanOffset(s:shim.Span, offset:Int):shim.Span
+		return shim.Arena.spanAt((shim.Arena.spanIndex(s) + offset) | 0);
+
+	/** Non-alias proof for byte ranges in already validated spans. Arena indices account for
+	    guest RAM mirrors and separate scratchpad backing without comparing host pointers.
+	    All bytes must lie in the checked ranges; callers check spanOk before this call. */
+	public static function spansDisjoint(a:shim.Span, ao:Int, aw:Int, b:shim.Span, bo:Int, bw:Int):Bool {
+		final ai = (shim.Arena.spanIndex(a) + ao) | 0;
+		final bi = (shim.Arena.spanIndex(b) + bo) | 0;
+		return ((ai + aw) | 0) <= bi || ((bi + bw) | 0) <= ai;
+	}
 
 	/**
 		A span after its base register was stepped by `imm` (`addiu r, r, imm`): the index moved
@@ -259,6 +283,26 @@ class Memory {
 	public static inline function spanWrite16(s:shim.Span, k:Int, v:Int):Void shim.Arena.spanWrite16(s, k, v);
 
 	public static inline function spanWrite32(s:shim.Span, k:Int, v:Int):Void shim.Arena.spanWrite32(s, k, v);
+
+	/**
+		`lwl` and `lwr` through a span (the recompiler's scalar helpers, ADR-0044): the aligned word
+		that holds byte `k` of the span, merged into `current` as `lwl` and `lwr` below merge it. A
+		span is checked over whole aligned words — RAM and the scratchpad both start and end on one
+		in the arena — so the word is in the span's region whenever byte `k` is, and the arena index
+		has the guest address's alignment. The merges as shifts: `sh` is 0, 8, 16 or 24.
+	**/
+	public static inline function spanLwl(s:shim.Span, k:Int, current:Int):Int {
+		final sh = ((shim.Arena.spanIndex(s) + k) & 3) << 3;
+		final w = shim.Arena.spanRead32(s, (k - (sh >> 3)) | 0);
+		return (current & (0x00FFFFFF >> sh)) | (w << (24 - sh));
+	}
+
+	public static inline function spanLwr(s:shim.Span, k:Int, current:Int):Int {
+		final sh = ((shim.Arena.spanIndex(s) + k) & 3) << 3;
+		final w = shim.Arena.spanRead32(s, (k - (sh >> 3)) | 0);
+		// The lanes lwr keeps are the top `sh` bits: none at 0.
+		return (current & ~(-1 >>> sh)) | ((w >>> sh) | 0);
+	}
 
 	// ---- unaligned access ------------------------------------------------------------------------
 

@@ -15,8 +15,9 @@ under exactly these, and the portable runtime cannot name sh4zam.
 ## Decision
 
 Add `shim.Bulk` — `copy` (memmove), `equal`, `fill16`, `prefetch`, offsets in bytes — with an
-implementation per target: C++ through `native/recompsx_bulk.h`, which chooses sh4zam on the
-Dreamcast (`_arch_dreamcast`) and the C library or the compiler builtin elsewhere; JavaScript
+implementation per target: C++ through C its header-only class carries (`@:headerCode`; until
+2026-10-01 a file of its own, `native/recompsx_bulk.h` — C files are now a backend's alone), which
+chooses sh4zam on the Dreamcast (`_arch_dreamcast`) and the C library or the compiler builtin elsewhere; JavaScript
 through `copyWithin`, typed-array loops and `fill` (no view allocated per call); the JVM through
 byte loops. The runtime uses it where each run is provably equivalent to the per-element code,
 and falls back to that code everywhere else:

@@ -9,3 +9,7 @@
 # with it on both targets — which is the only evidence that counts for a project whose promise is
 # bit-identical output. It also gives an immature C++ generator a smaller typed AST to chew on.
 -D analyzer-optimize
+
+# Whole-program dead-code elimination: remove unreachable types and fields as well as the
+# analyzer's local simplifications. Tests and benchmarks must use the same mode as game builds.
+-dce full

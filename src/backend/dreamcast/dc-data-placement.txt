@@ -2,71 +2,101 @@
 # a colour being the variable's first line, mod 512, in the 16 KB direct-mapped operand cache.
 # scripts/dc-layout.py place lists .data and .bss in full at every Dreamcast link with these first
 # (scripts/build-dc.sh). Global: the same for every game, since the variables are the runtime's and
-# the backend's, not a game's (docs/perf/dreamcast-ledger.md, E-007, E-022, E-043, E-058).
+# the backend's, not a game's (docs/perf/dreamcast-ledger.md, E-007, E-022, E-043, E-058, E-069, E-100, E-107, E-109).
 #
-# Made 2026-10-01 by dc-ocache-sim dopt over three windows' operand traces — Crash 3's title screen
-# and its gameplay demo, Crash Bash's Ballistix; 20 M of 40 M accesses each — taken from builds with
-# the code where it now is (each game's dc-placement.txt, E-056's code), with the main stack at its
-# new start (backend_kos.c, 235 lines below the top of RAM: dopt's shift 306 from 441): the 58
-# variables, CpuState's machine instance (recompsx_cpustate, a fixed address since E-054) among them,
-# one colour each for every game, two rounds — each window's operand cost 0.59, 0.78 and 0.73 of its
-# link's. Regenerate it the same way — after the code placements, from traces of a build that has
-# them — when the hot variables change.
-257 .bss.recompsx_gte
-420 .bss.recompsx_cpustate
-74 .bss.recompsx_mem
-504 .bss.recompsx_gpu
-299 .bss.g_cmds
-268 .bss.g_states
-237 .bss.g_hdrc
-61 .bss.g_semi_binds
-234 .data.pvr_dr_addr
-357 .bss.recompsx_spu
-228 .bss.g_run_hdr
-242 .bss.recompsx_timers
-241 .bss.g_cmd_count
-226 .bss.g_pull
-464 .bss.g_bake
-174 .bss.g_prio
-305 .bss.g_pal4
-235 .bss.g_run_over
-14 .bss.g_state_count
-128 .bss.g_frame_shown
-322 .bss._ZN4core9Scheduler10activeBitsE
-240 .data._ZN4core9Scheduler8nextSlotE
-124 .bss._ZN3gpu3Gpu7opCountE
-238 .bss.g_hdr_hits
-281 .rodata._ZL12recompsx_fns
-268 .data.g_scene_dirty
-141 .bss._ZN3gpu3Gpu10wholeWordsE
-133 .bss.g_where_depth
-205 .bss.g_bright_prims
-333 .bss._ZN3gpu3Gpu6packetE
-162 .bss._ZN4core9Scheduler3dueE
-387 .bss.g_pal_memo
-256 .data.g_where
-97 .data._ZN3dma3Dma6listAtE
-496 .bss._ZN4core9Scheduler5firedE
-279 .bss.g_page4
-149 .bss.g_where_outer
-165 .bss._ZN4core3Irq4statE
-362 .bss._ZN3dma3Dma9listClockE
-381 .bss._ZN3dma3Dma9listLinksE
-130 .bss._ZN3dma3Dma10wordsToGpuE
-433 .bss._ZN6kernel7KEvents7evFlagsE
-188 .data.g_clip_y1
-159 .bss.g_clip_y0
-107 .data.g_clip_x1
-98 .bss.g_clip_x0
-391 .bss._ZN3mem6Memory7machineE
-471 .rodata.none.0
-432 .bss._ZN4core3Irq4maskE
-132 .bss.g_disp
-328 .bss.g_spu_pcm
-223 .data.g_tex_frame
-211 .data.g_pal_memo_gen
-0 .bss._ZN6timers6Timers7reachedE
-0 .bss._ZN6timers6Timers6anchorE
-0 .bss._ZN6timers6Timers6targetE
-0 .bss._ZN6timers6Timers4baseE
-0 .bss._ZN6timers6Timers4modeE
+# Made 2026-10-03 (round r109, E-109; first E-100) by dc-ocache-sim dopt over three windows' operand
+# traces — Crash 3's title screen and its gameplay demo, 20 M of 40 M accesses each, and Crash Bash's
+# Ballistix window in all three of its phases (the match, a disc load at 19840, the scene after it at
+# 20100: 14 M + 3 M + 3 M joined) — taken from builds with the code where it now is (each game's
+# dc-placement.txt instruction colours of the same round, r109p1, the code of E-098..E-109), with the
+# main stack at its start (backend_kos.c, 235 lines below the top of RAM): the 83 variables — the 80
+# of E-107 and three a window now touches 10,000 times in 20 M (the pacer's next_deadline,
+# TimeBase.perLine and Gpu.texPage, which GPUSTAT reads take: the disc load polls it ~2,900 times a
+# vblank) — one colour each for every game, two rounds: each window's operand cost 0.892, 0.980 and
+# 0.932 of its link's (the literal-pool halves were then chosen with these). Regenerate it the same
+# way — after the code placements, from traces of a build that has them — when the hot variables
+# change (out/_work/round3.sh in the session that made it; ledger E-100, E-108).
+#
+149 .bss.recompsx_cpustate
+408 .bss.recompsx_gte
+14 .bss.recompsx_gpu
+186 .bss.recompsx_mem
+207 .bss.g_cmds
+338 .bss.g_states
+48 .bss.g_semi_binds
+498 .bss.recompsx_timers
+321 .bss.recompsx_spu
+391 .bss.g_sres
+181 .bss.g_uv256
+135 .bss.recompsx_sched
+10 .bss.g_hdrc
+101 .data.pvr_dr_addr
+271 .bss.g_cmd_count
+155 .bss.g_bake
+221 .bss.g_pull
+261 .bss.g_run_over
+310 .bss.g_pal4
+33 .bss.g_state_cur
+43 .bss.g_state_count
+259 .bss.g_frame_shown
+106 .bss._ZN3gpu3Gpu7opCountE
+173 .rodata._ZL12recompsx_fns
+492 .bss._ZN3gpu3Gpu10wholeWordsE
+468 .data.g_scene_dirty
+303 .bss._ZN3mem6Memory7machineE
+293 .bss.g_where_depth
+126 .bss._ZN3gpu3Gpu6packetE
+105 .bss.dc_boot_time
+298 .data.g_where
+272 .data._ZN3dma3Dma6listAtE
+252 .bss.g_bright_prims
+160 .bss.g_prio
+51 .bss.next_deadline.1
+103 .bss._ZN4core8TimeBase7perLineE
+32 .bss._ZN7FnTable4FASTE
+461 .bss.g_sdedup
+299 .bss.g_area_w
+80 .bss.g_hdr_hits
+180 .bss._ZN4core3Irq4statE
+81 .bss.g_tbind_gen
+69 .bss._ZN6kernel7KEvents7evFlagsE
+273 .bss.g_where_outer
+253 .bss._ZN3dma3Dma9listLinksE
+301 .bss._ZN3dma3Dma9listClockE
+66 .bss._ZN3dma3Dma10wordsToGpuE
+85 .data.g_run_hdr_p
+389 .bss.g_pal_memo
+31 .bss.g_clip_y0
+119 .data.g_clip_x1
+137 .bss.g_clip_x0
+39 .data.g_clip_y1
+68 .bss._ZN4core3Irq4maskE
+123 .bss._ZN3gpu3Gpu7texPageE
+257 .bss.g_disp
+134 .bss._ZN4core9Scheduler5ownerE
+261 .bss._ZN6kernel7KEvents11postedCountE
+81 .bss.g_page4
+103 .rodata.none.0
+494 .bss.maple_state
+401 .bss._ZN3spu3Spu8softMaskE
+503 .bss.g_tbind
+381 .bss.g_cls_memo
+273 .data.g_tex_frame
+196 .bss.g_spu_pcm
+71 .bss.inside_int
+257 .bss.g_run_hdr
+73 .bss._ZN4core12ScalarResult6value1E
+337 .bss._ZN4core7Runtime6runnerE
+346 .bss.g_samp_hit
+510 .bss._ZN6kernel7KEvents7evClassE
+272 .data.g_pal_memo_gen
+419 .bss._ZN3gpu3Gpu6pixelsE
+145 .bss._ZN3gpu3Gpu2vxE
+146 .bss._ZN3gpu3Gpu2vyE
+148 .bss._ZN3gpu3Gpu2vcE
+345 .bss.g_samp_key
+338 .bss._ZN3spu3Spu3ramE
+130 .bss._ZN3gpu3Gpu19drawAreaBottomRightE
+467 .bss._ZN3gpu4Vram4dataE
+505 .bss.g_spread
+253 .bss.g_semi_next

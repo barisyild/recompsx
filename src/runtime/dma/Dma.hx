@@ -264,7 +264,22 @@ class Dma {
 			else {
 				links++;
 				if (links > 0x10000) state = LIST_RUNAWAY;
-				else addr = header & 0x1FFFFC;
+				else {
+					addr = header & 0x1FFFFC;
+					// An ordering table's untouched entries follow one another by the hundred: each
+					// is a link and the channel's cycle, no words, and no GPU work — this node took
+					// what there was, and nothing has drawn since. The loop above for one costs its
+					// counters kept in memory around the GPU's calls; here they stay in registers.
+					// Exactly as that loop would walk them: while one is empty (no count, no end
+					// bit), the step has cycles left and the link count is short of a runaway.
+					var next = MemA.get32(ram, addr);
+					while ((next & 0xFF800000) == 0 && spent < LIST_STEP && links < 0x10000) {
+						spent++;
+						links++;
+						addr = next & 0x1FFFFC;
+						next = MemA.get32(ram, addr);
+					}
+				}
 			}
 		}
 		listLinks = links;

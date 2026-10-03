@@ -175,8 +175,10 @@ class Irq {
 		Runs the game's handlers for whatever is pending.
 
 		Called from `Runtime.pump`, never from anywhere else, because this is where recompiled
-		code gets re-entered and only a pump point guarantees the CPU state is consistent.
+		code gets re-entered and only a pump point guarantees the CPU state is consistent — and
+		only with something `pending`, so out of line.
 	**/
+	@:specifier("__attribute__((noinline))")
 	public static function dispatch(ctx:CpuState):Void {
 		if (!deliverable(ctx)) return blocked(ctx);
 		else {}

@@ -243,7 +243,9 @@ class KEvents {
 		run on the game's own registers returned into a loop whose `$t` registers it had used.
 		Inside interrupt dispatch the events wait for the pump after it, as they would wait on
 		hardware behind the handler's disabled interrupts; the exception stack is in use there.
+		Out of line: the pump calls it only when something is posted (`posted`).
 	**/
+	@:specifier("__attribute__((noinline))")
 	public static function drain(ctx:CpuState):Void {
 		if (postedCount == 0 || core.Irq.dispatching()) return;
 		else {}
@@ -255,6 +257,11 @@ class KEvents {
 		ctx.sp = Kernel.EXCEPTION_STACK_TOP;
 		for (i in 0...n) deliver(ctx, postedClass[i], postedSpec[i]);
 		core.Irq.copyRegisters(drainSaved, ctx);
+	}
+
+	/** Whether a device event waits for `drain`: the pump's test before it calls. */
+	public static inline function posted():Bool {
+		return postedCount != 0;
 	}
 
 	static var drainSaved:CpuState;

@@ -58,10 +58,87 @@ RUN TIME (portable subset: reflaxe.CPP C++17 now, JVM later)
   `(ctx:CpuState)->Void`. `jal` to a known target is a direct static call;
   `jr $ra` is a return; indirect calls go through a generated address→function table.
 - **Registers in CpuState, structured regions** (ADR-0029, ADR-0007): registers are `CpuState`
-  fields, read and written in place, so no call or trap copies anything; a looping leaf (no guest
+  fields at architectural boundaries; a looping leaf (no guest
   call or trap) keeps them in locals, published at its exits and due pumps.
   Linear chains use Haxe fallthrough and single-block loops use native `while`; remaining CFGs
-  use `while (true) switch (bb)`. Every block retains its stable resume index, with one body.
+  use `while (true) switch (bb)`. Every public block entry retains its stable resume index.
+- **Recovered scalar signatures** (ADR-0044): bounded linear leaves and acyclic call trees can compute
+  with ordinary Haxe arguments and immutable value SSA. One computed result uses the Int
+  return; additional distinct results use allocation-free ABI words, consumed immediately
+  under a no-callback/no-suspension contract. Constants, aliases and affine incoming values
+  are reconstructed at the boundary. Entry adapters retain CpuState for events, public/interior
+  dispatch and observable results. CFG joins use phi selections and return path-dependent
+  counters through the same ABI contract. Build-time Boolean proofs simplify repeated/complementary
+  conditions, phi choices and path charges using immutable SSA identities. A parameter disappears
+  only when results, effects and accounting no longer need it. Helpers may take several checked plain-memory
+  spans, preserving aliased load/store order; setters with no changed GPR return `Void`.
+  Proved byte-range values can replace repeated loads; writes invalidate overlapping values
+  and all values in other, possibly aliased spans. Every write remains observable in guest RAM.
+  CFG loads/stores execute under block reach predicates. At joins, only exact byte/value facts
+  shared by every predecessor survive. All possible spans are preflighted inside the ordinary-entry guard; interior entries
+  and failed preflight retain the original CFG.
+  All accesses are preflighted before any effect. Failed proofs use the original body for MMIO
+  and irregular addresses. A direct caller can bypass the memory entry adapter only when its
+  existing live spans cover every callee access, with runtime validity/alignment and entry-event
+  guards. A shared `_withSpans` adapter owns these checks and result publication; callers pass
+  spans anchored at callee inputs, and the computation retains its state-free `_value` signature.
+  Block-local immutable value facts may prove an affine copy from another span's register;
+  effects and public entries discard these facts. Shifts stay in the donor range and occur only
+  after its validity check. The adapter introduces no guest checkpoint or dispatch entry.
+  Donor registers participate in span liveness after the delay slot; all failed proofs
+  retain the complete adapter. No calling-convention or non-aliasing assumption supplies this proof.
+  A proved resident direct callee may be another ordinary `_value` call within a helper.
+  Inputs, return-address restoration and child memory spans must be proved from SSA values;
+  every secondary result/accounting word is captured before the next call. An entry guard
+  requires the entire bounded call tree to finish before an event or cooperative deadline,
+  with no pre-existing unwind. Otherwise the original checkpoints and guest frames execute.
+  Child may-write ranges preserve disjoint saved values in the same checked view. For other
+  views, a reused value requires an entry check that the physical byte ranges are disjoint;
+  RAM mirrors are resolved through arena indices. Failed checks use the entire original body.
+  Child alias conditions translate into the parent preflight too. Recursive, unknown and hooked
+  calls remain on the general path; no callee body is expanded into its caller.
+  Loaded addresses carry immutable read provenance. Entry preflight checks the source span
+  before sampling its pointer, then checks dependent spans recursively. Earlier possible writes
+  must be disjoint from that source; later writes cannot replace the saved value. Calls
+  translate source ranges, prior writes and returned-pointer provenance into the caller.
+  Failed proofs execute the entire original body; preflight never samples MMIO or writes RAM.
+  Loaded views cannot use the borrowed-span adapter. General changed-pointer continuations
+  and differing-pointer phis still require further recovery.
+  Proved entry samples can become Int parameters, replacing repeated body reads. Helper
+  signatures retain only spans used by live computations/effects/calls; preflight still
+  checks every original access. Equal entry samples share a value without merging guest
+  memory versions or dropping any alias exclusion. The six-parameter limit is unchanged,
+  and entry preflight has its own six-span limit. Calls propagate these inputs directly.
+  Outputs proved unconditionally equal to an entry sample plus a constant are reconstructed
+  at the boundary, avoiding redundant helper arguments and result words. Entirely known
+  memory-helper outputs permit Void returns while effects/accounting remain ordered. Child
+  calls preserve read versions and reach predicates when reconstructing their own outputs;
+  pointer provenance alone never authorizes dropping a computed result.
+  An unconditional child invocation can export its independently proved numeric equality;
+  the caller may establish the required read guard and eliminate an otherwise dead call.
+  Effects and dynamic charges retain the call, while fixed packed charges propagate through
+  nested summaries. Narrow forwarded conversions keep exact read-version/extension metadata.
+  Every original access remains checked even when no host call survives.
+  Analysis admits up to 256 guest instructions per function; a separate 96-unit live-body
+  budget limits emitted definitions/effects/results/accounting. Dead guest instructions
+  retain their charges. Parameter, preflight and transitive accounting bounds stay intact,
+  and larger recovered helpers receive no forced inline annotation.
+  Direct callers can omit memory-helper results proved overwritten on every path before an
+  observation. All original access/alias guards, writes, path costs and full fallback entries
+  remain. An adapter either reuses an identical proved borrowed-span preflight or constructs
+  the complete preflight after its entry checks. All-dead read results permit Void helpers;
+  device accesses still execute through the original callee. Public entries keep full state.
+  This is bounded signature recovery, not a replacement for guest RAM, hardware state or general
+  calling-convention recovery.
+- **Values between observations** (ADR-0044): pure arithmetic intervals inside ordinary functions
+  use immutable values and exact expression sharing, then reconstruct the changed GPRs before
+  any effect. Experimental `--value-cfg` regions also carry values across Haxe branches in local
+  merge variables; every public entry captures current state and every exit publishes changed
+  GPRs. Values never survive a call, memory access, trap, back edge or pump. Span metadata updates
+  keep their original order and operands. The next region starts from current CpuState, so nothing
+  stale is restored over a callee's result. Looping-leaf locals keep their existing implementation.
+  The CFG extension is off by default: current game measurements do not establish a speed gain.
+  Neither pass adds a whole-function register cache or extra runtime helper calls.
 - **Branch delay slots** are resolved at build time: latch the condition/target, write any link,
   execute the slot once, then transfer. The slot may overwrite the branch's input registers.
 - **Cooperative scheduling.** Codegen adds `ctx.cycles = (ctx.cycles + N) | 0` per basic block; at loop

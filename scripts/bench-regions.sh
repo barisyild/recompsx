@@ -8,10 +8,10 @@ OUT=out/_regions_bench
 mkdir -p "$OUT"
 haxe build/common.hxml -cp tools/recomp/src -cp tools/recomp/test -main TestCodegen --interp
 haxe build/common.hxml -cp tests/bench -cp out/_codegen/fixtures -cp src/runtime \
-  -cp src/shims/js -main RegionsBench -js "$OUT/bench.js" -D js-es=6 -dce full
+  -cp src/shims/js -main RegionsBench -js "$OUT/bench.js" -D js-es=6
 haxe build/common.hxml build/reflaxe-cpp.hxml -cp tests/bench -cp out/_codegen/fixtures \
   -cp src/runtime -cp src/shims/cxx -D mainClass=RegionsBench -main RegionsBench \
-  -D "cpp-output=$OUT/cpp" -dce full > "$OUT/cpp.log" 2>&1
+  -D "cpp-output=$OUT/cpp" > "$OUT/cpp.log" 2>&1
 ./scripts/build-pc.sh _regions_bench --null > "$OUT/native.log" 2>&1
 
 # Host timing is kept outside guest state. Alternate order, discard one warm-up per mode,

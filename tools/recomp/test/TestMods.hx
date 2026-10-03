@@ -49,6 +49,8 @@ class TestMods {
 			final a = hooked.files.get("Ovl_a_01_80020000.hx");
 			final b = hooked.files.get("Ovl_b_02_80020000.hx");
 			Assert.isTrue(enters(a, "0x80020040"), "overlay a's function enters the host");
+			Assert.isTrue(a.indexOf('f_80020040_value(') < 0, "hooked code has no scalar entry to bypass its hook");
+			Assert.isTrue(b.indexOf('f_80020040_value(') >= 0, "a hook in another universe does not disable a safe scalar entry");
 			Assert.isTrue(!enters(b, "0x80020040"), "overlay b's, at the same address, does not");
 			Assert.isTrue(b.indexOf("public static function f_80020040(") >= 0,
 				"and b now emits its own copy, since the two texts differ");
