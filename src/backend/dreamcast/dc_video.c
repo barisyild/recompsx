@@ -189,22 +189,27 @@ static void upload_24bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, p
  * screen, at every loading pause). So each display buffer has a picture: the PVR renders the
  * records into it, starting from the picture as it was, and the screen shows the displayed
  * buffer's. A record is rendered once. Pictures are RGB565, the PVR's own 16 bits, copied 1:1 with
- * point sampling and dithering off, so a picture redrawn every frame does not drift. */
+ * point sampling and dithering off, so a picture redrawn every frame does not drift.
+ *
+ * A picture is the screen's size, 640x480 (ADR-0055): the buffer's records drawn as the screen
+ * would draw them, at the Dreamcast's own resolution, and shown 1:1 — the sharpness of drawing
+ * straight to the screen, which a picture at the buffer's resolution scaled up lost. A render draws
+ * into the picture it starts from: the PVR draws a tile at a time, and the copy it starts from is
+ * 1:1 and point sampled, so each tile reads only its own pixels, before it writes them. That keeps
+ * two memories where a copy elsewhere and a swap needed three (1.8 MB at this size). */
 
 int g_pic_ok, g_pic_active, g_pic_done;
-static pvr_ptr_t g_pic_mem[PIC_MEMS];
-static pvr_poly_hdr_t g_pic_point[PIC_MEMS];    /* point sampled: a base, and a screen at 2:1 */
-static pvr_poly_hdr_t g_pic_smooth[PIC_MEMS];   /* bilinear: a screen at any other ratio */
+static pvr_ptr_t g_pic_mem[PIC_N];
+static pvr_poly_hdr_t g_pic_point[PIC_N];       /* point sampled: the base, the screen, a copy */
 static gpic_t g_pic[PIC_N];
-static int g_pic_spare;                         /* the memory the next render goes into */
+float g_pic_ru[PIC_N], g_pic_rv[PIC_N];         /* screen pixels per buffer pixel, over the size */
 
 const pvr_poly_hdr_t* g_base_hdr;
 float g_base_x1, g_base_y1, g_base_u1, g_base_v1;
 
-static void pic_compile(pvr_poly_hdr_t* hdr, pvr_ptr_t mem, int filter) {
+static void pic_compile(pvr_poly_hdr_t* hdr, pvr_ptr_t mem) {
     pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
-                     PIC_W, PIC_H, mem, filter);
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PIC_FMT, PIC_TEXW, PIC_TEXH, mem, PVR_FILTER_NONE);
     cxt.blend.src = PVR_BLEND_ONE;
     cxt.blend.dst = PVR_BLEND_ZERO;
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
@@ -215,29 +220,30 @@ static void pic_compile(pvr_poly_hdr_t* hdr, pvr_ptr_t mem, int filter) {
     pvr_poly_compile(hdr, &cxt);
 }
 
-/* At bp_init, once g_txr exists: the pictures' memories are its slots 1-3 at PIC_W x PIC_H. */
+/* At bp_init, once g_txr exists (TXR_BYTES): the pictures' memories follow slot 0 at
+ * PIC_SRC_W x PIC_SRC_H, each 32-byte aligned (a whole number of 4 KB from g_txr). */
 int pictures_init(void) {
-    if(!g_txr || (size_t)(PIC_MEMS + 1) * PIC_W * PIC_H > (size_t)TXR_MAX_W * TXR_MAX_H) return 0;
+    if(!g_txr) return 0;
     else {}
-    for(int k = 0; k < PIC_MEMS; k++) {
-        g_pic_mem[k] = (pvr_ptr_t)((uint8_t*)g_txr + (size_t)(k + 1) * PIC_W * PIC_H * 2);
-        pic_compile(&g_pic_point[k], g_pic_mem[k], PVR_FILTER_NONE);
-        pic_compile(&g_pic_smooth[k], g_pic_mem[k], PVR_FILTER_BILINEAR);
-    }
     for(int i = 0; i < PIC_N; i++) {
-        g_pic[i].mem = i;
+        g_pic_mem[i] = (pvr_ptr_t)((uint8_t*)g_txr + (size_t)PIC_SRC_W * PIC_SRC_H * 2
+                                   + (size_t)i * PIC_BYTES);
+        pic_compile(&g_pic_point[i], g_pic_mem[i]);
         g_pic[i].valid = 0;
         g_pic[i].w = 0;
         g_pic[i].used = 0;
+        g_pic_ru[i] = 1.0f / (float)PIC_TEXW;
+        g_pic_rv[i] = 1.0f / (float)PIC_TEXH;
     }
-    g_pic_spare = PIC_N;
+    /* One stride for every stride texture of a scene; the pictures are the only ones. */
+    pvr_txr_set_stride(PIC_W);
     g_pic_ok = 1;
     return 1;
 }
 
-/* A present the pictures cannot show (24-bit video, a blank display, a mode larger than PIC_W x
- * PIC_H): the pictures may miss what it showed, so they start again from emulated VRAM, and g_txr's
- * slots are all the background's again (declared anew at the next upload). */
+/* A present the pictures cannot show (24-bit video, a blank display, a mode larger than PIC_SRC_W x
+ * PIC_SRC_H): the pictures may miss what it showed, so they start again from emulated VRAM, and
+ * g_txr's slots are all the background's again (declared anew at the next upload). */
 static void pictures_drop(void) {
     for(int i = 0; i < PIC_N; i++) g_pic[i].valid = 0;
     g_pic_active = 0;
@@ -247,10 +253,10 @@ static void pictures_drop(void) {
     g_scene_dirty = 1;      /* the pictures ignore it (present_pictures); the old path must not */
 }
 
-/* The first present through the pictures: g_txr at PIC_W x PIC_H, slot 0 the background's alone,
- * slots 1-3 the pictures' memories, none of which holds a picture yet. */
+/* The first present through the pictures: g_txr at PIC_SRC_W x PIC_SRC_H, slot 0 the background's
+ * alone, the pictures' memories after it, none of which holds a picture yet. */
 static void pictures_enter(void) {
-    declare_texture(PIC_W, PIC_H);
+    declare_texture(PIC_SRC_W, PIC_SRC_H);
     g_bg_slots = 1;
     for(int k = 1; k < BG_SLOTS; k++) g_bgs[k].valid = 0;
     for(int i = 0; i < PIC_N; i++) g_pic[i].valid = 0;
@@ -280,20 +286,27 @@ static gpic_t* pic_take(int x, int y, int w, int h) {
     }
     p->x = x; p->y = y; p->w = w; p->h = h;
     p->valid = 0;
+    /* Its texel coordinates, in the buffer's pixels, reach the picture's through its scale. */
+    const int i = (int)(p - g_pic);
+    g_pic_ru[i] = (float)PIC_W / ((float)w * (float)PIC_TEXW);
+    g_pic_rv[i] = (float)PIC_H / ((float)h * (float)PIC_TEXH);
     return p;
 }
 
 /* A 15-bit texture page whose corner lies in a buffer with a picture (ADR-0054): the picture, as a
- * texture of PIC_TEXDIM x PIC_TEXDIM — its 256 lines are the upper half, and a page's coordinates
- * (0..255 from a corner inside the buffer) stay in them — and the page's offset into it. During a
- * render of that same buffer the picture is the one it started from. */
-int pic_page(int tx, int ty, pvr_ptr_t* mem, int* ou, int* ov) {
+ * texture of PIC_TEXW x PIC_TEXH bound as `dim` PIC_TEXDIM + its index — a page's coordinates
+ * (0..255 from a corner inside the buffer) reach its pixels through the picture's scale — and the
+ * page's offset into it. During a render of that same buffer the picture is the one it started from
+ * in an emulator, which keeps a render apart from the texture it read; on a console, where the
+ * render draws into it a tile at a time, a tile the render has finished already holds the new. */
+int pic_page(int tx, int ty, pvr_ptr_t* mem, int* dim, int* ou, int* ov) {
     if(!g_pic_active) return 0;
     else {}
     for(int i = 0; i < PIC_N; i++) {
         const gpic_t* p = &g_pic[i];
         if(p->valid && tx >= p->x && tx < p->x + p->w && ty >= p->y && ty < p->y + p->h) {
-            *mem = g_pic_mem[p->mem];
+            *mem = g_pic_mem[i];
+            *dim = PIC_TEXDIM + i;
             *ou = p->x - tx;
             *ov = p->y - ty;
             return 1;
@@ -302,15 +315,17 @@ int pic_page(int tx, int ty, pvr_ptr_t* mem, int* ou, int* ov) {
     return 0;
 }
 
-/* The picture holding all of a copy's source rectangle, point sampled as it replaces, and its
- * corner (ADR-0054). */
-const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py) {
+/* The picture holding all of a copy's source rectangle, point sampled as it replaces, its corner
+ * and its scale (ADR-0054): a texel coordinate in the buffer's pixels times ru, rv. */
+const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py, float* ru, float* rv) {
     for(int i = 0; i < PIC_N; i++) {
         const gpic_t* p = &g_pic[i];
         if(p->valid && inside(x, y, w, h, p->x, p->y, p->w, p->h)) {
             *px = p->x;
             *py = p->y;
-            return &g_pic_point[p->mem];
+            *ru = g_pic_ru[i];
+            *rv = g_pic_rv[i];
+            return &g_pic_point[i];
         } else {}
     }
     return NULL;
@@ -379,6 +394,9 @@ static void present_counted(void) {
     g_pal_stale = 0;
     g_pal_live = 0;
     g_mir_decodes = 0;
+    if(g_bake_live > g_bake_live_max) g_bake_live_max = g_bake_live;
+    else {}
+    g_bake_miss_all += g_bake_miss;
     g_bake_live = 0;
     g_bake_decodes = 0;
     g_bake_miss = 0;
@@ -453,25 +471,24 @@ static void render_picture(const uint16_t* vram, int tx, int ty, int tw, int th,
         g_bgs[k].used = g_tex_frame;
         g_hdr = g_bg_hdr[k];
     } else {}
+    const int i = (int)(p - g_pic);
     if(cover < 0) {
-        g_base_x1 = (float)tw;
-        g_base_y1 = (float)th;
+        g_base_x1 = (float)PIC_W;
+        g_base_y1 = (float)PIC_H;
         if(p->valid) {
-            g_base_hdr = &g_pic_point[p->mem];
-            g_base_u1 = (float)tw / (float)PIC_W;
-            g_base_v1 = (float)th / (float)PIC_H;
+            /* The picture itself, 1:1: drawn into it, each tile reads only what it then writes. */
+            g_base_hdr = &g_pic_point[i];
+            g_base_u1 = (float)PIC_W / (float)PIC_TEXW;
+            g_base_v1 = (float)PIC_H / (float)PIC_TEXH;
         } else {
             g_base_hdr = &g_hdr;
             g_base_u1 = (float)tw / (float)g_txw;
             g_base_v1 = (float)th / (float)g_txh;
         }
     } else {}
-    pvr_scene_begin_rtt(g_pic_mem[g_pic_spare], (uint32_t)tw, (uint32_t)th, PIC_W);
+    pvr_scene_begin_rtt(g_pic_mem[i], PIC_W, PIC_H, PIC_W);
     build_scene(tx, ty, tw, th, cover < 0, cover < 0 ? from : cover, 1);
     pvr_scene_finish();
-    const int m = p->mem;
-    p->mem = g_pic_spare;
-    g_pic_spare = m;
     p->valid = 1;
     p->used = g_tex_frame;
 }
@@ -538,8 +555,9 @@ static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh
     g_pic_screens++;
 #endif
     if(p) {
-        put_hdr(&g_pic_smooth[p->mem]);
-        tex_rect(640.0f, 480.0f, (float)sw / (float)PIC_W, (float)sh / (float)PIC_H);
+        /* The screen's own size: a pixel a texel. */
+        put_hdr(&g_pic_point[(int)(p - g_pic)]);
+        tex_rect((float)PIC_W, (float)PIC_H, (float)PIC_W / (float)PIC_TEXW, (float)PIC_H / (float)PIC_TEXH);
         p->used = g_tex_frame;
     } else {}
 #if RECOMPSX_DC_PROFILE_OVERLAY
@@ -576,9 +594,10 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 
     const int blank = (sw <= 0 || sh <= 0);
 
-    /* Hardware drawing of a 15-bit picture up to PIC_W x PIC_H: through the pictures (ADR-0053). */
-    if(g_pic_ok && g_vram != NULL && !blank && !(flags & BP_PRESENT_24BPP) && sw <= PIC_W
-       && sh <= PIC_H) {
+    /* Hardware drawing of a 15-bit picture up to PIC_SRC_W x PIC_SRC_H: through the pictures
+     * (ADR-0053). */
+    if(g_pic_ok && g_vram != NULL && !blank && !(flags & BP_PRESENT_24BPP) && sw <= PIC_SRC_W
+       && sh <= PIC_SRC_H) {
         /* The walk's first part waits for the rest, as below; bounded the same way. */
         const int hold = (flags & BP_PRESENT_DRAWING) && cmd_count() > g_pic_done
                          && g_held < HOLD_MAX;

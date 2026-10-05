@@ -2,8 +2,36 @@
 
 ## Status snapshot
 
+**2026-10-05 (morning): the Dreamcast draws at its own resolution (ADR-0055; a tester's and the
+owner's report).** Crash 3 had looked lower in resolution and blurred since ADR-0053's pictures: each
+display buffer was kept at 512x240 and the screen scaled it up, bilinear.
+- **Pictures are 640x480 now**, whatever the buffer's size (up to 512x256): a frame's records are built
+  at the screen's scale, as the direct render built them, into its buffer's picture, a stride texture
+  (640 a row, declared 1024x512, which Flycast matches a render to texture by), and the screen shows it
+  1:1, point sampled. A render draws into the picture it starts from, the PVR's tiles each reading their
+  own pixels first, so two memories do (1.2 MB, after g_txr's slot 0: g_txr 1 MB → 1.42 MB). Picture
+  pages and copies (ADR-0054) take the picture's scale (`dim` PIC_TEXDIM + i). The owner's questions
+  answered in ADR-0055: why not draw only what is on screen (what a frame does not redraw would be
+  lost — the pause), why not a PlayStation-resolution copy beside a native screen (every frame built
+  twice; the framebuffer cannot be read back as a texture).
+- **The memory came out of the bake pool and broke the DEMO text** (the owner, Flycast): 128 → 76
+  patches with the overlay, every one bound in Crash 3's attract demo, 772 misses by present 5000, the
+  DEMO text through the wrong palette for a frame. Now the 4bpp mirror's pages lend their memory to the
+  pool, four patches each, until a page is first sampled (`page_reclaim`): Crash 3 samples 16 of 32
+  pages (its buffers cover the rest), Crash Bash 20, so the demo's pool is 144, at most 92 bound, no
+  miss. Serial `bench vram` reports it. Global: a game that samples every page keeps 92 (76).
+- **Verified:** Flycast pictures (`--dc-shots`), zoomed against the 512x240 pictures: the demo and the
+  warp room's pause sharp, the pause's frozen game kept, the second transition as before, the DEMO text
+  right at every appearance (wrong at 4756 before the lending). The owner, on Flycast: Crash 3 and
+  Crash Bash ("sorun yok"). Model E-166: before the lending Crash 3's demo 20.87 → 21.57 (cf 17.73 →
+  18.50, re-baking), Crash Bash B210 17.39 → 17.43; with it Crash 3 **20.70** (cf 17.66) and Crash
+  Bash **17.38** (work 11.50): no cost against 2212e1e's 20.87 / 17.39.
+- Tester CDIs: out/dc/crash3-native2-max.cdi, crashbash-native2-max.cdi (the -pic- ones are the
+  512x240 pictures of 2212e1e). The PVR's work at 640x480 — two and a half times the pixels, plus the
+  copy a render starts from and the screen pass — is the console's to measure (`pvr-wait`).
+
 **2026-10-05 (night): Crash 3's level transitions on every target (ADR-0054, the owner's report).**
-Not committed. The transition copies the frame on screen into the other buffer (GP0 80h) and draws it
+Committed as 2212e1e. The transition copies the frame on screen into the other buffer (GP0 80h) and draws it
 back over itself as four turning, semi-transparent textures, with a darkening diamond.
 - **The software rasteriser kept no texel's bit 15** (every target, the reference too): psx-spx says a
   textured pixel writes its texel's bit 15 unless E6h.0 forces it, and a semi-transparent texture
@@ -4154,6 +4182,7 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+2026-10-05 [claude] ADR-0055 (a tester's and the owner's report: Crash 3 blurred on the DC since ADR-0053): pictures 640x480 RGB565 stride textures rendered in place (2 memories, g_txr 1.42 MB), shown 1:1; picture pages/copies at the picture's scale; the 4bpp mirror's unsampled pages lend 4 bake patches each (page_reclaim) — without it 772 misses and a broken DEMO text in Crash 3's demo. Verified by Flycast shots and the owner (both games). E-165's CB column filled (B210 17.39). Model E-166 with the lending: C3 demo 20.70 (cf 17.66, was 20.87), CB B210 17.38 (was 17.39). Next: the PVR's cost at 640x480 on a console (pvr-wait).
 2026-10-05 [claude] ADR-0054 (the owner's report: Crash 3's level transitions): the software rasteriser keeps a texel's bit 15 (psx-spx); bp_gpu_copy + BP_CAP_GPU_COPIES (7) — WebGL copies what it drew (mask bit as depth), the DC draws copies from its pictures and binds a picture as a 15-bit page (512x256, dim_v).
 Digests JS = DC: C3 5000 52875c77, Crash Bash 20300 37eefb07; Raster 1bdad19d JS = C++; conformance JS 64/64; check.sh clean (52 ABI functions); C3 gpu-stream hash 5f877994a1335867 unchanged. Model E-165: C3 demo cf 17.60 → 17.73.
 Both transitions verified frame by frame (JS, WebGL, Flycast with the new --dc-shots); then the browser's colour made five-bit (fbTex = (k+1/2)/32, F cut, mode 0 floored): the first transition within 0.33 of a step of the reference (was 2.1). DC transition confirmed by the owner. Then Crash Bash's hub "CONTROLLER 1-A IS UNPLUGGED" with a DualShock: the multitap answers a long read late (ADR-0042 amended); the owner verified Crash Bash and Crash 3 on Flycast. Gates: test.sh JS 329de455, conformance 64/64, pad tests JS = C++, check.sh clean; digests 52875c77/37eefb07 (standard JS). Committed and pushed at the owner's word. Next: the owner's experiment — the Dreamcast's scene drawn directly at 640x480 (tile-based), persistence by replaying records since the last cover.

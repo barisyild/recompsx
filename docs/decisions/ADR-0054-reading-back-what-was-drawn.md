@@ -73,6 +73,8 @@ Three faults made it what the owner saw:
   - A copy out of a buffer on screen (through the pictures, ADR-0053) is a record, `GCMD_COPY`. It is
     drawn where it falls among the primitives, 1:1, from the source buffer's picture. Anything else is
     a write as before.
+  - (ADR-0055 makes pictures 640x480 stride textures, declared 1024x512, and scales a page's and a
+    copy's coordinates by the picture's own scale; what follows is the first form.)
   - A 15-bit texture page whose corner lies in a buffer with a picture binds that picture. It is
     sampled at the size it was rendered, 512x256: an emulator matches a texture it rendered by address
     and size, and Flycast keeps a 512x240 render as 512x256. V is therefore scaled apart from U

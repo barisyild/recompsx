@@ -34,9 +34,10 @@ static int    g_pal_next;
 gpage4_t  g_page4[PAGE4_N];
 static pvr_ptr_t g_mir_base;
 int       g_mir_decodes;
-gbake_t g_bake[BAKE_MAX];
+gbake_t g_bake[BAKE_SLOTS];
 int     g_bake_n, g_bake_live, g_bake_decodes, g_bake_miss;
 static int g_bake_next;
+static int g_bake_lent0 = -1;     /* the first patch lent by a mirror page; -1 before arming */
 
 gtex_t g_tex[TEX_SLOTS_MAX]; /* [0, big_n) ARGB pool, [big_n, big_n+small_n) 4bpp pool */
 int    g_tex_big_n, g_tex_small_n;        /* allocated at arming time, floor-checked   */
@@ -714,11 +715,43 @@ PROF_NOINLINE int tex_slot(const gstate_t* s, int amode) {
     return slot;
 }
 
+static void bake_unindex(int i);
+
+/* A page sampled for the first time takes its memory back from the bake patches it carried
+ * (ADR-0055) — unless the PVR may still read one of them: then the page waits a frame, and its
+ * primitives take a page slot (the caller's path for a page without a mirror). For good: a page
+ * once sampled keeps its memory. */
+static int page_reclaim(gpage4_t* pg) {
+    if(g_bake_lent0 < 0) { pg->own = 1; return 1; }
+    else {}
+    const int first = g_bake_lent0 + (int)(pg - g_page4) * BAKE_PER_PAGE;
+    for(int k = 0; k < BAKE_PER_PAGE; k++) {
+        const gbake_t* b = &g_bake[first + k];
+        if(b->bound_frame != 0 && b->bound_frame + 1 >= g_tex_frame) return 0;
+        else {}
+    }
+    for(int k = 0; k < BAKE_PER_PAGE; k++) {
+        bake_unindex(first + k);
+        g_bake[first + k].used = 0;
+        g_bake[first + k].gone = 1;
+    }
+    pg->own = 1;
+    return 1;
+}
+
+/* The patches the pool can bake into: its own and those still lent by unsampled mirror pages. */
+int bake_pool_size(void) {
+    int n = 0;
+    for(int i = 0; i < g_bake_n; i++) n += !g_bake[i].gone;
+    return n;
+}
+
 /** The permanent 4bpp mirror slot for a texture page, decoded on first use and after any write
  *  to the VRAM it covers. Never evicted: the slot IS the page, so nothing else can want it. */
 PROF_NOINLINE pvr_ptr_t page4_mirror(const gstate_t* s) {
     gpage4_t* pg = &g_page4[((s->tex_y >> 8) & 1) * PAGE4_COLS + ((s->tex_x >> 6) & 15)];
     if(!pg->mem) return NULL;
+    if(!pg->own && !page_reclaim(pg)) return NULL;
     if(!pg->valid) {
         /* The slot is permanent, but its CONTENTS are not: a VRAM write invalidates the page and
          * the next use re-decodes it — into memory the PVR may still be reading for the previous
@@ -736,6 +769,9 @@ PROF_NOINLINE pvr_ptr_t page4_mirror(const gstate_t* s) {
             pg->defer = 0;
             g_mir_decodes++;
             g_win_mir++;
+#if RECOMPSX_DC_PROFILE
+            g_mir_pages |= 1u << (int)(pg - g_page4);
+#endif
         }
     } else if(pg->part) {
         /* Patched now, not deferred: a strip of one frame's scroll on its way out tears less
@@ -777,13 +813,14 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv, int am
  *  of them sampling a single 64x64 corner — against twelve slots: five whole-page decodes a
  *  frame and slots evicted while the PVR still read them. As patches it is ~26 x 8 KB. */
 /* Every baked patch by its key: open addressing, linear probing, one entry per slot that was ever
- * baked (BAKE_MAX of BAKE_INDEX), so a probe always ends at an empty entry. An entry names the
+ * baked (BAKE_SLOTS of BAKE_INDEX), so a probe always ends at an empty entry. An entry names the
  * slot its key went into; a slot bp_gpu_dirty evicted keeps its entry, which bake_is passes over,
  * until the slot is baked again and the entry goes (bake_unindex). A lookup is a probe or two. The
  * one entry per hash this replaces was a hint: a key it missed — one sharing its entry, and every
  * patch not baked yet — walked the whole pool, a fifth of bake_slot in Crash 3's gameplay (ledger
  * E-114). */
-#define BAKE_INDEX 256
+#define BAKE_INDEX_BITS 9
+#define BAKE_INDEX (1 << BAKE_INDEX_BITS)
 static int16_t g_bake_index[BAKE_INDEX];   /* slot + 1; 0 for none */
 
 static inline int bake_hash_key(uint32_t tex_x, uint32_t tex_y, uint32_t clut_x, uint32_t clut_y,
@@ -791,7 +828,7 @@ static inline int bake_hash_key(uint32_t tex_x, uint32_t tex_y, uint32_t clut_x,
     uint32_t h = tex_x * 0x9E3779B1u ^ tex_y * 0x85EBCA77u;
     h ^= ((clut_x << 16) | clut_y) * 0xC2B2AE3Du;
     h ^= (tu | (tv << 8) | (depth << 16) | (amode << 18)) * 0x27D4EB2Fu;
-    return (int)(h >> 24) & (BAKE_INDEX - 1);
+    return (int)(h >> (32 - BAKE_INDEX_BITS));
 }
 
 static inline int bake_hash(const gstate_t* s, int tu, int tv, int amode) {
@@ -844,7 +881,7 @@ PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
     int slot = -1;
     for(int i = 0; i < g_bake_n; i++) {
         const int c = (g_bake_next + i) % g_bake_n;
-        if(!g_bake[c].used
+        if(!g_bake[c].used && !g_bake[c].gone
            && (g_bake[c].bound_frame == 0 || g_bake[c].bound_frame + 1 < g_tex_frame)) {
             slot = c; break;
         }
@@ -852,7 +889,7 @@ PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
     if(slot < 0) {
         for(int i = 0; i < g_bake_n; i++) {
             const int c = (g_bake_next + i) % g_bake_n;
-            if(g_bake[c].bound_frame + 1 < g_tex_frame) { slot = c; break; }
+            if(!g_bake[c].gone && g_bake[c].bound_frame + 1 < g_tex_frame) { slot = c; break; }
         }
     }
     if(slot < 0) return -1;   /* every entry in flight — the caller approximates, and counts it */
@@ -968,22 +1005,34 @@ void bp_gpu_vram(const uint16_t* vram) {
             g_tex_small_n++;
         }
     }
-    while(g_bake_n < BAKE_MAX && pvr_mem_available() >= BAKE_BYTES + 128 * 1024) {
-        pvr_ptr_t m = pvr_mem_malloc(BAKE_BYTES);
-        if(!m) break;
-        g_bake[g_bake_n++].mem = m;
-    }
+    if(g_bake_lent0 < 0) {
+        while(g_bake_n < BAKE_MAX && pvr_mem_available() >= BAKE_BYTES + 128 * 1024) {
+            pvr_ptr_t m = pvr_mem_malloc(BAKE_BYTES);
+            if(!m) break;
+            g_bake[g_bake_n++].mem = m;
+        }
+        /* Then the mirror pages' memory, each page's patches until it is first sampled. */
+        if(g_mir_base) {
+            g_bake_lent0 = g_bake_n;
+            for(int i = 0; i < PAGE4_N; i++) {
+                for(int k = 0; k < BAKE_PER_PAGE; k++)
+                    g_bake[g_bake_n++].mem = (pvr_ptr_t)((uint8_t*)g_page4[i].mem + (size_t)k * BAKE_BYTES);
+            }
+        } else {}
+    } else {}
     for(int i = 0; i < g_tex_big_n + g_tex_small_n; i++) g_tex[i].used = 0;
     for(int i = 0; i < g_bake_n; i++) g_bake[i].used = 0;
     /* Said out loud, because the failure mode is silent and looks like a rendering bug: a pool
      * that came up short makes its primitives disappear and the survivors thrash harder. A short
      * count here is a budget error, not a graphics one. */
-    char msg[160];
+    char msg[192];
+    const int own = g_bake_lent0 < 0 ? g_bake_n : g_bake_lent0;
     snprintf(msg, sizeof(msg),
              "gpu: PVR draws the primitives — VRAM mirror %s, %d big + %d small slots, "
-             "%d bake patches, %u KB free",
+             "%d bake patches and %d in mirror pages not sampled yet, %u KB free",
              g_mir_base ? "resident" : "MISSING",
-             g_tex_big_n, g_tex_small_n, g_bake_n, (unsigned)(pvr_mem_available() / 1024));
-    bp_log(g_mir_base && g_tex_big_n == TEX_BIG_SLOTS && g_bake_n >= 32
+             g_tex_big_n, g_tex_small_n, own, bake_pool_size() - own,
+             (unsigned)(pvr_mem_available() / 1024));
+    bp_log(g_mir_base && g_tex_big_n == TEX_BIG_SLOTS && own >= 32
            ? BP_LOG_INFO : BP_LOG_WARN, msg);
 }

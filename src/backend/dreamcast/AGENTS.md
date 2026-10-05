@@ -182,33 +182,48 @@ an `#error`.
   4bpp pages are mirrored (`page4_mirror`) with palettes in 64 banks of 16, addressed by content;
   what does not fit is baked (`bake_slot`, 64x64 patches on `BAKE_STEP` boundaries). Anything
   that writes emulated VRAM reaches here as `bp_gpu_dirty`, which evicts by page and palette.
-- **The pictures (ADR-0053):** each display buffer has a picture, the buffer at its own resolution
-  in a 512x256 RGB565 texture; the three memories are slots 1-3 of g_txr (slot 0 is the background
-  slot meanwhile), so the texture pools keep their 128 bake patches (640-wide pictures took ~1 MB
-  from them: 10 patches left, slot conflicts in Crash 3).
+- **The pictures (ADR-0053, ADR-0055):** each display buffer has a picture: the buffer at the
+  screen's resolution, 640x480 RGB565, whatever its own (up to 512x256) — its records built at the
+  screen's scale, 640/w by 480/h, as a direct render builds them. A picture is a stride texture (640
+  a row, declared 1024x512, `PIC_FMT`; `pvr_txr_set_stride(640)` once). Two memories, one a picture,
+  after slot 0 of g_txr (the background slot while the pictures are in use): g_txr is 1.42 MB
+  (`TXR_BYTES`), and the bake pool's own patches are 92 instead of 128 (76 with the overlay). The
+  4bpp mirror's pages lend their memory to the pool, four patches each, until a page is first
+  sampled (`page_reclaim`): a game never samples the pages its display buffers cover (Crash 3 16 of
+  32, Crash Bash 20), so Crash 3's pool is 144-156. Without the lending the attract demo missed 772
+  patches by present 5000 and drew its DEMO text through the wrong palette. At the buffer's own
+  resolution (ADR-0053's first form) the picture, scaled to the screen, was soft and blurred — what
+  a tester and the owner reported.
   At each present the records since the last one are rendered (`pvr_scene_begin_rtt`) into the
   picture of the buffer they draw into (`screen_origin`; `state_targets`, `last_cover_at`). The
   buffers come from the states a triangle or a fill was recorded under, not from every state: a
   frame's first state is the last frame's, carried over, and it names the other buffer. Each
-  render goes over
-  that picture copied 1:1 (point sampled, dithering off) or over emulated VRAM's rectangle for a
-  buffer with no picture yet; VRAM marks are drawn from emulated VRAM at their place; then a
-  screen scene shows the displayed buffer's picture scaled to 640x480 (bilinear) with the overlay
-  and the pointer. A record is rendered once (`g_pic_done`); a mark recorded after a present moves to the
-  next frame's front (`begin_frame`). So what a game drew stays drawn: Crash 3's pause keeps the
-  frozen game behind its panels, and Crash Bash's legal screen, uploaded once and cleared with
-  primitives, no longer shows through at loading pauses. What it costs: ledger E-164; the serial
-  line `bench pictures` counts renders, copies and screen passes a frame.
+  render draws into the picture it starts from, over that picture copied 1:1 (point sampled,
+  dithering off: each tile of the render reads only its own pixels before it writes them), or over
+  emulated VRAM's rectangle, scaled, for a buffer with no picture yet; VRAM marks are drawn from
+  emulated VRAM at their place; then a screen scene shows the displayed buffer's picture 1:1,
+  point sampled, with the overlay and the pointer. A record is rendered once (`g_pic_done`); a mark
+  recorded after a present moves to the next frame's front (`begin_frame`). So what a game drew
+  stays drawn: Crash 3's pause keeps the frozen game behind its panels, and Crash Bash's legal
+  screen, uploaded once and cleared with primitives, no longer shows through at loading pauses.
+  What it costs: ledger E-164, E-166; the serial line `bench pictures` counts renders, copies and
+  screen passes a frame, `bench vram` the bake pool (its size, its busiest frame, its misses) and the
+  mirror's pages sampled, since boot.
 - **Copies and picture textures (ADR-0054):** the backend answers `BP_CAP_GPU_COPIES`, so the
   runtime reports every VRAM-to-VRAM copy through `bp_gpu_copy`. A copy out of a buffer with a
   picture is a record, `GCMD_COPY`, drawn where it falls among the primitives, 1:1 from the source
   buffer's picture (`draw_copy`); any other copy is a write (`bp_gpu_dirty`) when it changed
   emulated VRAM (`changed`), as before. A 15-bit texture page whose corner lies in a buffer with a
-  picture binds that picture (`pic_page`), sampled at the size it was rendered, 512x256: Flycast
-  matches a render to texture by address and size, and a 512x512 header read black — so V is
-  scaled apart from U (`dim_v`, put_tri's `rv`). A picture keeps no bit 15, so a semi-transparent
-  primitive reading one blends every texel. Crash 3's level transitions are the case: the frame on
-  screen copied into the other buffer and drawn back over itself, turning, as four textures.
+  picture binds that picture (`pic_page`), declared at the size of the texture Flycast keeps a render
+  to texture in: the next powers of two of the render, 1024x512 — it matches by address, size and
+  format, not by the stride bit (ADR-0054 found a 512x512 header reading a 512x256 render black).
+  Picture i is bound as `dim` PIC_TEXDIM + i, so its texel coordinates, in the buffer's pixels, take
+  that picture's scale (`dim_ru`/`dim_rv`, `g_pic_ru`/`g_pic_rv`); a copy is drawn at the
+  destination's scale from the source's (`pic_source`). A picture keeps no bit 15, so a
+  semi-transparent primitive reading one blends every texel. Crash 3's level transitions are the
+  case: the frame on screen copied into the other buffer and drawn back over itself, turning, as
+  four textures. A read of the buffer being rendered gets the picture as the render started in an
+  emulator, and on a console the new pixels where a tile is already done (ADR-0055).
 - Presents the pictures cannot show — 24-bit video, a blank display, a mode wider than 512 or
   taller than 256 lines, software drawing — take the old path and drop the pictures.
 - A present carrying `BP_PRESENT_DRAWING` came while the runtime was still walking a DMA list

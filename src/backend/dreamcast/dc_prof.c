@@ -105,6 +105,8 @@ int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
 /* The pictures this window (ADR-0053): renders into one, those of them over the picture as it was
  * (a copy of the whole buffer first), and screen passes. The bench's line: what a frame costs the PVR. */
 int      g_pic_renders, g_pic_copies, g_pic_screens;
+int      g_bake_live_max, g_bake_miss_all;
+uint32_t g_mir_pages;
 
 /* `--dc-bench=FROM:TO`, read at init; the benchmark itself is with profile_report. With
  * `--dc-rxprof` as well, the range is also announced on the serial port — "@@rxprof start" as it
@@ -580,6 +582,17 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
                  q[0] / 100, q[0] % 100, q[1] / 100, q[1] % 100, q[2] / 100, q[2] % 100);
         bp_log(BP_LOG_WARN, rest);
     } else {}
+    {
+        /* What the texture pools have to spare since boot (ADR-0055): the bake pool's busiest frame
+         * and the patches that found none, and the 4bpp mirror's pages sampled — the rest lend their
+         * memory to the pool. */
+        char vr[160];
+        snprintf(vr, sizeof(vr), "bench vram: bake %d patches, at most %d bound in a frame, %d misses;"
+                 " 4bpp mirror %d of %d pages used (%08lx)",
+                 bake_pool_size(), g_bake_live_max, g_bake_miss_all,
+                 __builtin_popcount(g_mir_pages), PAGE4_N, (unsigned long)g_mir_pages);
+        bp_log(BP_LOG_WARN, vr);
+    }
 #if RECOMPSX_FASTMEM
     /* Guest accesses the MMU sent to the slow path over the window (ADR-0049): ports and the like. */
     snprintf(rest, sizeof(rest), "bench fastmem: %lu traps a frame", (unsigned long)((g_fm_traps - g_bench_traps0) / g_bench_frames));

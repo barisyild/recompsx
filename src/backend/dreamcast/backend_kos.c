@@ -223,13 +223,13 @@ int bp_init(const char* title) {
     /* Palette RAM holds ARGB1555, matching the page decode; set once, format is global. */
     pvr_set_pal_format(PVR_PAL_ARGB1555);
 
-    g_txr = pvr_mem_malloc(TXR_MAX_W * TXR_MAX_H * 2);
+    g_txr = pvr_mem_malloc(TXR_BYTES);
     if(!g_txr) {
         bp_log(BP_LOG_ERROR, "no PVR memory for the framebuffer texture");
         return 2;
     }
-    /* The pictures (ADR-0053), in g_txr's slots. Copied every frame, a picture must come back as
-     * it went: no dither on the PVR's 16-bit writes. */
+    /* The pictures (ADR-0053, ADR-0055), after g_txr's slot 0. Copied every frame, a picture must
+     * come back as it went: no dither on the PVR's 16-bit writes. */
     vid_set_dithering(false);
     pictures_init();
     g_ready = 1;

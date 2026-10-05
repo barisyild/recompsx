@@ -2,6 +2,9 @@
 Status: accepted   Date: 2026-10-04
 Direction set by the project owner: Crash 3's pause screen must look as it does on the console.
 Amends ADR-0011's consequences (hardware drawing). Keeps ADR-0039's hold, for a different reason.
+Amended by ADR-0055: pictures are the screen's size, 640x480, shown 1:1, and a render draws into the
+picture it starts from (two memories, after g_txr's slot 0). The size and memories below are the first
+form's.
 
 ## Context
 

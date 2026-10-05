@@ -876,11 +876,12 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
 }
 
 /** A copy into the buffer at sx, sy being rendered (ADR-0054): the picture of the buffer it reads,
- *  1:1 and replacing, where its destination falls in this one — the PlayStation copies what that
- *  buffer holds, which emulated VRAM lacks. A source with no picture yet: emulated VRAM's result,
- *  as a mark is drawn. Inside one buffer the picture read is the one this render started from.
- *  Returns 1 when something was drawn. */
-static int draw_copy(const gcmd_t* c, int sx, int sy, int sw, int sh) {
+ *  point sampled and replacing, where its destination falls in this one — the PlayStation copies
+ *  what that buffer holds, which emulated VRAM lacks. Pixel for pixel when the two buffers are the
+ *  same size, as both pictures are the screen's. A source with no picture yet: emulated VRAM's
+ *  result, as a mark is drawn. Inside one buffer the picture read is the one this render started
+ *  from (pic_page says where that holds). Returns 1 when something was drawn. */
+static int draw_copy(const gcmd_t* c, int sx, int sy, int sw, int sh, float scale_x, float scale_y) {
     int x0 = c->x[0], y0 = c->y[0], x1 = c->x[0] + c->x[1], y1 = c->y[0] + c->y[1];
     if(x0 < sx) x0 = sx;
     if(y0 < sy) y0 = sy;
@@ -890,18 +891,19 @@ static int draw_copy(const gcmd_t* c, int sx, int sy, int sw, int sh) {
     else {}
     const int cx = c->x[2] + (x0 - c->x[0]), cy = c->y[2] + (y0 - c->y[0]);
     int px, py;
-    const pvr_poly_hdr_t* src = pic_source(cx, cy, x1 - x0, y1 - y0, &px, &py);
-    if(!src) return draw_mark(c, sx, sy, sw, sh, 1.0f, 1.0f);
+    float ru, rv;
+    const pvr_poly_hdr_t* src = pic_source(cx, cy, x1 - x0, y1 - y0, &px, &py, &ru, &rv);
+    if(!src) return draw_mark(c, sx, sy, sw, sh, scale_x, scale_y);
     else {}
     put_hdr(src);
     pvr_vertex_t v;
     v.argb = 0xFFFFFFFFu;
     v.oargb = 0;
     v.z = 1.0f;
-    const float u0 = (float)(cx - px) / (float)PIC_W, u1 = (float)(cx - px + x1 - x0) / (float)PIC_W;
-    const float w0 = (float)(cy - py) / (float)PIC_H, w1 = (float)(cy - py + y1 - y0) / (float)PIC_H;
-    const float px0 = (float)(x0 - sx), px1 = (float)(x1 - sx);
-    const float py0 = (float)(y0 - sy), py1 = (float)(y1 - sy);
+    const float u0 = (float)(cx - px) * ru, u1 = (float)(cx - px + x1 - x0) * ru;
+    const float w0 = (float)(cy - py) * rv, w1 = (float)(cy - py + y1 - y0) * rv;
+    const float px0 = (float)(x0 - sx) * scale_x, px1 = (float)(x1 - sx) * scale_x;
+    const float py0 = (float)(y0 - sy) * scale_y, py1 = (float)(y1 - sy) * scale_y;
     v.flags = PVR_CMD_VERTEX;
     v.x = px0; v.y = py0; v.u = u0; v.v = w0; put_vtx(&v);
     v.x = px1; v.y = py0; v.u = u1; v.v = w0; put_vtx(&v);
@@ -941,7 +943,7 @@ static float emit_header_compile(pvr_ptr_t mem, int fmt, int dim, const gstate_t
     pvr_poly_cxt_t cxt;
     const int blends = (s->flags & BP_GPU_SEMI) && kind == HK_NORMAL;
     if(mem && kind != HK_INVERT) {
-        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim, dim_v(dim), mem, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim_u(dim), dim_v(dim), mem, PVR_FILTER_NONE);
         /* MODULATE keeps the texel's own alpha: a transparent texel reaches the blender with
          * alpha 0 and the blend below keeps the destination, which is what the PlayStation's
          * "texel zero draws nothing" means. */
@@ -1232,8 +1234,8 @@ typedef struct {
     int       bank[AM_N], slot[AM_N];   /* -2: not asked yet */
     int       patch8, cls;
     pvr_ptr_t mir;
-    pvr_ptr_t pic;                      /* a page in a buffer's picture (ADR-0054), its offsets */
-    int       pou, pov;
+    pvr_ptr_t pic;                      /* a page in a buffer's picture (ADR-0054), its binding */
+    int       pdim, pou, pov;
 } grun_t;
 
 static void run_begin(grun_t* r, const gstate_t* s, int state) {
@@ -1253,7 +1255,7 @@ static void run_begin(grun_t* r, const gstate_t* s, int state) {
      * from Crash Bandicoot: Warped's textures carries (83 % of its pixels when its transition
      * reads it back). */
     r->pic = NULL;
-    if(s->depth == 2 && (s->window & 0x3FF) == 0 && pic_page(s->tex_x, s->tex_y, &r->pic, &r->pou, &r->pov)) {
+    if(s->depth == 2 && (s->window & 0x3FF) == 0 && pic_page(s->tex_x, s->tex_y, &r->pic, &r->pdim, &r->pou, &r->pov)) {
         r->mir = NULL;
         r->patch8 = 0;
         if(s->flags & BP_GPU_SEMI) r->cls = CLS_STP;
@@ -1537,8 +1539,8 @@ static const gsemibind_t* semi_bind(gscene_t* g, int state, const gstate_t* s, c
     g_semi_next = (g_semi_next + 1) & (SEMI_BINDS - 1);
     e->state = state; e->mem = b->mem; e->fmt = b->fmt; e->dim = b->dim;
     e->ou = b->ou; e->ov = b->ov; e->kind = kind;
-    e->rdim = 1.0f / (float)b->dim;
-    e->rdimv = 1.0f / (float)dim_v(b->dim);
+    e->rdim = dim_ru(b->dim);
+    e->rdimv = dim_rv(b->dim);
     const float alpha = emit_header(b->mem, b->fmt, b->dim, s, 0, kind, &e->hdr);
     /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture the texel
      * centre less the patch origin. rdim is a power of two, so the texture terms are exact either
@@ -1628,8 +1630,8 @@ static void scene_bright(gscene_t* g, const gsemibind_t* e, const gcmd_t* c, con
 static inline int bind_texture(const gcmd_t* c, const gstate_t* s, int am, grun_t* r, gbind_t* b) {
     if(r->pic) {
         b->mem = r->pic;
-        b->fmt = PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED;
-        b->dim = PIC_TEXDIM; b->ou = r->pou; b->ov = r->pov;
+        b->fmt = PIC_FMT;
+        b->dim = r->pdim; b->ou = r->pou; b->ov = r->pov;
         return 1;
     } else if(r->mir) {
         if(r->bank[am] >= 0) {
@@ -1965,9 +1967,9 @@ static void base_rect(void) {
 PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first,
                                int to_picture) {
     if(sw <= 0 || sh <= 0) return;
-    /* A picture is the buffer at its own resolution; the screen is 640 x 480. */
-    const float scale_x = to_picture ? 1.0f : 640.0f / (float)sw;
-    const float scale_y = to_picture ? 1.0f : 480.0f / (float)sh;
+    /* The screen and a picture alike are 640 x 480 (ADR-0055). */
+    const float scale_x = 640.0f / (float)sw;
+    const float scale_y = 480.0f / (float)sh;
 
     pvr_list_begin(PVR_LIST_TR_POLY);
 #if RECOMPSX_TA_HASH
@@ -2057,7 +2059,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         if(c->is_rect >= GCMD_VRAM) {
             /* A copy out of a buffer (ADR-0054) from that buffer's picture; on the old path,
              * where there are none, emulated VRAM's result, as a mark. */
-            const int drew = c->is_rect == GCMD_COPY && to_picture ? draw_copy(c, sx, sy, sw, sh)
+            const int drew = c->is_rect == GCMD_COPY && to_picture
+                           ? draw_copy(c, sx, sy, sw, sh, scale_x, scale_y)
                            : draw_mark(c, sx, sy, sw, sh, scale_x, scale_y);
             if(drew) { h.restate = 1; g.e = NULL; }
             else {}
@@ -2135,17 +2138,17 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
 
         if(textured) {
             pvr_ptr_t pmem;
-            int pou, pov;
+            int pdim, pou, pov;
             if(to_picture && s->depth == 2 && (s->window & 0x3FF) == 0
-               && pic_page(s->tex_x, s->tex_y, &pmem, &pou, &pov)) {
+               && pic_page(s->tex_x, s->tex_y, &pmem, &pdim, &pou, &pov)) {
                 /* A page in a buffer this backend draws (ADR-0054): its picture, which holds what
                  * was drawn there and emulated VRAM's copy of the buffer does not. Bound per record,
                  * since the state's own answers (g_sres) are the page's in emulated VRAM. */
                 per_state = 0;
                 run_state = -1;
                 mem = pmem;
-                fmt = PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED;
-                dim = PIC_TEXDIM; ou = pou; ov = pov;
+                fmt = PIC_FMT;
+                dim = pdim; ou = pou; ov = pov;
             } else {
                 if((int)c->state != run_state) {
                     run_state = (int)c->state;
@@ -2287,8 +2290,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
              * only when one of those changed (a divide and a dozen conversions, E-044). */
             if(dim != cur_dim || ou != vs_ou || ov != vs_ov || g.ox != vs_ox || g.oy != vs_oy) {
                 cur_dim = dim; vs_ou = ou; vs_ov = ov; vs_ox = g.ox; vs_oy = g.oy;
-                cur_rdim = 1.0f / (float)dim;
-                cur_rdimv = 1.0f / (float)dim_v(dim);
+                cur_rdim = dim_ru(dim);
+                cur_rdimv = dim_rv(dim);
                 cur_xo = -(float)g.ox * scale_x;
                 cur_yo = -(float)g.oy * scale_y;
                 cur_uo = (0.5f - (float)ou) * cur_rdim;

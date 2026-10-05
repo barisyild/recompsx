@@ -249,7 +249,12 @@ typedef struct {
  *
  * Only the plain (unwindowed) case lives here: GP0(E2h)'s tile-repeat mask has to be baked
  * into the texels, so windowed pages keep the old dynamic slots, where they are rare enough
- * to fit. */
+ * to fit.
+ *
+ * A page's megabyte share carries bake patches until the page is first sampled (ADR-0055): a game
+ * never samples the pages its display buffers cover as 4bpp textures — Crash 3 samples 16 of the
+ * 32, Crash Bash 20 — and their memory is the bake pool's for good. A page sampled for the first
+ * time takes its memory back from its patches (page_reclaim). */
 #define PAGE4_COLS  16
 #define PAGE4_ROWS  2
 #define PAGE4_N     (PAGE4_COLS * PAGE4_ROWS)
@@ -268,6 +273,10 @@ typedef struct {
  * floor free). At 64, Crash 3's demo window re-baked every frame and cost 3.5 %; at 128, about 1 %. */
 #define BAKE_DIM   64
 #define BAKE_MAX   128
+/* Patches in a 4bpp page's mirror memory while the page is unsampled, and the pool's whole array:
+ * BAKE_MAX of its own, then the pages' (from g_bake_lent0, BAKE_PER_PAGE a page in page order). */
+#define BAKE_PER_PAGE ((TEX_DIM * TEX_DIM / 2) / (BAKE_DIM * BAKE_DIM * 2))
+#define BAKE_SLOTS (BAKE_MAX + PAGE4_N * BAKE_PER_PAGE)
 /* Where a patch may start, in texels: every 32, not every 64. A primitive whose 64 texels begin on
  * an odd multiple of 32 — Crash's eyebrows and Aku Aku's feathers in Crash 3 sample v 160..223 —
  * fits no aligned patch, and without one it fell back to being drawn whole, its solid texels
@@ -287,10 +296,11 @@ typedef struct {
 
 /* `part`: the page is valid except inside [dx0,dx1) x [dy0,dy1), in VRAM halfwords and rows
  * relative to the page, which page4_mirror patches in place before the page is next used. */
+/* `own`: the page holds its memory; until then the memory carries bake patches (page_reclaim). */
 typedef struct {
     pvr_ptr_t mem;
     uint32_t  bound_frame;
-    uint8_t   valid, defer, part;
+    uint8_t   valid, defer, part, own;
     int16_t   dx0, dy0, dx1, dy1;
 } gpage4_t;
 
@@ -298,6 +308,7 @@ typedef struct {
     pvr_ptr_t mem;
     uint16_t  tex_x, tex_y, clut_x, clut_y;
     uint8_t   tu, tv, used;
+    uint8_t   gone;             /* its memory went back to the mirror page it was lent from */
     uint8_t   depth;            /* 0: a 4bpp page's patch, 1: an 8bpp page's — see bake_slot */
     uint8_t   amode;            /* which texels it shows (AM_*) */
     uint32_t  bound_frame;
@@ -338,19 +349,28 @@ typedef struct {
 /* ---- defined in one file, used in another ------------------------------------------------- */
 
 /* dc_video.c */
-/* The pictures (ADR-0053): what the PlayStation's VRAM holds in a display buffer, rendered by the PVR
- * into texture memory, so that what a game drew stays drawn until it draws over it — as it stays in
- * a PlayStation's framebuffer. A picture is the buffer at its own resolution (1:1, up to
- * PIC_W x PIC_H), in a texture of that size. Three memories — two buffers' pictures and the one the
- * next render goes into — are slots 1-3 of g_txr's megabyte, and slot 0 is the background slot
- * while the pictures are in use: they cost the texture pools nothing. */
-#define PIC_W    512
-#define PIC_H    256
-#define PIC_N    2
-#define PIC_MEMS 3
+/* The pictures (ADR-0053, ADR-0055): what the PlayStation's VRAM holds in a display buffer, rendered
+ * by the PVR into texture memory, so that what a game drew stays drawn until it draws over it — as
+ * it stays in a PlayStation's framebuffer. A picture is the buffer at the screen's resolution,
+ * PIC_W x PIC_H whatever the buffer's own (up to PIC_SRC_W x PIC_SRC_H): the buffer drawn as the
+ * screen would show it, and shown 1:1. Its memory is a stride texture, PIC_W pixels a row, declared
+ * PIC_TEXW x PIC_TEXH, and a render draws into the picture it starts from — one memory a picture.
+ * They follow slot 0 of g_txr, the background slot while the pictures are in use (TXR_BYTES). */
+#define PIC_W     640
+#define PIC_H     480
+#define PIC_TEXW  1024
+#define PIC_TEXH  512
+#define PIC_BYTES (PIC_W * PIC_H * 2)
+#define PIC_FMT   (PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE)
+#define PIC_SRC_W 512
+#define PIC_SRC_H 256
+#define PIC_N     2
+/* g_txr: the background's sheet, TXR_MAX_W x TXR_MAX_H, or while the pictures are in use slot 0 at
+ * PIC_SRC_W x PIC_SRC_H and the pictures after it — whichever is larger. */
+#define TXR_PIC_BYTES (PIC_SRC_W * PIC_SRC_H * 2 + PIC_N * PIC_BYTES)
+#define TXR_BYTES (TXR_PIC_BYTES > TXR_MAX_W * TXR_MAX_H * 2 ? TXR_PIC_BYTES : TXR_MAX_W * TXR_MAX_H * 2)
 typedef struct {
     int x, y, w, h;    /* the buffer's VRAM rectangle */
-    int mem;           /* which memory holds it */
     int valid;
     uint32_t used;     /* g_tex_frame of its last use */
 } gpic_t;
@@ -359,16 +379,23 @@ extern int g_pic_active;   /* the last present went through the pictures */
 extern int g_pic_done;     /* records already rendered into the pictures */
 int pictures_init(void);
 /* What a game reads back from a buffer this backend draws, from its picture (ADR-0054): the
- * picture holding a 15-bit texture page's corner, as a texture — its memory and the page's offset
- * into it (put_tri's ou, ov), sampled as PIC_TEXDIM square — and the point-sampled header and
- * corner of the picture holding a copy's source rectangle. 0 / NULL when no picture does. */
-#define PIC_TEXDIM 512
-/* A texture's height from its binding's size (`dim`): square, but for a buffer's picture, which is
- * PIC_W x PIC_H — sampled as it was rendered, since an emulator matches a texture it rendered by
- * address and size (Flycast: 512x256 for a 512x240 render). put_tri scales V by its own term. */
-static inline int dim_v(int dim) { return dim == PIC_TEXDIM ? PIC_H : dim; }
-int pic_page(int tx, int ty, pvr_ptr_t* mem, int* ou, int* ov);
-const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py);
+ * picture holding a 15-bit texture page's corner, as a texture — its memory, its binding's size
+ * (`dim`, below) and the page's offset into it in the buffer's pixels (put_tri's ou, ov) — and the
+ * point-sampled header, corner and scale of the picture holding a copy's source rectangle. 0 / NULL
+ * when no picture does. */
+/* A binding's `dim` is its texture's size, square, but for picture i it is PIC_TEXDIM + i: a picture
+ * is PIC_TEXW x PIC_TEXH, and its texel coordinates take the picture's own scale, screen pixels per
+ * buffer pixel (g_pic_ru, g_pic_rv) — so a binding carries whose. Below 2048, as hdr_key packs it;
+ * no texture is that size. */
+#define PIC_TEXDIM 1024
+extern float g_pic_ru[PIC_N], g_pic_rv[PIC_N];
+static inline int dim_u(int dim) { return dim >= PIC_TEXDIM ? PIC_TEXW : dim; }
+static inline int dim_v(int dim) { return dim >= PIC_TEXDIM ? PIC_TEXH : dim; }
+/* What put_tri multiplies a texel coordinate by: one over the size, or a picture's scale over it. */
+static inline float dim_ru(int dim) { return dim >= PIC_TEXDIM ? g_pic_ru[dim - PIC_TEXDIM] : 1.0f / (float)dim; }
+static inline float dim_rv(int dim) { return dim >= PIC_TEXDIM ? g_pic_rv[dim - PIC_TEXDIM] : 1.0f / (float)dim; }
+int pic_page(int tx, int ty, pvr_ptr_t* mem, int* dim, int* ou, int* ov);
+const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py, float* ru, float* rv);
 
 extern pvr_ptr_t g_txr;
 extern pvr_poly_hdr_t g_hdr;
@@ -403,16 +430,17 @@ int marks_from(int first, int sx, int sy, int sw, int sh);
  * (0,0) to (x1,y1), with the texture from (0,0) to (u1,v1). */
 extern const pvr_poly_hdr_t* g_base_hdr;
 extern float g_base_x1, g_base_y1, g_base_u1, g_base_v1;
-/* The frame's records onto the screen (`to_picture` 0: the rectangle sx..sh scaled to 640 x 480,
+/* The frame's records, the rectangle sx..sh scaled to 640 x 480: onto the screen (`to_picture` 0,
  * the background g_hdr) or into the picture of the buffer at sx, sy (1: that buffer's records only,
- * at its own resolution, sw x sh, the base g_base_hdr, no overlay or pointer). */
+ * the base g_base_hdr, no overlay or pointer). */
 PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first,
                                int to_picture);
 
 /* dc_textures.c */
 extern gpage4_t g_page4[PAGE4_N];
 extern int g_mir_decodes;
-extern gbake_t g_bake[BAKE_MAX];
+extern gbake_t g_bake[BAKE_SLOTS];
+int bake_pool_size(void);
 extern int g_bake_n;
 extern int g_bake_live;
 extern int g_bake_decodes;
@@ -487,6 +515,11 @@ extern int g_win_slot;
 extern int g_win_bake;
 extern int g_win_patch;
 extern int g_pic_renders, g_pic_copies, g_pic_screens;
+/* The texture pools' headroom since boot, for the bench's `vram` line: the most bake patches bound in
+ * one frame (the pool holds g_bake_n) and the primitives that found none. */
+extern int g_bake_live_max, g_bake_miss_all;
+/* The 4bpp mirror's pages a game has sampled since boot, one bit a page (PAGE4_COLS a row). */
+extern uint32_t g_mir_pages;
 #if RECOMPSX_DC_PROFILE
 extern int g_bench_from;
 extern int g_bench_to;
