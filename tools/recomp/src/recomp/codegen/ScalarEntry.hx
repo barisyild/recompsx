@@ -6,7 +6,7 @@ class ScalarEntry {
 	/** No internal guest call may reach a pump, suspension or pre-existing unwind. Bounds
 	    cover the entire DAG/call tree, including paths not taken; equality takes fallback. */
 	public static function callWindow(cycles:Int):String {
-		return '(ctx.unwindToken == 0 && ((ctx.cycles - ctx.nextEvent) | 0) < -$cycles'
+		return '(ctx.unwindToken == 0 && ((ctx.cycles - core.Runtime.deadline(ctx)) | 0) < -$cycles'
 			+ '\n\t\t#if recompsx_cooperative\n'
 			+ '\t\t&& (!core.Cooperative.enabled || (core.Cooperative.every <= 0'
 			+ ' && ((ctx.cycles - core.Cooperative.deadline) | 0) < -$cycles))'
@@ -14,7 +14,7 @@ class ScalarEntry {
 	}
 	public static function slowGuard(ind:String, projected:Bool = false, ?extra:String):String {
 		final buf = new StringBuf();
-		buf.add('${ind}if (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0)\n');
+		buf.add('${ind}if (shim.MemA.unlikely(((ctx.cycles - core.Runtime.deadline(ctx)) | 0) >= 0)\n');
 		if (projected) buf.add('${ind}\t|| ctx.unwindToken != 0\n');
 		if (extra != null) buf.add('${ind}\t|| !($extra)\n');
 		buf.add('${ind}\t#if recompsx_cooperative\n');

@@ -58,9 +58,11 @@ class Backend {
 			x2:Int, y2:Int, c2:Int, u2:Int, v2:Int):Void {}
 	public static function gpuTriWords():Void {}
 	public static function gpuStateWords():Void {}
+	public static function gpuStateAfterTri():Void {}
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void {}
 	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {}
+	public static function gpuCopy(sx:Int, sy:Int, dx:Int, dy:Int, w:Int, h:Int, changed:Int):Void {}
 	public static function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void {}
 	public static function gpuMask(setBit:Int, checkBit:Int):Void {}
 
@@ -88,6 +90,8 @@ class Backend {
 	public static function padType(pad:Int):Int return pad == 0 ? 1 : 0;
 	public static function padButtons(pad:Int):Int return 0;
 	public static function padAxis(pad:Int, axis:Int):Int return 0x80;
+	/** Headless: no motors to turn. */
+	public static function padRumble(pad:Int, small:Int, large:Int):Void {}
 	/** Headless: no keyboard, so nothing is ever typed. */
 	public static function keyText(on:Bool):Void {}
 	public static function keyNext():Int return -1;

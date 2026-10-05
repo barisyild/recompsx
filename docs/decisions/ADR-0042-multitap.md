@@ -79,3 +79,36 @@ no digest moves. `Multitap.plugged = false` gives the old machine, with a pad in
   ports A-D already did.
 - Not modelled: analog pads in a slot (the machine has only digital pads), rumble through the tap,
   and anything a game sends in the long read's data bytes.
+
+## Amendment (2026-10-05): a long read answers the one before it
+
+The owner, on the Dreamcast: Crash Bash's Adventure hub paused with "CONTROLLER 1-A IS UNPLUGGED!
+PLEASE INSERT A CONTROLLER", and the browser did not. A Dreamcast controller has a stick, so it is a
+DualShock (ADR-0052), and the browser's keyboard a digital pad. Headless with `--pad-dualshock` the
+hub paused the same way: the shared runtime, not the backend.
+
+libpad configures a DualShock in a slot through the long reads (the trace from boot: 43h 01h, 45h,
+4Ch, 47h through slot A directly, then 43h, 45h, 43h 00h through slot A's window of long reads). The
+tap answered each window at once, as a transfer of its own. A real SCPH-1070 does not: it takes the
+host's bytes for the four slots while sending what it has, and talks to the controllers after the
+transfer, so a long read returns the controllers' answers to what the *previous* long read sent
+them — BlueRetro's logic-analyser logs of the adaptor: "a 0x43 config mode request sent in TX3
+produces its response visible in the RX4 data"
+(https://hackaday.io/project/170365-blueretro/log/186471-playstation-playstation-2-spi-interface).
+Answered at once, libpad read each answer as the one to its command before: it left configuration
+mode early and went on asking 45h of a pad in normal mode, which refuses it (41h, then FFh),
+forever; the hub took that for a pad pulled out.
+
+Now `Multitap` keeps each slot's eight bytes of the last long read and sends them to the controllers
+when that read ends (`finished`); the next long read answers with the result. The first long read
+answers a read made at its start. A garbage read and a slot-A read send the controllers nothing this
+way (slot A read directly answers at once, as without a tap).
+
+- Crash Bash, headless, a scripted DualShock: libpad enters configuration mode, reads 45h's answer
+  (01 02 00 02 01 00), leaves it, and reads the pad in digital mode; the hub plays on, 4800-7200
+  without a pause (it paused from the first frame before).
+- `MultitapSio` 644b488d unchanged (digital pads answer every command as a read, and its buttons do
+  not change between long reads). `DualShockSio` 6081cd6f (was a1fdfeea): its long reads now expect
+  the answers to the read before, and the motors running once the read that drives them has ended.
+  JS = C++. Digests of both games unchanged (no controller in a headless run).
+- What a game sends in the long read's data bytes is modelled now (the "not modelled" above).

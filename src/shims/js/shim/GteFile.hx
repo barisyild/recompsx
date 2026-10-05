@@ -23,5 +23,8 @@ class GteFile {
 	/** The SH-4's RTPS core (see the cxx twin): declined here, so the C form always runs. */
 	public static inline function rtp(vh:Int, lm:Bool, last:Bool):Int return 1;
 
+	/** RTPT's three vertices in the SH-4's core (see the cxx twin): none done here. */
+	public static inline function rtp3(lm:Bool):Int return 0;
+
 	public static inline function rtpChecked():Void {}
 }

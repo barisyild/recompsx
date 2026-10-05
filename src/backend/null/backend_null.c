@@ -115,6 +115,12 @@ void bp_gpu_state(int tex_base_x, int tex_base_y, int tex_depth,
 void bp_gpu_state_w(const int* w) {
     bp_gpu_state(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9]);
 }
+
+/* Only an SH-4 polygon core that writes the backend's records itself calls this (ADR-0051); here no
+ * core runs, every triangle comes through bp_gpu_tri_w, and this is the state alone. */
+void bp_gpu_state_after_tri(const int* w) {
+    bp_gpu_state_w(w);
+}
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2) {
@@ -138,6 +144,13 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
     if (!g_gpu_hashing) return;
     gpu_call(4); gpu_mix(x); gpu_mix(y); gpu_mix(w); gpu_mix(h);
 }
+/* Never offered (bp_caps answers 0 for BP_CAP_GPU_COPIES), so a hashed run's copies arrive as
+ * bp_gpu_dirty, as they did before ADR-0054; hashed as the browser's shim hashes them otherwise. */
+void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed) {
+    if (!g_gpu_hashing) return;
+    gpu_call(7); gpu_mix(sx); gpu_mix(sy); gpu_mix(dx); gpu_mix(dy); gpu_mix(w); gpu_mix(h);
+    gpu_mix(changed);
+}
 void bp_gpu_clip(int x0, int y0, int x1, int y1) {
     if (!g_gpu_hashing) return;
     gpu_call(5); gpu_mix(x0); gpu_mix(y0); gpu_mix(x1); gpu_mix(y1);
@@ -155,6 +168,7 @@ int      bp_pad_connected(int pad) { (void)pad; return 0; }
 int      bp_pad_type(int pad) { (void)pad; return BP_PAD_NONE; }
 uint32_t bp_pad_buttons(int pad) { (void)pad; return 0u; }
 int      bp_pad_axis(int pad, int axis) { (void)pad; (void)axis; return 0x80; }
+void     bp_pad_rumble(int pad, int small, int large) { (void)pad; (void)small; (void)large; }
 int      bp_quit_requested(void) { return 0; }
 
 /* No keyboard: text entry is accepted and nothing is ever typed. */

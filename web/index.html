@@ -13,7 +13,8 @@
     h1 { margin: 0; font: 700 clamp(18px, 3vw, 28px)/1.2 system-ui, sans-serif; }
     button { border: 0; border-radius: 8px; padding: 10px 18px; font: inherit; cursor: pointer; background: #f4b942; color: #17130a; }
     button:disabled { cursor: wait; opacity: .65; }
-    .screen { aspect-ratio: 4 / 3; background: #000; border: 1px solid #292f3a; border-radius: 10px; overflow: hidden; box-shadow: 0 24px 80px #0009; }
+    .screen { position: relative; aspect-ratio: 4 / 3; background: #000; border: 1px solid #292f3a; border-radius: 10px; overflow: hidden; box-shadow: 0 24px 80px #0009; }
+    #frameinfo { position: absolute; left: 8px; top: 8px; padding: 2px 8px; border-radius: 4px; background: #000b; color: #ffd76a; font: 600 14px/1.4 ui-monospace, Menlo, monospace; pointer-events: none; }
     /* The machine's pointer over the picture, while a mod has turned the mouse on: the same
        16 x 24 art the Dreamcast draws (src/backend/api/pointer_art.h), tip at 0 0, and twice the
        size where a CSS pixel is two device pixels. The runtime adds the class, and sets
@@ -36,7 +37,7 @@
       <label><input type="checkbox" id="pace" checked> Speed limit</label>
       <button id="start">Start game</button>
     </header>
-    <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas></div>
+    <div class="screen"><canvas id="screen" width="640" height="480"></canvas><canvas id="screen-gl" hidden></canvas><div id="frameinfo" hidden></div></div>
     <div id="status">Press the button to start.</div>
     <small id="build"></small>
     <!--
@@ -162,6 +163,51 @@
     let shownFrames = -15;
     let shownAt = 0;
     let presentedAt = 0;
+
+    // Finding a frame (web/AGENTS.md). ?slow=auto plays 300 frames in slow motion from every copy
+    // of the picture on screen the WebGL renderer makes (a level transition, ADR-0054);
+    // ?slow=A-B,C-D plays those frames so; ?slowfps=N is how slow (10 by default); ?ff=N runs with
+    // the speed limit off until frame N. Any of them, or ?frames, puts the frame number on the
+    // picture — the vblank --pad-script counts — and gives two keys: "," slow motion on and off,
+    // "." one frame on while paused.
+    const query = new URLSearchParams(location.search);
+    const slowSpec = query.getAll('slow').join(',');
+    const slowAuto = /(^|,)auto(,|$)/.test(slowSpec);
+    const slowRanges = slowSpec.split(',').map(r => r.match(/^(\d+)-(\d+)$/)).filter(Boolean)
+      .map(m => [+m[1], +m[2]]);
+    const slowFps = Math.max(1, +(query.get('slowfps') || 10));
+    const ffUntil = +(query.get('ff') || 0);
+    const frameDebug = slowAuto || slowRanges.length > 0 || ffUntil > 0 || query.has('frames');
+    const frameInfo = document.querySelector('#frameinfo');
+    let frameNo = 0, slowUntil = -1, slowManual = false, seenCopies = 0, stepTo = -1;
+    let userPaused = false, slowTimer = 0;
+    // Once a vblank, before anything else the page does with the picture.
+    function debugFrame(host) {
+      frameNo++;
+      const copies = host.gpu ? host.gpu.copies | 0 : 0;
+      if (slowAuto && copies !== seenCopies) slowUntil = frameNo + 300;
+      seenCopies = copies;
+      // Nothing is slowed while fast-forwarding: ?ff skips to where the looking starts.
+      const slow = frameNo >= ffUntil && (slowManual || frameNo <= slowUntil
+        || slowRanges.some(r => frameNo >= r[0] && frameNo <= r[1]));
+      if (ffUntil > 0 && frameNo <= ffUntil) host.unpaced = frameNo < ffUntil || !paceBox.checked;
+      if (stepTo >= 0 && frameNo >= stepTo) { stepTo = -1; host.paused = true; }
+      else if (slow && !userPaused && !slowTimer) {
+        host.paused = true;
+        slowTimer = setTimeout(() => { slowTimer = 0; if (!userPaused) host.paused = false; }, 1000 / slowFps);
+      }
+      frameInfo.textContent = 'frame ' + frameNo + (userPaused ? ' · paused' : (slow ? ' · slow' : ''));
+    }
+    if (frameDebug) {
+      frameInfo.hidden = false;
+      frameInfo.textContent = 'frame 0';
+      addEventListener('keydown', (e) => {
+        const host = globalThis.recompsxHost;
+        if (!host || e.repeat) return;
+        if (e.key === ',') slowManual = !slowManual;
+        else if (e.key === '.' && userPaused) { stepTo = frameNo + 1; host.paused = false; }
+      });
+    }
     function workletBuffered() {
       const drained = (performance.now() - reportedAt) * 44.1;
       return Math.max(0, Math.round(reportedFrames - drained + pushedSinceReport));
@@ -215,8 +261,11 @@
     start.addEventListener('click', async () => {
       if (globalThis.recompsxHost) {
         const host = globalThis.recompsxHost;
-        host.paused = !host.paused;
+        // The player's pause, apart from slow motion's (debugFrame), which pauses between frames.
+        userPaused = !userPaused;
+        host.paused = userPaused;
         start.textContent = host.paused ? 'Resume' : 'Pause';
+        if (frameDebug) frameInfo.textContent = 'frame ' + frameNo + (userPaused ? ' · paused' : '');
         if (host.paused) {
           audioQueue.length = 0; queuedFrames = 0;
           audioPendingSamples = 0;
@@ -250,9 +299,12 @@
         if (renderer) { canvas.hidden = true; glCanvas.hidden = false; }
 
         globalThis.recompsxHost = {
+          // Launch parameters from the page's address as well, one `arg` each, for a run that must
+          // reach one place every time: ?arg=--pad-script&arg=4700:CROSS,4710:- (sio.PadScript).
           args: ['boot.exe', 'disc.bin']
             .concat(renderer ? ['--video-hw'] : [])
-            .concat(audioContext ? [] : ['--no-audio']),
+            .concat(audioContext ? [] : ['--no-audio'])
+            .concat(new URLSearchParams(location.search).getAll('arg')),
           files: { 'boot.exe': boot, 'disc.bin': disc },
           paused: false,
           unpaced: !paceBox.checked,
@@ -261,6 +313,7 @@
           // as the HLE kernel's mouse (shim.Input, ADR-0038).
           screen: document.querySelector('.screen'),
           present(vram, sx, sy, width, height, flags) {
+            if (frameDebug) debugFrame(this);
             // Fast-forwarding, every emulated vblank still arrives here; one picture per display
             // interval is all a viewer can see, so the rest are skipped before any blit.
             if (this.unpaced) {

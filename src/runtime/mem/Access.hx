@@ -103,6 +103,10 @@ class Access {
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function read8ut(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld8(a & 0x1FFFFFFF, ctx) & 0xFF;
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return RawMem.get8(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -111,11 +115,16 @@ class Access {
 			ctx.cycles = cyc;
 			return Memory.slowRead8(Memory.phys(a));
 		}
+		#end
 	}
 
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function read16ut(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld16(a & 0x1FFFFFFF, ctx) & 0xFFFF;
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get16(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -124,11 +133,16 @@ class Access {
 			ctx.cycles = cyc;
 			return Memory.slowRead16(Memory.phys(a));
 		}
+		#end
 	}
 
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function read32t(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld32(a & 0x1FFFFFFF, ctx);
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) return shim.MemA.get32(Memory.ram(), r);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -137,11 +151,16 @@ class Access {
 			ctx.cycles = cyc;
 			return Memory.slowRead32(Memory.phys(a));
 		}
+		#end
 	}
 
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function write8t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st8(a & 0x1FFFFFFF, v, ctx);
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) RawMem.set8(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -150,11 +169,16 @@ class Access {
 			ctx.cycles = cyc;
 			Memory.slowWrite8(Memory.phys(a), v);
 		}
+		#end
 	}
 
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function write16t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st16(a & 0x1FFFFFFF, v, ctx);
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set16(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -163,11 +187,16 @@ class Access {
 			ctx.cycles = cyc;
 			Memory.slowWrite16(Memory.phys(a), v);
 		}
+		#end
 	}
 
 	@:cppInline
 	@:specifier("__attribute__((always_inline))")
 	public static function write32t(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st32(a & 0x1FFFFFFF, v, ctx);
+		#else
 		final r = Memory.phys(a) & Memory.RAM_DECODE_MASK;
 		if (shim.MemA.likely(r < Memory.RAM_SIZE)) shim.MemA.set32(Memory.ram(), r, v);
 		else if ((a & Memory.SCRATCH_MATCH_MASK) == Memory.SCRATCH_BASE)
@@ -176,5 +205,6 @@ class Access {
 			ctx.cycles = cyc;
 			Memory.slowWrite32(Memory.phys(a), v);
 		}
+		#end
 	}
 }

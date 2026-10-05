@@ -161,6 +161,22 @@ static inline __attribute__((always_inline)) void recompsx_gte_rtp_after(void) {
 	recompsx_gte_rtp_checked();
 #endif
 }
+/* RTPT's three vertices in the core in one call (Gte.rtpt, GteFile.rtp3), each handed over as
+ * recompsx_gte_rtp hands one: how many were done before the first the core declined. lm = 1 it
+ * declines at once, so it is not asked. The check build asks for none: its vertices go one at a
+ * time, each compared. */
+static inline __attribute__((always_inline)) int recompsx_gte_rtp3(int lm) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM) && !RECOMPSX_GTE_RTP_CHECK
+	if(lm != 0) return 0;
+	if(recompsx_gte_rtp_run(recompsx_gte, 66, 0, 0) != 0) return 0;
+	if(recompsx_gte_rtp_run(recompsx_gte, 70, 0, 0) != 0) return 1;
+	if(recompsx_gte_rtp_run(recompsx_gte, 74, 0, 1) != 0) return 2;
+	return 3;
+#else
+	(void)lm;
+	return 0;
+#endif
+}
 #endif")
 // <dc-sched scripts/sh4/rtp1.blk scripts/sh4/rtp1n.blk> written by scripts/dc-sched.py --into: never edit by hand
 @:cppFileCode("#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GTE_NO_ASM)
@@ -1850,7 +1866,13 @@ class Gte {
 		plain 3 the loop came back as the three copies, 2.4 KB again (E-054).
 	**/
 	static function rtpt(sf:Int, lm:Bool):Void {
-		for (v in 0...MemA.opaque(3)) {
+		// On the SH-4 the three vertices at sf = 1 go to the core in one call (GteFile.rtp3), which
+		// says how many it did: the loop's own frame and its three calls were 85 instructions an
+		// RTPT around the core's (docs/perf/dreamcast-ledger.md, E-153). The rest, from the one it
+		// declined, are the loop's as before: the core asked again for each, the C form for what it
+		// declines. Elsewhere it did none, and the loop is the whole of it.
+		final done = sf != 0 ? GteFile.rtp3(lm) : 0;
+		for (v in done...MemA.opaque(3)) {
 			final xy = GteFile.get(33 + (v << 1));
 			project(sf, lm, sext16(xy), xy >> 16, GteFile.get(34 + (v << 1)), V0H + (v << 2), v == 2);
 		}

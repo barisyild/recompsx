@@ -59,6 +59,8 @@ class KEvents {
 	static var evMode:Array<Int>;
 	static var evHandler:Array<Int>;
 	static var evFlags:Array<Int>;
+	/** Bit i set exactly when slot i is ENABLED (setFlag): where `deliver`'s walk can stop. */
+	static var enabledMask = 0;
 
 	/** Deterministic counters, so a conformance digest can watch the event system work. */
 	public static var delivered(default, null) = 0;
@@ -70,6 +72,7 @@ class KEvents {
 		evMode = [for (_ in 0...COUNT) 0];
 		evHandler = [for (_ in 0...COUNT) 0];
 		evFlags = [for (_ in 0...COUNT) FREE];
+		enabledMask = 0;
 		postedClass = [for (_ in 0...POST_MAX) 0];
 		postedSpec = [for (_ in 0...POST_MAX) 0];
 		drainSaved = new CpuState();
@@ -90,7 +93,7 @@ class KEvents {
 		evMode[slot] = mode;
 		evHandler[slot] = handler;
 		// Opened but not listening: a game calls EnableEvent when it is ready to hear about it.
-		evFlags[slot] = DISABLED;
+		setFlag(slot, DISABLED);
 		// What a game listens for is the shortest description of what it expects to happen, and a
 		// game stuck waiting is stuck on one of these. Named once each, so the list is the set of
 		// promises the kernel has made.
@@ -106,21 +109,21 @@ class KEvents {
 	/** `CloseEvent`. Always 1, as the BIOS does, even for a descriptor that was never open. */
 	public static function close(ctx:CpuState, ev:Int):Int {
 		final slot = slotOf(ev);
-		if (slot >= 0) evFlags[slot] = FREE;
+		if (slot >= 0) setFlag(slot, FREE);
 		else {}
 		return 1;
 	}
 
 	public static function enable(ctx:CpuState, ev:Int):Int {
 		final slot = slotOf(ev);
-		if (slot >= 0) evFlags[slot] = ENABLED;
+		if (slot >= 0) setFlag(slot, ENABLED);
 		else {}
 		return 1;
 	}
 
 	public static function disable(ctx:CpuState, ev:Int):Int {
 		final slot = slotOf(ev);
-		if (slot >= 0) evFlags[slot] = DISABLED;
+		if (slot >= 0) setFlag(slot, DISABLED);
 		else {}
 		return 1;
 	}
@@ -140,8 +143,15 @@ class KEvents {
 	}
 
 	static function consume(slot:Int):Int {
-		evFlags[slot] = ENABLED;
+		setFlag(slot, ENABLED);
 		return 1;
+	}
+
+	/** Every change of a slot's flag, so that `enabledMask` stays what the flags say. */
+	static inline function setFlag(slot:Int, v:Int):Void {
+		evFlags[slot] = v;
+		if (v == ENABLED) enabledMask = enabledMask | (1 << slot);
+		else enabledMask = enabledMask & ~(1 << slot);
 	}
 
 	/**
@@ -193,15 +203,22 @@ class KEvents {
 		goes pending and waits to be asked.
 	**/
 	public static function deliver(ctx:CpuState, cls:Int, spec:Int):Void {
-		for (i in 0...COUNT) {
+		// The slots up to the last one enabled, asked again after each: a callback may enable or
+		// disable any slot, and each slot's flag is read when the walk reaches it, as when it went
+		// through all 32 — past the last enabled slot nothing is delivered and nothing runs to
+		// enable one. Games open their events from slot 0 up, so the walk ends early: Crash 3's
+		// gameplay asks ~90 times a frame (docs/perf/dreamcast-ledger.md, E-126).
+		var i = 0;
+		while (i < COUNT && (enabledMask >>> i) != 0) {
 			if (evFlags[i] == ENABLED && evClass[i] == cls && evSpec[i] == spec) deliverTo(ctx, i);
 			else {}
+			i++;
 		}
 	}
 
 	static function deliverTo(ctx:CpuState, slot:Int):Void {
 		delivered++;
-		if (evMode[slot] == MODE_NO_CALLBACK) evFlags[slot] = PENDING;
+		if (evMode[slot] == MODE_NO_CALLBACK) setFlag(slot, PENDING);
 		else if (evMode[slot] == MODE_CALLBACK && evHandler[slot] != 0) runCallback(ctx, slot);
 		else {}
 	}
@@ -279,7 +296,7 @@ class KEvents {
 	/** `UnDeliverEvent` — take back a delivery the game has not consumed yet. */
 	public static function undeliver(ctx:CpuState, cls:Int, spec:Int):Void {
 		for (i in 0...COUNT) {
-			if (evFlags[i] == PENDING && evClass[i] == cls && evSpec[i] == spec) evFlags[i] = ENABLED;
+			if (evFlags[i] == PENDING && evClass[i] == cls && evSpec[i] == spec) setFlag(i, ENABLED);
 			else {}
 		}
 	}

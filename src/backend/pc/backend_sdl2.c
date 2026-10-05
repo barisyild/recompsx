@@ -30,6 +30,9 @@ static SDL_GameController* g_pads[MAX_PADS];
 static uint32_t g_pad_buttons[MAX_PADS];
 static uint8_t  g_pad_axes[MAX_PADS][4];
 static int      g_pad_type[MAX_PADS];
+/* The DualShock motors each pad runs (bp_pad_rumble), and when its effect was last sent. */
+static int      g_rumble_small[MAX_PADS], g_rumble_large[MAX_PADS];
+static Uint32   g_rumble_sent[MAX_PADS];
 static uint32_t g_keyboard_buttons;        /* merged into pad 0 */
 static int      g_quit;
 
@@ -79,6 +82,10 @@ const char* bp_arg(int index) {
 /* ---- lifecycle ---------------------------------------------------------------------------- */
 
 int bp_init(const char* title) {
+    /* A DualShock 4 or DualSense over Bluetooth rumbles only in its extended report mode, which
+     * SDL leaves off unless asked (it changes what other programs see of the pad). */
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -131,7 +138,12 @@ int bp_init(const char* title) {
 
 void bp_shutdown(void) {
     for (int i = 0; i < MAX_FILES; i++) bp_file_close(i);
-    for (int i = 0; i < MAX_PADS; i++) if (g_pads[i]) SDL_GameControllerClose(g_pads[i]);
+    for (int i = 0; i < MAX_PADS; i++) {
+        if (g_pads[i]) {
+            SDL_GameControllerRumble(g_pads[i], 0, 0, 0);
+            SDL_GameControllerClose(g_pads[i]);
+        }
+    }
     if (g_audio)    SDL_CloseAudioDevice(g_audio);
     if (g_pixels)   { free(g_pixels); g_pixels = NULL; }
     if (g_texture)  SDL_DestroyTexture(g_texture);
@@ -236,6 +248,12 @@ void bp_gpu_state_w(const int* w) {
     bp_gpu_state(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9]);
 }
 
+/* Only an SH-4 polygon core that writes the backend's records itself calls this (ADR-0051); here no
+ * core runs, every triangle comes through bp_gpu_tri_w, and this is the state alone. */
+void bp_gpu_state_after_tri(const int* w) {
+    bp_gpu_state_w(w);
+}
+
 void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
                 int x1, int y1, int c1, int u1, int v1,
                 int x2, int y2, int c2, int u2, int v2) {
@@ -255,6 +273,9 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
 }
 
 void bp_gpu_dirty(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed) {
+    (void)sx; (void)sy; (void)dx; (void)dy; (void)w; (void)h; (void)changed;
+}
 void bp_gpu_clip(int x0, int y0, int x1, int y1) { (void)x0; (void)y0; (void)x1; (void)y1; }
 void bp_gpu_mask(int set_bit, int check_bit) { (void)set_bit; (void)check_bit; }
 
@@ -308,12 +329,43 @@ static uint32_t controller_buttons(SDL_GameController* c) {
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK))       b |= PAD_SELECT;
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK))  b |= PAD_L3;
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) b |= PAD_R3;
+    /* The centre button (PS, Xbox, Home) is the DualShock's ANALOG button (ADR-0052). */
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_GUIDE))      b |= BP_PAD_ANALOG_BUTTON;
     if (SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > 16384) b |= PAD_L2;
     if (SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384) b |= PAD_R2;
     return b;
 }
 
 static uint8_t axis_to_byte(Sint16 v) { return (uint8_t)(((int)v + 32768) >> 8); }
+
+/* ---- motors (bp_pad_rumble) -------------------------------------------------------------------
+ * The DualShock's large left motor is the controller's low-frequency one, its small right motor
+ * the high-frequency one, on at full strength. SDL runs an effect for a set time, so a running
+ * one is sent again from bp_input_poll before it ends: if the program stops polling, the pad
+ * stops shaking within RUMBLE_MS. */
+#define RUMBLE_MS    500
+#define RUMBLE_RENEW 250
+
+static void rumble_send(int i) {
+    if (!g_pads[i]) return;
+    const int on = g_rumble_small[i] || g_rumble_large[i];
+    SDL_GameControllerRumble(g_pads[i], (Uint16)(g_rumble_large[i] * 257),
+                             g_rumble_small[i] ? 0xFFFF : 0, on ? RUMBLE_MS : 0);
+    g_rumble_sent[i] = SDL_GetTicks();
+}
+
+void bp_pad_rumble(int pad, int small, int large) {
+    if (pad < 0 || pad >= MAX_PADS) return;
+    g_rumble_small[pad] = small ? 1 : 0;
+    g_rumble_large[pad] = large < 0 ? 0 : (large > 255 ? 255 : large);
+    rumble_send(pad);
+}
+
+static void rumble_renew(void) {
+    const Uint32 now = SDL_GetTicks();
+    for (int i = 0; i < MAX_PADS; i++)
+        if ((g_rumble_small[i] || g_rumble_large[i]) && now - g_rumble_sent[i] >= RUMBLE_RENEW) rumble_send(i);
+}
 
 /* ---- keyboard as text (bp_key_text, bp_key_next) --------------------------------------------
  * While text entry is on, characters come from SDL_TEXTINPUT — the host's layout and input
@@ -478,7 +530,11 @@ void bp_input_poll(void) {
                 const int i = e.cdevice.which;
                 if (i >= 0 && i < MAX_PADS && !g_pads[i] && SDL_IsGameController(i)) {
                     g_pads[i] = SDL_GameControllerOpen(i);
-                    if (g_pads[i]) g_pad_type[i] = BP_PAD_ANALOG;
+                    if (g_pads[i]) {
+                        g_pad_type[i] = BP_PAD_ANALOG;
+                        /* A new controller is a new DualShock: the runtime stops whatever ran. */
+                        g_rumble_small[i] = g_rumble_large[i] = 0;
+                    }
                 }
                 break;
             }
@@ -512,6 +568,7 @@ void bp_input_poll(void) {
         g_pad_buttons[i] = b;
     }
     if (g_window && g_renderer) latch_mouse();
+    rumble_renew();
 }
 
 int      bp_pad_connected(int pad) {

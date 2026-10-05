@@ -134,11 +134,18 @@ class Backend {
 		// The page's WebGL renderer samples what it drew (web/gpu-webgl.js), so it must hear of
 		// every upload, not only of those that changed emulated VRAM (BP_CAP_GPU_UPLOADS).
 		else if (capId == 6) return hasGpu() ? 1 : 0;
+		// And it copies what it drew (BP_CAP_GPU_COPIES, ADR-0054), when it says it can: a page
+		// may load a renderer older than this build.
+		else if (capId == 7) return hasGpuCopy() ? 1 : 0;
 		else return 0;
 	}
 
 	static inline function hasGpu():Bool {
 		return js.Syntax.code("({0} != null && {0}.gpu != null)", host());
+	}
+
+	static inline function hasGpuCopy():Bool {
+		return js.Syntax.code("({0} != null && {0}.gpu != null && typeof {0}.gpu.copy === 'function')", host());
 	}
 
 	/**
@@ -185,6 +192,12 @@ class Backend {
 			GpuFile.get(57), GpuFile.get(58), GpuFile.get(59), GpuFile.get(60), GpuFile.get(61));
 	}
 
+	/** After an SH-4 polygon core recorded a triangle (ADR-0051): never here, where no core runs and
+	    every triangle is gpuTriWords' — the state alone, as the C++ shim's fallback is. */
+	public static function gpuStateAfterTri():Void {
+		gpuStateWords();
+	}
+
 	/** The triangle the GPU file's words 36-47 hold (gpu.Gpu.triWords: x, y, the colour word, the
 	    texture word a vertex), as bp_gpu_tri_w takes it: gpuTri with the words unpacked. */
 	public static function gpuTriWords():Void {
@@ -211,6 +224,16 @@ class Backend {
 			return;
 		} else {}
 		js.Syntax.code("{0}.gpu.dirty({1}, {2}, {3}, {4})", host(), x, y, w, h);
+	}
+
+	/** A VRAM-to-VRAM copy, to a renderer that copies what it drew (caps(7), ADR-0054). **/
+	public static function gpuCopy(sx:Int, sy:Int, dx:Int, dy:Int, w:Int, h:Int, changed:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(7); gpuHashMix(sx); gpuHashMix(sy); gpuHashMix(dx); gpuHashMix(dy);
+			gpuHashMix(w); gpuHashMix(h); gpuHashMix(changed);
+			return;
+		} else {}
+		js.Syntax.code("{0}.gpu.copy({1}, {2}, {3}, {4}, {5}, {6}, {7})", host(), sx, sy, dx, dy, w, h, changed);
 	}
 
 	public static function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void {
@@ -315,9 +338,11 @@ class Backend {
 	/** The keyboard and gamepads in a page (shim.Input); under Node, no pad at all. */
 	public static function inputPoll():Void Input.poll();
 	public static function padConnected(pad:Int):Bool return Input.connected(pad);
-	public static function padType(pad:Int):Int return Input.connected(pad) ? 1 : 0;
+	public static function padType(pad:Int):Int return Input.type(pad);
 	public static function padButtons(pad:Int):Int return Input.buttons(pad);
-	public static function padAxis(pad:Int, axis:Int):Int return 0x80;
+	public static function padAxis(pad:Int, axis:Int):Int return Input.axis(pad, axis);
+	/** A gamepad's motors (shim.Input); under Node there are none to turn. */
+	public static function padRumble(pad:Int, small:Int, large:Int):Void Input.rumble(pad, small, large);
 	/** The page's keyboard as text (shim.Input); under Node nothing is ever typed. */
 	public static function keyText(on:Bool):Void Input.textEntry(on);
 	public static function keyNext():Int return Input.nextTyped();

@@ -42,6 +42,9 @@ extern function bp_gpu_rect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int, semiM
 @:include("backend_c_api.h") @:topLevel
 extern function bp_gpu_dirty(x:Int, y:Int, w:Int, h:Int):Void;
 
+@:include("backend_c_api.h") @:topLevel
+extern function bp_gpu_copy(sx:Int, sy:Int, dx:Int, dy:Int, w:Int, h:Int, changed:Int):Void;
+
 // Metadata binds to the one declaration after it: without their own `@:topLevel` these two were
 // emitted as members of the module's field class, and the C++ build stopped at gpu_Gpu.cpp.
 @:include("backend_c_api.h") @:topLevel
@@ -59,6 +62,7 @@ extern function bp_audio_push(frames:Ptr<Int16>, frameCount:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_pad_type(pad:Int):Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_pad_buttons(pad:Int):UInt32;
 @:include("backend_c_api.h") @:topLevel extern function bp_pad_axis(pad:Int, axis:Int):Int;
+@:include("backend_c_api.h") @:topLevel extern function bp_pad_rumble(pad:Int, small:Int, large:Int):Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_quit_requested():Int;
 @:include("backend_c_api.h") @:topLevel extern function bp_exit_to_menu():Void;
 @:include("backend_c_api.h") @:topLevel extern function bp_key_text(on:Int):Void;

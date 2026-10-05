@@ -499,6 +499,30 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s, int amode) {
  *  PlayStation did. Staleness cannot exist: content cannot drift from itself, which is why
  *  bp_gpu_dirty has no palette work at all. */
 uint32_t g_pal_memo_gen = 1;
+
+/* Every bank in use by its content's hash: open addressing, linear probing, one entry per bank
+ * (PAL_BANKS_4BPP of PAL_INDEX), moved with backward-shift deletion when a bank is written again.
+ * A bank's content is in at most one bank, so a probe finds the bank the walk over all sixty-four
+ * did (ledger E-117). */
+#define PAL_INDEX 128
+static int8_t g_pal_index[PAL_INDEX];     /* bank + 1; 0 for none */
+
+static inline int pal_home(uint32_t h) { return (int)(h >> 25) & (PAL_INDEX - 1); }
+
+static void pal_unindex(int bank) {
+    int hole = pal_home(g_pal4[bank].hash);
+    while(g_pal_index[hole] != 0 && g_pal_index[hole] != bank + 1) hole = (hole + 1) & (PAL_INDEX - 1);
+    if(g_pal_index[hole] == 0) return;
+    for(int q = (hole + 1) & (PAL_INDEX - 1); g_pal_index[q] != 0; q = (q + 1) & (PAL_INDEX - 1)) {
+        const int home = pal_home(g_pal4[g_pal_index[q] - 1].hash);
+        if(((q - hole) & (PAL_INDEX - 1)) <= ((q - home) & (PAL_INDEX - 1))) {
+            g_pal_index[hole] = g_pal_index[q];
+            hole = q;
+        } else {}
+    }
+    g_pal_index[hole] = 0;
+}
+
 PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, int amode) {
     uint16_t want[16];
     uint32_t h = 2166136261u;
@@ -506,13 +530,13 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
         want[i] = texel_argb(g_vram[(clut_y & 511) * VRAM_W + ((clut_x + i) & 1023)], amode);
         h = (h ^ want[i]) * 16777619u;
     }
-    for(int i = 0; i < PAL_BANKS_4BPP; i++) {
-        if(g_pal4[i].used && g_pal4[i].hash == h
-           && memcmp(g_pal4[i].entry, want, sizeof(want)) == 0) {
+    for(int p = pal_home(h); g_pal_index[p] != 0; p = (p + 1) & (PAL_INDEX - 1)) {
+        const int i = g_pal_index[p] - 1;
+        if(g_pal4[i].hash == h && memcmp(g_pal4[i].entry, want, sizeof(want)) == 0) {
             if(g_pal4[i].bound_frame != g_tex_frame) g_pal_live++;
             g_pal4[i].bound_frame = g_tex_frame;
             return i;
-        }
+        } else {}
     }
     /* In-flight rule, as for the texture slots: the PVR is still rendering the previous scene
      * out of palette RAM, so nothing bound this frame or the last may be rewritten. bound_frame
@@ -577,9 +601,16 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
     /* Only the steal above can rewrite a bank this scene has already handed out; the memo
      * below must then forget what it said about it. */
     if(g_pal4[bank].bound_frame == g_tex_frame) g_pal_memo_gen++;
+    if(g_pal4[bank].used) pal_unindex(bank);   /* by the content it held */
+    else {}
     g_pal_next = (bank + 1) % PAL_BANKS_4BPP;
     g_pal4[bank].used = 1;
     g_pal4[bank].hash = h;
+    {
+        int p = pal_home(h);
+        while(g_pal_index[p] != 0) p = (p + 1) & (PAL_INDEX - 1);
+        g_pal_index[p] = (int8_t)(bank + 1);
+    }
     shz_memcpy2_16(g_pal4[bank].entry, want);
     if(g_pal4[bank].bound_frame != g_tex_frame) g_pal_live++;
     g_pal4[bank].bound_frame = g_tex_frame;
@@ -745,18 +776,50 @@ static void bake_decode(pvr_ptr_t dst, const gstate_t* s, int tu, int tv, int am
  *  128 KB ARGB slot, and Crash Bandicoot: Warped binds seventeen such pairs a frame — every one
  *  of them sampling a single 64x64 corner — against twelve slots: five whole-page decodes a
  *  frame and slots evicted while the PVR still read them. As patches it is ~26 x 8 KB. */
-/* Where each key was last found, direct-mapped: a hit is one compare where the walk over the
- * pool was sixty-four, and the walk was four fifths of bake_slot — before the semi-transparency
- * variants doubled the lookups. An entry is a hint, checked against the slot it names. */
+/* Every baked patch by its key: open addressing, linear probing, one entry per slot that was ever
+ * baked (BAKE_MAX of BAKE_INDEX), so a probe always ends at an empty entry. An entry names the
+ * slot its key went into; a slot bp_gpu_dirty evicted keeps its entry, which bake_is passes over,
+ * until the slot is baked again and the entry goes (bake_unindex). A lookup is a probe or two. The
+ * one entry per hash this replaces was a hint: a key it missed — one sharing its entry, and every
+ * patch not baked yet — walked the whole pool, a fifth of bake_slot in Crash 3's gameplay (ledger
+ * E-114). */
 #define BAKE_INDEX 256
 static int16_t g_bake_index[BAKE_INDEX];   /* slot + 1; 0 for none */
 
-static inline int bake_hash(const gstate_t* s, int tu, int tv, int amode) {
-    uint32_t h = (uint32_t)s->tex_x * 0x9E3779B1u ^ (uint32_t)s->tex_y * 0x85EBCA77u;
-    h ^= (((uint32_t)s->clut_x << 16) | (uint32_t)s->clut_y) * 0xC2B2AE3Du;
-    h ^= ((uint32_t)tu | ((uint32_t)tv << 8) | ((uint32_t)s->depth << 16)
-          | ((uint32_t)amode << 18)) * 0x27D4EB2Fu;
+static inline int bake_hash_key(uint32_t tex_x, uint32_t tex_y, uint32_t clut_x, uint32_t clut_y,
+                                uint32_t tu, uint32_t tv, uint32_t depth, uint32_t amode) {
+    uint32_t h = tex_x * 0x9E3779B1u ^ tex_y * 0x85EBCA77u;
+    h ^= ((clut_x << 16) | clut_y) * 0xC2B2AE3Du;
+    h ^= (tu | (tv << 8) | (depth << 16) | (amode << 18)) * 0x27D4EB2Fu;
     return (int)(h >> 24) & (BAKE_INDEX - 1);
+}
+
+static inline int bake_hash(const gstate_t* s, int tu, int tv, int amode) {
+    return bake_hash_key(s->tex_x, s->tex_y, s->clut_x, s->clut_y, (uint32_t)tu, (uint32_t)tv,
+                         s->depth, (uint32_t)amode);
+}
+
+/* The hash of the key slot i holds (or last held). */
+static inline int bake_hash_slot(int i) {
+    const gbake_t* b = &g_bake[i];
+    return bake_hash_key(b->tex_x, b->tex_y, b->clut_x, b->clut_y, b->tu, b->tv, b->depth, b->amode);
+}
+
+/* Slot i's entry out of the index, if it has one, the entries after it in its run moved back so
+ * that no probe stops short of them (backward-shift deletion). */
+static void bake_unindex(int i) {
+    int hole = bake_hash_slot(i);
+    while(g_bake_index[hole] != 0 && g_bake_index[hole] != i + 1) hole = (hole + 1) & (BAKE_INDEX - 1);
+    if(g_bake_index[hole] == 0) return;
+    for(int q = (hole + 1) & (BAKE_INDEX - 1); g_bake_index[q] != 0; q = (q + 1) & (BAKE_INDEX - 1)) {
+        const int home = bake_hash_slot(g_bake_index[q] - 1);
+        /* q's entry may fill the hole when the hole is on its probe path, home .. q */
+        if(((q - hole) & (BAKE_INDEX - 1)) <= ((q - home) & (BAKE_INDEX - 1))) {
+            g_bake_index[hole] = g_bake_index[q];
+            hole = q;
+        } else {}
+    }
+    g_bake_index[hole] = 0;
 }
 
 static inline int bake_is(int i, const gstate_t* s, int tu, int tv, int amode) {
@@ -768,18 +831,14 @@ static inline int bake_is(int i, const gstate_t* s, int tu, int tv, int amode) {
 
 PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
     const int h = bake_hash(s, tu, tv, amode);
-    int found = g_bake_index[h] - 1;
-    if(found < 0 || !bake_is(found, s, tu, tv, amode)) {
-        found = -1;
-        for(int i = 0; i < g_bake_n; i++) {
-            if(bake_is(i, s, tu, tv, amode)) { found = i; break; }
-        }
-        if(found >= 0) g_bake_index[h] = (int16_t)(found + 1);
-    }
-    if(found >= 0) {
-        if(g_bake[found].bound_frame != g_tex_frame) g_bake_live++;
-        g_bake[found].bound_frame = g_tex_frame;
-        return found;
+    /* A key is in at most one slot in use, so the probe finds the slot the walk over the pool did. */
+    for(int p = h; g_bake_index[p] != 0; p = (p + 1) & (BAKE_INDEX - 1)) {
+        const int found = g_bake_index[p] - 1;
+        if(bake_is(found, s, tu, tv, amode)) {
+            if(g_bake[found].bound_frame != g_tex_frame) g_bake_live++;
+            g_bake[found].bound_frame = g_tex_frame;
+            return found;
+        } else {}
     }
     /* Same in-flight rule as everywhere else: the PVR is still reading the previous scene. */
     int slot = -1;
@@ -797,6 +856,7 @@ PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
         }
     }
     if(slot < 0) return -1;   /* every entry in flight — the caller approximates, and counts it */
+    bake_unindex(slot);       /* by the key it held, before it holds this one */
     g_bake_next = (slot + 1) % g_bake_n;
     g_bake[slot].used = 1;
     g_bake[slot].tex_x = s->tex_x;
@@ -808,7 +868,9 @@ PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
     g_bake[slot].depth = (uint8_t)s->depth;
     g_bake[slot].amode = (uint8_t)amode;
     g_bake[slot].bound_frame = g_tex_frame;
-    g_bake_index[h] = (int16_t)(slot + 1);
+    int p = h;
+    while(g_bake_index[p] != 0) p = (p + 1) & (BAKE_INDEX - 1);
+    g_bake_index[p] = (int16_t)(slot + 1);
     g_bake_live++;
     g_bake_decodes++;
     g_win_bake++;

@@ -361,11 +361,26 @@ class Runtime {
 	}
 
 	/**
+		The next deadline, as the generated code's pump tests read it: `ctx.nextEvent`. Except where
+		guest accesses go through the SH-4's MMU (ADR-0049, `recompsx_fastmem`): there an access
+		that traps runs a port's slow path, which may move the deadline (`Scheduler.scheduleAt`) with
+		nothing telling the C++ compiler, so the tests read it from memory every time — as they did
+		after the C++ form's call to the slow path, which the compiler had to assume wrote it.
+	**/
+	public static inline function deadline(ctx:CpuState):Int {
+		#if recompsx_fastmem
+		return shim.P0.deadline(ctx);
+		#else
+		return ctx.nextEvent;
+		#end
+	}
+
+	/**
 		Time has reached the next deadline: run what is due, then deliver any interrupt.
 
 		The only place recompiled code re-enters the runtime for reasons other than a memory access
 		or a kernel call, and the only place an interrupt can be delivered. Generated code calls it
-		guarded — `if (ctx.cycles - ctx.nextEvent >= 0) Runtime.pump(ctx);` — at function entry and
+		guarded — `if (ctx.cycles - Runtime.deadline(ctx) >= 0) Runtime.pump(ctx);` — at function entry and
 		every back-edge, so the common cost is a subtraction and a branch (ADR-0005 §2).
 
 		Order matters: events first, because firing one is what raises the interrupt that the

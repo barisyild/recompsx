@@ -266,6 +266,21 @@ class TestCodegen {
 		final readChain = next;
 		add("scalarReadChain", [alu(0x21, 16, 31, 0), jal(next + 28), 0, alu(0x21, 31, 16, 0), JR, 0, 0,
 			imm(0x23, 2, 4, 0), JR, imm(9, 2, 2, 7)]);
+		// A function span only one path needs (Emitter.deferEntryTakes): with a0 < 0 the function
+		// returns 7 without touching a1's memory; otherwise it sums the two words at a1, through a
+		// span taken at that block, not at the entry. The `addi` (an overflow trap, never taken
+		// here) keeps it out of scalar recovery, so the span is the general body's.
+		final deferred = add("deferredSpan", [imm(1, 1, 4, 4), 0, imm(9, 2, 0, 7), JR, 0,
+			imm(0x23, 2, 5, 0), imm(0x23, 3, 5, 4), alu(0x21, 2, 2, 3), imm(8, 2, 2, 1), JR, 0]);
+		// Ports reached the libraries' ways (PortBases): through a pointer the executable keeps — a word
+		// of the image holding libetc's I_STAT, loaded, then read through — and through a base built as
+		// a port's constant. Both decode their address on fastmem rather than trap (Memory's `*pt`,
+		// `*pf`); a load through a0, which holds anything, stays `*bt`. The `addi` keeps it out of
+		// scalar recovery.
+		final pp = next;
+		final portPtr = add("portPointer", [imm(15, 2, 0, (pp + 32 + 0x8000) >>> 16), imm(0x23, 2, 2, (pp + 32) & 0xffff),
+			imm(0x25, 5, 2, 0), imm(15, 3, 0, 0x1f80), imm(0x23, 6, 3, 0x1814), imm(8, 7, 4, 1), JR,
+			imm(0x23, 8, 4, 0), 0x1f801070]);
 		bodies.add('public static inline var SCALAR_READS = $readBase;\n');
 		bodies.add('public static inline var SCALAR_READ_CHAIN = $readChain;\n');
 		bodies.add('public static inline var SCALAR_BASE = $scalarBase;\n');
@@ -273,6 +288,15 @@ class TestCodegen {
 		bodies.add('public static inline var SCALAR_OPS = $scalarOpsAddr;\n');
 		bodies.add('public static inline var SCALAR_COUNT = ${scalarOps.length};\n');
 		if (check) {
+			Assert.equals(portPtr.indexOf('Memory.read16up') >= 0, opt, "a port through a pointer the image keeps decodes its address");
+			Assert.equals(portPtr.indexOf('Memory.read32pt(ctx.v1, 6164') >= 0, opt, "a port's constant base decodes its address");
+			Assert.isTrue(portPtr.indexOf('Memory.read32pt(ctx.a0') < 0 && portPtr.indexOf('Memory.read32pf(ctx.a0') < 0,
+				"a base that may hold anything goes through the MMU");
+			Assert.isTrue(deferred.indexOf('_value(') < 0, "the deferred-span fixture keeps its general body");
+			Assert.equals(deferred.indexOf('var fspan_a1 = entry == 0 ? Memory.spanNone()') >= 0, opt,
+				"a span one path needs is not taken at the entry");
+			Assert.equals(deferred.indexOf('\tfspan_a1 = Memory.span(ctx.a1, 0, 7);') >= 0, opt,
+				"the span is taken at the block that needs it");
 			Assert.equals(restored.indexOf('scalarRestored_value(a0:Int):Int') >= 0, opt,
 				"SSA proves a scratch register is restored without reading it into the helper");
 			Assert.equals(tooLong.indexOf('_value(') >= 0, opt, "compact recovery may exceed 32 guest instructions");
@@ -324,7 +348,8 @@ class TestCodegen {
 			Assert.equals(nonlocal.indexOf('var cyc = ctx.cycles;') >= 0, opt, "the clock in a local when optimizing");
 			Assert.equals(nonlocal.indexOf('ctx.cycles = cyc;\n') >= 0 && nonlocal.indexOf('cyc = ctx.cycles;\n') >= 0, opt,
 				"the clock written before a call and read back after it");
-			Assert.equals(nonlocal.indexOf('Memory.read32t(') >= 0 || nonlocal.indexOf('Memory.read32f(') >= 0, opt,
+			Assert.equals(nonlocal.indexOf('Memory.read32bt(') >= 0 || nonlocal.indexOf('Memory.read32bf(') >= 0
+				|| nonlocal.indexOf('Memory.read32t(') >= 0 || nonlocal.indexOf('Memory.read32f(') >= 0, opt,
 				"a load's slow path is handed the clock");
 			Assert.equals(fused.indexOf('Ops.multLo(ctx') >= 0, opt, "fused signed multiply low");
 			Assert.equals(fused.indexOf('Ops.multHi(ctx') >= 0, opt, "fused signed multiply high");
@@ -347,7 +372,7 @@ class TestCodegen {
 			Assert.equals(gte.indexOf('gte.GteQuick.rtps(12, false);') >= 0, opt, "RTPS runs at its call site when optimizing");
 			Assert.isTrue(gte.indexOf('Gte.execute(ctx, 0x00000002);') >= 0, "unknown GTE command falls back to execute");
 			Assert.equals(gte.indexOf('gte.GteQuick.nclip();') >= 0, opt, "NCLIP runs at its call site when optimizing");
-			Assert.equals(idle.indexOf('core.IdleLoop.untilEvent(cyc, ctx.nextEvent, ') >= 0, opt, "idle loop prologue when optimizing");
+			Assert.equals(idle.indexOf('core.IdleLoop.untilEvent(cyc, core.Runtime.deadline(ctx), ') >= 0, opt, "idle loop prologue when optimizing");
 			Assert.equals(idle.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "idle loop counter exit");
 			Assert.equals(reload.indexOf('core.IdleLoop.untilEqual(idleTop, -1, v1)') >= 0, opt, "stored-and-reloaded counter exit");
 			Assert.equals(reload.indexOf('idle_v0 = idleStored;') >= 0, opt, "a reload yields the stored count in the dry turn");

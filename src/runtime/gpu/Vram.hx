@@ -1,6 +1,7 @@
 package gpu;
 
 import shim.IntMath;
+import shim.MemA;
 import shim.RawBuf;
 import shim.RawMem;
 
@@ -23,11 +24,14 @@ class Vram {
 		data = RawMem.alloc(BYTES);
 	}
 
+	// Every pixel is a halfword at an even offset of a buffer malloc aligned: one halfword access
+	// (MemA) where RawMem's were two byte accesses on C++, and under -fno-strict-aliasing every
+	// store is one the compiler must take for a change to any memory it has read (ledger E-141).
 	public static function get(x:Int, y:Int):Int
-		return RawMem.get16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2);
+		return MemA.get16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2);
 
 	public static function set(x:Int, y:Int, v:Int):Void
-		RawMem.set16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2, v);
+		MemA.set16(data, ((y & (HEIGHT - 1)) * WIDTH + (x & (WIDTH - 1))) * 2, v);
 
 	/**
 		Linear access for clipped raster spans. The caller has already established that the index
@@ -35,11 +39,15 @@ class Vram {
 		multiply for every pixel. Uploads and VRAM copies keep using get/set because those paths
 		wrap at the hardware's torus boundary.
 	**/
-	public static inline function getLinear(index:Int):Int return RawMem.get16Index(data, index);
+	public static inline function getLinear(index:Int):Int return MemA.get16(data, index << 1);
 
-	public static inline function setLinear(index:Int, v:Int):Void RawMem.set16Index(data, index, v);
+	public static inline function setLinear(index:Int, v:Int):Void MemA.set16(data, index << 1, v);
 
 	public static inline function rowStart(y:Int):Int return y * WIDTH;
+
+	/** The buffer as a value, for a loop to hold in a local: one initialised from `data` itself is
+	    a reference to the static on reflaxe.CPP, read again after every store (see Spu.accLeft). */
+	public static function buffer():RawBuf return data;
 
 	/** `count` halfwords from a linear index, one value: a row of a fill or of an opaque span.
 	    The shim's bulk fill: on C++ it was a loop of byte stores the SH-4 cannot widen. */

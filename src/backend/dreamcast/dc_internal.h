@@ -157,8 +157,11 @@ static inline void txr_put(const void* src, pvr_ptr_t dst, size_t bytes) {
  * wrong palette. "Half the map right, half a single pink wash" was this integer. */
 #define GPU_MAX_STATES (GPU_MAX_CMDS + 1)
 /* One primitive. A rectangle borrows the triangle's slots: corner in [0], size in [1]. So does a
- * VRAM write into the picture (GCMD_VRAM, see bp_gpu_dirty): VRAM corner in [0], size in [1]. */
-enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2 };
+ * VRAM write into the picture (GCMD_VRAM, see bp_gpu_dirty): VRAM corner in [0], size in [1]; and
+ * a VRAM-to-VRAM copy out of a buffer this backend draws (GCMD_COPY, bp_gpu_copy, ADR-0054): the
+ * destination's corner in [0], the size in [1], the source's corner in [2]. Both are "marks": what
+ * looks for VRAM writes in a picture (marks_from) finds either. */
+enum { GCMD_TRI = 0, GCMD_RECT = 1, GCMD_VRAM = 2, GCMD_COPY = 3 };
 /* 32 bytes, 32-aligned: one operand-cache line a record. Recording one allocates its line without
  * reading memory (shz_dcache_alloc_line, `movca.l`: the SH-4 caches write-back, and a store that
  * misses would otherwise fetch 32 bytes only to overwrite them), and build_scene reads the buffer
@@ -335,6 +338,38 @@ typedef struct {
 /* ---- defined in one file, used in another ------------------------------------------------- */
 
 /* dc_video.c */
+/* The pictures (ADR-0053): what the PlayStation's VRAM holds in a display buffer, rendered by the PVR
+ * into texture memory, so that what a game drew stays drawn until it draws over it — as it stays in
+ * a PlayStation's framebuffer. A picture is the buffer at its own resolution (1:1, up to
+ * PIC_W x PIC_H), in a texture of that size. Three memories — two buffers' pictures and the one the
+ * next render goes into — are slots 1-3 of g_txr's megabyte, and slot 0 is the background slot
+ * while the pictures are in use: they cost the texture pools nothing. */
+#define PIC_W    512
+#define PIC_H    256
+#define PIC_N    2
+#define PIC_MEMS 3
+typedef struct {
+    int x, y, w, h;    /* the buffer's VRAM rectangle */
+    int mem;           /* which memory holds it */
+    int valid;
+    uint32_t used;     /* g_tex_frame of its last use */
+} gpic_t;
+extern int g_pic_ok;       /* the memories exist: presents that can use pictures do */
+extern int g_pic_active;   /* the last present went through the pictures */
+extern int g_pic_done;     /* records already rendered into the pictures */
+int pictures_init(void);
+/* What a game reads back from a buffer this backend draws, from its picture (ADR-0054): the
+ * picture holding a 15-bit texture page's corner, as a texture — its memory and the page's offset
+ * into it (put_tri's ou, ov), sampled as PIC_TEXDIM square — and the point-sampled header and
+ * corner of the picture holding a copy's source rectangle. 0 / NULL when no picture does. */
+#define PIC_TEXDIM 512
+/* A texture's height from its binding's size (`dim`): square, but for a buffer's picture, which is
+ * PIC_W x PIC_H — sampled as it was rendered, since an emulator matches a texture it rendered by
+ * address and size (Flycast: 512x256 for a 512x240 render). put_tri scales V by its own term. */
+static inline int dim_v(int dim) { return dim == PIC_TEXDIM ? PIC_H : dim; }
+int pic_page(int tx, int ty, pvr_ptr_t* mem, int* ou, int* ov);
+const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py);
+
 extern pvr_ptr_t g_txr;
 extern pvr_poly_hdr_t g_hdr;
 extern int g_txw;
@@ -348,7 +383,9 @@ void draw_quad(int sw, int sh);
 /* dc_scene.c */
 extern const uint16_t* g_vram;
 extern gcmd_t g_cmds[GPU_MAX_CMDS];
-extern int g_cmd_count;
+/* The records of the frame: those before the sink's next (ADR-0051), where the polygon core and
+ * cmd_line both append. */
+static inline int cmd_count(void) { return (int)((const gcmd_t*)(const void*)bp_gpu_sink.next - g_cmds); }
 extern gstate_t g_states[GPU_MAX_STATES];
 extern int g_state_count;
 extern int g_frame_shown;
@@ -359,8 +396,18 @@ extern gdiag_t g_diag;
 extern int g_disp[2][4];
 int inside(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh);
 int last_cover(int sw, int sh);
+int last_cover_at(int tx, int ty, int sw, int sh, int from);
+int state_targets(int t[][4], int max, int from);
 int marks_from(int first, int sx, int sy, int sw, int sh);
-PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first);
+/* The base a picture's render starts from (ADR-0053): a header and the rectangle it fills, from
+ * (0,0) to (x1,y1), with the texture from (0,0) to (u1,v1). */
+extern const pvr_poly_hdr_t* g_base_hdr;
+extern float g_base_x1, g_base_y1, g_base_u1, g_base_v1;
+/* The frame's records onto the screen (`to_picture` 0: the rectangle sx..sh scaled to 640 x 480,
+ * the background g_hdr) or into the picture of the buffer at sx, sy (1: that buffer's records only,
+ * at its own resolution, sw x sh, the base g_base_hdr, no overlay or pointer). */
+PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first,
+                               int to_picture);
 
 /* dc_textures.c */
 extern gpage4_t g_page4[PAGE4_N];
@@ -405,6 +452,8 @@ void* audio_pull(snd_stream_hnd_t hnd, int req, int* got);
 
 /* dc_input.c */
 void reset_combo(uint8_t addr, uint32_t btns);
+/* The DualShock motors' Puru Puru packs stopped (dc_input.c), before the hardware is. */
+void rumble_stop_all(void);
 /* The mouse pointer, over the picture, while a maple mouse is attached: the last thing each scene
  * submits, inside the translucent list (build_scene and a blank present both end with it). */
 void draw_mouse_pointer(void);
@@ -437,10 +486,12 @@ extern int g_win_mir;
 extern int g_win_slot;
 extern int g_win_bake;
 extern int g_win_patch;
+extern int g_pic_renders, g_pic_copies, g_pic_screens;
 #if RECOMPSX_DC_PROFILE
 extern int g_bench_from;
 extern int g_bench_to;
 extern int g_rxprof;
+extern int g_shot_from, g_shot_to, g_shot_step;
 #endif
 extern kthread_t* g_emu_thread;
 #if RECOMPSX_DC_PROFILE
@@ -476,6 +527,14 @@ void draw_profile_overlay(void);
 #if RECOMPSX_DC_PROFILE
 extern char g_fm_line[48];
 void fastmem_test(void);
+#endif
+#if RECOMPSX_FASTMEM
+void fastmem_init(void);          /* ADR-0049: guest RAM through the MMU, before any guest code runs */
+extern uint32_t g_fm_traps;       /* accesses the MMU sent to the slow path */
+#if RECOMPSX_FM_HIST
+void fm_hist_reset(void);         /* a diagnostic build's traps by address (dc_fastmem.c) */
+void fm_hist_report(uint32_t frames);
+#endif
 #endif
 
 #endif /* RECOMPSX_DC_INTERNAL_H */

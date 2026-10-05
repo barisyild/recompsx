@@ -5,16 +5,18 @@
 !   _recompsx_gpu_poly   in  r4 guest RAM's base, r5 the packet's address, r6 its command (20h-3Fh),
 !                            r7 the GPU's register file (recompsx_gpu): the triangle (0, 1, 2)
 !   _recompsx_gpu_poly2  the same for a quad's second triangle (1, 2, 3)
-!   out  r0 = 0: drawn, the backend's triangle in words 36-47 (bp_gpu_tri_w: x, y, the colour word,
-!        the texture word masked, a vertex), its state the one last sent;
-!        2: the same, its state for the backend first in words 52-61 (bp_gpu_state_w: Gpu.triState
-!        and sendState done here); 3: rejected, nothing to
-!        record; 1: the packet could wrap at the end of RAM — the C form runs it (texEnabled, texRaw
-!        and semiTransparent perhaps written, as it writes them)
+!   out  r0 = 0: drawn, and recorded: the backend's record written where bp_gpu_sink says (ADR-0051:
+!        the eight words bp_gpu_tri_w makes of the twelve, under the sink's tag, the state's count
+!        of triangles counted), its state the one last sent;
+!        2: the same, its state for the backend after it in words 52-61 (bp_gpu_state_after_tri:
+!        Gpu.triState and sendState done here), which takes the record as the new state's; 3:
+!        rejected, nothing to record; 1: the packet could wrap at the end of RAM, or the sink has no
+!        room for its triangles (a frame shown and not begun, the buffer nearly full) — the C form
+!        runs it (texEnabled, texRaw and semiTransparent perhaps written, as it writes them)
 !   uses r0-r7, MACH/MACL, T; r8-r14 saved and restored
 ! A palette or page not the one decoded last is decoded at .Lclut0 / .Lpage0 (Gpu.setClut,
-! setTexPage), and the packet starts again. Words: tpKey 0, clutKey 1, sentTp 2, sentClut 3, sentFlags 4,
-! sentAreaWord 5, textureWindow 6, drawAreaTopLeft 7, offsetX 8, offsetY 9, areaL/T/R/B 10-13, work 14,
+! setTexPage), which go on with the packet at .Lbody. Words: tpKey 0, clutKey 1, sentTp 2, sentClut 3,
+! sentFlags 4, sentAreaWord 5, textureWindow 6, drawAreaTopLeft 7, offsetX 8, offsetY 9, areaL/T/R/B 10-13, work 14,
 ! primitives 15, texEnabled 16, texRaw 17, semiTransparent 18, sentWindow 19, texBaseX/Y 23/24,
 ! texDepth 25, clutX/Y 26/27, semiMode 28 | out: the triangle's words 36-47 | 48 the command's row of .Lops,
 ! 49 the answer, 50 vertex 0's colour word, 51 its position word | out: 52-61 the state for the
@@ -32,82 +34,70 @@
 	rts
 	mov	#1,r0
 .Lclut0:
-	! Gpu.setClut (r11 the attribute): clutKey a & 0x7FFF, clutX (a & 0x3F) << 4, clutY (a >>> 6) & 0x1FF
+	! Gpu.setClut (r11 the attribute): clutKey a & 0x7FFF, clutX (a & 0x3F) << 4, clutY (a >>> 6) & 0x1FF;
+	! then the page if it differs too (r8), and on with the packet. r1-r3, r7, r13 and r14 are the body's
 	mov	#-128,r0
 	extu.b	r0,r0
 	shll8	r0
 	add	#-1,r0
 	and	r11,r0
 	mov.l	r0,@(4,r7)
-	mov	r7,r2
-	add	#64,r2
+	mov	r7,r5
+	add	#64,r5
 	mov	r11,r0
 	and	#63,r0
 	shll2	r0
 	shll2	r0
-	mov.l	r0,@(40,r2)
+	mov.l	r0,@(40,r5)
 	mov	r11,r0
 	shlr2	r0
 	shlr2	r0
 	shlr2	r0
-	mov	#2,r3
-	shll8	r3
-	add	#-1,r3
-	and	r3,r0
-	mov.l	r0,@(44,r2)
-	mov.l	@r15+,r14
-	mov.l	@r15+,r13
-	mov.l	@r15+,r12
-	mov.l	@r15+,r11
-	mov.l	@r15+,r10
-	mov.l	@r15+,r9
-	mov.l	@r15+,r8
-	bra	.Lpoly
+	mov	#2,r6
+	shll8	r6
+	add	#-1,r6
+	and	r6,r0
+	mov.l	r0,@(44,r5)
+	tst	r8,r8
+	bf	.Lpage0
+	bra	.Lbody
 	nop
 .Lpage0:
 	! Gpu.setTexPage (r13 the attribute): tpKey a & 0x1FF, texBaseX (a & 0xF) << 6, texBaseY
-	! ((a >>> 4) & 1) << 8, semiMode (a >>> 5) & 3, texDepth (a >>> 7) & 3
-	mov	#2,r3
-	shll8	r3
-	add	#-1,r3
-	and	r13,r3
-	mov.l	r3,@(0,r7)
-	mov	r7,r2
-	add	#64,r2
+	! ((a >>> 4) & 1) << 8, semiMode (a >>> 5) & 3, texDepth (a >>> 7) & 3; then on with the packet
+	mov	#2,r6
+	shll8	r6
+	add	#-1,r6
+	and	r13,r6
+	mov.l	r6,@(0,r7)
+	mov	r7,r5
+	add	#64,r5
 	mov	r13,r0
 	and	#15,r0
 	shll2	r0
 	shll2	r0
 	shll2	r0
-	mov.l	r0,@(28,r2)
+	mov.l	r0,@(28,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	and	#1,r0
 	shll8	r0
-	mov.l	r0,@(32,r2)
+	mov.l	r0,@(32,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	shlr	r0
 	and	#3,r0
-	mov.l	r0,@(48,r2)
+	mov.l	r0,@(48,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	shlr2	r0
 	shlr	r0
 	and	#3,r0
-	mov.l	r0,@(36,r2)
-	mov.l	@r15+,r14
-	mov.l	@r15+,r13
-	mov.l	@r15+,r12
-	mov.l	@r15+,r11
-	mov.l	@r15+,r10
-	mov.l	@r15+,r9
-	mov.l	@r15+,r8
-	bra	.Lpoly
-	nop
+	bra	.Lbody
+	mov.l	r0,@(36,r5)
 	.global	_recompsx_gpu_poly2
 	.type	_recompsx_gpu_poly2,@function
 _recompsx_gpu_poly2:
@@ -132,6 +122,17 @@ _recompsx_gpu_poly:
 	mov.l	.Lk1fffd0,r2
 	cmp/hi	r2,r0
 	bt	WRAP			;; exit
+	! and so is one the backend's sink (ADR-0051) has no room for: two records for a packet, one for
+	! a quad's second triangle (r1 -1), whose first call found room for both
+	mov.l	.Lksink,r3
+	mov.l	@r3,r8			;; table
+	mov.l	@(4,r3),r9		;; table
+	sub	r8,r9
+	mov	#-32,r10
+	and	r1,r10
+	add	#64,r10
+	cmp/ge	r10,r9
+	bf	WRAP			;; exit
 	mov	r4,r2
 	add	r0,r2
 	! the command's row of .Lops: its step, the GPU time's shift and blend mask, the flags
@@ -147,27 +148,31 @@ _recompsx_gpu_poly:
 	mov.l	@r3,r14			;; table
 	mov.l	@(28,r3),r10		;; table
 	! the palette rides on vertex 0's texture word, the page on vertex 1's: each the one decoded
-	! last, or decoded at .Lclut0 / .Lpage0 and the packet started again (an untextured packet has neither)
+	! last, or decoded at .Lclut0 / .Lpage0, which go on with the packet at .Lbody (an untextured
+	! packet has neither). Both differences first: neither decode changes the other's key
 	mov.l	@(8,r2),r11
 	shlr16	r11
 	mov.w	.Lk7fff,r12
 	and	r11,r12
-	mov.l	@(4,r7),r13		;; word=1
-	xor	r13,r12
+	mov.l	@(4,r7),r9		;; word=1
+	xor	r9,r12
 	and	r10,r12
-	tst	r12,r12
-	bf	CLUT			;; exit use=r1,r4,r5,r6,r7,r11
 	mov	r2,r13
 	add	r14,r13
 	mov.l	@(8,r13),r13
 	shlr16	r13
-	mov.w	.Lk1ff,r12
-	and	r13,r12
-	mov.l	@(0,r7),r8		;; word=0
-	xor	r8,r12
-	and	r10,r12
+	mov.w	.Lk1ff,r8
+	and	r13,r8
+	mov.l	@(0,r7),r0		;; word=0
+	xor	r0,r8
+	and	r10,r8
 	tst	r12,r12
-	bf	PAGE			;; exit use=r1,r4,r5,r6,r7,r13
+	bf	CLUT			;; exit use=r1,r2,r3,r7,r8,r11,r13,r14
+	tst	r8,r8
+	bf	PAGE			;; exit use=r1,r2,r3,r7,r13,r14
+@end
+.Lbody:
+@block R
 	! vertex 0's position word: the command's next, a vertex on for a quad's second triangle; its
 	! colour word the one before with gouraud, the command word flat (for .Ljoin's words)
 	mov	r14,r9
@@ -377,73 +382,6 @@ _recompsx_gpu_poly:
 .Lk5:		.word	5
 .Lk7fff:	.word	0x7FFF
 .Lk1ff:		.word	0x1FF
-.Ljoin:
-@block U
-	! the GPU time (Gpu.pixelWork): 5/8 of a cycle a pixel textured, 5/16 not, half as much again
-	! semi-transparent, and the setup; then the positions for the record
-	mov	r7,r6
-	add	#127,r6
-	add	#17,r6
-	mov.l	@(48,r6),r3		;; word=48
-	mov.l	@(4,r3),r1		;; table
-	mov.l	@(8,r3),r2		;; table
-	shld	r1,r0
-	mov	r0,r4
-	shlr2	r4
-	add	r4,r0
-	mov	r0,r4
-	shlr	r4
-	and	r2,r4
-	add	r4,r0
-	mov.l	@(56,r7),r4		;; word=14
-	add	#16,r0
-	add	r0,r4
-	mov.l	r4,@(56,r7)		;; word=14 keep
-	mov.l	r8,@(0,r6)		;; word=36 keep
-	mov.l	r9,@(4,r6)		;; word=37 keep
-	mov.l	r10,@(16,r6)		;; word=40 keep
-	mov.l	r11,@(20,r6)		;; word=41 keep
-	mov.l	r12,@(32,r6)		;; word=44 keep
-	mov.l	r13,@(36,r6)		;; word=45 keep
-	! the colour words a colour step apart (the step with gouraud, none flat), the texture words
-	! after each position, masked
-	mov.l	@(56,r6),r1		;; word=50
-	mov.l	@(60,r6),r2		;; word=51
-	mov.l	@r3,r4			;; table
-	mov.l	@(32,r3),r5		;; table
-	mov.l	@(28,r3),r14		;; table
-	and	r4,r5
-	mov.l	@r1,r8
-	add	r5,r1
-	mov.l	@r1,r9
-	add	r5,r1
-	mov.l	@r1,r10
-	mov.l	@(4,r2),r11
-	add	r4,r2
-	mov.l	@(4,r2),r12
-	add	r4,r2
-	mov.l	@(4,r2),r13
-	and	r14,r11
-	and	r14,r12
-	and	r14,r13
-	mov.l	r8,@(8,r6)		;; word=38 keep
-	mov.l	r11,@(12,r6)		;; word=39 keep
-	mov.l	r9,@(24,r6)		;; word=42 keep
-	mov.l	r12,@(28,r6)		;; word=43 keep
-	mov.l	r10,@(40,r6)		;; word=46 keep
-	mov.l	r13,@(44,r6)		;; word=47 keep
-	mov.l	@(52,r6),r0		;; word=49
-	tst	r0,r0
-	bf	SEND			;; exit use=r3,r7
-	mov.l	@r15+,r14		;; stack
-	mov.l	@r15+,r13		;; stack
-	mov.l	@r15+,r12		;; stack
-	mov.l	@r15+,r11		;; stack
-	mov.l	@r15+,r10		;; stack
-	mov.l	@r15+,r9		;; stack
-	rts				;; last
-@end
-	mov.l	@r15+,r8
 .Lout1:
 	! a vertex outside the drawing area: its box clipped to the area, and no more than its area
 	! (r0), as Gpu.triangleWork; then .Ljoin
@@ -520,6 +458,113 @@ _recompsx_gpu_poly:
 .Lnobox:
 	bra	.Ljoin
 	mov	#0,r0
+.Ljoin:
+@block U
+	! the GPU time (Gpu.pixelWork): 5/8 of a cycle a pixel textured, 5/16 not, half as much again
+	! semi-transparent, and the setup; then the positions for the record
+	mov	r7,r6
+	add	#127,r6
+	add	#17,r6
+	mov.l	@(48,r6),r3		;; word=48
+	mov.l	@(4,r3),r1		;; table
+	mov.l	@(8,r3),r2		;; table
+	shld	r1,r0
+	mov	r0,r4
+	shlr2	r4
+	add	r4,r0
+	mov	r0,r4
+	shlr	r4
+	and	r2,r4
+	add	r4,r0
+	mov.l	@(56,r7),r4		;; word=14
+	add	#16,r0
+	add	r0,r4
+	mov.l	r4,@(56,r7)		;; word=14 keep
+	! the backend's record (ADR-0051) where bp_gpu_sink's next one goes, its line allocated without a
+	! read (movca.l), as bp_gpu_tri_w makes it of the twelve words: the positions in halfword pairs
+	! (x0 x1, x2 y0, y1 y2), the colour words a colour step apart (the step with gouraud, none flat)
+	! masked to their 24 bits, then u0 u1 u2 v0 and v1 v2 beside the sink's tag from the texture
+	! words after each position, masked; then the sink's next, and its state's count of triangles. The
+! record's stores share a word tag (255, no word of the file) so that they keep their order: the
+! line's first store is the movca.l, or a store before it would miss and read the line
+	mov.l	.Lksink,r5
+	mov.l	@r5,r1			;; table
+	mov	r8,r0
+	shll16	r0
+	xtrct	r10,r0
+	mov	r12,r2
+	shll16	r2
+	xtrct	r9,r2
+	mov	r11,r4
+	shll16	r4
+	xtrct	r13,r4
+	movca.l	r0,@r1			;; keep word=255
+	mov.l	r2,@(4,r1)		;; keep word=255
+	mov.l	r4,@(8,r1)		;; keep word=255
+	mov.l	@(56,r6),r8		;; word=50
+	mov.l	@(60,r6),r9		;; word=51
+	mov.l	@r3,r4			;; table
+	mov.l	@(32,r3),r10		;; table
+	mov.l	@(28,r3),r11		;; table
+	and	r4,r10
+	mov.l	@r8,r12
+	add	r10,r8
+	mov.l	@r8,r13
+	add	r10,r8
+	mov.l	@r8,r0
+	mov	#-1,r2
+	shlr8	r2
+	and	r2,r12
+	and	r2,r13
+	and	r2,r0
+	mov.l	r12,@(12,r1)		;; keep word=255
+	mov.l	r13,@(16,r1)		;; keep word=255
+	mov.l	r0,@(20,r1)		;; keep word=255
+	mov.l	@(4,r9),r12
+	add	r4,r9
+	mov.l	@(4,r9),r13
+	add	r4,r9
+	mov.l	@(4,r9),r14
+	and	r11,r12
+	and	r11,r13
+	and	r11,r14
+	extu.b	r14,r0
+	shll8	r0
+	extu.b	r13,r2
+	or	r2,r0
+	shll8	r0
+	extu.b	r12,r2
+	or	r2,r0
+	shlr8	r12
+	shll16	r12
+	shll8	r12
+	or	r12,r0
+	shlr8	r14
+	shll8	r14
+	shlr8	r13
+	or	r13,r14
+	mov.l	@(8,r5),r2		;; table
+	or	r2,r14
+	mov.l	r0,@(24,r1)		;; keep word=255
+	mov.l	r14,@(28,r1)		;; keep word=255
+	mov.l	@(12,r5),r2		;; table
+	add	#32,r1
+	mov.l	r1,@r5			;; keep
+	mov.w	@r2,r0
+	add	#1,r0
+	mov.w	r0,@r2			;; keep
+	mov.l	@(52,r6),r0		;; word=49
+	tst	r0,r0
+	bf	SEND			;; exit use=r3,r7
+	mov.l	@r15+,r14		;; stack
+	mov.l	@r15+,r13		;; stack
+	mov.l	@r15+,r12		;; stack
+	mov.l	@r15+,r11		;; stack
+	mov.l	@r15+,r10		;; stack
+	mov.l	@r15+,r9		;; stack
+	rts				;; last
+@end
+	mov.l	@r15+,r8
 .Lsend1:
 	! the state is not the one last sent (Gpu.triState): the page, palette, flags and drawing area
 	! become the sent ones; then Gpu.sendState — the page, depth, blend and flags packed, the palette,
@@ -614,6 +659,7 @@ _recompsx_gpu_poly:
 	.align	2
 .Lk1ffffc:	.long	0x1FFFFC
 .Lk1fffd0:	.long	0x1FFFD0
+.Lksink:	.long	_bp_gpu_sink
 	.align	5
 .Lops:
 	! a row a command 20h-3Fh: the step between vertices, the GPU time's shift (-1 textured, -2 not)

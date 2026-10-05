@@ -21,6 +21,15 @@ import js.html.PointerEvent;
 	keyboard's language. Gamepads are read in the W3C "standard" mapping: face buttons 0-3,
 	shoulders 4-7, select and start 8-9, stick clicks 10-11, d-pad 12-15.
 
+	A gamepad is a DualShock's worth of controller (ADR-0052): its pad is reported analog, its sticks
+	are axes 0-3 (left X and Y, right X and Y, -1..1, turned into 0..255 in plain JavaScript so that
+	no fraction reaches Haxe), and its centre button, 16, is the DualShock's ANALOG button. The
+	keyboard alone is a digital pad. The motors go to the gamepad's `vibrationActuator` as a
+	"dual-rumble" effect, the large motor strong and the small one weak, renewed every few polls
+	while they run and short enough to end soon after the polls stop — a hidden or closed page
+	rumbles on for half a second at most. A browser with only `hapticActuators` gets one pulse of
+	the stronger motor; one with neither rumbles nothing.
+
 	The Gamepad API may be missing — browsers withhold it from pages that are not a secure
 	context, which a page served to the LAN over plain HTTP is not — and the keyboard still works.
 
@@ -57,15 +66,27 @@ class Input {
 	static inline var SQUARE = 0x8000;
 
 	static var attached = false;
+	/** bp_pad_buttons' BP_PAD_ANALOG_BUTTON: the DualShock's ANALOG button. */
+	static inline var ANALOG = 0x10000;
+
+	/** A motor effect lasts this long, and is renewed every `RENEW` polls while the motors run. */
+	static inline var RUMBLE_MS = 500;
+	static inline var RENEW = 4;
+
 	/** Held keys, as the events arrive. */
 	static var keys = 0;
-	/** The snapshot `poll` takes, which is all the runtime ever reads. */
-	static var pad0 = 0;
-	static var pad1 = 0;
-	static var pad2 = 0;
-	static var pad3 = 0;
+	/** The snapshot `poll` takes, which is all the runtime ever reads: each pad's buttons, the
+	    index of the gamepad behind it (-1 for none) and its sticks, four a pad, LX LY RX RY. */
+	static var held:Array<Int> = [0, 0, 0, 0];
+	static var gamepadOf:Array<Int> = [-1, -1, -1, -1];
+	static var sticks:Array<Int> = [for (_ in 0...16) 0x80];
 	/** Gamepads connected at the last poll: pad n > 0 is there when more than n are. */
 	static var gamepads = 0;
+
+	/** The motors each pad was last asked for, and the polls since its effect was last sent. */
+	static var rumbleSmall:Array<Int> = [0, 0, 0, 0];
+	static var rumbleLarge:Array<Int> = [0, 0, 0, 0];
+	static var rumbleAge:Array<Int> = [0, 0, 0, 0];
 
 	static inline var TYPED_CAPACITY = 64;
 	/** Whether the keyboard types (`Backend.keyText`), and what it typed, oldest first. */
@@ -92,28 +113,27 @@ class Input {
 		if (Browser.supported) {
 			if (!attached) attach();
 			else {}
-			var first = 0;
-			var second = 0;
-			var third = 0;
-			var fourth = 0;
+			for (p in 0...4) {
+				held[p] = 0;
+				gamepadOf[p] = -1;
+			}
+			for (k in 0...16) sticks[k] = 0x80;
 			var seen = 0;
 			if (hasGamepads()) {
 				for (g in Browser.navigator.getGamepads()) {
 					if (g != null && g.connected) {
-						if (seen == 0) first = gamepadButtons(g);
-						else if (seen == 1) second = gamepadButtons(g);
-						else if (seen == 2) third = gamepadButtons(g);
-						else if (seen == 3) fourth = gamepadButtons(g);
-						else {}
+						if (seen < 4) {
+							held[seen] = gamepadButtons(g);
+							gamepadOf[seen] = g.index;
+							for (a in 0...4) sticks[seen * 4 + a] = axisByte(g, a);
+						} else {}
 						seen++;
 					} else {}
 				}
 			} else {}
-			pad0 = keys | first;
-			pad1 = second;
-			pad2 = third;
-			pad3 = fourth;
+			held[0] = held[0] | keys;
 			gamepads = seen;
+			renewRumble();
 			mouseOver = pointerOver ? 1 : 0;
 			mouseX = pointerX;
 			mouseY = pointerY;
@@ -138,12 +158,68 @@ class Input {
 		return Browser.supported && (pad == 0 || (pad > 0 && pad < 4 && gamepads > pad));
 	}
 
-	public static function buttons(pad:Int):Int {
-		if (pad == 0) return pad0;
-		else if (pad == 1) return pad1;
-		else if (pad == 2) return pad2;
-		else if (pad == 3) return pad3;
-		else return 0;
+	/** bp_pad_type: 2 (analog) for a pad with a gamepad behind it, 1 (digital) for the keyboard alone. */
+	public static function type(pad:Int):Int {
+		var t = 0;
+		if (connected(pad)) t = gamepadOf[pad] >= 0 ? 2 : 1;
+		else {}
+		return t;
+	}
+
+	public static function buttons(pad:Int):Int return pad >= 0 && pad < 4 ? held[pad] : 0;
+
+	/** bp_pad_axis: 0 LX, 1 LY, 2 RX, 3 RY, 0..255, 80h centred. */
+	public static function axis(pad:Int, axis:Int):Int {
+		return pad >= 0 && pad < 4 && axis >= 0 && axis < 4 ? sticks[pad * 4 + axis] : 0x80;
+	}
+
+	/** bp_pad_rumble: the motors pad `pad`'s gamepad is to run, the small one 0 or 1, the large one 0..255. */
+	public static function rumble(pad:Int, small:Int, large:Int):Void {
+		if (pad >= 0 && pad < 4) {
+			rumbleSmall[pad] = small;
+			rumbleLarge[pad] = large;
+			rumbleAge[pad] = 0;
+			vibrate(pad);
+		} else {}
+	}
+
+	/** The motors that run, sent again before their effect ends. */
+	static function renewRumble():Void {
+		for (p in 0...4) {
+			if (rumbleSmall[p] != 0 || rumbleLarge[p] != 0) {
+				rumbleAge[p] = rumbleAge[p] + 1;
+				if (rumbleAge[p] >= RENEW) {
+					rumbleAge[p] = 0;
+					vibrate(p);
+				} else {}
+			} else {}
+		}
+	}
+
+	/**
+		Pad `p`'s motors to its gamepad, if it has one that rumbles: the Gamepad API's "dual-rumble"
+		(strong for the large motor at its speed, weak for the small one, on or off), stopped with
+		`reset`; or `hapticActuators[0].pulse`, the stronger of the two. A browser may refuse an effect
+		(a hidden page, another effect playing): that rejection is dropped.
+	**/
+	static function vibrate(p:Int):Void {
+		final index = gamepadOf[p];
+		if (index >= 0 && hasGamepads()) {
+			js.Syntax.code("(function (g, small, large, ms) {
+				if (!g) return;
+				var a = g.vibrationActuator;
+				if (a && typeof a.playEffect === 'function') {
+					var done = small === 0 && large === 0;
+					var p = done && typeof a.reset === 'function' ? a.reset()
+						: a.playEffect('dual-rumble', { startDelay: 0, duration: done ? 0 : ms,
+							strongMagnitude: large / 255, weakMagnitude: small });
+					if (p && typeof p.catch === 'function') p.catch(function () {});
+				} else if (g.hapticActuators && g.hapticActuators.length > 0 && typeof g.hapticActuators[0].pulse === 'function') {
+					var q = g.hapticActuators[0].pulse(Math.max(small, large / 255), small === 0 && large === 0 ? 0 : ms);
+					if (q && typeof q.catch === 'function') q.catch(function () {});
+				}
+			})(navigator.getGamepads()[{0}], {1}, {2}, {3})", index, rumbleSmall[p], rumbleLarge[p], RUMBLE_MS);
+		} else {}
 	}
 
 	static function attach():Void {
@@ -318,6 +394,11 @@ class Input {
 		return js.Syntax.field(Browser.navigator, "getGamepads") != null;
 	}
 
+	/** Axis `a` of a gamepad, -1..1, as a byte: 0 left or up, 128 centred, 255 right or down. */
+	static function axisByte(g:Gamepad, a:Int):Int {
+		return js.Syntax.code("(Math.min(255, Math.max(0, Math.round(((({0}).axes && ({0}).axes.length > {1} ? +({0}).axes[{1}] || 0 : 0) + 1) * 127.5))) | 0)", g, a);
+	}
+
 	static function gamepadButtons(g:Gamepad):Int {
 		var bits = 0;
 		final b = g.buttons;
@@ -347,6 +428,7 @@ class Input {
 			case 13: DOWN;
 			case 14: LEFT;
 			case 15: RIGHT;
+			case 16: ANALOG;
 			case _: 0;
 		}
 	}

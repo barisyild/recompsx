@@ -1,10 +1,11 @@
-/* dc_input.c — maple controllers as PlayStation pads, the reset combo, a keyboard as text, and a
- * mouse as the HLE kernel's pointer. */
+/* dc_input.c — maple controllers as PlayStation pads, the reset combo, a keyboard as text, a mouse
+ * as the HLE kernel's pointer, and a Puru Puru pack as a DualShock's motors. */
 
 #include "dc_internal.h"
 #include "pointer_art.h"
 #include <dc/maple/keyboard.h>
 #include <dc/maple/mouse.h>
+#include <dc/maple/purupuru.h>
 #include <dc/vblank.h>
 #include <kos/irq.h>
 
@@ -13,6 +14,7 @@
 static uint32_t g_pad_buttons[MAX_PADS];
 static uint8_t  g_pad_axes[MAX_PADS][4];
 static int      g_pad_present[MAX_PADS];
+static int      g_pad_type[MAX_PADS];
 /* Written from the maple driver's button callback, which runs on an interrupt. */
 static volatile int g_quit;
 
@@ -40,16 +42,19 @@ void reset_combo(uint8_t addr, uint32_t btns) {
 }
 
 /* ---- input --------------------------------------------------------------------------------------
- * A Dreamcast pad is four face buttons, a d-pad, Start and two analogue triggers. A PlayStation
- * pad is four face buttons, a d-pad, Start, Select and four shoulders. Two things therefore have
- * to be found homes:
+ * A Dreamcast pad is four face buttons, a d-pad, Start, two analogue triggers and a stick. A
+ * PlayStation DualShock is four face buttons, a d-pad, Start, Select, four shoulders, two sticks
+ * that click (L3, R3) and its ANALOG button (ADR-0052). So some things have to be found homes:
  *
  *   - L1/L2 and R1/R2 share a trigger each, split along its travel: a light pull is the first
  *     shoulder, a hard pull the second.
- *   - Select has no home at all. It is taken from the C button when a pad has one (arcade sticks
- *     and several third-party pads do), and otherwise from Start held with a full left trigger —
- *     which suppresses both of those for that frame, so a game never sees Start and Select at
- *     once from one gesture. */
+ *   - Select is taken from the C button when a pad has one (arcade sticks and several third-party
+ *     pads do), and otherwise from Start held with a full left trigger — which suppresses both of
+ *     those for that frame, so a game never sees Start and Select at once from one gesture.
+ *   - ANALOG is Start held with a full right trigger, suppressing those two the same way.
+ *   - L3 is the D button and R3 the Z button, on the pads that have them.
+ *   - The stick is the left stick; the right one is a second stick where the pad has one, and
+ *     reads centred otherwise. */
 
 static uint32_t map_buttons(const cont_state_t* st) {
     uint32_t b = 0;
@@ -64,6 +69,7 @@ static uint32_t map_buttons(const cont_state_t* st) {
     if(k & CONT_X)          b |= PAD_SQUARE;
     if(k & CONT_Y)          b |= PAD_TRIANGLE;
     if(k & CONT_D)          b |= PAD_L3;
+    if(k & CONT_Z)          b |= PAD_R3;
 
     if(st->ltrig >= TRIG_L2)      b |= PAD_L2;
     else if(st->ltrig >= TRIG_L1) b |= PAD_L1;
@@ -71,9 +77,11 @@ static uint32_t map_buttons(const cont_state_t* st) {
     else if(st->rtrig >= TRIG_L1) b |= PAD_R1;
 
     const int select_combo = (k & CONT_START) && st->ltrig >= TRIG_L2;
+    const int analog_combo = (k & CONT_START) && st->rtrig >= TRIG_L2;
     if((k & CONT_C) || select_combo) b |= PAD_SELECT;
-    if((k & CONT_START) && !select_combo) b |= PAD_START;
+    if((k & CONT_START) && !select_combo && !analog_combo) b |= PAD_START;
     if(select_combo) b &= ~(uint32_t)PAD_L2;
+    if(analog_combo) b = (b & ~(uint32_t)PAD_R2) | BP_PAD_ANALOG_BUTTON;
 
     return b;
 }
@@ -86,6 +94,7 @@ static uint8_t axis_to_byte(int v) {
 static void poll_mouse(void);
 static maple_device_t* keyboard(void);
 static uint32_t keyboard_pad(const kbd_state_t* ks);
+static void rumble_update(void);
 static int g_typing;
 
 void bp_input_poll(void) {
@@ -99,6 +108,7 @@ void bp_input_poll(void) {
     if(g_rxprof) {
         for(int i = 0; i < MAX_PADS; i++) {
             g_pad_present[i] = 0;
+            g_pad_type[i] = BP_PAD_NONE;
             g_pad_buttons[i] = 0;
             g_pad_axes[i][0] = g_pad_axes[i][1] = g_pad_axes[i][2] = g_pad_axes[i][3] = 0x80;
         }
@@ -113,19 +123,24 @@ void bp_input_poll(void) {
 
         if(!st) {
             g_pad_present[i] = 0;
+            g_pad_type[i] = BP_PAD_NONE;
             g_pad_buttons[i] = 0;
             g_pad_axes[i][0] = g_pad_axes[i][1] = g_pad_axes[i][2] = g_pad_axes[i][3] = 0x80;
             continue;
         }
 
         g_pad_present[i] = 1;
+        /* A pad with a stick is a DualShock to the machine; one without (an arcade stick) a
+         * digital pad. */
+        g_pad_type[i] = cont_has_capabilities(dev, CONT_CAPABILITIES_ANALOG) ? BP_PAD_ANALOG : BP_PAD_DIGITAL;
         g_pad_buttons[i] = map_buttons(st);
         g_pad_axes[i][0] = axis_to_byte(st->joyx);
         g_pad_axes[i][1] = axis_to_byte(st->joyy);
-        /* The pad has one stick. A second one reads centred, which is what a game asking a
+        /* A second stick where the pad has one; centred otherwise, which is what a game asking a
          * DualShock about an axis nobody is touching would see. */
-        g_pad_axes[i][2] = 0x80;
-        g_pad_axes[i][3] = 0x80;
+        const int second = cont_has_capabilities(dev, CONT_CAPABILITIES_SECONDARY_ANALOG);
+        g_pad_axes[i][2] = second ? axis_to_byte(st->joy2x) : 0x80;
+        g_pad_axes[i][3] = second ? axis_to_byte(st->joy2y) : 0x80;
 
         /* Same gesture as the interrupt-time callback, seen from the polling side. Both exist
          * because they fail differently: this one cannot fire while the emulator is busy not
@@ -133,13 +148,16 @@ void bp_input_poll(void) {
         if((st->buttons & CONT_RESET_BUTTONS) == CONT_RESET_BUTTONS) g_quit = 1;
     }
 
-    /* A keyboard is pad 0 as well — merged with the pad in port A, and pad 0 even without one. */
+    /* A keyboard is pad 0 as well — merged with the pad in port A, and pad 0 even without one, a
+     * digital pad then. */
     maple_device_t* kbd = keyboard();
     const kbd_state_t* ks = kbd ? (const kbd_state_t*)maple_dev_status(kbd) : NULL;
     if(ks) {
+        if(!g_pad_present[0]) g_pad_type[0] = BP_PAD_DIGITAL;
         g_pad_present[0] = 1;
         g_pad_buttons[0] |= keyboard_pad(ks);
     }
+    rumble_update();
 }
 
 /* The keyboard as the desktop and the browser map it: arrows for the d-pad, X S Z A for cross,
@@ -171,17 +189,82 @@ int      bp_pad_connected(int pad) { return (pad >= 0 && pad < MAX_PADS) ? g_pad
 uint32_t bp_pad_buttons(int pad)   { return (pad >= 0 && pad < MAX_PADS) ? g_pad_buttons[pad] : 0u; }
 int      bp_quit_requested(void)   { return g_quit; }
 
-/* Reported digital even though the stick is read: a PlayStation pad in analogue mode has two
- * sticks and this machine has one, and a game that switches modes on the strength of that report
- * would find the right stick permanently centred. The axes are still served, for whatever asks. */
+/* A controller with a stick is analog: the machine plugs a DualShock in for it, which powers on in
+ * digital mode and goes analog when the game or the player (ANALOG, above) says so (ADR-0052). */
 int bp_pad_type(int pad) {
     if(pad < 0 || pad >= MAX_PADS || !g_pad_present[pad]) return BP_PAD_NONE;
-    return BP_PAD_DIGITAL;
+    return g_pad_type[pad];
 }
 
 int bp_pad_axis(int pad, int axis) {
     if(pad < 0 || pad >= MAX_PADS || axis < 0 || axis > 3) return 0x80;
     return g_pad_axes[pad][axis];
+}
+
+/* ---- motors (bp_pad_rumble) ------------------------------------------------------------------------
+ * A Puru Puru (jump) pack in a controller's expansion slot is that pad's DualShock motors. It has
+ * one motor, so it runs for the stronger of the two: the large motor's speed as its power, 1..7 at
+ * a low frequency, and the small motor as full power at a high one. Effects are continuous, sent
+ * when what the motors do changes and stopped by an effect of power 0; a send the bus refuses (its
+ * frame busy) is tried again at the next poll, and so is one whose pack was taken out and put back. */
+
+static int g_rumble_small[MAX_PADS], g_rumble_large[MAX_PADS];
+static uint32_t g_rumble_sent[MAX_PADS];          /* the effect the pack last took */
+static maple_device_t* g_rumble_dev[MAX_PADS];    /* the pack it went to */
+
+static maple_device_t* rumble_pack(int port) {
+    for(int u = 1; u < MAPLE_UNIT_COUNT; u++) {
+        maple_device_t* dev = maple_enum_dev(port, u);
+        if(dev && dev->valid && (dev->info.functions & MAPLE_FUNC_PURUPURU)) return dev;
+    }
+    return NULL;
+}
+
+static uint32_t rumble_effect(int small, int large) {
+    purupuru_effect_t e = {.raw = 0};
+    e.motor = 1;
+    if(small || large) {
+        const int lp = large ? 1 + (large * 6) / 255 : 0;
+        e.cont = true;
+        e.fpow = small ? 7 : lp;
+        e.freq = large ? 26 : 50;
+    }
+    return e.raw;
+}
+
+static void rumble_update(void) {
+    for(int i = 0; i < MAX_PADS; i++) {
+        maple_device_t* dev = rumble_pack(i);
+        const uint32_t want = rumble_effect(g_rumble_small[i], g_rumble_large[i]);
+        if(!dev) { g_rumble_dev[i] = NULL; continue; }
+        if(dev == g_rumble_dev[i] && want == g_rumble_sent[i]) continue;
+        purupuru_effect_t e = {.raw = want};
+        if(purupuru_rumble(dev, &e) == MAPLE_EOK) {
+            g_rumble_dev[i] = dev;
+            g_rumble_sent[i] = want;
+        }
+    }
+}
+
+void bp_pad_rumble(int pad, int small, int large) {
+    if(pad < 0 || pad >= MAX_PADS) return;
+    g_rumble_small[pad] = small ? 1 : 0;
+    g_rumble_large[pad] = large < 0 ? 0 : (large > 255 ? 255 : large);
+    rumble_update();
+}
+
+/* Every pack stopped, and two vblanks for the bus to carry it: before the hardware is stopped for
+ * the BIOS menu, or a continuous effect would run on there. */
+void rumble_stop_all(void) {
+    int any = 0;
+    for(int i = 0; i < MAX_PADS; i++) {
+        any |= g_rumble_small[i] | g_rumble_large[i];
+        g_rumble_small[i] = g_rumble_large[i] = 0;
+    }
+    if(!any) return;
+    rumble_update();
+    vid_waitvbl();
+    vid_waitvbl();
 }
 
 /* ---- keyboard as text (bp_key_text, bp_key_next) -------------------------------------------------

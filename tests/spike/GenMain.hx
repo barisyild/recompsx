@@ -83,6 +83,8 @@ class GenMain {
 				gpu.Gpu.hw = true;
 				// A backend that samples what it drew must hear of every upload (BP_CAP_GPU_UPLOADS).
 				gpu.Gpu.reportUploads = shim.Backend.caps(6) != 0;
+				// And one that copies what it drew, of every VRAM-to-VRAM copy (BP_CAP_GPU_COPIES).
+				gpu.Gpu.reportCopies = shim.Backend.caps(7) != 0;
 				shim.Backend.gpuVram(gpu.Vram.data);
 				shim.Backend.log(shim.Backend.LOG_INFO, "video: primitives go to the backend");
 			} else {
@@ -90,6 +92,22 @@ class GenMain {
 					"--video-hw asked for, but this backend has no rasteriser — drawing in software");
 			}
 		} else {}
+
+		// Pad 0 from a script (sio.PadScript): every `--pad-script` given, read as one. A DualShock
+		// with `--pad-dualshock`, a digital pad otherwise (ADR-0052); `--log-rumble` logs the
+		// DualShocks' motors as they change.
+		sio.PadScript.dualShock = hasFlag('--pad-dualshock');
+		sio.DualShock.logMotors = hasFlag('--log-rumble');
+		final script = optionAll('--pad-script');
+		if (script != "") {
+			if (sio.PadScript.parse(script))
+				shim.Backend.log(shim.Backend.LOG_INFO, "pad 0 from a script: " + sio.PadScript.events() + " changes");
+			else shim.Backend.log(shim.Backend.LOG_WARN, "--pad-script does not read: " + script);
+		} else {}
+		// VRAM written out at given frames as well (vram-<frame>.bin), to see where a script went.
+		final shots = optionAll('--vram-at');
+		if (shots != "") kernel.Kernel.dumpAt(shots);
+		else {}
 
 		ctx.pc = GameInfo.ENTRY_POINT;
 		ctx.gp = GameInfo.INITIAL_GP;
@@ -204,6 +222,21 @@ class GenMain {
 			i++;
 		}
 		return 0;
+	}
+
+	/** Every value of option `name`, joined by commas; empty when none is given. */
+	static function optionAll(name:String):String {
+		final argc = shim.Backend.argCount();
+		var out = "";
+		var i = 0;
+		while (i + 1 < argc) {
+			if (shim.Backend.arg(i) == name) {
+				out = out == "" ? shim.Backend.arg(i + 1) : out + "," + shim.Backend.arg(i + 1);
+				i++;
+			} else {}
+			i++;
+		}
+		return out;
 	}
 
 	static function hasFlag(name:String):Bool {

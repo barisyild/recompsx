@@ -68,8 +68,9 @@ class Emitter {
 	var callReturnAddr:Int = 0;
 	// The function has returns checked against the `$ra` it was entered with, kept in `entryRa`.
 	var entryRaLocal = false;
-	/** Whether another function hands over to the one being emitted (Discovery.cutAtEntries). */
-	var hopTarget = false;
+	/** Whether another function hands over to the one being emitted (Discovery.cutAtEntries); after
+	    `emitFunction`, the one it emitted. */
+	public var hopTarget(default, null) = false;
 	var hopTargets:Null<Map<Int, Bool>> = null;
 	/** The function being emitted. */
 	var curFn:Null<Func> = null;
@@ -89,6 +90,9 @@ class Emitter {
 	var loopFrame:Int = 0;
 	// Region emission declares `resume`; block emission then resets it at every block start.
 	var inRegions:Bool = false;
+	// In a function with a block dispatcher (`while (true) switch (bb)`): each block index's case,
+	// by the first index that case lists — its label on C++ (dispatchJump). Null without one.
+	var dispatchCase:Null<Map<Int, Int>> = null;
 	// Loops proved idle (IdleLoopPlan), by header address: the header emits the skip prologue.
 	var idlePlans:Map<Int, IdleLoopPlan> = [];
 	// A leaf's registers, held in locals (null: every register is a CpuState field), and which of
@@ -101,6 +105,9 @@ class Emitter {
 	// the instruction's offset. Null: the access decodes its own address, as always.
 	var span:Null<SpanAccess> = null;
 	var spanCount = 0;
+	// The loads and stores whose base holds a port (PortBases), by address: on fastmem they decode
+	// their address as every other target does instead of trapping (Memory's `pt`/`pf`).
+	var portAccesses:Map<Int, Bool> = [];
 	// Function spans (planFunctionSpans): a base register's span for the whole function, by
 	// register, set wherever the register's value may have changed. Null: none.
 	var fspans:Null<Map<Int, FunctionSpan>> = null;
@@ -258,6 +265,7 @@ class Emitter {
 		final buf = new StringBuf();
 		final blockAddrs = blockOrder(fn);
 		ir = new FunctionIR(fn, image);
+		portAccesses = optimize ? PortBases.analyze(ir, image, x -> x.decoded.op == Op.JAL ? callWrites(x.decoded.target) : ALL_REGS) : [];
 		projections = [];
 		lastProjections = [];
 		callLive = optimize && scalarFunctions && scalarCalls && !relocatable
@@ -275,6 +283,7 @@ class Emitter {
 		loopMembers = null;
 		loopFrame = 0;
 		inRegions = false;
+		dispatchCase = null;
 		while (frames.length > 0) frames.pop();
 		idlePlans = [];
 		shadow = null;
@@ -386,6 +395,7 @@ class Emitter {
 		final dispatch = !flat && !linear;
 		if (linear && !flat) buf.add('\t\tif (entry < 0 || entry >= ${blockAddrs.length}) return;\n');
 		if (dispatch) {
+			dispatchCase = [for (i in 0...blockAddrs.length) i => i];
 			buf.add('\t\tvar bb = entry;\n');
 			buf.add('\t\twhile (true) switch (bb) {\n');
 		}
@@ -395,7 +405,7 @@ class Emitter {
 			final guarded = linear && i + 1 < blockAddrs.length;
 			final indent = dispatch ? "\t\t\t\t" : (guarded ? "\t\t\t" : "\t\t");
 			linearNext = guarded ? blockAddrs[i + 1] : null;
-			if (dispatch) buf.add('\t\t\tcase $i: // ${addrNote(addr)}\n');
+			if (dispatch) buf.add('\t\t\tcase $i: // ${addrNote(addr)}\n' + caseLabel('\t\t\t\t', i));
 			else if (guarded) buf.add('\t\tif (entry <= $i) { // ${addrNote(addr)}\n');
 			final loopExit = optimize ? selfLoopExit(fn, addr) : null;
 			if (loopExit != null) {
@@ -430,13 +440,15 @@ class Emitter {
 		final dispatch = plan.roots.length != 1 || plan.roots[0].successors.length != 0;
 		buf.add('\t\t// Regions: ${plan.roots.length}; ${plan.sequences} sequence / ${plan.choices} choice / ${plan.loops} loop reductions.\n');
 		if (dispatch) {
+			dispatchCase = [];
+			for (root in plan.roots) for (m in root.members) dispatchCase.set(m, root.members[0]);
 			buf.add('\t\tvar bb = entry;\n\t\twhile (true) switch (bb) {\n');
 		} else {
 			buf.add('\t\tif (entry < 0 || entry >= ${ir.blocks.length}) return;\n');
 		}
 		for (root in plan.roots) {
 			final ind = dispatch ? '\t\t\t\t' : '\t\t';
-			if (dispatch) buf.add('\t\t\tcase ${root.members.join(" | ")}:\n');
+			if (dispatch) buf.add('\t\t\tcase ${root.members.join(" | ")}:\n' + caseLabel(ind, root.members[0]));
 			buf.add(ind + 'var resume = ${dispatch ? "bb" : "entry"};\n');
 			emitRegion(buf, fn, root, indexOf, ind, null);
 			// The end of a root is reached only with a recorded target in another root: the
@@ -748,7 +760,7 @@ class Emitter {
 
 	function emitPump(buf:StringBuf, ind:String, entry:Int):Void {
 		emitCheckpoint(buf, ind, Std.string(entry), false);
-		buf.add('${ind}if (shim.MemA.unlikely(((${cycExpr()} - ctx.nextEvent) | 0) >= 0)) {\n');
+		buf.add('${ind}if (shim.MemA.unlikely(((${cycExpr()} - core.Runtime.deadline(ctx)) | 0) >= 0)) {\n');
 		publish(buf, ind + '\t');
 		buf.add(ind + '\tRuntime.pump(ctx);\n');
 		// A nonlocal jump has already restored CpuState: never publish a leaf's locals over it.
@@ -775,12 +787,12 @@ class Emitter {
 	// external entries. At a function entry only a due pump can introduce a new token, so keep
 	// its check on that path instead of paying a second branch on every ordinary function call.
 	static inline final PUMP_ENTRY =
-		"\t\tif (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0)) {\n"
+		"\t\tif (shim.MemA.unlikely(((ctx.cycles - core.Runtime.deadline(ctx)) | 0) >= 0)) {\n"
 		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
 
 	/** PUMP_ENTRY for a function another one hands over to: not for the hand-over itself. */
 	static inline final PUMP_ENTRY_HOP =
-		"\t\tif (shim.MemA.unlikely(((ctx.cycles - ctx.nextEvent) | 0) >= 0) && pumping) {\n"
+		"\t\tif (shim.MemA.unlikely(((ctx.cycles - core.Runtime.deadline(ctx)) | 0) >= 0) && pumping) {\n"
 		+ "\t\t\tRuntime.pump(ctx);\n\t\t\tif (ctx.unwindToken != 0) return;\n\t\t} else {}\n";
 
 	/** The `entry` a hand-over calls with (Discovery.cutAtEntries): the first block, past the pump. */
@@ -835,6 +847,9 @@ class Emitter {
 		curBlock = blockAddr;
 		// Arriving here ends whatever `resume` was steering towards.
 		if (inRegions) buf.add(ind + 'resume = -1;\n');
+		// A span the entry left to the block that needs it on every path on (deferEntryTakes).
+		if (fspanLive != null && fspanLive.entry.exists(blockAddr)) takeFunctionSpans(buf, ind, fspanLive.entry.get(blockAddr));
+		else {}
 		final idle = idlePlans.get(blockAddr);
 		if (idle != null) emitIdlePrologue(buf, ind, idle);
 		final stackPlan = optimize ? StackMemoryForwarding.plan(block.body) : null;
@@ -1232,7 +1247,7 @@ class Emitter {
 		}
 		// The same pass once more, now recording what to take after each event.
 		final plan:FspanLive = {top: needIn.get(ir.blocks[0].addr), write: [], slot: [], call: [], callLive: [],
-			step: [], slotStep: []};
+			step: [], slotStep: [], entry: []};
 		for (block in ir.blocks) {
 			var live = 0;
 			for (s in block.successors) live |= needIn.exists(s) ? needIn.get(s) : 0;
@@ -1268,7 +1283,135 @@ class Emitter {
 			plan.write.set(block.addr, writes);
 			plan.step.set(block.addr, steps);
 		}
+		deferEntryTakes(plan, events, regs);
 		return plan;
+	}
+
+	/**
+		A span live at the entry but not needed on every path from it is taken where it is, not at
+		the entry: at the start of each block from which every path reaches an access through the
+		register before its value can change, on the paths that arrive there without it. Crash
+		Bandicoot: Warped took ~1,800 entry spans a gameplay frame that no access used (a quarter of
+		its function spans; most on the renderer's scratchpad pointer, ~20 instructions each): a
+		decoder returning a cached value at its second block, say, while every other path decodes
+		through the span. A call still enters at 0 with the span none, as for a span the entry block
+		does not need; a resume still takes it at the entry. An access with no span decodes on its
+		own, so a take left out costs only speed: what is exact is that a span is never taken from
+		a value its register no longer holds, and each take here is at a block start no write, call
+		or trap separates from the accesses it serves.
+
+		Where such a block is also reached with the span already taken — a loop that took it on
+		its first turn, a branch that took it after a write — taking it there again would cost
+		that path a second take, so the span is taken at the entry as before.
+	**/
+	function deferEntryTakes(plan:FspanLive, events:Map<Int, Array<Array<Int>>>, regs:Int):Void {
+		final entryAddr = ir.blocks[0].addr;
+		// Backward, to a fixed point: the spans every path from a block's start uses before a write
+		// to the register, a call that may write it, a trap or a way out.
+		final antIn:Map<Int, Int> = [];
+		for (block in ir.blocks) antIn.set(block.addr, regs);
+		var changed = true;
+		while (changed) {
+			changed = false;
+			var k = ir.blocks.length - 1;
+			while (k >= 0) {
+				final block = ir.blocks[k];
+				var ant = block.successors.length == 0 ? 0 : regs;
+				for (s in block.successors) ant &= antIn.exists(s) ? antIn.get(s) : 0;
+				final ev = events.get(block.addr);
+				var e = ev.length - 1;
+				while (e >= 0) {
+					final x = ev[e];
+					if (x[0] == 0) ant |= 1 << x[1];
+					else if (x[0] == 1 || x[0] == 4) ant &= ~x[1];
+					else if (x[0] == 2 || x[0] == 3) ant = 0;
+					else {}
+					e--;
+				}
+				if (ant != antIn.get(block.addr)) {
+					antIn.set(block.addr, ant);
+					changed = true;
+				} else {}
+				k--;
+			}
+		}
+		var active = plan.top & ~antIn.get(entryAddr);
+		final entry:Map<Int, Int> = [];
+		while (active != 0) {
+			// Forward, to a fixed point: which spans arrive at each block not yet taken (`pend`) and
+			// which already taken (`taken`); a span in both arrives each way by different paths.
+			final pendIn:Map<Int, Int> = [], takenIn:Map<Int, Int> = [];
+			final pendOut:Map<Int, Int> = [], takenOut:Map<Int, Int> = [];
+			for (block in ir.blocks) {
+				pendIn.set(block.addr, 0); takenIn.set(block.addr, 0);
+				pendOut.set(block.addr, 0); takenOut.set(block.addr, 0);
+			}
+			var bad = 0;
+			changed = true;
+			while (changed) {
+				changed = false;
+				bad = 0;
+				for (block in ir.blocks) {
+					var p = block.addr == entryAddr ? active : 0;
+					var t = 0;
+					for (pr in block.predecessors) {
+						p |= pendOut.exists(pr) ? pendOut.get(pr) : 0;
+						t |= takenOut.exists(pr) ? takenOut.get(pr) : 0;
+					}
+					pendIn.set(block.addr, p);
+					takenIn.set(block.addr, t);
+					final ant = antIn.get(block.addr);
+					bad |= p & t & ant;
+					var pend = p & ~ant;
+					var taken = t | (p & ant);
+					final writes = plan.write.get(block.addr);
+					for (x in events.get(block.addr)) {
+						final kind = x[0];
+						if (kind == 0) bad |= pend & (1 << x[1]);
+						else if (kind == 1) {
+							final again = x[2] == -1 ? (plan.slot.exists(block.addr) ? plan.slot.get(block.addr) : 0)
+								: (writes != null && writes.exists(x[2]) ? writes.get(x[2]) : 0);
+							pend &= ~x[1];
+							taken = (taken & ~x[1]) | (again & x[1]);
+						} else if (kind == 2) {
+							final again = x[2] == -2 ? (plan.call.exists(block.addr) ? plan.call.get(block.addr) : 0)
+								: (writes != null && writes.exists(x[2]) ? writes.get(x[2]) : 0);
+							pend = 0;
+							taken = again;
+						} else if (kind == 3) {
+							final again = plan.call.exists(block.addr) ? plan.call.get(block.addr) : 0;
+							pend &= ~again;
+							taken |= again;
+						} else if (kind == 4) {
+							final again = plan.call.exists(block.addr) ? plan.call.get(block.addr) : 0;
+							pend &= ~x[1];
+							taken = (taken & ~x[1]) | (again & x[1]);
+							// A guessed jalr's other arm takes every span the call left live.
+							if (block.transfer != null && block.transfer.decoded.op == Op.JALR)
+								taken |= plan.callLive.exists(block.addr) ? plan.callLive.get(block.addr) : 0;
+							else {}
+						} else {}
+					}
+					pend &= active;
+					taken &= active;
+					if (pend != pendOut.get(block.addr) || taken != takenOut.get(block.addr)) {
+						pendOut.set(block.addr, pend);
+						takenOut.set(block.addr, taken);
+						changed = true;
+					} else {}
+				}
+			}
+			if (bad == 0) {
+				for (block in ir.blocks) {
+					final m = pendIn.get(block.addr) & antIn.get(block.addr) & active;
+					if (m != 0) entry.set(block.addr, m);
+					else {}
+				}
+				break;
+			} else active &= ~bad;
+		}
+		plan.top &= ~active;
+		plan.entry = entry;
 	}
 
 	/** What a `jal` to `target` may write: the summary of the function it calls directly, or
@@ -1344,14 +1487,29 @@ class Emitter {
 	    between its blocks. Unmarked, Crash 3's 21 KB f_8003fc50 kept two hot stretches 8 KB
 	    apart, which the SH-4's 8 KB instruction cache cannot hold at once, and no placement of
 	    the function can separate (docs/perf/dreamcast-ledger.md, E-037). */
-	function spanLoad(fast:String, name:String, addr:String):String
-		return span == null ? memRead(name, addr)
-			: '(shim.MemA.likely(Memory.spanOk(${span.v})) ? Memory.$fast(${span.v}, ${span.off}) : Memory.${name}f($addr, ctx, cyc))';
+	function spanLoad(fast:String, name:String, i:Instr):String {
+		final b = byBase(i);
+		final k = portAccesses.exists(i.addr) ? 'p' : 'b';
+		final slow = b == null ? 'Memory.${name}f(${busAddr(i)}, ctx, cyc)' : 'Memory.${name}${k}f($b, ctx, cyc)';
+		return span == null ? ((b == null || !cycLocal) ? memRead(name, busAddr(i)) : 'Memory.${name}${k}t($b, ctx, cyc)')
+			: '(shim.MemA.likely(Memory.spanOk(${span.v})) ? Memory.$fast(${span.v}, ${span.off}) : $slow)';
+	}
 
 	/** A store, likewise, as a statement. */
-	function spanStore(fast:String, name:String, addr:String, value:String):String
-		return span == null ? memWrite(name, addr, value)
-			: 'if (shim.MemA.likely(Memory.spanOk(${span.v}))) Memory.$fast(${span.v}, ${span.off}, $value); else Memory.${name}f($addr, $value, ctx, cyc);';
+	function spanStore(fast:String, name:String, i:Instr, value:String):String {
+		final b = byBase(i);
+		final k = portAccesses.exists(i.addr) ? 'p' : 'b';
+		final slow = b == null ? 'Memory.${name}f(${busAddr(i)}, $value, ctx, cyc);' : 'Memory.${name}${k}f($b, $value, ctx, cyc);';
+		return span == null ? ((b == null || !cycLocal) ? memWrite(name, busAddr(i), value) : 'Memory.${name}${k}t($b, $value, ctx, cyc);')
+			: 'if (shim.MemA.likely(Memory.spanOk(${span.v}))) Memory.$fast(${span.v}, ${span.off}, $value); else $slow';
+	}
+
+	/** An access through a register as `base, offset` (Memory's `*bt` and `*bf` forms: the bus
+	    address `(base + offset) & 0x1FFFFFFF` everywhere but fastmem, where they let the C++
+	    compiler share the base's P0 address among its accesses, ADR-0049); null for one at a
+	    constant address, which keeps the bus address. */
+	function byBase(i:Instr):Null<String>
+		return i.rs == 0 ? null : '${reg(i.rs)}, ${i.immS}';
 
 	/** Emit a selected pair as one Haxe expression or one runtime helper call. */
 	function emitFused(buf:StringBuf, ind:String, first:Instr, second:Instr,
@@ -1472,7 +1630,7 @@ class Emitter {
 		}
 		shadow = null;
 		buf.add(in1 + 'if (idleOk) {\n');
-		buf.add(in2 + 'var idleTurns = core.IdleLoop.untilEvent(${cycExpr()}, ctx.nextEvent, ${plan.cycles});\n');
+		buf.add(in2 + 'var idleTurns = core.IdleLoop.untilEvent(${cycExpr()}, core.Runtime.deadline(ctx), ${plan.cycles});\n');
 		final exit = plan.counterExit;
 		if (slot != null && exit != null) {
 			final other = reg(exit.other);
@@ -1694,7 +1852,13 @@ class Emitter {
 						// Both outcomes are the following block; the slot and cycles already ran.
 					} else if (takenKind == JUMP_DISPATCH && notTakenKind == JUMP_DISPATCH) {
 						publishValues(buf, ind);
-						buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
+						if (dispatchCase != null && dispatchCase.exists(takenIdx) && dispatchCase.exists(notTakenIdx)) {
+							buf.add('$ind$GOTO_IF\n');
+							buf.add('${ind}if ($cond) { ' + cxxJump(takenIdx) + ' } else { ' + cxxJump(notTakenIdx) + ' }\n');
+							buf.add('$ind#else\n');
+							buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
+							buf.add('$ind#end\n');
+						} else buf.add('${ind}bb = $cond ? $takenIdx : $notTakenIdx; continue;\n');
 					} else if (takenKind == JUMP_RETURN && notTakenKind == JUMP_RETURN) {
 						emitReturn(buf, ind);
 					} else if (takenKind == JUMP_FALL) {
@@ -1856,7 +2020,7 @@ class Emitter {
 			case JUMP_CONTINUE: 'resume = -1; continue;';
 			case JUMP_BREAK: 'resume = ${idOf(target)}; break;';
 			case JUMP_FORWARD: 'resume = ${idOf(target)};';
-			case _: 'bb = ${indexOf.get(target)}; continue;';
+			case _: dispatchJump(indexOf.get(target));
 		};
 	}
 
@@ -1870,6 +2034,28 @@ class Emitter {
 			buf.add(ind + jumpText(kind, target, indexOf) + '\n');
 		}
 	}
+
+	/** Code only reflaxe.CPP's output may hold: a label, a `goto` (dispatchJump). */
+	static inline final GOTO_IF = '#if (cxx && !recompsx_cooperative)';
+
+	/** The label at the head of a dispatcher's case on C++, which dispatchJump's `goto` reaches. */
+	function caseLabel(ind:String, first:Int):String
+		return '$ind$GOTO_IF untyped __cpp__("rx_bb_$first:;"); #end\n';
+
+	/**
+		A jump to block `idx` through the dispatcher: `bb` set, then on C++ a `goto` to the label of
+		the case that holds it, and elsewhere `continue`, back to the switch; the case's `resume = bb`
+		steers to the block either way. The switch was a bound check, a table load and a `braf` a
+		jump on the SH-4, its table in the code and read through the operand cache (ADR-0050).
+	**/
+	function dispatchJump(idx:Int):String {
+		return dispatchCase == null || !dispatchCase.exists(idx) ? 'bb = $idx; continue;'
+			: 'bb = $idx; $GOTO_IF untyped __cpp__("goto rx_bb_${dispatchCase.get(idx)};"); #else continue; #end';
+	}
+
+	/** dispatchJump's C++ form alone, for code already inside GOTO_IF. */
+	function cxxJump(idx:Int):String
+		return 'bb = $idx; untyped __cpp__("goto rx_bb_${dispatchCase.get(idx)};");';
 
 	/** One arm of a branch as a braced block: a one-liner inline, a return on its own lines. */
 	function arm(kind:Int, target:Int, indexOf:Map<Int, Int>, ind:String):String {
@@ -1973,17 +2159,17 @@ class Emitter {
 			case MTLO:  'ctx.lo = ${reg(rs)};';
 
 			// A load into $zero still performs the read: half the address space is hardware.
-			case LB:  load(rt, spanLoad('spanRead8s', 'read8s', busAddr(i)));
-			case LBU: load(rt, spanLoad('spanRead8u', 'read8u', busAddr(i)));
-			case LH:  load(rt, spanLoad('spanRead16s', 'read16s', busAddr(i)));
-			case LHU: load(rt, spanLoad('spanRead16u', 'read16u', busAddr(i)));
-			case LW:  load(rt, spanLoad('spanRead32', 'read32', busAddr(i)));
+			case LB:  load(rt, spanLoad('spanRead8s', 'read8s', i));
+			case LBU: load(rt, spanLoad('spanRead8u', 'read8u', i));
+			case LH:  load(rt, spanLoad('spanRead16s', 'read16s', i));
+			case LHU: load(rt, spanLoad('spanRead16u', 'read16u', i));
+			case LW:  load(rt, spanLoad('spanRead32', 'read32', i));
 			case LWL: clockFirst(load(rt, 'Memory.lwl(${busAddr(i)}, ${reg(rt)})'));
 			case LWR: clockFirst(load(rt, 'Memory.lwr(${busAddr(i)}, ${reg(rt)})'));
 
-			case SB: spanStore('spanWrite8', 'write8', busAddr(i), reg(rt));
-			case SH: spanStore('spanWrite16', 'write16', busAddr(i), reg(rt));
-			case SW: spanStore('spanWrite32', 'write32', busAddr(i), reg(rt));
+			case SB: spanStore('spanWrite8', 'write8', i, reg(rt));
+			case SH: spanStore('spanWrite16', 'write16', i, reg(rt));
+			case SW: spanStore('spanWrite32', 'write32', i, reg(rt));
 			case SWL: clockFirst('Memory.swl(${busAddr(i)}, ${reg(rt)});');
 			case SWR: clockFirst('Memory.swr(${busAddr(i)}, ${reg(rt)});');
 
@@ -1998,8 +2184,8 @@ class Emitter {
 			case MTC2: 'Gte.setData(ctx, ${i.rd}, ${reg(rt)});';
 			case CFC2: assign(rt, 'Gte.getCtrl(ctx, ${i.rd})', false);
 			case CTC2: 'Gte.setCtrl(ctx, ${i.rd}, ${reg(rt)});';
-			case LWC2: 'Gte.setData(ctx, ${i.rt}, ${spanLoad('spanRead32', 'read32', busAddr(i))});';
-			case SWC2: spanStore('spanWrite32', 'write32', busAddr(i), 'Gte.getData(ctx, ${i.rt})');
+			case LWC2: 'Gte.setData(ctx, ${i.rt}, ${spanLoad('spanRead32', 'read32', i)});';
+			case SWC2: spanStore('spanWrite32', 'write32', i, 'Gte.getData(ctx, ${i.rt})');
 			case COP2CMD: gteCommand(i.code, optimize, optimize);
 
 			case _: '// unhandled: ${Disasm.text(i)}';
@@ -2178,6 +2364,7 @@ typedef SpanPlan = {open:Map<Int, String>, at:Map<Int, SpanAccess>};
 typedef FunctionSpan = {v:String, lo:Int, hi:Int};
 
 /** Where function spans are taken (Emitter.planFspanLiveness), as register masks: at the entry,
-    after a body instruction by block and index, after a block's delay slot, after its call. */
+    after a body instruction by block and index, after a block's delay slot, after its call, and
+    at the start of a block (`entry`, Emitter.deferEntryTakes). */
 typedef FspanLive = {top:Int, write:Map<Int, Map<Int, Int>>, slot:Map<Int, Int>, call:Map<Int, Int>,
-	callLive:Map<Int, Int>, step:Map<Int, Map<Int, Int>>, slotStep:Map<Int, Int>};
+	callLive:Map<Int, Int>, step:Map<Int, Map<Int, Int>>, slotStep:Map<Int, Int>, entry:Map<Int, Int>};

@@ -78,6 +78,7 @@ digests; a mismatch is either a portability leak of ours or an upstream miscompi
                                            # result with -D recompsx_mods (ADR-0033)
     haxe build/game-js.hxml && node out/_gen/game.js <exe> <disc.bin>   # run it (JS = reference)
     haxe build/game-cpp.hxml && ./scripts/build-pc.sh _gen --null       # the same, reflaxe.CPP
+    haxe build/game-cpp-dc.hxml && ./scripts/build-dc.sh _gen --max     # the Dreamcast's (fastmem, ADR-0049)
     <run> --headless-hash 600    # stop at frame 600, print one digest; the cross-target compare
                                  # for a GAME (test.sh's 329de455 is the demo's, and stays put)
     ./scripts/test.sh               # THE gate: spikes + conformance + both target digests

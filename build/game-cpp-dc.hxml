@@ -1,0 +1,9 @@
+# build/game-cpp-dc.hxml — the recompiled game through reflaxe.CPP, for the Dreamcast.
+#
+# build/game-cpp.hxml with fastmem (ADR-0049): guest RAM and the scratchpad reached through the
+# SH-4's MMU, one masked load or store an access, everything else a TLB miss the backend emulates.
+# A tree transpiled this way is the Dreamcast's alone — its accesses are SH-4 assembly — and
+# scripts/build-dc.sh sees it (mem_Fastmem.cpp) and builds it with RECOMPSX_FASTMEM; a desktop
+# build of it stops at mem.Fastmem's #error. Transpile with build/game-cpp.hxml for the desktop.
+build/game-cpp.hxml
+-D recompsx_fastmem

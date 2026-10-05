@@ -120,6 +120,8 @@ class Machine:
                 setr(dst, v); return None
             v = val(src); a = addr(dst, size, True)
             self.wr(a, size, v); return None
+        if mn == 'movca.l':    # a store that allocates its line without a read: the same word stored
+            self.wr(addr(dst, 4, True), 4, val(src)); return None
         if mn == 'mova':
             setr(dst, int(src.split()[0], 16)); return None
         if mn == 'mov':

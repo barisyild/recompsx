@@ -10,18 +10,23 @@ answers 2 (bp_gpu_state_w), the record from the twelve words it leaves (bp_gpu_t
 the second triangle of a quad through _recompsx_gpu_poly2 —
 and compares the whole outcome with a transcription of the C form (polygonHw, triPacket,
 triangleWork, pixelWork, triState, sendState, setClut, setTexPage): GPU words 0-35 and the
-backend's calls (gpuState, gpuTri), in order. The packets mix the cases: every command 20h-3Fh,
+backend's calls (gpuState, gpuTri), in order. The core writes each triangle's record itself, where the
+backend's sink says (ADR-0051: bp_gpu_sink at SINK_HOST, its relocation patched in): the record's
+eight words are read back as the triangle the C form hands over, under the sink's tag, the sink's next
+moved one record on and its count of triangles one up; a sink with too little room is generated too,
+which the core must decline. The packets mix the cases: every command 20h-3Fh,
 positions on and off the drawing area, too wide and too tall, lines, coordinates with stray high
 bits, palettes and pages new and kept, states sent and not, packets that could wrap at the end of
 RAM (which the core declines). Each path is timed with the cache model's issue rules.
 """
-import importlib.util, os, random, sys, collections
+import importlib.util, os, random, subprocess, sys, collections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location('shrun', os.path.join(HERE, 'dc-shrun.py'))
 sr = importlib.util.module_from_spec(spec); spec.loader.exec_module(sr)
 M32 = 0xFFFFFFFF
 RAM_HOST, G_HOST, STACK = 0x20000000, 0x10000000, 0x30001000
+SINK_HOST, REC_HOST, TRIS_HOST = 0x50000000, 0x40000000, 0x40100000
 
 def s32(v):
     v &= M32
@@ -103,17 +108,28 @@ class Core:
     def __init__(self, obj):
         self.code, self.poly, self.cdata = sr.load_object(obj, '_recompsx_gpu_poly')
         _, self.poly2, _ = sr.load_object(obj, '_recompsx_gpu_poly2')
+        # the pool's word for _bp_gpu_sink, unrelocated in the object: the sink is at SINK_HOST here
+        rel = subprocess.run([sr.OD, '-r', obj], capture_output=True, text=True).stdout
+        for line in rel.split('\n'):
+            f = line.split()
+            if len(f) == 3 and f[1] == 'R_SH_DIR32' and f[2] == '_bp_gpu_sink':
+                off = int(f[0], 16)
+                for k in range(4): self.cdata[off + k] = (SINK_HOST >> (8 * k)) & 0xFF
     def run(self, entry, m):
         m.r[15] = STACK
         path = m.run(entry, limit=20000)
         if m.r[15] != STACK: raise SystemExit('stack moved')
         return m.r[0], path
 
-def machine(core, ram, G):
+def machine(core, ram, G, sink):
     m = sr.Machine(core.code, core.cdata)
     m.mem.update(core.cdata)             # the section's data (the command table) where its code reads it
     for off, w in ram.items(): m.wr(RAM_HOST + off, 4, w)
     for i, w in enumerate(G): m.wr(G_HOST + 4 * i, 4, w)
+    # the backend's sink: next, end, the tag, where its state's count of triangles is
+    m.wr(SINK_HOST, 4, REC_HOST); m.wr(SINK_HOST + 4, 4, REC_HOST + sink['room'])
+    m.wr(SINK_HOST + 8, 4, sink['tag']); m.wr(SINK_HOST + 12, 4, TRIS_HOST)
+    m.wr(TRIS_HOST, 2, sink['tris'])
     return m
 
 def gen(rnd):
@@ -174,7 +190,10 @@ def gen(rnd):
     G[5] = G[7] if same or rnd.random() < 0.5 else 9
     for i in (16, 17, 18): G[i] = rnd.randrange(0, 2)
     for i in range(29, 36): G[i] = rnd.randrange(0, 100)
-    return ram, at, op, [s32(v) for v in G]
+    # the sink: room for both triangles mostly, sometimes for one, for none (a frame shown), or a byte short
+    room = rnd.choice((64, 96, 4096, 4096, 4096, 4096, 4096, 4096, 0, 32, 63))
+    sink = dict(room=room, tag=rnd.randrange(0, 1 << 14) << 16, tris=rnd.randrange(0, 60000))
+    return ram, at, op, [s32(v) for v in G], sink
 
 def main():
     args = sys.argv[1:]
@@ -184,35 +203,43 @@ def main():
     core = Core(obj)
     stats, cyc, bad = collections.Counter(), collections.Counter(), 0
     for i in range(n):
-        ram, at, op, G = gen(rnd)
+        ram, at, op, G, sink = gen(rnd)
         ref = Ref(G, ram); ref.poly(at, op)
-        m = machine(core, ram, G)
+        m = machine(core, ram, G, sink)
         m.r[4], m.r[5], m.r[6], m.r[7] = RAM_HOST, at & M32, op, G_HOST
         rc, path = core.run(core.poly, m)
         if rc == 1:
             stats['declined'] += 1
             same = all(s32(m.rd(G_HOST + 4 * k, 4)) == G[k] for k in range(64))
-            if (at & 0x1FFFFC) <= 0x1FFFFC - 44 or not same:
-                bad += 1; print('bad decline', i, hex(at), hex(op))
+            sunk = m.rd(SINK_HOST, 4) == REC_HOST and m.rd(TRIS_HOST, 2) == sink['tris']
+            if ((at & 0x1FFFFC) <= 0x1FFFFC - 44 and sink['room'] >= 64) or not same or not sunk:
+                bad += 1; print('bad decline', i, hex(at), hex(op), sink['room'])
+            continue
+        if sink['room'] < 64:
+            bad += 1; print('no decline with room', sink['room'], i)
             continue
         # the C++ around the core: triState when it answers 2, the record from words 36-47
         flow = Ref([s32(m.rd(G_HOST + 4 * k, 4)) for k in range(64)], ram)
         at0 = at & 0x1FFFFC
         step = (1 + (1 if op & 4 else 0) + (1 if op & 0x10 else 0)) << 2
+        recs = [0]
         def record(rc, first):
-            # Gpu.triRecord: the state the core left in words 52-61 when it answers 2 (it did triState
-            # and sendState itself: bp_gpu_state_w), then the backend's triangle from the twelve words
-            # 36-47 (bp_gpu_tri_w)
+            # Gpu.triDone: the state the core left in words 52-61 when it answers 2 (it did triState
+            # and sendState itself: bp_gpu_state_after_tri), the triangle the record the core wrote
+            # (ADR-0051) holds — the twelve values bp_gpu_tri_w would have packed, under the sink's tag
             if rc == 3: return
             if rc == 2:
                 flow.calls.append(('state',) + tuple(s32(m.rd(G_HOST + 4 * k, 4)) for k in range(52, 62)))
             elif rc != 0: raise SystemExit('rc %d' % rc)
-            w = [s32(m.rd(G_HOST + 4 * k, 4)) for k in range(36, 48)]
-            args = []
-            for v in range(3):
-                x, y, c, t = w[4 * v:4 * v + 4]
-                args += [x, y, c & 0xFFFFFF, t & 0xFF, (t & M32) >> 8]
-            flow.calls.append(('tri',) + tuple(args))
+            n = recs[0]; recs[0] += 1
+            w = [m.rd(REC_HOST + 32 * n + 4 * k, 4) for k in range(8)]
+            h = lambda v: s32((v & 0xFFFF) - 0x10000 if v & 0x8000 else v & 0xFFFF)
+            x0, x1, x2, y0, y1, y2 = h(w[0]), h(w[0] >> 16), h(w[1]), h(w[1] >> 16), h(w[2]), h(w[2] >> 16)
+            u0, u1, u2, v0 = w[6] & 0xFF, (w[6] >> 8) & 0xFF, (w[6] >> 16) & 0xFF, w[6] >> 24
+            v1, v2 = w[7] & 0xFF, (w[7] >> 8) & 0xFF
+            if (w[7] & 0xFFFF0000) != sink['tag']:
+                raise SystemExit('record %d tag %08x, the sink %08x' % (i, w[7], sink['tag']))
+            flow.calls.append(('tri', x0, y0, w[3], u0, v0, x1, y1, w[4], u1, v1, x2, y2, w[5], u2, v2))
         record(rc, at0 + 4)
         kind = ('quad ' if op & 8 else '') + {0: 'drawn', 2: 'drawn, state', 3: 'rejected'}[rc]
         total = sr.timing(path)
@@ -224,7 +251,13 @@ def main():
             total += sr.timing(path2)
         got = [s32(m.rd(G_HOST + 4 * k, 4)) for k in range(36)]
         for k in (2, 3, 4, 5, 19, 20, 21, 22): got[k] = flow.G[k]
-        if got != ref.G[:36] or flow.calls != ref.calls:
+        # the C form's positions as the record keeps them, sixteen bits each
+        refcalls = [c if c[0] != 'tri' else tuple(c[:1]) + tuple(
+            (s32((v & 0xFFFF) - 0x10000 if v & 0x8000 else v & 0xFFFF) if j % 5 in (1, 2) else v)
+            for j, v in enumerate(c[1:], 1)) for c in ref.calls]
+        sunk = (m.rd(SINK_HOST, 4) == REC_HOST + 32 * recs[0]
+                and m.rd(TRIS_HOST, 2) == (sink['tris'] + recs[0]) & 0xFFFF)
+        if got != ref.G[:36] or flow.calls != refcalls or not sunk:
             bad += 1
             if bad <= 5:
                 diff = [(k, got[k], ref.G[k]) for k in range(36) if got[k] != ref.G[k]]

@@ -693,11 +693,36 @@ class Kernel {
 	public static var vramDump = false;
 	static var dumped = false;
 
+	/** Frames VRAM is also written out at, as vram-<frame>.bin (`dumpAt`), in order. */
+	static var shotFrames:Array<Int> = [];
+	static var nextShot = 0;
+
+	/** VRAM written at each of these frames (a comma-separated list, in order), for a launcher's
+	    `--vram-at`. */
+	public static function dumpAt(list:String):Void {
+		final frames:Array<Int> = [];
+		for (part in list.split(",")) {
+			var v = 0;
+			for (k in 0...part.length) {
+				final c = part.charCodeAt(k);
+				if (c != null && c >= 48 && c <= 57) v = v * 10 + (c - 48);
+				else {}
+			}
+			frames.push(v);
+		}
+		shotFrames = frames;
+		nextShot = 0;
+	}
+
 	static function heartbeat(ctx:CpuState):Void {
 		// Late, not at the first pixel: the opening clear arrives thousands of frames before the
 		// rest of the display list, and a census taken at the clear describes only the clear.
 		if (vramDump && !dumped && vblankCount >= 8000) takeFrame();
 		else {}
+		if (nextShot < shotFrames.length && vblankCount >= shotFrames[nextShot]) {
+			Backend.storageWrite("vram-" + vblankCount + ".bin", gpu.Vram.data, gpu.Vram.BYTES);
+			nextShot++;
+		} else {}
 		if (vblankCount % 60 != 0) return;
 		else {}
 		core.Runtime.note("frame " + vblankCount

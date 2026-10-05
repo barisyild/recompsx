@@ -3,6 +3,21 @@
 Clean-room observations recorded by this project. No game code or data lives in this repository;
 everything below is a measurement taken from the user's own dump, or a plan for taking one.
 
+## 2026-10-05: "CONTROLLER 1-A IS UNPLUGGED" in the Adventure hub with a DualShock
+
+Reported by the owner on the Dreamcast (a maple controller with a stick is a DualShock to the
+machine, ADR-0052); the browser with the keyboard (a digital pad) was fine. Headless with
+`--pad-dualshock` and the walk below the hub paused the same way, from its first frame, and the
+menus before it tolerated what caused it. The walk: `0:-`, START every 120 frames from 1800 to 2880,
+then CROSS every 90 from 3000 to 6600 (ADVENTURE MODE, NEW GAME, 1 PLAYER, the character, the
+intro) — the hub from about 4800.
+
+libpad configures a DualShock in slot A through the multitap's long reads, where a real adaptor
+answers a read late: the tap answered at once, libpad fell out of step, left configuration mode
+early and asked 45h of a pad in normal mode, forever. The tap now answers the previous long read's
+commands (ADR-0042 amended); the hub plays on. Slot A's traffic from vblank 90 is the thing to
+trace (a hook on `sio_Sio0.answer` in a copy of the bundle).
+
 ## 2026-09-28: Circle in the warp room froze the character — three entries the analysis never had
 
 Reported by the owner (the keyboard's A is circle). Reproduced headless with a scripted pad —

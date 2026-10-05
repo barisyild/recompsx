@@ -26,6 +26,9 @@ typedef Rows = {addrs:Array<Int>, handle:Map<Int, Int>, block:Map<Int, Int>};
 	`git diff` on generated code shows what actually changed rather than what happened to move.
 **/
 class Program {
+	/** FnTable's FAST slots (its FAST_SLOTS, and the size of its C++ storage). */
+	static inline final FAST_SLOTS_GEN = 256;
+
 	final exe:PsxExe;
 
 	/** Universe 0 is the executable; the rest are overlays, in config order. */
@@ -49,6 +52,21 @@ class Program {
 		the pair's own names (ProjectionShare). Off only for comparisons (`--no-projection-share`).
 	**/
 	public var shareProjections = true;
+	/** `gen --sh4` (ADR-0048, proposed): the functions Sh4Emitter can take written as SH-4 assembly
+	    too, linked in place of their C++ form by a Dreamcast build that defines `recompsx_sh4`.
+	    Every other build compiles exactly what it did. */
+	public var sh4 = false;
+	var sh4Emitter:Null<Sh4Emitter> = null;
+	/** How many functions were written as assembly. */
+	public var sh4Functions(default, null) = 0;
+
+	/** Why the others were not, by reason, for the generator's report. */
+	public function sh4Declined():String {
+		if (sh4Emitter == null) return "";
+		final parts = [for (k => v in sh4Emitter.declined) '$k $v'];
+		parts.sort((a, b) -> a < b ? -1 : (a > b ? 1 : 0));
+		return parts.join(", ");
+	}
 	/** Whether call sites use proved helpers (Emitter.scalarCalls); off only for measurements. */
 	public var scalarCalls(default, set) = true;
 	function set_scalarCalls(v:Bool):Bool {
@@ -299,12 +317,36 @@ class Program {
 		if (!u.isBase()) buf.add(', from overlay "${u.overlay.id}"');
 		buf.add('.\n');
 		buf.add('**/\n');
-		buf.add('class ${shard.className} {\n');
-
 		// One sharing scope per class: what is shared is defined in the class that calls it.
 		final share = shareProjections ? new ProjectionShare() : null;
+		final bodies = [];
+		final assembly = [];
 		for (fn in shard.functions) {
-			buf.add(bodyOf(u, shard, fn, share));
+			var body = bodyOf(u, shard, fn, share);
+			final forwarder = StringTools.startsWith(body, '\t/** Identical to');
+			var wrapped = false;
+			if (sh4 && u.isBase() && !forwarder) {
+				if (sh4Emitter == null) sh4Emitter = new Sh4Emitter(u.image, u.discovery);
+				else {}
+				final symbol = 'rx_' + StringTools.hex(fn.entry, 8).toLowerCase();
+				final code = sh4Emitter.emit(fn, symbol);
+				if (code != null) {
+					body = sh4Wrap(fn, body, symbol);
+					assembly.push({symbol: symbol, text: code});
+					sh4Functions++;
+					wrapped = true;
+				} else {}
+			} else {}
+			// A forwarder's owner is split already, and an SH-4 form has its own ordinary entry.
+			if (!forwarder && !wrapped) body = splitEntry(fn.name, body, u.emitter.hopTarget);
+			else {}
+			bodies.push(body);
+		}
+		if (assembly.length > 0) buf.add(sh4ShardCode(assembly));
+		else {}
+		buf.add('class ${shard.className} {\n');
+		for (b in bodies) {
+			buf.add(b);
 			buf.add("\n");
 		}
 		if (share != null) projectionsShared += share.shared;
@@ -344,6 +386,132 @@ class Program {
 		actually written cannot get that wrong, and the cases it does merge are exactly the ones
 		that are genuinely the same code — usually library routines that only call into the base.
 	**/
+	/**
+		A function with an SH-4 form (Sh4Emitter): on a build with `recompsx_sh4` its C++ form becomes
+		`<name>_c`, and `<name>` calls the assembly for an ordinary entry with no pump due and the C++
+		form for anything else — a resume at a later block, a due pump, which the C++ form runs as it
+		always did. Every other build compiles the function as it was.
+	**/
+	function sh4Wrap(fn:Func, body:String, symbol:String):String {
+		final head = 'public static function ${fn.name}(ctx:core.Ctx, entry:Int = 0):Void {';
+		final at = body.indexOf(head);
+		if (at < 0) throw 'sh4: no definition of ${fn.name}';
+		final renamed = body.substr(0, at) + 'public static function ${fn.name}_c(ctx:core.Ctx, entry:Int = 0):Void {'
+			+ body.substr(at + head.length);
+		return '#if recompsx_sh4\n' + renamed
+			+ '\t/** ${fn.name} in SH-4 assembly (`$symbol`, Sh4Emitter) for an ordinary entry. */\n'
+			+ '\t$head\n'
+			+ '\t\tif (entry == 0 && ((ctx.cycles - core.Runtime.deadline(ctx)) | 0) < 0) untyped __cpp__("$symbol({0})", ctx);\n'
+			+ '\t\telse ${fn.name}_c(ctx, entry);\n'
+			+ '\t}\n'
+			+ '#else\n' + body + '#end\n';
+	}
+
+	/**
+		A function as two on C++ (ADR-0050, ledger E-138): the ordinary entry, compiled knowing its
+		`entry`, and a cold copy for a resume at a later block. The body is written once, as
+		`<name>__body`, and the C++ compiler inlines it into both: `<name>` passes it 0 (a hand-over
+		target, which other functions enter at -2 and -3, its `entry` when that is not above 0), and
+		the block guards that let a resume in fold away; `<name>__at`, cold, takes every other entry
+		exactly as the function always did. A resume is rare — a return elsewhere, a computed jump
+		into the middle — and those guards were most of a function's code: a shard of Crash 3's
+		compiled to 2.4 times its size with them (66.9 KB, 27.7 KB with `entry` 0), the hot paths
+		spread over lines the instruction cache filled for nothing. JavaScript and a cooperative
+		build compile the function as it was.
+	**/
+	static function splitEntry(name:String, body:String, hopTarget:Bool):String {
+		final head = 'public static function $name(ctx:core.Ctx, entry:Int = 0):Void {';
+		final at = body.indexOf(head);
+		if (at < 0) throw 'split: no definition of $name';
+		final call = hopTarget ? 'if (shim.MemA.likely(entry <= 0)) ${name}__body(ctx, entry);'
+			: 'if (shim.MemA.likely(entry == 0)) ${name}__body(ctx, 0);';
+		return body.substr(0, at)
+			+ '#if (cxx && !recompsx_cooperative)\n'
+			+ '\t$head\n'
+			+ '\t\t$call\n'
+			+ '\t\telse ${name}__at(ctx, entry);\n'
+			+ '\t}\n'
+			+ '\t/** `$name` entered at a later block: a copy of its own, out of the way of its ordinary entry. */\n'
+			+ '\t@:specifier("__attribute__((cold, noinline))")\n'
+			+ '\tstatic function ${name}__at(ctx:core.Ctx, entry:Int):Void {\n'
+			+ '\t\t${name}__body(ctx, entry);\n'
+			+ '\t}\n'
+			+ '\t@:specifier("inline __attribute__((always_inline))")\n'
+			+ '\tstatic function ${name}__body(ctx:core.Ctx, entry:Int):Void {\n'
+			+ '#else\n'
+			+ '\t$head\n'
+			+ '#end'
+			+ body.substr(at + head.length);
+	}
+
+	/** A shard's assembly, its declarations and the CpuState layout it assumes, for its C++ file. */
+	function sh4ShardCode(assembly:Array<{symbol:String, text:String}>):String {
+		final c = new StringBuf();
+		c.add('#include <cstddef>\n');
+		for (a in assembly) c.add('extern "C" void ${a.symbol}(core::CpuState*);\n');
+		c.add('#if defined(__sh__)\n');
+		final fields = [for (k in Sh4Emitter.FIELD_OFFSET.keys()) k];
+		fields.sort((a, b) -> Sh4Emitter.FIELD_OFFSET.get(a) - Sh4Emitter.FIELD_OFFSET.get(b));
+		for (f in fields)
+			c.add('static_assert(offsetof(core::CpuState, $f) == ${Sh4Emitter.FIELD_OFFSET.get(f)}, "CpuState as Sh4Emitter has it");\n');
+		c.add('__asm__(R"SH4(\n');
+		for (a in assembly) c.add(a.text);
+		c.add(')SH4");\n');
+		c.add('#endif\n');
+		return '#if recompsx_sh4\n@:cppFileCode("' + haxeString(c.toString()) + '")\n#end\n';
+	}
+
+	/** C text as the inside of a Haxe string literal, on one line. */
+	static function haxeString(text:String):String {
+		final b = new StringBuf();
+		for (k in 0...text.length) {
+			final ch = text.charAt(k);
+			b.add(switch (ch) {
+				case "\\": "\\\\";
+				case '"': '\\"';
+				case "\n": "\\n";
+				case "\t": "\\t";
+				case _: ch;
+			});
+		}
+		return b.toString();
+	}
+
+	/** The C functions the assembly calls (Sh4Emitter's glue): the runtime's accessors and helpers
+	    in the C ABI, with the CpuState first. Defined once, in FnTable's C++ file. */
+	static function sh4Glue():String {
+		final c = new StringBuf();
+		c.add('#if defined(__sh__)\n');
+		c.add('#include "mem_Access.h"\n#include "mem_Memory.h"\n#include "core_Ops.h"\n');
+		c.add('#define RX_GLUE extern "C" __attribute__((used, externally_visible, noinline))\n');
+		if (Sh4Emitter.FASTMEM) {
+			// Fastmem's assembly reaches memory through the MMU itself; these serve the shared
+			// routines alone, the same way: the clock written, then the access through P0.
+			c.add('RX_GLUE int rx_rd8s(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld8((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
+			c.add('RX_GLUE int rx_rd16s(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld16((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
+			c.add('RX_GLUE int rx_rd32(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld32((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
+			c.add('RX_GLUE void rx_wr8(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st8((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
+			c.add('RX_GLUE void rx_wr16(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st16((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
+			c.add('RX_GLUE void rx_wr32(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st32((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
+		} else {
+			c.add('RX_GLUE int rx_rd8s(core::CpuState* ctx, int a, int cyc) { return (int)(signed char)mem::Access::read8ut(a, ctx, cyc); }\n');
+			c.add('RX_GLUE int rx_rd16s(core::CpuState* ctx, int a, int cyc) { return (int)(short)mem::Access::read16ut(a, ctx, cyc); }\n');
+			c.add('RX_GLUE int rx_rd32(core::CpuState* ctx, int a, int cyc) { return mem::Access::read32t(a, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr8(core::CpuState* ctx, int a, int v, int cyc) { mem::Access::write8t(a, v, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr16(core::CpuState* ctx, int a, int v, int cyc) { mem::Access::write16t(a, v, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr32(core::CpuState* ctx, int a, int v, int cyc) { mem::Access::write32t(a, v, ctx, cyc); }\n');
+		}
+		c.add('RX_GLUE int rx_lwl(core::CpuState* ctx, int a, int cur) { (void)ctx; return mem::Memory::lwl(a, cur); }\n');
+		c.add('RX_GLUE int rx_lwr(core::CpuState* ctx, int a, int cur) { (void)ctx; return mem::Memory::lwr(a, cur); }\n');
+		c.add('RX_GLUE void rx_swl(core::CpuState* ctx, int a, int v) { (void)ctx; mem::Memory::swl(a, v); }\n');
+		c.add('RX_GLUE void rx_swr(core::CpuState* ctx, int a, int v) { (void)ctx; mem::Memory::swr(a, v); }\n');
+		c.add('RX_GLUE void rx_div(core::CpuState* ctx, int a, int b) { core::Ops::div(ctx, a, b); }\n');
+		c.add('RX_GLUE void rx_divu(core::CpuState* ctx, int a, int b) { core::Ops::divu(ctx, a, b); }\n');
+		c.add('__asm__(R"SH4(\n' + Sh4Emitter.sharedRoutines() + ')SH4");\n');
+		c.add('#endif\n');
+		return c.toString();
+	}
+
 	function bodyOf(u:Universe, shard:Shard, fn:Func, ?share:ProjectionShare):String {
 		// Shared bodies retain the first owner's handle. Comparing before substitution preserves
 		// deduplication; resuming the handle cannot accidentally choose a new resident overlay.
@@ -435,40 +603,54 @@ class Program {
 		buf.add('\tThese rows are the executable\'s. Code the game loads from its disc lives in\n');
 		buf.add('\t`Overlays`, whose windows shadow these addresses while they are resident.\n');
 		buf.add('**/\n');
-		// C++ only (`cxx`, reflaxe.CPP's define): the executable's functions as a native array of
-		// pointers, in handle order, so a kept answer (`FAST`) can hold an index into it and a call
-		// through a register goes straight to its function — not through this class's switch on
-		// the shard and the shard's switch on the slot, which with their prologues were most of a
-		// dynamic call. A function value in Haxe would be a heap-allocated std::function (ADR-0002);
-		// this is a C array the compiler fills at link time. Other targets keep the switches.
-		final exe = universes[0].shards.shards;
-		final fnRefs = [for (sh in exe) for (f in sh.functions) '&${sh.className}::${f.name}'];
+		// C++ only (`cxx`, reflaxe.CPP's define): the functions of the executable and its overlays as
+		// a native array of pointers, in handle order, so a kept answer (`FAST`) can hold an index into
+		// it and a call through a register goes straight to its function — not through this class's
+		// switch on the shard and the shard's switch on the slot, which with their prologues were most
+		// of a dynamic call. A function value in Haxe would be a heap-allocated std::function
+		// (ADR-0002); this is a C array the compiler fills at link time. Other targets keep the switches.
+		final coded = [for (u in universes) for (sh in u.shards.shards) sh];
+		coded.sort((a, b) -> a.index - b.index);
+		final fnRefs = [for (sh in coded) for (f in sh.functions) '&${sh.className}::${f.name}'];
 		// Last, the empty state of the CpuState's last answer (`run`): its address is odd, which no
 		// table answers, and this asks the long way, as a miss does.
-		buf.add('@:cppFileCode("typedef void (*RecompsxFn)(core::CpuState*, int);\\n'
+		final table = new StringBuf();
+		table.add('typedef void (*RecompsxFn)(core::CpuState*, int);\\n'
 			+ 'static void recompsx_unanswered(core::CpuState* ctx, int entry) { (void)entry; core::Runtime::callOnce(ctx, ctx->_callAt); }\\n'
 			+ 'static const RecompsxFn recompsx_fns[] = {\\n');
 		var col = 0;
 		for (r in fnRefs) {
-			buf.add(r + ',');
+			table.add(r + ',');
 			col++;
-			if (col % 4 == 0) buf.add('\\n');
+			if (col % 4 == 0) table.add('\\n');
 			else {}
 		}
-		buf.add('&recompsx_unanswered,\\n};\\n")\n');
+		table.add('&recompsx_unanswered,\\n};\\n');
+		// FAST's storage on C++ (`fastStore`): an array of its own, so the data placement can give its
+		// lines a colour (src/backend/dreamcast/dc-data-placement.txt, `.bss.recompsx_fnfast`) where
+		// malloc put them wherever the heap had room, and they missed on what else was hot (E-150).
+		table.add('extern \\"C\\" { unsigned char recompsx_fnfast[' + (FAST_SLOTS_GEN << 4) + '] __attribute__((aligned(32))); }\\n');
+		// With `gen --sh4`, a build defining `recompsx_sh4` also gets the assembly's glue here.
+		if (sh4Functions > 0) {
+			buf.add('#if recompsx_sh4\n');
+			buf.add('@:cppFileCode("' + table.toString() + haxeString(sh4Glue()) + '")\n');
+			buf.add('#else\n');
+			buf.add('@:cppFileCode("' + table.toString() + '")\n');
+			buf.add('#end\n');
+		} else buf.add('@:cppFileCode("' + table.toString() + '")\n');
 		buf.add('class FnTable {\n');
 		buf.add('\t/** `recompsx_unanswered`\'s place in the native pointer array (C++): after every function. */\n');
 		buf.add('\tstatic inline var NONE:Int = ${fnRefs.length};\n\n');
-		// Where each executable shard starts in that array: flat = SHARD_BASE[shard] + slot.
+		// Where each shard of the executable and its overlays starts in that array: flat = SHARD_BASE[shard] + slot.
 		var maxShard = -1;
-		for (sh in exe) if (sh.index > maxShard) maxShard = sh.index;
+		for (sh in coded) if (sh.index > maxShard) maxShard = sh.index;
 		final bases = [for (_ in 0...maxShard + 1) -1];
 		var next = 0;
-		for (sh in exe) {
+		for (sh in coded) {
 			bases[sh.index] = next;
 			next += sh.functions.length;
 		}
-		buf.add('\t/** Where each of the executable\'s shards starts in the native pointer array (C++). */\n');
+		buf.add('\t/** Where each shard of the executable and its overlays starts in the native pointer array (C++). */\n');
 		buf.add('\tstatic final SHARD_BASE:Array<Int> = [${bases.join(", ")}];\n\n');
 
 		buf.add('\t/** Block addresses, ascending. */\n');
@@ -568,7 +750,7 @@ class Program {
 			if (shim.MemA.likely(ctx._callAt == target)) FnPtr.call(ctx._callFn, ctx, ctx._callBlock);
 			else runFast(ctx, target);
 			#else
-			final at = ((target >>> 2) & 1023) << 4;
+			final at = ((target >>> 2) & (FAST_SLOTS - 1)) << 4;
 			if (shim.MemA.get32(FAST, at) == target) dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
 			else Runtime.callOnce(ctx, target);
 			#end
@@ -585,7 +767,7 @@ class Program {
 	    and the call, not the table. */
 	@:specifier(\"__attribute__((noinline))\")
 	static function runFast(ctx:CpuState, target:Int):Void {
-		final at = ((target >>> 2) & 1023) << 4;
+		final at = ((target >>> 2) & (FAST_SLOTS - 1)) << 4;
 		if (shim.MemA.get32(FAST, at) == target) {
 			final fn = shim.MemA.get32(FAST, at + 12);
 			final block = shim.MemA.get32(FAST, at + 8);
@@ -610,7 +792,7 @@ class Program {
 	public static function call(addr:Int, ctx:CpuState):Bool {
 		if (!flatReady) buildFlat();
 		else {}
-		final at = ((addr >>> 2) & 1023) << 4;
+		final at = ((addr >>> 2) & (FAST_SLOTS - 1)) << 4;
 		if (shim.MemA.get32(FAST, at) == addr) {
 			dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
 			return true;
@@ -620,7 +802,10 @@ class Program {
 			// The resident overlay shadows the executable here: no fallthrough.
 			final row = Overlays.lookup(ovl, addr);
 			if (row < 0) return false;
-			dispatch(Overlays.handleAt(row), Overlays.blockAt(row), ctx);
+			final handle = Overlays.handleAt(row);
+			final block = Overlays.blockAt(row);
+			keep(at, addr, handle, block);
+			dispatch(handle, block, ctx);
 			return true;
 		} else {}
 		final row = lookup(addr);
@@ -628,17 +813,18 @@ class Program {
 		if (row < 0) return RelocTable.call(addr, ctx);
 		final handle = shim.MemA.get32(HANDLES_F, row << 2);
 		final block = shim.MemA.get32(BLOCKS_F, row << 2);
-		// Kept only where no window can take the address away; `clearFast` runs whenever the
-		// windows change, so a window declared later is honoured too.
-		if (kernel.OverlayMgr.windowOf(addr) < 0) keep(at, addr, handle, block);
-		else {}
+		// Kept, in a window or not: `clearFast` runs whenever the windows or what is resident in
+		// them change (OverlayMgr), so no answer outlives the code it names. Kept only outside
+		// every window, a game running from an overlay took the long way at every dynamic call
+		// into it — Crash 3's demo 40 a frame, ~430 instructions each (ledger E-157).
+		keep(at, addr, handle, block);
 		dispatch(handle, block, ctx);
 		return true;
 	}
 
 	/** A kept answer: the address, its handle and block, and (the spare word) the function's place
-	    in the native pointer array, which `run` calls through on C++. Only the executable's rows
-	    are kept, and every one of those has a place there. */
+	    in the native pointer array, which `run` calls through on C++. The executable's rows and its
+	    overlays' are kept, and every one of those has a place there; relocatable code's are not. */
 	static function keep(at:Int, addr:Int, handle:Int, block:Int):Void {
 		shim.MemA.set32(FAST, at, addr);
 		shim.MemA.set32(FAST, at + 4, handle);
@@ -658,6 +844,12 @@ class Program {
 private extern class FnPtr {
 	@:nativeFunctionCode(\"(recompsx_fns[({arg0})](({arg1}), ({arg2})))\")
 	public static function call(index:Int, ctx:CpuState, entry:Int):Void;
+}
+
+/** FAST's storage, the array FnTable's C++ file defines (`recompsx_fnfast`). */
+private extern class FastStore {
+	@:nativeFunctionCode(\"(recompsx_fnfast)\")
+	public static function buf():shim.RawBuf;
 }
 #end
 ");
@@ -689,18 +881,24 @@ private extern class FnPtr {
 	static var CACHE_TAG:shim.RawBuf;
 	static var CACHE_ROW:shim.RawBuf;
 	/**
-		`call`'s answers for fixed code outside every overlay window, direct-mapped on the address:
+		`call`'s answers for the executable's and its overlays' code, direct-mapped on the address:
 		address, handle, block and a spare word per slot, so a lookup touches one cache line. An
 		empty slot holds an address that maps to a different slot, which no lookup can match.
 	**/
 	static var FAST:shim.RawBuf;
+	/** FAST's slots: 4 KB of them, in an array of its own on C++ (`recompsx_fnfast`) that the data
+	    placement gives a colour. A game calls few targets this way (Crash 3's demo: ~1,900 calls a
+	    frame to 150 targets; 12 a frame miss 256 direct-mapped slots, 35 miss 64, and a miss is
+	    ~600 cycles of the long way); what the lookups paid was their lines' misses, other data
+	    evicting them from wherever the heap had put a table of 16 KB (ledger E-120, E-143, E-150). */
+	static inline final FAST_SLOTS = " + FAST_SLOTS_GEN + ";
 	static var flatReady:Bool = false;
 
-	/** Forgets every kept answer. The windows changed: an address may now belong to one. */
+	/** Forgets every kept answer. The windows or their residents changed: an address may now name other code. */
 	static function clearFast():Void {
 		var i = 0;
-		while (i < 1024) {
-			shim.MemA.set32(FAST, i << 4, ((i + 1) & 1023) << 2);
+		while (i < FAST_SLOTS) {
+			shim.MemA.set32(FAST, i << 4, ((i + 1) & (FAST_SLOTS - 1)) << 2);
 			i++;
 		}
 		#if cxx
@@ -742,7 +940,11 @@ private extern class FnPtr {
 		// Every Int address, including -1, therefore has an unambiguous answer.
 		CACHE_TAG = shim.RawMem.alloc(1024 << 2);
 		CACHE_ROW = shim.RawMem.alloc(1024 << 2);
-		FAST = shim.RawMem.alloc(1024 << 4);
+		#if cxx
+		FAST = FastStore.buf();
+		#else
+		FAST = shim.RawMem.alloc(FAST_SLOTS << 4);
+		#end
 		i = 0;
 		while (i < 1024) {
 			shim.MemA.set32(CACHE_ROW, i << 2, 0);
@@ -770,7 +972,8 @@ private extern class FnPtr {
 			final rf = relocOf(r, fn);
 			final token = '__RECOMPSX_CONTINUATION_HANDLE__';
 			rf.unit.emitter.continuationToken = token;
-			buf.add(StringTools.replace(rf.unit.emitter.emitFunction(fn), token, Std.string(rf.handle)));
+			final text = StringTools.replace(rf.unit.emitter.emitFunction(fn), token, Std.string(rf.handle));
+			buf.add(splitEntry(fn.name, text, rf.unit.emitter.hopTarget));
 			buf.add("\n");
 		}
 		buf.add('\tpublic static function dispatch(slot:Int, entry:Int, ctx:CpuState):Void {\n');

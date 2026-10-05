@@ -102,6 +102,9 @@ int      g_bright_prims;
 /* Texture decodes this window, by cache: 4bpp page mirrors, pool slots, baked palette patches.
  * The overlay's `dec m/s/b`: what tells an invalidated texture from a cache that is too small. */
 int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
+/* The pictures this window (ADR-0053): renders into one, those of them over the picture as it was
+ * (a copy of the whole buffer first), and screen passes. The bench's line: what a frame costs the PVR. */
+int      g_pic_renders, g_pic_copies, g_pic_screens;
 
 /* `--dc-bench=FROM:TO`, read at init; the benchmark itself is with profile_report. With
  * `--dc-rxprof` as well, the range is also announced on the serial port — "@@rxprof start" as it
@@ -110,6 +113,10 @@ int      g_win_mir, g_win_slot, g_win_bake, g_win_patch;
 #if RECOMPSX_DC_PROFILE
 int g_bench_from = -1, g_bench_to = -1;
 int g_rxprof;
+/* `--dc-shots=FROM:TO:STEP`: with `--dc-rxprof`, a picture every STEP presents from FROM to TO as
+ * well, named as the every-150 ones are — a moment that lasts a second, such as a transition, seen
+ * frame by frame against the reference's VRAM dumps of the same presents. */
+int g_shot_from = -1, g_shot_to = -1, g_shot_step;
 #endif
 
 /* ---- the runtime's brackets (bp_profile_mark) ------------------------------------------------- */
@@ -271,6 +278,13 @@ static volatile uint32_t  g_sym_other;          /* samples in no listed function
 static const char*        g_sym_state = "no SYMS.BIN on the disc";
 
 static void samp_tick(irq_t code, irq_context_t* ctx, void* data);
+
+/* The sampler's rate: a tick is SAMP_US microseconds. 250 a second, where it was 1,000: each tick hashes
+ * the PC and finds its function, and at 1 kHz that was 0.083 ms of every present of Crash 3's gameplay
+ * demo under the cache model (docs/perf/dreamcast-ledger.md, E-155) — the measurement's own cost, in
+ * the window it measures and on the console. A 300-present bench still takes 1,250 samples. */
+#define SAMP_HZ 250
+#define SAMP_US (1000000 / SAMP_HZ)
 static void syms_clear(void);
 
 void syms_load(void) {
@@ -400,7 +414,7 @@ static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
 }
 
 void samp_start(void) {
-    if(timer_prime(TMU1, 1000, 1) < 0) {
+    if(timer_prime(TMU1, SAMP_HZ, 1) < 0) {
         bp_log(BP_LOG_WARN, "samp: TMU1 unavailable — no PC sampling");
         return;
     }
@@ -420,14 +434,14 @@ void samp_start(void) {
  *  neither. Each report describes the period since the last one, so the numbers belong to the
  *  scene on screen when they are printed. */
 void samp_report(void) {
-    if(g_samp_total < 200 || g_samp_frames < 10) return;
+    if(g_samp_total < 200 * SAMP_HZ / 1000 || g_samp_frames < 10) return;
     uint8_t taken[SAMP_SLOTS] __attribute__((aligned(8)));
     shz_memset8(taken, 0, sizeof(taken));
     char msg[260];
     /* Tenths of a millisecond, because the interesting buckets are under 10 ms and integers
      * would round most of them to the same number. */
     int n = snprintf(msg, sizeof(msg), "samp: %lu ms/frame over %lu frames (%lu lost) |",
-                     (unsigned long)(g_samp_total / g_samp_frames),
+                     (unsigned long)((uint64_t)g_samp_total * (SAMP_US / 1000) / g_samp_frames),
                      (unsigned long)g_samp_frames, (unsigned long)g_samp_lost);
     for(int k = 0; k < 10; k++) {
         int best = -1;
@@ -436,7 +450,7 @@ void samp_report(void) {
         if(best < 0) break;
         taken[best] = 1;
         const unsigned tenths =
-            (unsigned)((uint64_t)g_samp_hit[best] * 10ull / (uint64_t)g_samp_frames);
+            (unsigned)((uint64_t)g_samp_hit[best] * (10ull * SAMP_US / 1000) / (uint64_t)g_samp_frames);
         if(tenths == 0) break;
         n += snprintf(msg + n, sizeof(msg) - (size_t)n, " %08lx:%u.%ums",
                       (unsigned long)g_samp_key[best] << SAMP_GRAN, tenths / 10, tenths % 10);
@@ -486,6 +500,7 @@ static uint64_t g_bench_sum[5];       /* total, emu, gte, gpu, build — microse
 /* The rest of the total, for the serial log only: the PVR's wait, uploads, the submission less the
  * build, the pacer's hold and the disc — where a frame's time went that is not the emulator's. */
 static uint64_t g_bench_rest[5];
+static uint32_t g_bench_pic[3];       /* the pictures' counters, summed */
 /* Presents by what they cost (bench_frame_busy), for the serial log: whether a bench's average hides
  * frames far over 16.7 ms behind others far under it, which the pacer then sleeps through. */
 #define BENCH_BINS 10
@@ -519,6 +534,9 @@ void bench_frame_busy(uint64_t busy_us) {
 }
 static uint32_t g_bench_frames;
 static char     g_bench_line[48];
+#if RECOMPSX_FASTMEM
+static uint32_t g_bench_traps0;       /* g_fm_traps when the window started */
+#endif
 
 static void profile_reset(void);
 
@@ -529,6 +547,8 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
     g_bench_rest[0] += g_prof_wait; g_bench_rest[1] += g_prof_upload;
     g_bench_rest[2] += g_prof_submit - g_prof_build; g_bench_rest[3] += g_prof_pace;
     g_bench_rest[4] += g_prof_disc_us;
+    g_bench_pic[0] += (uint32_t)g_pic_renders; g_bench_pic[1] += (uint32_t)g_pic_copies;
+    g_bench_pic[2] += (uint32_t)g_pic_screens;
     g_bench_frames += (uint32_t)g_prof_frames;
     if(g_presents < (uint32_t)g_bench_to) return;
     g_bench_state = 2;
@@ -553,6 +573,21 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
              r[0] / 100, r[0] % 100, r[1] / 100, r[1] % 100, r[2] / 100, r[2] % 100, r[3] / 100, r[3] % 100,
              r[4] / 100, r[4] % 100);
     bp_log(BP_LOG_WARN, rest);
+    if(g_bench_pic[0] | g_bench_pic[2]) {
+        unsigned long q[3];
+        for(int i = 0; i < 3; i++) q[i] = (unsigned long)((uint64_t)g_bench_pic[i] * 100u / g_bench_frames);
+        snprintf(rest, sizeof(rest), "bench pictures: %lu.%02lu renders (%lu.%02lu over a picture) %lu.%02lu screens a frame",
+                 q[0] / 100, q[0] % 100, q[1] / 100, q[1] % 100, q[2] / 100, q[2] % 100);
+        bp_log(BP_LOG_WARN, rest);
+    } else {}
+#if RECOMPSX_FASTMEM
+    /* Guest accesses the MMU sent to the slow path over the window (ADR-0049): ports and the like. */
+    snprintf(rest, sizeof(rest), "bench fastmem: %lu traps a frame", (unsigned long)((g_fm_traps - g_bench_traps0) / g_bench_frames));
+    bp_log(BP_LOG_WARN, rest);
+#if RECOMPSX_FM_HIST
+    fm_hist_report(g_bench_frames);
+#endif
+#endif
     /* Each bin: its upper edge in ms, the presents in it, their mean cost in tenths of a ms. */
     char hist[256];
     int at = snprintf(hist, sizeof(hist), "bench presents by cost:");
@@ -589,8 +624,11 @@ void profile_report(void) {
     g_presents++;
     /* A picture every 150 presents for the profiling Flycast, named by the present: the same name
      * is the same frame in every build and every emulator, which is how a bench range is found. */
-    if(g_rxprof && g_presents % 150 == 0) { printf("@@rxprof shot p%05lu\n", (unsigned long)g_presents); fflush(stdout); }
-    else {}
+    if(g_rxprof && (g_presents % 150 == 0
+                    || (g_shot_step > 0 && g_presents >= (uint32_t)g_shot_from && g_presents <= (uint32_t)g_shot_to
+                        && (g_presents - (uint32_t)g_shot_from) % (uint32_t)g_shot_step == 0))) {
+        printf("@@rxprof shot p%05lu\n", (unsigned long)g_presents); fflush(stdout);
+    } else {}
 #if RECOMPSX_DC_PROFILE_OVERLAY
     if(g_txt_next < TXT_LINES) txt_step();
     else {}
@@ -598,6 +636,12 @@ void profile_report(void) {
     if(g_bench_state == 0 && g_bench_from >= 0 && g_presents == (uint32_t)g_bench_from) {
         profile_reset();        /* the range starts with a window of its own */
         g_bench_state = 1;
+#if RECOMPSX_FASTMEM
+        g_bench_traps0 = g_fm_traps;
+#if RECOMPSX_FM_HIST
+        fm_hist_reset();
+#endif
+#endif
         if(g_rxprof) { printf("@@rxprof start\n"); fflush(stdout); }
         else {}
         return;
@@ -612,9 +656,9 @@ void profile_report(void) {
      * code with the kernel, memory and timers it calls, and every number on the overlay is its own
      * and they add up to the total. GTE time is sampled (a tick is a millisecond), the rest timed,
      * so the remainder is clamped rather than trusted to the last millisecond. */
-    const uint64_t spu_us = (uint64_t)g_samp_where[BP_PROFILE_SPU] * 1000ull;
-    const uint64_t gpu_us = (uint64_t)g_samp_where[BP_PROFILE_GPU] * 1000ull;
-    const uint64_t gte_us = (uint64_t)g_samp_where[BP_PROFILE_GTE] * 1000ull;
+    const uint64_t spu_us = (uint64_t)g_samp_where[BP_PROFILE_SPU] * SAMP_US;
+    const uint64_t gpu_us = (uint64_t)g_samp_where[BP_PROFILE_GPU] * SAMP_US;
+    const uint64_t gte_us = (uint64_t)g_samp_where[BP_PROFILE_GTE] * SAMP_US;
     const uint64_t inside = g_prof_disc_us + spu_us + gpu_us + gte_us + g_prof_aica;
     const uint64_t emu = g_prof_emu > inside ? g_prof_emu - inside : 0;
     if(g_bench_state == 1) bench_add(total, emu, gte_us, gpu_us, g_prof_build);
@@ -720,6 +764,7 @@ static void profile_reset(void) {
     g_prof_skipped = 0;
     g_bright_prims = 0;
     g_win_mir = g_win_slot = g_win_bake = g_win_patch = 0;
+    g_pic_renders = g_pic_copies = g_pic_screens = 0;
     for(int i = 0; i < BP_PROFILE_SECTIONS; i++) g_samp_where[i] = 0;
     g_prof_aica = 0;
     g_prof_aica_decodes = 0;

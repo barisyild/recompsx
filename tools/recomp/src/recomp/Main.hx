@@ -110,7 +110,7 @@ usage:
       Disassemble. Defaults to the entry point and 32 instructions. Addresses may be
       written as 0x80010000 or as a decimal number.
 
-  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions | --no-scalar | --no-value-regions | --no-projection-share | --no-scalar-calls] [--value-cfg | --no-value-cfg] [--cut-shared] [--mods <id,id | all>]
+  recompsx gen <disc.cue | SERIAL | games/SERIAL/game.json | file.exe> [--out <dir>] [--seed <addr>] [--no-opt | --no-regions | --no-scalar | --no-value-regions | --no-projection-share | --no-scalar-calls] [--value-cfg | --no-value-cfg] [--cut-shared] [--sh4] [--mods <id,id | all>]
       Emit a recompiled program. Given a disc image, its SYSTEM.CNF names the executable
       and its product code, and games/<code>/game.json, when there is one, supplies the
       overlays and hints; without one the executable alone is compiled. Given a code or a
@@ -127,6 +127,8 @@ usage:
       --no-regions keeps simple loops but disables region reductions.
       --cut-shared: functions hand over at each other's entries instead of carrying the code
         they share (ADR-0045): smaller, exact, and slower on the Dreamcast (ledger E-077).
+      --sh4 also writes the functions the SH-4 emitter can take as SH-4 assembly (ADR-0048,
+        proposed), which a Dreamcast build with -D recompsx_sh4 links in place of their C++ form.
       --mods builds in the named mods from games/<code>/mods (ADR-0033): their hooks are
       emitted, their sources copied beside the program; compile with -D recompsx_mods.
 
@@ -285,6 +287,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		var valueCfg = false;
 		var shareProjections = true;
 		var scalarCalls = true;
+		var sh4 = false;
 		var modsWanted:Null<String> = null;
 		var i = 1;
 		while (i < args.length) {
@@ -301,6 +304,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 				case "--no-projection-share": shareProjections = false;
 				case "--no-scalar-calls": scalarCalls = false;
 				case "--cut-shared": cutShared = true;
+				case "--sh4": sh4 = true;
 				case "--mods" if (i + 1 < args.length): modsWanted = args[i + 1]; i++;
 				case other:
 					Sys.stderr().writeString('gen: unexpected argument "$other"\n');
@@ -344,6 +348,7 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		program.setGame(input.serial != null ? input.serial : "", input.title != null ? input.title : "");
 		program.shareProjections = shareProjections;
 		program.scalarCalls = scalarCalls;
+		program.sh4 = sh4;
 		// Mods (ADR-0033): only with --mods does anything below change what is written.
 		final mods = modsWanted == null ? [] : modsFor(input, modsWanted);
 		final hooks = [for (m in mods) for (h in m.hooks) h];
@@ -376,6 +381,10 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		if (program.deduplicated > 0) {
 			Sys.println('${program.deduplicated} function bodies shared between universes');
 		}
+		if (program.sh4Functions > 0) {
+			Sys.println('${program.sh4Functions} functions also written as SH-4 assembly (build with -D recompsx_sh4); '
+				+ 'not the others: ${program.sh4Declined()}');
+		} else {}
 		if (program.projectionsShared > 0) {
 			Sys.println('${program.projectionsShared} memory projection call sites share an earlier site\'s helper');
 		}

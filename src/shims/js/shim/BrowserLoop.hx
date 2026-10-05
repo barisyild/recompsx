@@ -53,6 +53,8 @@ class BrowserLoop {
 				const budget = unpaced ? 14 : 8;
 				while (performance.now() - start < budget) {
 					if (!unpaced && (frames() - base) * frameMs > performance.now() - t0 + frameMs) break;
+					// Paused from inside a frame (the page's slow motion and frame step): no frame more.
+					if (host && host.paused) break;
 					if (!step()) { active = false; state('stopped'); return; }
 				}
 				if (host && host.progress) host.progress(frames(), {1});

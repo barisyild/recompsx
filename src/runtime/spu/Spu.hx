@@ -6,6 +6,7 @@ import core.TimeBase;
 import shim.Backend;
 import shim.RawBuf;
 import shim.IntMath;
+import shim.MemA;
 import shim.RawMem;
 import shim.SpuFile;
 
@@ -151,8 +152,15 @@ class Spu {
 		Sized for the longest catch-up the guard allows, and allocated once — the portable subset
 		allocates nothing after init.
 	**/
-	static var accL:Array<Int>;
-	static var accR:Array<Int>;
+	static var accL:RawBuf;
+	static var accR:RawBuf;
+
+	// The buffers as values: a local initialised from the static itself is, on reflaxe.CPP, a
+	// reference to it (`RawBuf& a = Spu::accL`), which every store may change for all the C++
+	// compiler knows; from a call it is a copy, which no store can.
+	static function accLeft():RawBuf return accL;
+	static function accRight():RawBuf return accR;
+	static function outBuf():RawBuf return out;
 	static inline var MAX_CATCHUP = 4097;
 
 	/**
@@ -215,8 +223,8 @@ class Spu {
 			sentL[v] = -1;
 			sentR[v] = -1;
 		}
-		accL = [for (_ in 0...MAX_CATCHUP) 0];
-		accR = [for (_ in 0...MAX_CATCHUP) 0];
+		accL = RawMem.alloc(MAX_CATCHUP * 4);
+		accR = RawMem.alloc(MAX_CATCHUP * 4);
 		dirtyLo = RAM_BYTES;
 		dirtyHi = 0;
 		softMask = 0;
@@ -517,14 +525,17 @@ class Spu {
 	}
 
 	static function catchUp(cycles:Int):Void {
-		// Wrap-safe, like every other comparison against the cycle counter (ADR-0004).
+		// Wrap-safe, like every other comparison against the cycle counter (ADR-0004). The samples
+		// due are the cycles since the last one over 768, at most MAX_CATCHUP — what a loop of one
+		// subtraction a sample counted (~700 turns a frame on the Dreamcast). 768 is 3 << 8, and a
+		// third is a multiply and a shift: exact for every quotient below 2^17, and below the cap
+		// the quotient is under 12,291, so the product stays under 2^31.
+		final d = (cycles - lastSample) | 0;
 		var due = 0;
-		var last = lastSample;
-		while (((cycles - last) | 0) >= CYCLES_PER_SAMPLE && due < MAX_CATCHUP) {
-			last = (last + CYCLES_PER_SAMPLE) | 0;
-			due++;
-		}
-		lastSample = last;
+		if (d >= MAX_CATCHUP * CYCLES_PER_SAMPLE) due = MAX_CATCHUP;
+		else if (d >= CYCLES_PER_SAMPLE) due = ((d >> 8) * 43691) >> 17;
+		else {}
+		lastSample = (lastSample + due * CYCLES_PER_SAMPLE) | 0;
 		if (due > 0) mixBatch(due);
 		else {}
 		// A catch-up longer than a frame means something stopped the scheduler, and grinding
@@ -565,8 +576,8 @@ class Spu {
 			else advanceBatch(n);
 		} else {
 			for (i in 0...n) {
-				accL[i] = 0;
-				accR[i] = 0;
+				MemA.set32(accL, i << 2, 0);
+				MemA.set32(accR, i << 2, 0);
 			}
 			for (v in 0...VOICES) {
 				if (envPhase[v] == PHASE_OFF) continue;
@@ -575,7 +586,7 @@ class Spu {
 			}
 			final mainL = volumeOf(mainVolL);
 			final mainR = volumeOf(mainVolR);
-			for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
+			emitBatch(n, mainL, mainR);
 		}
 	}
 
@@ -585,8 +596,8 @@ class Spu {
 	**/
 	static function mixDeclined(n:Int):Void {
 		for (i in 0...n) {
-			accL[i] = 0;
-			accR[i] = 0;
+			MemA.set32(accL, i << 2, 0);
+			MemA.set32(accR, i << 2, 0);
 		}
 		for (v in 0...VOICES) {
 			if (envPhase[v] == PHASE_OFF) continue;
@@ -596,7 +607,7 @@ class Spu {
 		}
 		final mainL = volumeOf(mainVolL);
 		final mainR = volumeOf(mainVolR);
-		for (i in 0...n) emit((sat16(accL[i]) * mainL) >> 15, (sat16(accR[i]) * mainR) >> 15);
+		emitBatch(n, mainL, mainR);
 	}
 
 	/** `n` samples of every voice's state, and no sound: what `mixBatch` does with nobody listening. */
@@ -969,16 +980,27 @@ class Spu {
 		final base = v * SAMPLES_PER_BLOCK;
 		final step = pitchStep(v);
 		final phase = envPhase[v];
+		// The accumulators and the level in locals for the run: through the voice file and an
+		// array, every store a sample made was one the C++ compiler had to assume changed them,
+		// and it read them all again at the next sample (ledger E-141).
+		final al = accLeft(), ar = accRight();
 		var pos = blockPos[v];
 		var cnt = counter[v];
 		var peak = peakSample;
+		// The level `mixVoice` reads at each sample, read again wherever it can change: the
+		// envelope's step, and a block's decode — the end of a one-shot zeroes it.
+		var level = envLevel[v];
+		var a = at << 2;
 		var k = 0;
 		while (k < m) {
-			if (stepping) stepEnvelope(v);
-			else {}
+			if (stepping) {
+				stepEnvelope(v);
+				level = envLevel[v];
+			} else {}
 			if (pos >= SAMPLES_PER_BLOCK) {
 				decodeBlock(v);
 				pos = 0;
+				level = envLevel[v];
 			} else {}
 			final raw = decoded[base + pos];
 			cnt = (cnt + step) | 0;
@@ -988,14 +1010,16 @@ class Spu {
 				if (pos >= SAMPLES_PER_BLOCK) {
 					decodeBlock(v);
 					pos = 0;
+					level = envLevel[v];
 				} else {}
 			}
-			final s = (raw * envLevel[v]) >> 15;
+			final s = (raw * level) >> 15;
 			final magnitude = raw < 0 ? -raw : raw;
 			if (magnitude > peak) peak = magnitude;
 			else {}
-			accL[at + k] = (accL[at + k] + ((s * vl) >> 15)) | 0;
-			accR[at + k] = (accR[at + k] + ((s * vr) >> 15)) | 0;
+			MemA.set32(al, a, (MemA.get32(al, a) + ((s * vl) >> 15)) | 0);
+			MemA.set32(ar, a, (MemA.get32(ar, a) + ((s * vr) >> 15)) | 0);
+			a += 4;
 			k++;
 			if (stepping && envPhase[v] != phase) break;
 			else {}
@@ -1024,6 +1048,36 @@ class Spu {
 		// The buffer is the machine's, not the test's: leave it where it was.
 		outCount = before;
 		return (l & 0xFFFF) | (r << 16);
+	}
+
+	/**
+		`n` accumulated pairs through the main volume into the output, as `emit` each one: the
+		counters in locals for the batch, and the pair one word, where each sample's two halfwords
+		went out a byte at a time and every store was, to the C++ compiler (-fno-strict-aliasing),
+		one that might have changed the counters and the buffer's address (ledger E-141). A full
+		buffer drops the rest uncounted, as `emit` does.
+	**/
+	static function emitBatch(n:Int, mainL:Int, mainR:Int):Void {
+		final al = accLeft(), ar = accRight(), o = outBuf();
+		var count = outCount;
+		var made = 0;
+		var loud = 0;
+		var a = 0;
+		var i = 0;
+		while (i < n && count < OUT_PAIRS) {
+			final ls = sat16((sat16(MemA.get32(al, a)) * mainL) >> 15);
+			final rs = sat16((sat16(MemA.get32(ar, a)) * mainR) >> 15);
+			MemA.set32(o, count << 2, (ls & 0xFFFF) | (rs << 16));
+			count++;
+			made++;
+			if (ls != 0 || rs != 0) loud++;
+			else {}
+			a += 4;
+			i++;
+		}
+		outCount = count;
+		samplesOut = (samplesOut + made) | 0;
+		nonSilent = (nonSilent + loud) | 0;
 	}
 
 	static function emit(l:Int, r:Int):Void {
@@ -1127,6 +1181,7 @@ class Spu {
 		of the previous two samples. The shift is a range, not a volume: a block of quiet detail and
 		a block of loud detail use the same nibbles and different shifts.
 	**/
+	@:specifier("__attribute__((noinline))")
 	static function decodeBlock(v:Int):Void {
 		final at = curAddr[v] & (RAM_BYTES - 1);
 		final header = RawMem.get8(ram, at);
@@ -1142,16 +1197,27 @@ class Spu {
 		final f1 = filter1(f);
 
 		final base = v * SAMPLES_PER_BLOCK;
-		for (i in 0...SAMPLES_PER_BLOCK) {
-			final byte = RawMem.get8(ram, at + 2 + (i >> 1));
-			final nibble = (i & 1) == 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
+		// A byte's two samples at a time, low nibble first, and the two the filter looks back at
+		// in locals: through the voice file they were read and written at every sample, each
+		// store one the C++ compiler took for a change to everything else there (ledger E-141).
+		var o1 = old[v];
+		var o2 = older[v];
+		for (j in 0...(SAMPLES_PER_BLOCK >> 1)) {
+			final byte = RawMem.get8(ram, at + 2 + j);
+			final lo = byte & 0x0F;
+			final hi = (byte >> 4) & 0x0F;
 			// Sign-extend four bits, then scale into sixteen.
-			final t = ((nibble > 7 ? nibble - 16 : nibble) << 12) >> shift;
-			final s = sat16(t + ((old[v] * f0 + older[v] * f1 + 32) >> 6));
-			decoded[base + i] = s;
-			older[v] = old[v];
-			old[v] = s;
+			final t0 = ((lo > 7 ? lo - 16 : lo) << 12) >> shift;
+			final s0 = sat16(t0 + ((o1 * f0 + o2 * f1 + 32) >> 6));
+			final t1 = ((hi > 7 ? hi - 16 : hi) << 12) >> shift;
+			final s1 = sat16(t1 + ((s0 * f0 + o1 * f1 + 32) >> 6));
+			decoded[base + (j << 1)] = s0;
+			decoded[base + (j << 1) + 1] = s1;
+			o2 = s0;
+			o1 = s1;
 		}
+		old[v] = o1;
+		older[v] = o2;
 
 		blockPos[v] = 0;
 		advanceBlock(v, flags);

@@ -56,7 +56,9 @@ uintptr_t arch_stack_32m = 0x8e000000u - 7520u;
 
 /* ---- launch state ---------------------------------------------------------------------------- */
 
-#define MAX_ARGS 8
+/* Sixteen: a bench disc's RECOMPSX.CFG carries seven lines before a pad script (sio.PadScript)
+ * adds its two. */
+#define MAX_ARGS 16
 #define ARG_LEN  128
 
 static char g_args[MAX_ARGS][ARG_LEN];
@@ -226,6 +228,10 @@ int bp_init(const char* title) {
         bp_log(BP_LOG_ERROR, "no PVR memory for the framebuffer texture");
         return 2;
     }
+    /* The pictures (ADR-0053), in g_txr's slots. Copied every frame, a picture must come back as
+     * it went: no dither on the PVR's 16-bit writes. */
+    vid_set_dithering(false);
+    pictures_init();
     g_ready = 1;
 #if RECOMPSX_DC_PROFILE
     g_emu_thread = thd_get_current();        /* bp_init runs on the thread that emulates */
@@ -258,9 +264,14 @@ int bp_init(const char* title) {
     find_storage();
     load_args();
 
+#if RECOMPSX_FASTMEM
+    fastmem_init();               /* ADR-0049: guest RAM through the MMU, before any guest code */
+#endif
 #if RECOMPSX_DC_PROFILE
-    if(has_arg("--dc-fastmem-test")) fastmem_test();
+#if !RECOMPSX_FASTMEM
+    if(has_arg("--dc-fastmem-test")) fastmem_test();   /* it turns the MMU off again */
     else {}
+#endif
     g_rxprof = has_arg("--dc-rxprof");
     {
         const char* b = arg_value("--dc-bench=");
@@ -270,6 +281,15 @@ int bp_init(const char* title) {
             g_bench_to = to;
         } else if(b) {
             bp_log(BP_LOG_WARN, "--dc-bench=FROM:TO wants two present counts, FROM below TO");
+        } else {}
+        const char* s = arg_value("--dc-shots=");
+        int step;
+        if(s && sscanf(s, "%d:%d:%d", &from, &to, &step) == 3 && from >= 0 && to >= from && step > 0) {
+            g_shot_from = from;
+            g_shot_to = to;
+            g_shot_step = step;
+        } else if(s) {
+            bp_log(BP_LOG_WARN, "--dc-shots=FROM:TO:STEP wants present counts, FROM up to TO, and a step");
         } else {}
     }
 #endif
@@ -302,6 +322,7 @@ int bp_init(const char* title) {
 
 void bp_shutdown(void) {
     for(int i = 0; i < MAX_FILES; i++) bp_file_close(i);
+    rumble_stop_all();
 
     if(g_stream != SND_STREAM_INVALID) {
         snd_stream_stop(g_stream);
@@ -330,6 +351,8 @@ int bp_caps(int cap_id) {
         case BP_CAP_GPU_DRAW:        return 1;
         /* And a sampler of its own: the AICA plays the SPU's voices (--audio-hw, ADR-0024). */
         case BP_CAP_SPU_VOICES:      return g_snd_up;
+        /* VRAM-to-VRAM copies out of the buffers it draws, through the pictures (ADR-0054). */
+        case BP_CAP_GPU_COPIES:      return g_pic_ok;
         default:                     return 0;
     }
 }
@@ -428,6 +451,7 @@ void bp_fatal(const char* msg) {
  * the memory card back before this. */
 void bp_exit_to_menu(void) {
     bp_log(BP_LOG_INFO, "exit to the BIOS menu");
+    rumble_stop_all();
     irq_disable();
     PVR_SET(PVR_RESET, PVR_RESET_ALL);
     PVR_SET(PVR_RESET, PVR_RESET_NONE);

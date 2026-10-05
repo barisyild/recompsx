@@ -83,7 +83,8 @@ So a change is judged per function, on the fully associative columns as well as 
 never by one build's frame total against another's.
 
 **So the hot code is placed (ADR-0043).** `build-dc.sh` applies `games/<SERIAL>/dc-placement.txt`
-at every link. That puts Crash 3's title screen at 29.5 ms a frame under the model, against 35.1
+at every link, and for a game with none the runtime's and backend's shared
+`src/backend/dreamcast/dc-code-placement.txt` (ADR-0043's amendment: more than half the gain). That puts Crash 3's title screen at 29.5 ms a frame under the model, against 35.1
 without it. To make a placement, or remake one when the hot code has changed much:
 1. Build, and make a bench image of it (`--dc-rxprof --dc-bench=FROM:TO` in its RECOMPSX.CFG).
 2. Run the model with a trace: `scripts/dc-flycast-model.sh <image> <out.txt> RXTRACE=48000000`.
@@ -127,7 +128,8 @@ Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim 
   GDI boots to a black screen: no launch line, nothing to run (Demul's title: RPS 0).
 - Data directories under `out/dc/` hold `BOOT.EXE`, `DISC.BIN`, `SYMS.BIN` and `RECOMPSX.CFG`
   (the command line: `--video-hw --audio-hw [--dc-overlay]`; profiling adds
-  `--dc-bench=FROM:TO --dc-rxprof`). Bench windows: Crash 3 `4700:5000` (attract demo) and
+  `--dc-bench=FROM:TO --dc-rxprof`; `--dc-shots=FROM:TO:STEP` adds a picture every STEP presents
+  over FROM..TO, named as below — a transition seen frame by frame). Bench windows: Crash 3 `4700:5000` (attract demo) and
   `3300:4050` (title screen, the console-calibrated one), Crash Bash `18800:20300`. A
   `--dc-rxprof` run keeps the pad ports empty so every run measures the same frames, and prints
   `@@rxprof shot pNNNNN` every 150 presents: the profiling fork saves `<RXPROF_SHOTS>/pNNNNN.png`,
@@ -139,6 +141,29 @@ Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim 
   its time; `--callers NAME` on the first counts callers. `RXPROF_SHOTS=<dir>
   RXPROF_SHOT_SEC=<s>` saves screenshots by emulated time — the way to check a picture. The count
   is exact for a given binary; a relink moves code, so compare builds of the same sources.
+
+## Fastmem: guest memory through the MMU (ADR-0049)
+
+A Dreamcast tree is transpiled with `build/game-cpp-dc.hxml` (`-D recompsx_fastmem`): guest RAM, its
+mirrors and the scratchpad are wired UTLB pages at their own bus addresses in P0, and every guest
+access the generated code makes is one `mov.{b,w,l}` (by base register and offset, the base's mask
+shared among its accesses, the offset in the displacement or R0). Anything else — a port, the BIOS —
+misses the TLB: `rx_fm_vbr`'s 0x400 vector records it, and `rx_fm_trampoline` runs the runtime's
+slow path in ordinary context (dc_fastmem.c). `scripts/build-dc.sh` sees such a tree
+(`cpp/src/mem_Fastmem.cpp`) and builds it with `RECOMPSX_FASTMEM`; a desktop build of one stops at
+an `#error`.
+- **Measure it on the copy** `~/Desktop/Project/flycast-fastmem` (`FLYCAST_MODEL=` its
+  build-rxcache binary): the model's own Flycast cannot run the MMU (WinCE page-table guesses, no 1 KB
+  pages, no cache model with the MMU on, a TLB cache that never drops an entry — patched in the copy
+  only). The copy reads a build without fastmem exactly as the original does.
+- **Traps:** the bench prints `bench fastmem: N traps a frame` (Crash 3's gameplay 292, Crash Bash's
+  Ballistix ~1,000). A build with `DC_EXTRA_FLAGS=-DRECOMPSX_FM_HIST=1` also prints the 24 most
+  trapped addresses with a pc each — not for timing, the note is a call in every trap.
+- **What the compiler is not told:** an access is asm with no memory output (one would make GCC
+  reload every cached guest register: +20 % `mov.l`), so the generated code reads `nextEvent` through
+  `Runtime.deadline` (volatile here) — a trapped port write can move it.
+- **Exact:** check `scripts/dc-digest.sh` on both games after any change here (Crash 3 52875c77 at
+  5000, Crash Bash 37eefb07 at 20300 — the values since ADR-0054's texel bit 15).
 
 ## How the backend draws (hardware mode, ADR-0011)
 
@@ -157,15 +182,53 @@ Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim 
   4bpp pages are mirrored (`page4_mirror`) with palettes in 64 banks of 16, addressed by content;
   what does not fit is baked (`bake_slot`, 64x64 patches on `BAKE_STEP` boundaries). Anything
   that writes emulated VRAM reaches here as `bp_gpu_dirty`, which evicts by page and palette.
+- **The pictures (ADR-0053):** each display buffer has a picture, the buffer at its own resolution
+  in a 512x256 RGB565 texture; the three memories are slots 1-3 of g_txr (slot 0 is the background
+  slot meanwhile), so the texture pools keep their 128 bake patches (640-wide pictures took ~1 MB
+  from them: 10 patches left, slot conflicts in Crash 3).
+  At each present the records since the last one are rendered (`pvr_scene_begin_rtt`) into the
+  picture of the buffer they draw into (`screen_origin`; `state_targets`, `last_cover_at`). The
+  buffers come from the states a triangle or a fill was recorded under, not from every state: a
+  frame's first state is the last frame's, carried over, and it names the other buffer. Each
+  render goes over
+  that picture copied 1:1 (point sampled, dithering off) or over emulated VRAM's rectangle for a
+  buffer with no picture yet; VRAM marks are drawn from emulated VRAM at their place; then a
+  screen scene shows the displayed buffer's picture scaled to 640x480 (bilinear) with the overlay
+  and the pointer. A record is rendered once (`g_pic_done`); a mark recorded after a present moves to the
+  next frame's front (`begin_frame`). So what a game drew stays drawn: Crash 3's pause keeps the
+  frozen game behind its panels, and Crash Bash's legal screen, uploaded once and cleared with
+  primitives, no longer shows through at loading pauses. What it costs: ledger E-164; the serial
+  line `bench pictures` counts renders, copies and screen passes a frame.
+- **Copies and picture textures (ADR-0054):** the backend answers `BP_CAP_GPU_COPIES`, so the
+  runtime reports every VRAM-to-VRAM copy through `bp_gpu_copy`. A copy out of a buffer with a
+  picture is a record, `GCMD_COPY`, drawn where it falls among the primitives, 1:1 from the source
+  buffer's picture (`draw_copy`); any other copy is a write (`bp_gpu_dirty`) when it changed
+  emulated VRAM (`changed`), as before. A 15-bit texture page whose corner lies in a buffer with a
+  picture binds that picture (`pic_page`), sampled at the size it was rendered, 512x256: Flycast
+  matches a render to texture by address and size, and a 512x512 header read black — so V is
+  scaled apart from U (`dim_v`, put_tri's `rv`). A picture keeps no bit 15, so a semi-transparent
+  primitive reading one blends every texel. Crash 3's level transitions are the case: the frame on
+  screen copied into the other buffer and drawn back over itself, turning, as four textures.
+- Presents the pictures cannot show — 24-bit video, a blank display, a mode wider than 512 or
+  taller than 256 lines, software drawing — take the old path and drop the pictures.
 - A present carrying `BP_PRESENT_DRAWING` came while the runtime was still walking a DMA list
-  (ADR-0039). If the frame has unshown primitives, it is not built: the last picture stays up,
-  and what the walk still draws joins this frame, for at most `HOLD_MAX` presents in a row.
-  Built there, a frame went out in two halves, a vblank each (Crash 3's village, Flycast).
+  (ADR-0039). If the frame has primitives not shown yet, it is held, on either path: the last
+  picture stays up, and what the walk still draws joins this frame, for at most `HOLD_MAX`
+  presents in a row. On the old path a frame built there went out in two halves, a vblank each
+  (Crash 3's village, Flycast). Through the pictures the half would not be seen, since the buffer
+  being drawn is not the one shown, but the frame would be two scenes with a scene's fixed cost
+  each, the second over a copy of the first. A held present that finds the display flipped still
+  shows the buffer flipped to.
 - `screen_origin` decides which buffer a primitive draws into; the runtime's off-screen rule
   (`gpu.Gpu.offscreen`, ADR-0030) is the same rule, so off-screen drawing never arrives here.
 - Semi-transparency: modes 0/1/3 as PVR blends; B-F as three passes; mixed-CLUT primitives split
   into solid and STP passes from baked variants.
-- Pads: maple controllers mapped to PS1 digital pads (`dc_input.c`); A+B+X+Y+Start quits. Maple
+- Pads: maple controllers as PS1 pads (`dc_input.c`); A+B+X+Y+Start quits. A pad with a stick is a
+  DualShock (ADR-0052): its stick is the left one (a second stick, where the pad has one, the right
+  one), Start + full left trigger is Select, Start + full right trigger the ANALOG button, D is L3
+  and Z is R3; a Puru Puru pack in its slot runs the motors (a continuous effect of the stronger
+  motor, sent on change, stopped before the BIOS menu). A pad without a stick, and a keyboard
+  alone, is a digital pad. Maple
   ports A-D are pads 0-3, the multitap's slots A-D in port 1 (ADR-0042); the controller in port B
   is also the PS1's port 2 until a game uses the tap. In Flycast each player's host device must be
   assigned to its own port (Controls: a Sega Controller in A-D). A maple

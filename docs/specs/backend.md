@@ -61,7 +61,7 @@ void bp_exit_to_menu(void);           /* QUIT (ADR-0041): the host's own menu �
                                          BIOS menu, the desktop, the page's start; the runtime has
                                          kept the memory card first */
 enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4,
-       BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6 };
+       BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6, BP_CAP_GPU_COPIES = 7 };
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
@@ -76,13 +76,16 @@ void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h
 void bp_audio_push(const int16_t* frames, int frame_count);
 int  bp_audio_buffered(void);
 /* input: 4 pads, the multitap's slots A-D in port 1; pad 1 is also port 2 until a game uses the
-   tap (ADR-0042). Poll once per emulated vsync. */
+   tap (ADR-0042). Poll once per emulated vsync. BP_PAD_ANALOG (sticks) is a DualShock to the
+   machine, any other a digital pad (ADR-0052); bit 16 of the buttons is its ANALOG button. */
 enum { BP_PAD_NONE = 0, BP_PAD_DIGITAL = 1, BP_PAD_ANALOG = 2 };
+#define BP_PAD_ANALOG_BUTTON (1u << 16)
 void bp_input_poll(void);
 int  bp_pad_connected(int pad);
 int  bp_pad_type(int pad);
-uint32_t bp_pad_buttons(int pad);            /* PS1 bit layout, low 16 bits */
+uint32_t bp_pad_buttons(int pad);            /* PS1 bit layout, low 16 bits; bit 16 ANALOG */
 int  bp_pad_axis(int pad, int axis);         /* 0=LX 1=LY 2=RX 3=RY; 0..255 center 128 */
+void bp_pad_rumble(int pad, int small, int large); /* the motors, on change: 0/1, 0..255 */
 int  bp_quit_requested(void);
 /* keyboard as text (ADR-0036, ADR-0040): typed only while text entry is on — while the machine's
    PS/2 keyboard is polled; then only the arrows of a keyboard that also plays a pad still press
@@ -162,13 +165,25 @@ textured quad, audio = the platform's streaming API, input = the platform's pad 
 memory card / SD / HDD, file = the platform's disc or mass-storage read. Nothing else changes.
 
 Input reaches the machine in one place: at each vblank the runtime (`sio.Pads`) calls
-`bp_input_poll` and reads `bp_pad_connected`/`bp_pad_buttons` for ports 1 and 2, and the emulated
-controllers (SIO0, and the BIOS pad driver under HLE) answer from that snapshot. A headless run
-(`--headless-hash`) never polls: every port is empty, so a digest never depends on the host. The
-JavaScript target reads the page's keyboard, with the desktop key map above matched by physical
-key (`KeyboardEvent.code`), and the Gamepad API in the W3C standard mapping, through Haxe's
-browser externs (`shim.Input`); under Node no pad is connected. The Dreamcast backend reads maple
-controllers (`dc_input.c`); the null backend has none.
+`bp_input_poll` and reads `bp_pad_connected`/`bp_pad_type`/`bp_pad_buttons` (and `bp_pad_axis`
+for an analog pad) for all four pads, and the emulated controllers (SIO0, and the BIOS pad driver
+under HLE) answer from that snapshot. A headless run (`--headless-hash`) never polls: every port is
+empty, so a digest never depends on the host. The JavaScript target reads the page's keyboard,
+with the desktop key map above matched by physical key (`KeyboardEvent.code`), and the Gamepad API
+in the W3C standard mapping, through Haxe's browser externs (`shim.Input`); under Node no pad is
+connected. The Dreamcast backend reads maple controllers (`dc_input.c`); the null backend has none.
+
+A pad with sticks is a DualShock (ADR-0052): SDL2's game controllers, the browser's gamepads and
+the Dreamcast's maple pads with a stick report BP_PAD_ANALOG and their sticks; a keyboard alone,
+or a maple pad without a stick, is a digital pad. The DualShock's ANALOG button is SDL2's Guide
+button, the gamepad's centre button 16, and Start with a full right trigger on the Dreamcast
+(where Start with a full left one is Select, D is L3 and Z is R3). Its two motors come back through
+`bp_pad_rumble` when they change: SDL2 runs `SDL_GameControllerRumble` (large on the low-frequency
+motor, small on the high one) for 500 ms and renews it every 250 ms while it runs, with PS4/PS5
+rumble over Bluetooth enabled by hint; the page plays the gamepad's `vibrationActuator`
+"dual-rumble" for 500 ms, renewed every 4 polls (`hapticActuators[0].pulse` where only that
+exists); the Dreamcast runs a Puru Puru pack in the pad's slot with a continuous effect of the
+stronger motor, sent on change and stopped before the BIOS menu. Null, JVM and Node have none.
 
 The keyboard also types, for the machine's own keyboard (`sio.Ps2Keyboard` behind
 `kernel.KKeyboard`; ADR-0036, ADR-0040). While something polls that keyboard — a mod's text field,
@@ -239,6 +254,7 @@ void bp_gpu_tri(int x0,int y0,int c0,int u0,int v0,
                 int x2,int y2,int c2,int u2,int v2);
 void bp_gpu_rect(int x,int y,int w,int h,int bgr,int semi,int semi_mode);
 void bp_gpu_dirty(int x,int y,int w,int h);
+void bp_gpu_copy(int sx,int sy,int dx,int dy,int w,int h,int changed);   /* BP_CAP_GPU_COPIES */
 /* The same state and triangle as words, the way the runtime holds them (ADR-0047): the state's ten
    arguments in order; the triangle's x, y, colour word (BGR in bits 0-23), texture word (u bits 0-7,
    v bits 8-15, bits 16-31 zero) a vertex. Read before returning. A backend may implement them by
@@ -259,7 +275,14 @@ bits for it. `bp_gpu_dirty` reports only writes that changed emulated VRAM, exce
 answering `BP_CAP_GPU_UPLOADS` nonzero, which hears of every CPU-to-VRAM upload: its drawn pixels
 become texels (the browser's WebGL renderer), and an upload that restores what emulated VRAM never
 lost still replaces what it drew — Crash Bash's menu font after the 511x511 clear, which the
-browser otherwise drew as nothing. The original decision and its measurements are preserved as
+browser otherwise drew as nothing. A backend answering `BP_CAP_GPU_COPIES` nonzero hears of every
+GP0(80h) VRAM-to-VRAM copy through `bp_gpu_copy`, in its place among the primitives, and of none
+through `bp_gpu_dirty`; `changed` says whether emulated VRAM's destination changed, which is all a
+copy out of what emulated VRAM holds amounts to. A copy out of what the backend drew moves pixels
+emulated VRAM lacks: Crash 3's level transition copies the frame on screen into the other buffer
+and draws it back over itself as a texture ([ADR-0054](../decisions/ADR-0054-reading-back-what-was-drawn.md)).
+The browser's renderer and the Dreamcast answer it; a copy onto itself is reported only when it
+sets the mask bit. The original decision and its measurements are preserved as
 [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md) (renumbered from that branch's
 ADR-0008 to preserve main's machine-IR decision).
 
@@ -287,7 +310,7 @@ shared machine through `@:unsafePtrType`; `CtxPass` checks writes through aliase
 ## 3. Haxe side — `Backend` interface + externs
 
 `src/runtime/Backend.hx` — the only platform surface the runtime sees:
-`init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/
+`init/shutdown/present/audioPush/audioBuffered/inputPoll/padConnected/padType/padButtons/padAxis/padRumble/
 keyText/keyNext/mouse/mousePointer/httpOpen/httpRead/httpClose/quitRequested/exitToMenu/storageRead/
 storageWrite/fileOpen/fileSize/fileRead/fileClose/
 timeUs/log/fatal`.

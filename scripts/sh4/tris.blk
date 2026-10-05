@@ -1,0 +1,482 @@
+! The scene build's commonest run in assembly (dc_scene.c's run_tris, its textured triangles under
+! the common binding, g_uv256's coordinates): scheduled by scripts/dc-sched.py for the SH-4's pairing
+! and latencies (the cache model's rules), written to src/backend/dreamcast/dc_tris.s by it — never
+! edited there by hand. The same blocks to the TA, in the same order, as the C form writes them.
+!   _dc_tris_uv(c, end, k): r4 the first record, r5 the run's end, r6 the run's terms (gtris_t)
+!   out  r0 the first record it did not draw: the end; a record of another tag; a triangle past the
+!        rows ylo..yhi; or one whose brightening header is not ready, its first pass written and
+!        `half` set — the C form sends the header and the second pass, then calls again
+!   k (gtris_t): 0 q, the last 32-byte block written (in and out; each block one on, 32 bytes, so
+!   that a run in RAM stays in order for the TA hash), 4 tag (sign-extended), 8 restate (in and
+!   out: the run's header said again before the next triangle), 12 flags (2 raw, 4 the brightening
+!   header ready), 16 hdr (the run's header), 20 over (the brightening header), 24 VTX, 28 EOL (the
+!   vertices' command words), 32 half (out), 36 a (the vertex alpha), 40 uv (g_uv256), 44 0x808080,
+!   48 0x00FF00FF, 52 ox, 56 oy, 60 sx, 64 sy, 68 ylo, 72 yhi (floats)
+!   uses r0-r7, T, FPUL, fr0-fr8; r8-r14 and fr9-fr15 saved and restored
+! Colours (bgr_parts): t the channels' top bits, l their low seven, u = t - (t >> 7); the doubled
+! colour 2l | (t + u), brightening where l & u, what the clamp loses (2l | t >> 7) & (t + u); R and
+! B exchanged by swap.w of the colour masked by 0x00FF00FF, green what the mask leaves.
+	.pushsection .text.dc_tris_uv,"ax",@progbits
+	.align	5
+.Ldone0:
+	mov.l	r7,@r6
+	mov	r4,r0
+	fmov.s	@r15+,fr15
+	fmov.s	@r15+,fr14
+	fmov.s	@r15+,fr13
+	fmov.s	@r15+,fr12
+	fmov.s	@r15+,fr11
+	fmov.s	@r15+,fr10
+	fmov.s	@r15+,fr9
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+	.global	_dc_tris_uv
+	.type	_dc_tris_uv,@function
+_dc_tris_uv:
+	mov.l	r8,@-r15
+	mov.l	r9,@-r15
+	mov.l	r10,@-r15
+	mov.l	r11,@-r15
+	mov.l	r12,@-r15
+	mov.l	r13,@-r15
+	mov.l	r14,@-r15
+	fmov.s	fr9,@-r15
+	fmov.s	fr10,@-r15
+	fmov.s	fr11,@-r15
+	fmov.s	fr12,@-r15
+	fmov.s	fr13,@-r15
+	fmov.s	fr14,@-r15
+	fmov.s	fr15,@-r15
+	mov.l	@r6,r7
+	mov.l	@(4,r6),r8
+	mov.l	@(36,r6),r11
+	mov.l	@(40,r6),r12
+	mov.l	@(44,r6),r9
+	mov	r6,r0
+	mov.l	@(48,r6),r10
+	add	#52,r0
+	fmov.s	@r0+,fr13
+	fmov.s	@r0+,fr12
+	fmov.s	@r0+,fr15
+	fmov.s	@r0+,fr14
+	fmov.s	@r0+,fr11
+	fmov.s	@r0+,fr10
+	fldi1	fr9
+.Lloop:
+@block L
+	! the run's end, its tag, the record four on, and the three positions as floats
+	cmp/hs	r5,r4
+	bt	DONE			;; exit
+	mov.w	@(30,r4),r0
+	cmp/eq	r8,r0
+	bf	DONE			;; exit
+	mov	r4,r1
+	add	#127,r1
+	add	#1,r1
+	pref	@r1
+	mov.w	@r4,r0
+	lds	r0,fpul
+	float	fpul,fr0
+	mov.w	@(6,r4),r0
+	lds	r0,fpul
+	float	fpul,fr1
+	mov.w	@(2,r4),r0
+	lds	r0,fpul
+	float	fpul,fr2
+	mov.w	@(8,r4),r0
+	lds	r0,fpul
+	float	fpul,fr3
+	mov.w	@(4,r4),r0
+	lds	r0,fpul
+	float	fpul,fr4
+	mov.w	@(10,r4),r0
+	lds	r0,fpul
+	float	fpul,fr5
+	! every row within ylo..yhi (tri_inside: all three, or the C form cuts it)
+	fcmp/gt	fr10,fr1
+	bt	DONE			;; exit
+	fcmp/gt	fr1,fr11
+	bt	DONE			;; exit
+	fcmp/gt	fr10,fr3
+	bt	DONE			;; exit
+	fcmp/gt	fr3,fr11
+	bt	DONE			;; exit
+	fcmp/gt	fr10,fr5
+	bt	DONE			;; exit
+	fcmp/gt	fr5,fr11
+	bt	DONE			;; exit
+	mov.l	@(8,r6),r0
+	tst	r0,r0
+	bt	.Lverts			;; last
+@end
+@block R
+	! the run's header again before this triangle (a brightening pass went out after it)
+	mov.l	@(16,r6),r1
+	mov.l	@(28,r1),r0
+	mov.l	@(24,r1),r2
+	mov.l	@(20,r1),r3
+	mov.l	@(16,r1),r13
+	add	#64,r7
+	mov.l	r0,@-r7
+	mov.l	r2,@-r7
+	mov.l	@(12,r1),r0
+	mov.l	r3,@-r7
+	mov.l	@(8,r1),r2
+	mov.l	r13,@-r7
+	mov.l	@(4,r1),r3
+	mov.l	r0,@-r7
+	mov.l	@r1,r13
+	mov.l	r2,@-r7
+	mov.l	r3,@-r7
+	mov.l	r13,@-r7
+	pref	@r7
+	mov	#0,r0
+	mov.l	r0,@(8,r6)
+@end
+.Lverts:
+@block V
+	! the positions on screen: (p - o) * s, as put_tri_uv256_at's (float)(p - o) * s, exactly
+	fsub	fr13,fr0
+	fsub	fr12,fr1
+	fsub	fr13,fr2
+	fsub	fr12,fr3
+	fsub	fr13,fr4
+	fsub	fr12,fr5
+	fmul	fr15,fr0
+	fmul	fr14,fr1
+	fmul	fr15,fr2
+	fmul	fr14,fr3
+	fmul	fr15,fr4
+	fmul	fr14,fr5
+	! vertex 0: its colour doubled and clamped, the brightening bits into r13
+	mov.l	@(12,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r3
+	add	r3,r3
+	shlr8	r3
+	mov	r2,r14
+	sub	r3,r14
+	mov	r14,r13
+	and	r1,r13
+	add	r2,r14
+	add	r1,r1
+	or	r14,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov.l	@(24,r4),r3
+	mov	r3,r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov	r3,r0
+	shlr16	r0
+	shlr8	r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(24,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr1,@-r7
+	fmov.s	fr0,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	! vertex 1
+	mov.l	@(16,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r14
+	add	r14,r14
+	shlr8	r14
+	mov	r2,r0
+	sub	r14,r0
+	mov	r0,r14
+	and	r1,r14
+	or	r14,r13
+	add	r2,r0
+	add	r1,r1
+	or	r0,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov	r3,r0
+	shlr8	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov.l	@(28,r4),r14
+	mov	r14,r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(24,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr3,@-r7
+	fmov.s	fr2,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	! vertex 2, the strip's end
+	mov.l	@(20,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r0
+	add	r0,r0
+	shlr8	r0
+	mov	r2,r14
+	sub	r0,r14
+	mov	r14,r0
+	and	r1,r0
+	or	r0,r13
+	add	r2,r14
+	add	r1,r1
+	or	r14,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov	r3,r0
+	shlr16	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov.l	@(28,r4),r14
+	mov	r14,r0
+	shlr8	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(28,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr5,@-r7
+	fmov.s	fr4,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	! a channel above 1.0 brightens: its second pass unless the texture is raw
+	tst	r13,r13
+	bf	.Lbright0		;; last
+@end
+.Lnext:
+	bra	.Lloop
+	add	#32,r4
+.Lbright0:
+@block X
+	mov.l	@(12,r6),r0
+	tst	#2,r0
+	bf	.Lnext			;; exit
+	tst	#4,r0
+	bf	.Lbright		;; last
+@end
+	! the brightening header not ready: the C form sends it and the second pass
+	mov	#1,r0
+	bra	.Ldone1
+	mov.l	r0,@(32,r6)
+.Lbright:
+@block B
+	! the brightening header, then the triangle again in what the clamp lost, and the run's header
+	! to be said again before the next one
+	mov.l	@(20,r6),r1
+	mov.l	@(28,r1),r0
+	mov.l	@(24,r1),r2
+	mov.l	@(20,r1),r3
+	mov.l	@(16,r1),r13
+	add	#64,r7
+	mov.l	r0,@-r7
+	mov.l	r2,@-r7
+	mov.l	@(12,r1),r0
+	mov.l	r3,@-r7
+	mov.l	@(8,r1),r2
+	mov.l	r13,@-r7
+	mov.l	@(4,r1),r3
+	mov.l	r0,@-r7
+	mov.l	@r1,r13
+	mov.l	r2,@-r7
+	mov.l	r3,@-r7
+	mov.l	r13,@-r7
+	pref	@r7
+	! vertex 0 over
+	mov.l	@(12,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r3
+	add	r3,r3
+	shlr8	r3
+	mov	r2,r14
+	sub	r3,r14
+	add	r2,r14
+	add	r1,r1
+	or	r3,r1
+	and	r14,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov.l	@(24,r4),r3
+	mov	r3,r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov	r3,r0
+	shlr16	r0
+	shlr8	r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(24,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr1,@-r7
+	fmov.s	fr0,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	! vertex 1 over
+	mov.l	@(16,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r13
+	add	r13,r13
+	shlr8	r13
+	mov	r2,r14
+	sub	r13,r14
+	add	r2,r14
+	add	r1,r1
+	or	r13,r1
+	and	r14,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov	r3,r0
+	shlr8	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov.l	@(28,r4),r14
+	mov	r14,r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(24,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr3,@-r7
+	fmov.s	fr2,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	! vertex 2 over
+	mov.l	@(20,r4),r1
+	mov	r1,r2
+	and	r9,r2
+	xor	r2,r1
+	mov	r2,r13
+	add	r13,r13
+	shlr8	r13
+	mov	r2,r14
+	sub	r13,r14
+	add	r2,r14
+	add	r1,r1
+	or	r13,r1
+	and	r14,r1
+	mov	r1,r2
+	and	r10,r2
+	xor	r2,r1
+	swap.w	r2,r2
+	or	r2,r1
+	or	r11,r1
+	mov	r3,r0
+	shlr16	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr6
+	mov.l	@(28,r4),r14
+	mov	r14,r0
+	shlr8	r0
+	extu.b	r0,r0
+	shll2	r0
+	fmov.s	@(r0,r12),fr7
+	mov.l	@(28,r6),r2
+	add	#64,r7
+	mov	#0,r0
+	mov.l	r0,@-r7
+	mov.l	r1,@-r7
+	fmov.s	fr7,@-r7
+	fmov.s	fr6,@-r7
+	fmov.s	fr9,@-r7
+	fmov.s	fr5,@-r7
+	fmov.s	fr4,@-r7
+	mov.l	r2,@-r7
+	pref	@r7
+	mov	#1,r0
+	mov.l	r0,@(8,r6)
+@end
+	bra	.Lnext
+	nop
+.Ldone1:
+	mov.l	r7,@r6
+	mov	r4,r0
+	fmov.s	@r15+,fr15
+	fmov.s	@r15+,fr14
+	fmov.s	@r15+,fr13
+	fmov.s	@r15+,fr12
+	fmov.s	@r15+,fr11
+	fmov.s	@r15+,fr10
+	fmov.s	@r15+,fr9
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
+	.size	_dc_tris_uv, .-_dc_tris_uv
+	.popsection

@@ -2,6 +2,281 @@
 
 ## Status snapshot
 
+**2026-10-05 (night): Crash 3's level transitions on every target (ADR-0054, the owner's report).**
+Not committed. The transition copies the frame on screen into the other buffer (GP0 80h) and draws it
+back over itself as four turning, semi-transparent textures, with a darkening diamond.
+- **The software rasteriser kept no texel's bit 15** (every target, the reference too): psx-spx says a
+  textured pixel writes its texel's bit 15 unless E6h.0 forces it, and a semi-transparent texture
+  blends only texels with the bit — 83 % of Crash 3's frame carries it, so nothing blended and the
+  colours went flat. Fixed in `Gpu` (`set || stp`). Digests changed, JavaScript = Dreamcast for both
+  games (dc-digest.sh), C++ = JavaScript for the conformance suite:
+  Crash 3 at 5000 **52875c77**, Crash Bash with its mods at 20300 **37eefb07**, conformance `Raster`
+  **1bdad19d**.
+- **ABI `bp_gpu_copy(sx, sy, dx, dy, w, h, changed)` and `BP_CAP_GPU_COPIES` (7):** a backend that
+  copies what it drew hears of every VRAM copy in its place among the primitives. The browser
+  (WebGL) answers it: copies from fbTex and its mask bits through a scratch, the mask bit now the
+  depth buffer (every fragment writes the bit the PlayStation stores), the stencil only for "check".
+  The Dreamcast answers it: a copy out of a buffer with a picture is a record drawn from that picture
+  (`GCMD_COPY`), and a 15-bit page inside such a buffer binds the picture (512x256, `dim_v`).
+- **The browser's colour is now five-bit** (the owner still saw its transition wrong): the shader
+  cuts a primitive's colour to five bits as gpu.Gpu does and fbTex stores k as (k + 1/2) / 32, so
+  the diamond subtracts 1/31 (it took 15.5/255) and mode 0 floors. fbTex against the reference's
+  VRAM at the same vblanks: the first transition 0.06-0.33 of a step a channel (was up to 2.1),
+  gameplay frames 87-89 % of pixels exact. The Dreamcast's transition works (the owner, Flycast)
+  but stays brighter for longer: the PVR blends at eight bits.
+- **The owner's "second time" found and fixed:** the attract loop's own transition at the end of
+  its second demo (~12200, no button). ANGLE on Metal renamed vramTex's storage at a palette upload
+  and `wordFbo` kept drawing into the old one; the browser's conversion now re-attaches vramTex
+  every time (web/AGENTS.md). Matches the reference within 0.15 of a step. The page also has
+  `?slow=auto|A-B`, `?slowfps`, `?ff`, `?frames` to find a frame (keys "," and ".").
+- **Crash Bash's Adventure hub paused "CONTROLLER 1-A IS UNPLUGGED" with a DualShock** (the owner, on
+  the Dreamcast, whose stick pads are DualShocks): the multitap answered each slot's commands in the
+  same long read, where the SCPH-1070 answers them in the next one (BlueRetro's logs; DuckStation
+  likewise). libpad fell out of step and probed a normal-mode pad with 45h forever. `Multitap` now
+  sends a long read's slot bytes to the controllers when it ends and answers them in the next
+  (ADR-0042 amended). Headless the hub plays on with `--pad-dualshock`; `DualShockSio` 6081cd6f
+  (was a1fdfeea), JS = C++; game digests unchanged (52875c77, 37eefb07 with the standard JS build).
+  The browser bundle (`recompsx_cooperative`) prints its own for Crash 3 at 5000, 385253b4, the same
+  before the change and after; why it differs from the standard build is not looked into yet.
+- **Verified** with `--pad-script 4700:CROSS,4710:-,8000:CROSS,8010:-` (the attract loop's first and
+  second demo): JS reference, WebGL in the pane frame by frame (both transitions, also with the blit
+  version and with every vblank presented), Dreamcast in Flycast's fork (`--dc-shots`, new: pictures
+  by present). The owner's "the second time does not work" in the browser is **not reproduced** —
+  asked for the browser and the steps. TA hash: Crash 3 unchanged; Crash Bash one more render and
+  then scenes differing only in which picture memory a texture is read from (ADR-0054). Cost E-165:
+  Crash 3's demo cf 17.60 → 17.73. E-162 (run_tris in assembly) measured slower and reverted.
+- Tester CDIs: out/dc/crash3-pic-max.cdi, crashbash-pic-max.cdi (02:31 / 02:52, placed, with all
+  of the above). Browser: :8000 serves Crash 3 (bundle 60c6fb4a3ef7, raw — Closure took 20+ minutes
+  under memory pressure and was stopped), :8797 Crash Bash with its mods (out/_cbweb, f3ae8d4ce19f,
+  raw; `.claude/launch.json` web-crashbash). The owner deleted most of out/dc's data directories (disk); the ones the CDIs and
+  web/boot.exe need are back as hard links.
+
+**2026-10-04 (evening): the development phase — the DualShock on every backend (ADR-0052), and
+the Dreamcast keeps what it draws (ADR-0053).** Not committed. The owner moved from optimisation
+to development ("şimdi geliştirme faslına geçtik"); optimisation resumes afterwards from where it
+is paused (out/_work/paused-opt/README.md).
+- **The DualShock (SCPH-1200)**, `sio.DualShock`, per nocash's psx-spx: power-on digital; ANALOG
+  (bit 16 of `bp_pad_buttons`) toggles analog mode unless locked; configuration mode (43h, 44h-4Dh);
+  two motors, old and mapped; in normal mode only 42h/43h are taken (DuckStation's behaviour for the
+  rest). A host pad with sticks (BP_PAD_ANALOG) is plugged in as one, any other as a digital pad.
+  The tap's long read is a transfer of its own per slot window, the BIOS handler reads it. ABI:
+  `BP_PAD_ANALOG_BUTTON`, `bp_pad_rumble` (on change). Scripts: `--pad-dualshock`, sticks
+  `F:B/LX.LY.RX.RY`, `--log-rumble`.
+- **Backends:** SDL2 (both sticks, Guide = ANALOG, `SDL_GameControllerRumble` renewed every 250 ms);
+  browser (Gamepad axes, button 16, `vibrationActuator` dual-rumble renewed; :8000 serves bundle
+  1172feda23f5, raw — no Closure); Dreamcast (the maple pad's stick, a second one where the pad has
+  it, Start + full R = ANALOG, Z = R3, a Puru Puru pack with continuous effects, stopped before the
+  BIOS menu); null and JVM no-ops. check.sh clean (51/51 functions). Tester CDIs with both:
+  out/dc/crash3-pic-max.cdi, crashbash-pic-max.cdi (they replace the -ds- ones).
+- **Verified:** conformance `DualShockSio` a1fdfeea JS = C++; `PadSio` 47a7a665, `MultitapSio`
+  644b488d, `PadBios` 42a146e6, `Mouse` 8d7276ce unchanged; the whole JS suite passes; Crash 3 JS
+  5000 still 47853ef7. Crash 3 sets analog mode itself (44h at vblank 275); the left stick walks Crash
+  in the warp room as the d-pad does; with the game's rumble timers written (80068E98h + 1F0h/1F4h)
+  its motors reach `bp_pad_rumble` (small 1, large C0h). Crash Bash configures the pad through the
+  tap's long read and reaches Select Game Type with it as with a digital pad.
+- **Crash 3 reads a DualShock every fourth vblank:** its pad routine (80015798h) calls
+  PadSetActAlign whenever the pad is stable, and libpad accepts whenever idle (8004B190h), so it
+  repeats 43h 01h / 4Dh / 43h 00h — on a PS1 too, by the code. The owner felt it ("jumps less") and
+  chose the PS1's behaviour over a mod.
+- **Dreamcast pictures (ADR-0053, accepted; the owner's two reports):** the backend kept nothing it
+  drew and showed emulated VRAM, which lacks it, as a frame's background — Crash 3's pause over
+  black, Crash Bash's legal screen (uploaded once, cleared with primitives) at every loading
+  pause; Flycast confirmed the diagnosis at six presents of the attract loop against JS VRAM. Now
+  each display buffer has a PVR picture (512x256 RGB565 in g_txr's slots 1-3, the buffer's own
+  resolution): records rendered into it once, the screen a bilinear quad of the displayed one.
+  Flycast: Crash 3's pause shows the frozen game; Crash Bash black where the PS1 is black. Cost
+  under the model (E-164): Crash 3 demo cf 17.52 → 17.60, Crash Bash B210 work 11.40 → 11.47,
+  after a fix (the frame's first state, carried over, made every present render the shown
+  picture again: +0.62 ms). The picture is softer than the 640x480 direct render (1x, scaled).
+- **Paused optimisation:** r140 installed (E-152); fh (E-153..E-157) and fi (E-158/E-159) in the
+  tree and exact (TA identical, DC digests 47853ef7/95e17b07); E-160/E-161 in the tree, not yet
+  measured on DC; E-162 prepared, not applied; B-lite parked (Sh4Emitter.hx back to its tested
+  version); placement round r141 ran (out/_work/round5d-r141.log), not installed.
+
+**2026-10-04 (afternoon): Dreamcast — a function's ordinary entry apart from its resumes and the
+dispatchers' jumps as goto (ADR-0050), the shadow's small triangles, the SPU's mix, ports through the
+libraries' pointers without a trap (ADR-0049 amended), and placement round r138. Crash 3's Uka Uka
+scene and warp room at full speed under the model; its demo 22.02 → 20.02.** Not committed.
+- **Under the cache model** (g99's code on r139's placement, ledger E-138..E-151): Crash 3's title
+  16.64, **the gameplay demo (Toad Village) 22.02 → 20.02** (20.58 on r138's placement, the CDIs'),
+  **the dark Uka Uka scene 18.38 → 16.50**, **the warp room 16.95 → 16.64**;
+  Crash Bash's Ballistix 16.63 (work 12.63 → 11.92), its disc load 16.6 a present (work 14.43 →
+  9.55), the scene after it 16.5. Hardware CDIs for the tester: **out/dc/crash3-r138-max.cdi,
+  crashbash-r138-max.cdi** (the fm136 pair stays for comparison).
+- **What changed:** (1) ADR-0050 / E-138: on C++ a generated function's body is written once,
+  `<name>__body` (always_inline), entered by `<name>` with entry 0 and by a cold `<name>__at` for
+  every other entry, so GCC folds the resume guards away on the ordinary entry (a Crash 3 shard
+  66.9 → 27.7 KB). (2) E-140: a block dispatcher's jumps as `goto` its case's label (875 in Crash 3).
+  (3) E-139: Crash 3's shadow (~210 small flat triangles a frame drawn into VRAM) by stepped edge
+  functions, out of line. (4) E-141, E-147: the SPU's software mix through RawBufs and locals, its
+  samples out in pairs; VRAM through MemA. (5) E-146, ADR-0049 amended (`PortBases`): ports reached
+  through the PsyQ libraries' pointer variables decode their address instead of trapping — traps a
+  frame 268 → 2 (Crash 3's demo), 1,036 → 4 (Ballistix), 6,173 → 6 (the disc load). (6) E-148:
+  placement round r138, then r139 with every window traced at length and sliced (E-151), installed
+  (games/*/dc-placement.txt, dc-data-placement.txt and the shared dc-code-placement.txt). (7) E-150:
+  FnTable's FAST (256 slots) and two GPU tables in arrays of their own, which the data placement can
+  colour where malloc's could not — in the tree of round r140 (running: out/_work/r140.sh).
+- **Rejected** (ledger): E-142 GCC's inliner given room, E-143 FnTable's FAST in a quarter of the
+  slots, E-144 pre-RA scheduling again, E-145/E-145b the scene build at -O2.
+- **Exact:** JS digests 47853ef7 (Crash 3 at 5000), 95e17b07 (Crash Bash with its mods at 20300),
+  the demo's 329de455; tool tests 62,007; conformance on JS (Codegen 5a431e3b); the Dreamcast
+  digests of the r138fd builds: Crash 3 47853ef7 at 5000, Crash Bash 95e17b07 at 20300; TA hash of
+  g99's trees identical to ta10's over 1,889 + 2,170 + 7,974 scenes.
+- **Where the demo's present goes** (r138p1: 3.29 M SH-4 instructions — generated code 1.09 M, the
+  scene build 0.69 M, the GPU runtime and polygon core 0.54 M, the GTE cores 0.53 M, the rest 0.43 M;
+  out/_work): ~1,590 triangles a built frame (two presents), 36 % brightened (a second pass each),
+  ~1,550 SH-4 instructions a triangle on the graphics path (scene 868, GPU 684); ~7.1 SH-4 cycles
+  spent a PlayStation cycle, where full speed is 5.9.
+
+**2026-10-04: Dreamcast — fastmem (ADR-0049, the owner's option A): guest RAM and the scratchpad
+through the SH-4's MMU, and a placement round for it (r136). Exact on both games; Crash Bash full
+speed, Crash 3's warp room nearly.** Not committed.
+- **Under the cache model now** (r136p2, ledger E-135..E-137): Crash 3's title 16.65 (full speed),
+  **the gameplay demo (Toad Village) 25.50 → 22.02**, **the dark Uka Uka scene 21.08 → 18.38**,
+  **the warp room 19.24 → 16.95**; Crash Bash's Ballistix **16.63** (16.6 a present in the match, the
+  disc load and the scene after it; work 12.63). Hardware CDIs for the tester:
+  **out/dc/crash3-fm136-max.cdi, crashbash-fm136-max.cdi** — the first builds with the MMU on.
+- **What it is:** RAM, its mirrors and the scratchpad are wired UTLB pages at their bus addresses in
+  P0; every guest access the generated code makes is one `mov.{b,w,l}` (by base register and offset:
+  `base & 0x1FFFFFFF` shared among a base's accesses, the offset in the displacement or R0); anything
+  else misses the TLB, and the backend's own vector (VBR, 14 instructions) and a lean trampoline run
+  the runtime's slow path. The pump tests read the deadline volatile (`Runtime.deadline`): a trapped
+  port write can schedule an event. A Dreamcast tree is transpiled with `build/game-cpp-dc.hxml`;
+  `scripts/build-dc.sh` sees one and builds it with RECOMPSX_FASTMEM.
+- **Exact:** Dreamcast digests JavaScript's — Crash 3 47853ef7 at 5000 (every step), Crash Bash
+  95e17b07 at 20300; the TA hash of fastmem builds identical to ta10's over 1,889 + 2,170 + 7,974
+  scenes; the regenerated trees' JS digests unchanged; conformance 63/63 on JS and reflaxe.CPP;
+  check.sh clean.
+- **Measured on a copy of the model's Flycast** (~/Desktop/Project/flycast-fastmem, the owner's call;
+  four MMU faults of its fast path patched there, none in the original; the copy reads a build
+  without fastmem exactly as the original). Traps: Crash 3 292 a frame (I_STAT/I_MASK through a
+  pointer), Crash Bash ~1,000 (the root counters, I_STAT, GPUSTAT; ~0.85 ms of its frame).
+- **Placement round r136 installed** (games/*/dc-placement.txt, dc-data-placement.txt, and the shared
+  dc-code-placement.txt remade from Crash 3's): code colours from Crash 3's four windows and Crash
+  Bash's three phases, then the data colours and pool halves over all seven.
+- **ADR-0048's emitter on fastmem** (E-136, opt-in, off): exact, but still 16-23 % more instructions
+  than GCC's code for the same functions — its allocator, not the decode, is what it lacks.
+
+**2026-10-03 (late): ADR-0048's first step measured — exact and slower; windows of real play for the
+model (sio.PadScript).** Not committed.
+- **SH-4 assembly for guest functions** (ledger E-131; `gen --sh4`, `-D recompsx_sh4`,
+  tools/recomp/src/recomp/codegen/Sh4Emitter.hx): 198 of Crash 3's functions (loopless leaves that
+  call nothing) written as SH-4 assembly beside their C++ form, linked on a Dreamcast build that
+  asks; every other build byte-identical. The Dreamcast digest at Crash 3's 5000 is JavaScript's
+  (47853ef7). But `f_8003d0fc` runs 178,480 SH-4 instructions a frame against GCC's 139,108 (+7,747
+  in glue), and the frame's conflict-free time rose (gameplay 22.59 → 23.80, title 14.87 → 16.40,
+  both unplaced): the prologue loads every homed register, guest registers past six go through
+  CpuState, every access has its RAM test where the C++ form spans. ADR-0048 has a "Measured"
+  section; the owner's call stands, now with this.
+- **Real play on the model** (E-132): `--pad-script F:B,...` (sio.PadScript, every game and target)
+  plays pad 0 by vblank; Crash 3's START at 3400 reaches the intro's dark Uka Uka scene (bench disc
+  out/dc/c3data-uka, 6750:7050: **23.02 ms**, cf 18.10) and the warp room (c3data-warp, 15000:15300:
+  **20.38**, cf 16.75; the console's picture there is the tester's). The gameplay demo is Toad
+  Village itself (its picture at 4800) and matches the console (25.46 now, 25.2 on r112's CDI).
+- **A correction (E-130):** the first reading of the tester's results said the model's demo window
+  runs none of real play's hot functions — that came from reading the title window's profile (a
+  batch's bare name is its first window, the title's). The demo runs them.
+- **Placement round r130** (E-133, installed): Crash 3's code colours from all four windows — the
+  Uka Uka scene 23.02 → **21.08**, the warp room 20.38 → **19.24**, the demo and the title unchanged
+  (25.50, 16.64). Hardware CDI: out/dc/crash3-r130-max.cdi (Crash Bash's latest stays
+  crashbash-r126-max.cdi). The shared half of a placement — the runtime's and the backend's sections,
+  the same in every game — gives 53-57 % of its gain on Crash 3 (batch133); whether Crash 3's shared
+  half helps Crash Bash as much is measured next (batch134): the case for a placement every game gets.
+
+**2026-10-03 (hardware): 5fa9442's CDIs on a Dreamcast** (the tester, chap3l: crash3-r112-max.cdi,
+crashbash-r109-max.cdi; docs/perf/dreamcast-ledger.md E-130). The overlay's 30-frame figures, Crash 3:
+the Aku Aku jungle intro 59.8 fps, the Cortex and Uka Uka intro 60.2, the LOAD/SAVE menu 60.0, a bonus
+round 58.3 (17.1 ms a frame), the warp room 47.5 (21.0), the dark Uka Uka scene 40.7 (24.5), **Toad
+Village 39.6 (25.2 ms a frame; the model's gameplay window said 25.49 for this build)**. Crash Bash's
+Select Game Type menu 59.6 with 165 of its 503 ms waiting; no Ballistix shot. Against E-053's g40 run:
+the Uka Uka intro 29.5 → 24.5 ms, the warp room 26.0 → 21.0, the jungle 18.7 → 16.7 (full speed).
+Toad Village's 30 frames: emulation 462 ms, GPU 138, scene build 127, SPU 15. The model's gameplay
+demo window (4700:5000; its profile is `out/_x_<name>w1` in these batches — the first window placed.sh
+is given, the title's, takes the bare name) runs what the console's overlay shows hottest in Toad
+Village: the RTPS core 5.3 %, run_tris 5.3 %, f_80041550 4.8 %, f_80041d28 4.4 %, the polygon core
+4.3 %, f_80038e28 3.6 %. The warp room and the dark Uka Uka scene (overlay: f_800418cc, f_800415a4,
+f_80042c58) are reached by a scripted START now (sio.PadScript, Next up 000) and measured as windows
+of their own.
+
+**2026-10-03 (night): Dreamcast — the case for generating the guest code as SH-4 assembly written up
+(ADR-0048, proposed); the Dreamcast build held to JavaScript's digest; function spans taken where they
+are needed (E-125), the counters' and events' runtime paths (E-126), and a placement round (r126).**
+Under the cache model now (round r126, E-128): Crash 3's title 16.64 (work 15.44 → 15.03), **gameplay
+25.16 → 25.01** (cf 22.79 → 22.39), Crash Bash's Ballistix 16.72 (work 13.39 → 13.25). Hardware CDIs:
+out/dc/crash3-r126-max.cdi, crashbash-r126-max.cdi. Gameplay is still the one window short of full
+speed, and what is left in place is ~0.1 ms an item (docs/perf/dreamcast-ledger.md E-121..E-127):
+- **Where the time goes now** (ledger, "Where the time goes (2026-10-03, after E-119)"): in the
+  generated code literal-pool loads are 13.3 % of its instructions and 0.99 ms of operand fills a
+  frame; CpuState traffic ~20 %; span set-ups ~146 K instructions a frame (a scratchpad base pays the
+  RAM test first: Crash 3's renderer, ~3,200 a frame); 31 % of the code slots it fetches never run;
+  6.4 K far branches a frame read their offsets through the operand cache. None moves more than ~0.3
+  ms in place; together they are what a code generator holding the memory map's constants and the hot
+  guest registers in SH-4 registers would not emit — **ADR-0048 (proposed)**: generated code ~10.7 →
+  ~6-7 ms, gameplay ~25 → ~20-21; the owner's call.
+- **The game digest on the Dreamcast** (`scripts/dc-digest.sh`, ledger How to measure): a build run
+  headless under the model's Flycast prints GenMain's digest. The r117 builds: Crash 3 at 5000
+  **47853ef7** and Crash Bash (with its mods) at 20300 **95e17b07**, JavaScript's — every word of the machine's state
+  the same through the generated code, the runtime and the RTPS core as GCC and the SH-4 run them.
+- **E-122** (runtime, exact): the SPU's due samples by a multiply, where a loop subtracted one sample
+  at a time (kept: `Scheduler.fireRest` −0.02 ms in both Crash 3 windows; SPU conformance and the
+  JS digests unchanged, TA hash identical over 1,889 + 2,170 + 7,974 scenes). A quad's second
+  triangle from the first's words in the polygon core (`_recompsx_gpu_poly2q`, dc-polyrun.py 44,000
+  packets 0 differ, 65 cycles a quad fewer) was **rejected**: the core runs in bursts between the
+  generated code, and the short path's own lines cost in fills what it saved in issue — running the
+  whole core again reused the lines the first triangle had just filled.
+- **E-125** (recompiler, exact, kept): a function span live at the entry but not needed on every
+  path from it is taken at the start of the blocks from which every path needs it, not at the
+  entry. A probe in the JavaScript build first: Crash 3's gameplay took 8,591 function spans a
+  frame, 2,273 never used; now 7,212. Gameplay cf 22.79 → 22.39 (the generated code −0.335 ms:
+  issue −0.12, instruction fills −0.13), title work −0.13, Crash Bash neutral; JS digests and the
+  63 JS conformance groups unchanged. On r117's placement the frame rose (25.38: the layout no
+  longer fits the code) — a placement round for it is due.
+- **E-126** (runtime, exact, kept): timer 2's reads in a body of their own (its index a constant),
+  the root counters first in the slow reads, and kernel event delivery walking the slots only up to
+  the last enabled one. The JS build showed the slow halfword reads are timer 2's mode and count in
+  both games (Crash 3 ~280 a frame, Crash Bash ~490, ~100 SH-4 instructions each): `slowRead16`
+  −30 % in Crash 3, −35 % in Crash Bash (Ballistix work 13.36 → 13.29).
+- **E-127** (recompiler, rejected): a span taken again after a call or pump only where its register
+  changed — exact, a third of those takes found the register unchanged, but the compares and base
+  copies at every site cost what they saved and the code grew 200 KB (gameplay +0.1 ms).
+- **Rejected:** E-121 (likely entry constants for function spans: the renderer's helpers are entered
+  only by computed jumps, so no call site knows `$v1`), E-123 (RTPT's three vertices as one assembly
+  block: 472 cycles against ~490 — the EX unit, not the multiplier, bounds it), **E-124** (ADR-0048's
+  fourth alternative: a function's six hottest guest registers in locals, synchronised at calls, pumps,
+  traps and exits — exact, and slower: GCC spills them, stack references ×2-3 in the hot functions;
+  the generated code +0.12 ms in gameplay, +0.23 in the title).
+
+**2026-10-03 (evening): Dreamcast — Crash 3's gameplay taken apart to the instruction; the scene
+build's lookups exact and cheaper; a round for the code; full speed there needs a redesign.** Global
+and exact (backend only: TA hash identical over Crash 3's 1,889 + 2,170 and Crash Bash's 7,974
+scenes for every batch; the runtime and the recompiler unchanged, so the game digests are too), on
+the cache model (docs/perf/dreamcast-ledger.md E-113..E-119):
+- **Where gameplay's frame goes** (E-112's build, 25.49 ms): 3.69 M SH-4 instructions — generated
+  code 1.41 M for ~290 K guest instructions, the scene build ~0.70 M for ~1,350 triangles, the
+  polygon core 0.27 M, the GTE cores 0.47 M, the GPU runtime 0.30 M. The generated code's 12.3 ms
+  are 4.4 of issue and 4.3 of capacity fills; guest memory access is 30 % of its time, CpuState
+  traffic 20 %. What is left in place is 0.05-0.2 ms an item; the architectural options are written
+  up under Blockers (2026-10-03) for the owner.
+- **E-113/E-114** (backend): a record's baked patch kept; the clipper's steps that cut nothing left
+  out; `bake_slot`'s index exact (open addressing, no walk of the pool); a fast path in build_scene
+  for a return to a state whose binding and header the build already made. Gameplay −36 K
+  instructions a frame, Ballistix's build_scene −16 %. Host checks of both indexes (4 M and 3 M
+  lookups against the old searches).
+- **E-115**: far-branch islands in GCC's assembly (scripts/sh4/islands.py) — exact, no gain on the
+  model (the islands land in lines the hot path fills anyway); kept opt-in for a console A/B.
+- **E-116**: placement round r114 for E-113/E-114: gameplay 25.49 → 25.38, Ballistix 16.76 → 16.74;
+  CDIs out/dc/crash3-r114-max.cdi, crashbash-r114-max.cdi (a checkpoint; superseded by E-119).
+- **E-117** (backend): a run of triangles goes on into the next state when build_scene's fast path
+  would take it (`run_switch`: only the header changes); the palette banks by content hash.
+  Gameplay's backend −0.09 ms conflict-free, Ballistix's work 13.51 → 13.31 (build_scene halved).
+- **E-118** (runtime, rejected): a textured packet's keys decoded before the polygon core, to spare
+  its 552 restarts a frame — exact, but the test costs what the restarts did.
+- **E-120** (recompiler, rejected): FnTable's dynamic-call cache in 8-byte slots — exact, neutral.
+- **E-119**: placement round r117 for the code with E-117 (installed): title 16.64, **gameplay 25.49 →
+  25.16** (cf 23.08 → 22.79; heavy presents 39.2 → 38.4), **Ballistix 16.76 → 16.71** (work 13.56 →
+  13.39; 6 of 1,500 presents over 33 ms). Hardware CDIs: **out/dc/crash3-r117-max.cdi,
+  out/dc/crashbash-r117-max.cdi** (the r117p2 ELFs, the overlay on). Not committed.
+
 **2026-10-03 (later): Dreamcast — Ballistix's slow presents named and all but the game's own gone;
 Crash 3's gameplay unchanged.** Global and exact (digests unchanged: C3 4523 88c8b426, 5000 47853ef7;
 CB+mods 20300 95e17b07; demo 329de455), on the cache model (docs/perf/dreamcast-ledger.md E-108..E-110):
@@ -2947,31 +3222,85 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
-000. **Dreamcast full speed — what is left (2026-10-03, later; docs/perf/dreamcast-ledger.md E-108..E-110).**
-   Under the cache model the title screen fits its 30 Hz pairs (31.8-32.6 ms against 33.4) and so
-   does Ballistix (heavy pairs 33.1, its disc load 11.6-13.4 a frame; 7 of 1,500 presents over, the
-   game's own two-vblank frames). Crash 3's gameplay demo is at 25.88 ms a frame (heavy presents 39.5):
-   the PlayStation is ~95 % busy in both vblanks of its pairs, and the emulation runs such code at
-   ~0.65 of real time — every part has to give, none is a third of it. In order:
-   1. **Hardware.** `out/dc/crash3-r112-max.cdi` and `out/dc/crashbash-r109-max.cdi` (the
-      measured ELFs, the FPS overlay on; with the tester since the commit of 2026-10-03) — Crash 3 in several levels (E-053's
-      console run had the jungle at 89 % and the Uka Uka intro at 56 % with g40, against the
-      model's demo 35.5 ms then, 25.9 now), Ballistix in a match and across a load. Not booted here.
-   2. **Crash 3's gameplay**, by part (ms a frame, r100p2's profile): generated code 11.7 (instruction
-      fills 4.4), the scene build 4.2, GPU emulation 2.8, the GTE 2.5, core 1.6, DMA 0.8. Measured
-      leads: (a) literal-pool loads are 13 % of the generated code's executed instructions, half of
-      them the memory decode's constants (0x1FFFFF, 0x1F9FFFFF, the arena's address, 0x1F800000,
-      0x3FF); (b) the world loop's hot code is 281 lines against the cache's 256, 18 % of it the
-      inline decode of unspanned accesses; (c) the scene build costs ~3x a triangle what
-      Ballistix's does — bake_slot bakes ~49 patches a frame (its hash finds ~16 of 243 lookups),
-      pal_bank_at walks 64 banks on its 33 misses a frame, clipping and the semi-transparent path;
-      (d) Crash's shadow, drawn into VRAM in software (triangle, rowSpan, polygonRest ~1.1 ms).
-   3. **Ballistix**: three presents ~54 frames apart with ~3 ms more emulation than the others and
-      nothing different on the guest's side (19664, 19718, 19774); the list walk's packet path.
-   4. Relocatable calls (GOOL, ADR-0025): `FnTable.call` 0.2 ms of a gameplay frame.
-   Done since the last list: Ballistix's spikes named (E-108: the overlay's redraw, a disc load the
-   placement had never seen, the game's own double vblanks), GPUSTAT and timer 1 without divides
-   (E-109), rounds with every phase traced (E-108, E-110).
+00000. **Dreamcast full speed: the demo is what is left (2026-10-04 afternoon; ledger E-138..E-148).**
+   Under the model Crash 3's title, Uka Uka scene and warp room and all three of Crash Bash's windows
+   are at full speed (16.6-16.7 a present); Crash 3's gameplay demo (Toad Village) is at 20.58 (g99
+   on r138's placement), and it needs ~7 ms less a 30 Hz pair (~3.2 a present). In order:
+   1. **Hardware:** the tester runs out/dc/crash3-r138-max.cdi and crashbash-r138-max.cdi (the model:
+      Uka Uka 16.58, warp room 16.64, demo 20.58; Ballistix and its disc load 16.6); fm136's pair is
+      still unreported.
+   2. **Placement round r140** for g101's code (E-150; running: out/_work/r140.sh — round6f.sh,
+      round6cb.sh with every window traced at length and sliced, then round5d.sh; r139's, the same
+      for g99, is installed: demo 20.02). Then install it (out/_work/install139.py as the pattern),
+      the Dreamcast digests and TA hash of its p2 builds, and CDIs for the tester.
+   3. **Where the demo's present goes** (Status snapshot): the graphics path is ~1,550 SH-4
+      instructions a triangle and ~37 % of the instructions, and halving it alone would close the
+      gap; no single change does that while the TA stream stays exactly the same (palette banks and
+      the cover skip are decided over the whole frame). Medium items, measured or estimated:
+      the arena's hot tables (Gpu.opCount: 0.07 ms of operand conflicts in the list walk;
+      Gpu.wholeWords, FnTable's FAST) made placeable — today malloc puts them where the data
+      placement cannot see (shim native header: edit when no round is building); the quad's second
+      triangle in the same call into the polygon core (~0.15); the triangle record written by the
+      core (~0.1-0.15); `unwindToken` returned (~0.1); the GTE's RTPT as one call (~0.1-0.2).
+      ADR-0048 with a register allocator stays the largest lever for the generated code (~2.8 SH-4
+      cycles a PlayStation cycle of ~7.1).
+   4. Rejected this round, not to be retried as they stood: GCC's inliner given room (E-142), FAST
+      in fewer slots (E-143), pre-RA scheduling for the game's code (E-144), the scene build at -O2
+      (E-145, E-145b).
+
+0000. **Dreamcast full speed after fastmem (2026-10-04; ADR-0049, ledger E-135..E-137).** Option A is
+   in, with its placement round: exact on both games; Crash 3's demo 25.50 → 22.02, Crash Bash at
+   full speed (16.63). In order:
+   1. **Hardware:** the tester runs out/dc/crash3-fm136-max.cdi and crashbash-fm136-max.cdi
+      (round r136 installed, E-137; the model: Toad Village 22.02, Uka Uka 18.38, the warp room
+      16.95, Ballistix 16.63) — the first builds with the MMU on, so a crash or a stall at boot is
+      the first thing to rule out; the previous CDIs (crash3-r130, crashbash-r126) stay for
+      comparison.
+   2. **Where Crash 3's gameplay still goes** (f7n, the model's counts): ~3.4 M SH-4 instructions a
+      frame — the GPU path ~1.3 M for ~700 polygon packets (~1,900 a packet: the polygon core 456 a
+      call, `Gpu.triangle` 1,112, the DMA walk 744 a call, `run_tris` 917 a run, textures ~120 K),
+      the generated code 1.07 M (3.6-4.6 SH-4 instructions a guest one in the hot renderer
+      functions), the GTE cores ~0.5 M (~195 a vertex). Options, the owner's approval standing:
+      (C) the scene straight to the PVR — streaming alone (no record and walk) ~0.8-1 ms; a fused
+      fast path for the common polygons, decode to TA vertices in one block, up to ~4 ms, a large
+      assembly job held to the TA hash; (B) ADR-0048's emitter — measured on fastmem (E-136): still
+      16-23 % more instructions than GCC, needs an allocator and a scheduler before it pays.
+   3. Crash Bash: Ballistix is at 16.62 on r136p1 (work 12.68, the pacer idle 2.66); its traps
+      (~1,000 a frame, the root counters through a pointer) are ~0.85 ms.
+
+000. **Dreamcast full speed — what is left (2026-10-03, night; docs/perf/dreamcast-ledger.md E-113..E-129).**
+   Under the cache model (round r126) the title screen fits its 30 Hz pairs (16.64 a frame, work 15.03)
+   and so does Ballistix (16.72; work 13.25). Crash 3's gameplay demo is at 25.01 ms a frame (cf
+   22.39): the PlayStation is ~95 % busy in both vblanks of its pairs, and what is left to take in
+   place is 0.05-0.3 ms an item — the owner's decision on the architectural options (Blockers,
+   2026-10-03) decides what comes after. In order:
+   1. **Hardware.** 5fa9442's CDIs measured (E-130: Toad Village 25.2 ms a frame, the model 25.49;
+      titles and menus at 60). Next `out/dc/crash3-r126-max.cdi` / `crashbash-r126-max.cdi`
+      (E-113..E-128: model 25.01 / 16.72; their code's game digests on the Dreamcast are
+      JavaScript's, its TA hash ta9's), and a Ballistix shot of either.
+   1b. **Model windows of more play.** The gameplay demo matches Toad Village's overlay (E-130);
+      the warp room and the intro's dark Uka Uka scene run other renderers (f_800418cc, f_800415a4,
+      f_80042c58). `sio.PadScript` (`--pad-script F:B,...`, every game and target) reaches them
+      from a START at 3400: bench discs out/dc/c3data-uka (6750:7050) and c3data-warp
+      (15000:15300); JS digests with that script a0b9d5bc at 7050, f4e397b8 at 15300.
+   2. **The owner's call** on Blockers 2026-10-03, asked again 2026-10-04 with the numbers: (A)
+      guest RAM through the MMU (~2-2.5 ms, the decode's ~30 % of the generated code; not
+      measurable on the model; the trap handler needs the clock, so `cyc` in a fixed register or
+      stored before each access), (B) **ADR-0048** — its first step measured (E-131): exact, and a
+      third more instructions than GCC's for the same functions; parity or better needs an
+      allocator and spans, weeks, ~1-2.7 ms at best, (C) the scene straight to the PVR (~0.7-1.5
+      ms), (D) auto frame-skip (full game speed, fewer pictures). Even A+B+C is ~4-6 of the ~8.8 ms
+      Toad Village needs; the realistic target without D is ~18-20 ms a frame there.
+   3. **In place, measured and not yet tried** (ledger, Not tried yet): the list walk's events
+      (~0.1-0.2 ms, ADR-0039 permitting), `Gpu.opCount` off the list walk's path (~0.03 ms). Probes in
+      the JavaScript build (counters spliced into the generated Haxe: span takes and their first
+      uses, unspanned accesses repeating a base, slow port reads by address) found E-125 and E-126;
+      the rest they showed is small (E-127, E-129).
+   Done since 5fa9442: E-113/E-114/E-117 (the scene build's lookups exact and cheaper), rounds r114
+   (E-116) and r117 (E-119), E-122a, E-125 (function spans where every path needs them, −0.34 ms of
+   gameplay's generated code), E-126 (timer 2's reads, event delivery), round r126 (E-128,
+   installed); rejected: E-115 (far-branch islands, kept opt-in), E-118, E-120, E-121, E-122b, E-123,
+   E-124, E-127, E-129.
 
 00. **Dreamcast placement, the follow-ups (ADR-0043).**
    1. Confirm it on hardware: `out/dc/crash3-placed-max.cdi` against
@@ -3663,6 +3992,38 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
+- **Decided (2026-10-04, the owner):** frame skipping never; the three architectural options
+  below are all approved, in any order — (1) ADR-0048 accepted, (2) and (3) to be written up as
+  they are started. Work order chosen from what the cache model can measure: ADR-0048's emitter
+  first (its leaf functions, then loops and the GTE), the scene straight to the PVR next, guest
+  RAM through the MMU last — the model maps P0 through the MMU (Flycast's on-demand full MMU,
+  `--dc-fastmem-test` "ok") but took 1 of 4,096 TLB misses as a trap, so the I/O path of a
+  fastmem build can only be measured on the console.
+- **Open (2026-10-03): Crash 3's gameplay needs a redesign to reach full speed, not more
+  increments.** At ~25.5 ms a frame under the cache model (a 30 Hz pair ~51 ms against 33.4), every
+  part has to lose a third. Measured on E-112's build, a gameplay frame: 3.69 M SH-4 instructions —
+  generated code 1.41 M (~290 K guest instructions, ~4.9 each), the backend 1.11 M (the scene build
+  ~700 K for ~1,350 triangles, ~520 each; the GPU's polygon core 270 K, ~200 each), the GTE cores
+  0.47 M, the GPU runtime 0.30 M. The generated code's 12.3 ms are 4.4 of issue and 4.3 of capacity
+  fills (its hot code spans ~420 KB of lines); by construct, guest memory access is 30 % of it
+  (unspanned decode 13.6 %, span tests 9.3 %, span set-up 7.4 %) and registers in CpuState 20 %.
+  What is left to try in place is 0.05-0.2 ms an item (E-113..E-115: two exact backend batches,
+  −36 K instructions a frame; far-branch islands, no gain on the model). What would move it by
+  milliseconds is architectural — each its own ADR and the owner's call:
+  1. **Guest code generated for the SH-4 directly** (guest registers allocated to the SH-4's, the
+     memory decode's constants in registers, no CpuState traffic on hot paths): the generated code's
+     ~10.7 ms toward ~6-7 (ADR-0048's count for one function: a quarter fewer instructions); weeks; a second code path beside reflaxe.CPP's, for the Dreamcast only.
+     Written up as **ADR-0048 (proposed)**, with the measurements behind it (ledger, "Where the time
+     goes (2026-10-03)": pool loads 13 % of the generated code and 0.99 ms of operand fills, CpuState
+     ~20 %, span set-ups ~146 K instructions a frame, 31 % of fetched code slots never run).
+  2. **The scene straight to the PVR** as the list is walked (no record and second pass; palette banks
+     from the previous frame's counts): ~0.7-1.5 ms; days; the TA stream no longer comparable by hash
+     to today's, so checked by pictures.
+  3. **Guest RAM through the SH-4's MMU** (no decode on any access; I/O by TLB miss and a handler):
+     ~2-3 ms; the cache model cannot measure it, and ~560 port accesses a frame would each pay an
+     exception.
+  Even (1) alone would leave gameplay near 18 ms: full speed there needs it and more of the rest.
+
 - **Open (2026-10-02): entries for shared code no entry starts change Crash 3's picture.** On
   top of `--cut-shared`, giving a block more functions carry than the block entering it an entry
   of its own (114 such heads in Crash 3) changed the headless digest by frame 2522 (VRAM only;
@@ -3793,6 +4154,31 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
+2026-10-05 [claude] ADR-0054 (the owner's report: Crash 3's level transitions): the software rasteriser keeps a texel's bit 15 (psx-spx); bp_gpu_copy + BP_CAP_GPU_COPIES (7) — WebGL copies what it drew (mask bit as depth), the DC draws copies from its pictures and binds a picture as a 15-bit page (512x256, dim_v).
+Digests JS = DC: C3 5000 52875c77, Crash Bash 20300 37eefb07; Raster 1bdad19d JS = C++; conformance JS 64/64; check.sh clean (52 ABI functions); C3 gpu-stream hash 5f877994a1335867 unchanged. Model E-165: C3 demo cf 17.60 → 17.73.
+Both transitions verified frame by frame (JS, WebGL, Flycast with the new --dc-shots); then the browser's colour made five-bit (fbTex = (k+1/2)/32, F cut, mode 0 floored): the first transition within 0.33 of a step of the reference (was 2.1). DC transition confirmed by the owner. Then Crash Bash's hub "CONTROLLER 1-A IS UNPLUGGED" with a DualShock: the multitap answers a long read late (ADR-0042 amended); the owner verified Crash Bash and Crash 3 on Flycast. Gates: test.sh JS 329de455, conformance 64/64, pad tests JS = C++, check.sh clean; digests 52875c77/37eefb07 (standard JS). Committed and pushed at the owner's word. Next: the owner's experiment — the Dreamcast's scene drawn directly at 640x480 (tile-based), persistence by replaying records since the last cover.
+
+2026-10-04 [claude] Development phase: the DualShock (ADR-0052) — sio.DualShock (analog mode, config 43h-4Dh, two motors), tap slot windows forwarded, BP_PAD_ANALOG_BUTTON + bp_pad_rumble on SDL2/browser/DC/null/JVM; DualShockSio a1fdfeea JS = C++, other pad digests unchanged, C3 5000 47853ef7.
+Crash 3: analog mode set by the game, stick and rumble verified; reads a DualShock every 4th vblank by its own code (owner: keep it). Crash Bash: configured through the tap, menus reached.
+DC pictures (ADR-0053): each display buffer rendered into a PVR picture; Crash 3's pause keeps the frozen game, Crash Bash's legal screen gone (Flycast vs JS VRAM); model E-164 cf 17.52→17.60 / work 11.40→11.47. CDIs out/dc/*-pic-max.cdi. Not committed. Next: the owner's next development item.
+
+2026-10-04 [claude] DC: ADR-0050 (ordinary entry apart from resumes, dispatchers' gotos), E-139 shadow raster, E-141/E-147 SPU mix, E-146 PortBases (ADR-0049 amended: traps 268→2, 1,036→4), placement round r138 installed (E-148).
+Model: C3 Uka 18.38→16.58, warp 16.95→16.64 (full speed), demo 22.02→20.58; CB all windows 16.6. Rejected E-142..E-145b. Exact: JS + DC digests 47853ef7/95e17b07, TA identical.
+CDIs out/dc/crash3-r138-max.cdi, crashbash-r138-max.cdi. Not committed. Next: r139 round (running, sliced traces), then the demo's medium items — Next up 00000.
+2026-10-04 [claude] DC fastmem (ADR-0049, option A): guest RAM/scratchpad as wired P0 pages, accesses one mov after a mask (by base and offset), the backend's own TLB-miss vector + lean trampoline for ports, Runtime.deadline volatile; build/game-cpp-dc.hxml + build-dc.sh auto RECOMPSX_FASTMEM; a Flycast copy with 4 MMU-model faults patched (owner's call). Exact (C3 47853ef7, CB 95e17b07, TA hash = ta10, conformance 63/63 both). Round r136 installed: C3 demo 25.50 → 22.02, Uka 21.08 → 18.38, warp 19.24 → 16.95, CB 16.63 (E-135..E-137). ADR-0048's emitter on fastmem still behind GCC (E-136). CDIs out/dc/crash3-fm136-max.cdi, crashbash-fm136-max.cdi.
+Next: the tester's run of the fm136 CDIs (first with the MMU on); then C (the GPU path, ~1.3 M instructions a frame) or B with an allocator — Next up 0000.
+2026-10-04 [claude] DC: the tester's 5fa9442 results recorded (E-130: Toad Village 25.2 ms, model 25.49; menus 60); ADR-0048's first step built and measured (E-131: 198 Crash 3 functions as SH-4 assembly, DC digest 47853ef7 = JS, but +34 % instructions and slower than GCC's — rejected as it stands, opt-in `gen --sh4`); sio.PadScript + `--vram-at` + DC CFG 16 lines + dc-digest DIGEST_ARGS (E-132: windows of real play, the intro's Uka Uka 6750:7050 and the warp room 15000:15300; scripted DC digest at 7050 a0b9d5bc = JS); round r130 from four windows installed (E-133: Uka 23.02 → 21.08, warp 20.38 → 19.24); a shared runtime/backend code placement for games without their own (E-134, ADR-0043 amended: 59 % of Crash Bash's own placement's gain from Crash 3's half; build-dc.sh's serial probe fixed for targets with no serial). CDI out/dc/crash3-r130-max.cdi. A wrong first reading of E-130 (the title's profile read as the demo's) corrected. Disk filled once (out/_x_* build intermediates cleaned; memory note).
+Gates: JS digests 47853ef7 (C3 5000, no script), test.sh JS gate 329de455; check.sh clean. Not committed.
+Next: the owner's choice among A (MMU fastmem), B (ADR-0048 with an allocator), C (scene to the PVR), D (frame skip) — asked 2026-10-04.
+
+2026-10-03 [claude] DC night: the generated code measured by form (pools 13 %, 0.99 ms of operand fills; CpuState ~20 %; 31 % of fetched slots never run) -> ADR-0048 (proposed: guest code as SH-4 assembly); scripts/dc-digest.sh (the DC build's GenMain digest = JS's: C3 5000 47853ef7, CB+mods 20300 95e17b07); E-122a kept (the SPU's catch-up by a multiply), E-122b rejected (the quad's short second triangle: its fills ate its issue saving), E-121/E-123 rejected; E-124 rejected (hot guest registers in locals: GCC spills them, gameplay's generated code +0.12 ms) — so the registers need ADR-0048's allocator. Then E-125 kept (function spans taken where every path needs them: gameplay's generated code −0.34 ms cf), E-126 kept (timer 2's reads, event delivery), E-127 rejected; placement round r126 installed (E-128: gameplay 25.16 → 25.01, title work 15.44 → 15.03, Ballistix work 13.39 → 13.25), CDIs r126 (their DC digests 47853ef7 / 95e17b07 = JS, TA hash identical, test.sh both targets 329de455); next the owner's call on ADR-0048.
+Gates: TA hash identical (1,889 + 2,170 + 7,974); JS digests 47853ef7/95e17b07; SPU conformance unchanged; check.sh clean. Not committed.
+Next: the tester's results against 5fa9442; the owner's call on ADR-0048.
+
+2026-10-03 [claude] DC after 5fa9442: gameplay taken apart (Blockers: full speed needs a redesign); backend E-113/E-114/E-117 (bake memo + exact index, clip steps, build_scene fast path, run_switch, palette hash index), rounds r114/r117 (E-116/E-119, installed); E-115 islands, E-118 packet keys, E-120 FnTable slots rejected.
+Model: gameplay 25.49 -> 25.16 (cf 23.08 -> 22.79), Ballistix 16.76 -> 16.71 (work 13.39), title 16.64. CDIs out/dc/crash3-r117-max.cdi, crashbash-r117-max.cdi.
+Gates: TA hash identical for every batch (1,889 + 2,170 + 7,974 scenes); JS digests 47853ef7/95e17b07 and gpu-stream 5f877994a1335867/07076c3751a9d204; check.sh clean. Not committed.
+Next: the tester's results against 5fa9442; the owner's call on the architectural options (Blockers 2026-10-03).
 
 2026-10-03 [claude] DC: Ballistix's slow presents named (E-108), GPUSTAT/timer-1 without divides (E-109, BeamLine), rounds r108/r109 with every Ballistix phase traced (E-110, installed), flat-triangle rows carried (E-112); E-111 rejected.
 Model: Ballistix 16.87 -> 16.76 (heavy pairs 33.1, load 11.6-13.4, slow presents 17 -> 7), title 16.64, gameplay 25.88 -> 25.49 (PS1 ~95 % busy).

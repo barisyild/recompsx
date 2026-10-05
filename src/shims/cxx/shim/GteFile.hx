@@ -36,6 +36,13 @@ extern class GteFile {
 	@:nativeFunctionCode("recompsx_gte_rtp(({arg0}), ({arg1}) ? 1 : 0, ({arg2}) ? 1 : 0)")
 	public static function rtp(vh:Int, lm:Bool, last:Bool):Int;
 
+	/** RTPT's three vertices at sf = 1 in the SH-4's core, one after another in one call
+	    (`recompsx_gte_rtp3` in gte.Gte's header): how many it did before the first it declined, 3
+	    for all. The rest are the caller's, the declined one first. On any other machine, and in
+	    the core's check build, 0. */
+	@:nativeFunctionCode("recompsx_gte_rtp3(({arg0}) ? 1 : 0)")
+	public static function rtp3(lm:Bool):Int;
+
 	/** After the C form of a vertex: with RECOMPSX_GTE_RTP_CHECK the core's answer, worked on a copy
 	    of the file, compared with it word by word; otherwise nothing. */
 	@:nativeFunctionCode("recompsx_gte_rtp_after()")

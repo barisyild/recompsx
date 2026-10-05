@@ -77,3 +77,18 @@ from 10.1 to 4.1 ms a frame, and operand fills rose 0.5 ms (constants moving wit
   nobody.
 - The model has been within a percent of the console on this window's total. A placed build still
   has to be confirmed on hardware.
+
+## Amendment (2026-10-04): a placement every game gets
+
+A game's placement colours its own hot functions and the runtime's and backend's together. The
+second half is the same code in every game. Measured (docs/perf/dreamcast-ledger.md, E-133, E-134):
+on Crash 3 the runtime's and backend's 78 sections of its placement alone give 53-57 % of what the
+whole placement gives; on Crash Bash, the same 78 sections *taken from Crash 3's placement* give
+59 % of what Crash Bash's own placement gives (Ballistix 19.24 ms a frame with none, 17.77 with
+them, 16.76 with its own). So they are shared: `src/backend/dreamcast/dc-code-placement.txt`, which
+`scripts/build-dc.sh` uses for any game with no `games/<SERIAL>/dc-placement.txt` (and for the demo
+and bare executables, which have no serial). A game's own file still supersedes it, since it places
+the runtime with that game's code. A new game is placed better from its first build, and its own
+round adds the rest when it has bench windows of its own. The shared file should be made again by
+a round over several games' traces with only its sections free to move.
+

@@ -1,0 +1,23 @@
+#!/bin/bash
+# The assembler GCC runs when this directory is first in its program path (-B<this dir>/): each
+# GCC-made .s through scripts/sh4/islands.py (far-branch islands: ledger E-115, opt-in, not kept), then the toolchain's own
+# assembler. ISLANDS_KEEP=<dir> keeps each file before and after; ISLANDS_STATS=1 prints the counts.
+here="$(cd "$(dirname "$0")" && pwd)"
+real="${KOS_CC_BASE:-$HOME/toolchains/dc/sh-elf}/bin/sh-elf-as"
+args=()
+for a in "$@"; do
+  # GCC's own output only (its temporary files, ccXXXXXX.s): hand-written assembly is left as written.
+  if [[ "$a" == *.s && -f "$a" && "$(basename "$a")" =~ ^cc[A-Za-z0-9]+(\.ltrans[0-9]+)?(\.ltrans)?\.s$ ]]; then
+    out="${a%.s}.isl.s"
+    st=""; [ -n "$ISLANDS_STATS" ] && st="--stats"
+    python3 "$here/../islands.py" "$a" "$out" $st || exit 1
+    if [ -n "$ISLANDS_KEEP" ]; then mkdir -p "$ISLANDS_KEEP"; cp "$a" "$ISLANDS_KEEP/"; cp "$out" "$ISLANDS_KEEP/"; fi
+    args+=("$out")
+  else
+    args+=("$a")
+  fi
+done
+"$real" "${args[@]}"
+rc=$?
+for a in "${args[@]}"; do [[ "$a" == *.isl.s ]] && rm -f "$a"; done
+exit $rc

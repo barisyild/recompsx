@@ -67,12 +67,20 @@ class Backend {
 	public static inline function gpuTriWords():Void
 		GpuFile.backendTri();
 
+	/** The state words 52-61 hold, after the SH-4's polygon core recorded a triangle under the
+	    backend's last one (ADR-0051): bp_gpu_state_after_tri. */
+	public static inline function gpuStateAfterTri():Void
+		GpuFile.backendStateAfterTri();
+
 	public static inline function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void
 		BackendNative.bp_gpu_rect(x, y, w, h, bgr, semi, semiMode);
 
 	public static inline function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void
 		BackendNative.bp_gpu_dirty(x, y, w, h);
+
+	public static inline function gpuCopy(sx:Int, sy:Int, dx:Int, dy:Int, w:Int, h:Int, changed:Int):Void
+		BackendNative.bp_gpu_copy(sx, sy, dx, dy, w, h, changed);
 
 	public static inline function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void
 		BackendNative.bp_gpu_clip(x0, y0, x1, y1);
@@ -115,6 +123,7 @@ class Backend {
 	public static inline function padType(pad:Int):Int return BackendNative.bp_pad_type(pad);
 	public static inline function padButtons(pad:Int):Int return cast BackendNative.bp_pad_buttons(pad);
 	public static inline function padAxis(pad:Int, axis:Int):Int return BackendNative.bp_pad_axis(pad, axis);
+	public static inline function padRumble(pad:Int, small:Int, large:Int):Void BackendNative.bp_pad_rumble(pad, small, large);
 	public static inline function keyText(on:Bool):Void BackendNative.bp_key_text(on ? 1 : 0);
 	public static inline function keyNext():Int return BackendNative.bp_key_next();
 	public static inline function mouse(field:Int):Int return BackendNative.bp_mouse(field);

@@ -65,6 +65,9 @@ class Memory {
 		for (i in 0...SCRATCH_SIZE) RawMem.set8(scratch(), i, 0);
 		resetMemControl();
 		RomFont.init();
+		#if recompsx_fastmem
+		Fastmem.keep();
+		#end
 	}
 
 	/** Strips the segment. The three cached/uncached views collapse to one physical address. */
@@ -158,6 +161,27 @@ class Memory {
 		spans).
 	*/
 
+	#if recompsx_fastmem
+	// Fastmem (ADR-0049): no span is ever taken, so these are every access's path, inline: the
+	// timed forms through the MMU.
+	public static inline function read8uf(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read8ut(a, ctx, cyc);
+
+	public static inline function read8sf(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read8ut(a, ctx, cyc) << 24) >> 24;
+
+	public static inline function read16uf(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read16ut(a, ctx, cyc);
+
+	public static inline function read16sf(a:Int, ctx:core.CpuState, cyc:Int):Int
+		return (Access.read16ut(a, ctx, cyc) << 16) >> 16;
+
+	public static inline function read32f(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read32t(a, ctx, cyc);
+
+	public static inline function write8f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write8t(a, v, ctx, cyc);
+
+	public static inline function write16f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write16t(a, v, ctx, cyc);
+
+	public static inline function write32f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write32t(a, v, ctx, cyc);
+	#else
 	@:specifier("__attribute__((noinline))")
 	public static function read8uf(a:Int, ctx:core.CpuState, cyc:Int):Int return Access.read8ut(a, ctx, cyc);
 
@@ -183,11 +207,373 @@ class Memory {
 
 	@:specifier("__attribute__((noinline))")
 	public static function write32f(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void Access.write32t(a, v, ctx, cyc);
+	#end
+
+	// ---- by base register and offset: the emitter's timed accesses ---------------------------------
+
+	/*
+		`lw rt, off(rs)` and the rest as the base register's value and the offset, where the emitter
+		wrote the bus address `(base + off) & 0x1FFFFFFF`: everywhere the same access — that address,
+		then the timed form (`*bt`, the access inline) or the out-of-line one (`*bf`, a span's
+		fallback) — except with fastmem (ADR-0049). There an offset that is not negative is added to
+		the base's bus address, `base & 0x1FFFFFFF`, which the C++ compiler works out once for every
+		access through one base value — a span with no test — and the offset goes into the access's
+		displacement, or R0 (shim.P0). Where the offset carries that past 0x1FFFFFFF it lands on no
+		page and traps, and the trap wraps it as the bus does: the same access.
+	*/
+	public static inline function read8ubt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld8b(base, off, ctx) & 0xFF;
+		#else
+		return read8ut((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8sbt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld8b(base, off, ctx);
+		#else
+		return read8st((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16ubt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld16b(base, off, ctx) & 0xFFFF;
+		#else
+		return read16ut((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16sbt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld16b(base, off, ctx);
+		#else
+		return read16st((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read32bt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		return shim.P0.ld32b(base, off, ctx);
+		#else
+		return read32t((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function write8bt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st8b(base, off, v, ctx);
+		#else
+		write8t((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write16bt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st16b(base, off, v, ctx);
+		#else
+		write16t((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write32bt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		ctx.cycles = cyc;
+		shim.P0.st32b(base, off, v, ctx);
+		#else
+		write32t((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8ubf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read8ubt(base, off, ctx, cyc);
+		#else
+		return read8uf((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8sbf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read8sbt(base, off, ctx, cyc);
+		#else
+		return read8sf((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16ubf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read16ubt(base, off, ctx, cyc);
+		#else
+		return read16uf((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16sbf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read16sbt(base, off, ctx, cyc);
+		#else
+		return read16sf((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function read32bf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read32bt(base, off, ctx, cyc);
+		#else
+		return read32f((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#end
+	}
+
+	public static inline function write8bf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write8bt(base, off, v, ctx, cyc);
+		#else
+		write8f((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write16bf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write16bt(base, off, v, ctx, cyc);
+		#else
+		write16f((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write32bf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write32bt(base, off, v, ctx, cyc);
+		#else
+		write32f((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#end
+	}
+
+	// ---- by base register and offset, through a port ---------------------------------------------
+
+	/*
+		`*bt` and `*bf` for the loads and stores the recompiler expects to reach a port (its
+		PortBases): a base built as a constant outside RAM and the scratchpad, or a pointer loaded
+		from a word of the executable that holds a port's address. With fastmem the MMU would trap
+		them, ~200 cycles of the vector and the trampoline on the way to the same slow path; these
+		decode the address instead, as every target without fastmem does every access (portRead* and
+		portWrite*). Elsewhere they are `*bt` and `*bf` themselves. A wrong guess is the same access,
+		only slower.
+	*/
+	public static inline function read8upt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return portRead8((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#else
+		return read8ubt(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8spt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return (portRead8((base + off) & 0x1FFFFFFF, ctx, cyc) << 24) >> 24;
+		#else
+		return read8sbt(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16upt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return portRead16((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#else
+		return read16ubt(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16spt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return (portRead16((base + off) & 0x1FFFFFFF, ctx, cyc) << 16) >> 16;
+		#else
+		return read16sbt(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read32pt(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return portRead32((base + off) & 0x1FFFFFFF, ctx, cyc);
+		#else
+		return read32bt(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function write8pt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		portWrite8((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#else
+		write8bt(base, off, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write16pt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		portWrite16((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#else
+		write16bt(base, off, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write32pt(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		portWrite32((base + off) & 0x1FFFFFFF, v, ctx, cyc);
+		#else
+		write32bt(base, off, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8upf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read8upt(base, off, ctx, cyc);
+		#else
+		return read8ubf(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read8spf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read8spt(base, off, ctx, cyc);
+		#else
+		return read8sbf(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16upf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read16upt(base, off, ctx, cyc);
+		#else
+		return read16ubf(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read16spf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read16spt(base, off, ctx, cyc);
+		#else
+		return read16sbf(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function read32pf(base:Int, off:Int, ctx:core.CpuState, cyc:Int):Int {
+		#if recompsx_fastmem
+		return read32pt(base, off, ctx, cyc);
+		#else
+		return read32bf(base, off, ctx, cyc);
+		#end
+	}
+
+	public static inline function write8pf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write8pt(base, off, v, ctx, cyc);
+		#else
+		write8bf(base, off, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write16pf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write16pt(base, off, v, ctx, cyc);
+		#else
+		write16bf(base, off, v, ctx, cyc);
+		#end
+	}
+
+	public static inline function write32pf(base:Int, off:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		#if recompsx_fastmem
+		write32pt(base, off, v, ctx, cyc);
+		#else
+		write32bf(base, off, v, ctx, cyc);
+		#end
+	}
+
+	#if recompsx_fastmem
+	/*
+		The decode every target without fastmem runs for every access (Access's timed forms, their
+		other half), out of line: RAM and its mirrors, the scratchpad, else the port's slow path with
+		the clock brought up to date first. The same memory as the MMU's pages, which map these very
+		bytes of the arena.
+	*/
+	@:specifier("__attribute__((noinline))")
+	public static function portRead8(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) return shim.RawMem.get8(ram(), r);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) return shim.RawMem.get8(scratch(), a & (SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return slowRead8(a);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	public static function portRead16(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) return shim.MemA.get16(ram(), r);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) return shim.MemA.get16(scratch(), a & (SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return slowRead16(a);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	public static function portRead32(a:Int, ctx:core.CpuState, cyc:Int):Int {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) return shim.MemA.get32(ram(), r);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) return shim.MemA.get32(scratch(), a & (SCRATCH_SIZE - 1));
+		else {
+			ctx.cycles = cyc;
+			return slowRead32(a);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	public static function portWrite8(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) shim.RawMem.set8(ram(), r, v);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) shim.RawMem.set8(scratch(), a & (SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			slowWrite8(a, v);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	public static function portWrite16(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) shim.MemA.set16(ram(), r, v);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) shim.MemA.set16(scratch(), a & (SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			slowWrite16(a, v);
+		}
+	}
+
+	@:specifier("__attribute__((noinline))")
+	public static function portWrite32(a:Int, v:Int, ctx:core.CpuState, cyc:Int):Void {
+		final r = a & RAM_DECODE_MASK;
+		if (r < RAM_SIZE) shim.MemA.set32(ram(), r, v);
+		else if ((a & SCRATCH_MATCH_MASK) == SCRATCH_BASE) shim.MemA.set32(scratch(), a & (SCRATCH_SIZE - 1), v);
+		else {
+			ctx.cycles = cyc;
+			slowWrite32(a, v);
+		}
+	}
+	#end
 
 	// ---- spans: a run of accesses through one base -----------------------------------------------
 
 	/** Where the scratchpad starts in the arena RAM shares with it (RECOMPSX_SCRATCH_OFFSET). */
-	public static inline var SCRATCH_OFFSET = 0x2000A0;
+	public static inline var SCRATCH_OFFSET = #if recompsx_fastmem 0x204000 #else 0x2000A0 #end;
 
 	/**
 		The span of `a` when every byte from `a + lo` to `a + hi` is plain memory — all of it in
@@ -202,6 +588,12 @@ class Memory {
 		span is, is the shim's (`shim.Span`): the arena's address on C++, its index elsewhere.
 	**/
 	public static inline function span(a:Int, lo:Int, hi:Int):shim.Span {
+		#if recompsx_fastmem
+		// Fastmem: every access is one load or store through the MMU, which a span would only
+		// test; none, so the generated code's span tests fold away and each access takes its
+		// timed form (read32f, ...).
+		return shim.Arena.spanNone();
+		#else
 		// One compare for the RAM case: the mask leaves `r` below RAM_SIZE for RAM and its
 		// mirrors and at 8 MB or more for anything else, so with offsets from a 16-bit immediate
 		// `r + hi < RAM_SIZE` already says `r < RAM_SIZE` — and with `lo` not negative, as it
@@ -225,6 +617,7 @@ class Memory {
 			else {}
 		}
 		return at;
+		#end
 	}
 
 	/** No span: what a run that must decode access by access holds. */
@@ -575,6 +968,7 @@ class Memory {
 	}
 
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowRead8(p:Int):Int {
 		if (isScratch(p)) return RawMem.get8(scratch(), p - SCRATCH_BASE);
 		// The CD-ROM's four registers are genuinely byte-wide and index-banked; folding them onto
@@ -641,12 +1035,20 @@ class Memory {
 		return 0;
 	}
 
+	/**
+		The root counters first, in both slow reads: they are what games poll — a timeout's or a
+		tempo's counter read hundreds of times a frame (Crash 3's gameplay ~280 halfword reads of
+		timer 2 in ~410 slow ones, Crash Bash ~490 in ~570 and timer 1's word ~180 in ~450) — where
+		each test before them is a compare or two and their constants. The ranges are disjoint, so
+		the order is speed only; the scratchpad's test stays, though Access has taken it already.
+	**/
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowRead16(p:Int):Int {
-		if (isScratch(p)) return RawMem.get16(scratch(), p - SCRATCH_BASE);
+		if (isTimer(p)) return (inline timers.Timers.read(p, cycleHint())) & 0xFFFF;
+		else if (isScratch(p)) return RawMem.get16(scratch(), p - SCRATCH_BASE);
 		else if (isCdrom(p)) return (inline cd.Cdrom.read8(p)) | ((inline cd.Cdrom.read8(p + 1)) << 8);
 		else if (isSio(p)) return inline sio.Sio0.read16(p);
-		else if (isTimer(p)) return (inline timers.Timers.read(p, cycleHint())) & 0xFFFF;
 		else if (spu.Spu.contains(p)) return inline spu.Spu.read16(p);
 		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 2) << 3)) & 0xFFFF;
 		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8);
@@ -669,10 +1071,11 @@ class Memory {
 		whose every `return` is final, which is why `romRead8` is one if/else chain.
 	**/
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowRead32(p:Int):Int {
-		if (isScratch(p)) return RawMem.get32(scratch(), p - SCRATCH_BASE);
+		if (isTimer(p)) return inline timers.Timers.read(p, cycleHint());
+		else if (isScratch(p)) return RawMem.get32(scratch(), p - SCRATCH_BASE);
 		else if (isSio(p)) return inline sio.Sio0.read32(p);
-		else if (isTimer(p)) return inline timers.Timers.read(p, cycleHint());
 		// The CD's four registers were reachable by byte and halfword but not by word, so a
 		// 32-bit read of the status register fell through to the unknown-I/O path and answered
 		// zero — a drive that reports nothing, to a driver that reads it that way.
@@ -708,6 +1111,7 @@ class Memory {
 	}
 
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowWrite8(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set8(scratch(), p - SCRATCH_BASE, v);
 		else if (isCdrom(p)) inline cd.Cdrom.write8(p, v, cycleHint());
@@ -733,6 +1137,7 @@ class Memory {
 	}
 
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowWrite16(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set16(scratch(), p - SCRATCH_BASE, v);
 		else if (isSio(p)) inline sio.Sio0.write16(p, v);
@@ -747,6 +1152,7 @@ class Memory {
 	}
 
 	@:specifier("__attribute__((noinline))")
+	@:keep   // also the fastmem trap's (mem.Fastmem), which DCE cannot see
 	public static function slowWrite32(p:Int, v:Int):Void {
 		if (isScratch(p)) RawMem.set32(scratch(), p - SCRATCH_BASE, v);
 		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());

@@ -253,7 +253,7 @@ class Dma {
 			// read, a write, a region search and three calls — half of all the time spent in this
 			// channel, measured on the hardware-drawing path. The GPU takes the node whole.
 			if (count != 0) {
-				Gpu.writeGp0Words(ram, addr + 4, count);
+				if (Gpu.wholeNode(ram, addr + 4, count)) {} else Gpu.writeGp0Words(ram, addr + 4, count);
 				words = (words + count) | 0;
 			} else {}
 			// The channel's own cycle a word, and however long the GPU takes to draw what it was

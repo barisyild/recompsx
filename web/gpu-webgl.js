@@ -27,6 +27,15 @@
   almost every pair of primitives (about 190 times a vblank in Crash Bash's gameplay), and a
   batch per switch cost a draw call and a dozen state calls each; now a vblank is one or two.
 
+  Colour is the PlayStation's: five bits a channel, the primitive's colour cut to five bits before
+  it blends (gpu.Gpu modulate, pack555) and the blend on five-bit channels (psx-spx, "Semi
+  Transparency"). fbTex stores a channel's k as (k + 1/2) / 32 — eight bits keep it within 1/16 of
+  a step — and the screen and toWord read it back as the floor of 32 times it. The half step
+  above k is what lets mode 0 floor as the hardware does (see primFs) and lets a black texel
+  blend without a negative colour, which a blend clamps. In eight-bit colour Crash Bandicoot:
+  Warped's level transition never turned black: it repeats (B + F) >> 1 and B - 1/31 every frame,
+  and each loses what the cut and the floor lose.
+
   Semi-transparency is the PlayStation's four blend equations. Three of them add, and they share
   one GL blend state: the source factor is ONE and the destination factor is the fragment's own
   alpha, so the shader writes (F, 0) for an opaque pixel, (F/2, 1/2) for mode 0, (F, 1) for
@@ -40,12 +49,16 @@
   reaches past the buffer it draws into, and the software rasteriser clips it there. Rectangles
   are not, as in the software path.
 
-  The mask bit (bp_gpu_mask) is the stencil: a dirty rectangle's copy writes 1 where VRAM's bit 15
-  is set and 0 elsewhere, and one drawn with "check" passes only where the stencil is zero. Every
-  pixel a primitive writes gets the bit the PlayStation would store (psx-spx, "Mask Bit Setting"):
-  1 under "set", otherwise the texel's bit 15, and 0 for an untextured primitive. A pass cannot
-  see its texels' bit, so it writes 0 — exact for untextured primitives and for texels without
-  it — except the blending pass of a subtracting primitive, whose texels all have it. Keeping the
+  The mask bit (bit 15 of every VRAM halfword) is the depth buffer: 1.0 where it is set, 0.0
+  where not, written by every fragment as gl_FragDepth — a dirty rectangle's copy from the
+  halfword, a primitive's pixel the bit the PlayStation would store (psx-spx, "GPU Rendering
+  Attributes"): 1 under "set", otherwise the texel's bit 15, and 0 for an untextured primitive.
+  Depth is not blended and each fragment writes its own, so a texel's bit reaches VRAM inside one
+  draw and submission order stays exact (ADR-0054). Crash Bandicoot: Warped's transition reads
+  its frame back as a semi-transparent texture, where only texels with the bit blend: with 0
+  written for every texel, as the stencil once had it, nothing blended and the colours broke. The
+  stencil serves "check" alone: rebuilt from the depth buffer before a batch that checks, it
+  passes only where no bit is set, and a "set" batch that checks sets it as it draws. Keeping the
   old bit instead left stale mask bits under everything drawn: Crash Bandicoot: Warped clears its
   shadow texture with a fill over words whose bit 15 was set, and the texture read back through
   its palette as a hatched rectangle across half the shadow. (That texture is now the runtime's
@@ -59,7 +72,11 @@
   what the runtime wrote, so such a texture read stale words: the shadow was a square. Every
   primitive marks the 16x16 tiles it may have drawn into; a textured primitive whose texels or
   palette lie in a marked tile first has those tiles converted back from fbTex into vramTex as
-  15-bit words (bit 15 from the stencil) — the value the PlayStation would have stored.
+  15-bit words (bit 15 from the depth buffer) — the value the PlayStation would have stored.
+
+  A VRAM-to-VRAM copy (bp_gpu_copy, ADR-0054) is done here, from fbTex and its mask bits: fbTex
+  holds everything emulated VRAM does and what was drawn besides, and a copy out of a buffer on
+  screen is a copy of what was drawn there — which emulated VRAM's own copy lacks.
 */
 function createHardwareGpu(canvas) {
   const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false,
@@ -133,6 +150,7 @@ function createHardwareGpu(canvas) {
     precision highp usampler2D;
     uniform usampler2D uVram;
     uniform int uPass;           // 0 every texel, 1 opaque texels only, 2 blending texels only
+    uniform int uMaskSet;        // GP0(E6h).0: every pixel written gets the mask bit
     in vec3 vColor;
     in vec2 vUv;
     flat in ivec4 vPage;
@@ -143,7 +161,15 @@ function createHardwareGpu(canvas) {
     void main() {
       int flags = vClut.z;
       bool blending = (flags & 2) != 0;
-      vec3 c;
+      bool mask = uMaskSet != 0;
+      // The colour the PlayStation writes, five bits a channel, as the software rasteriser makes
+      // it (gpu.Gpu modulate, pack555): a texel's five bits widened by a shift, times the vertex
+      // colour, shifted down by seven, clamped and cut to five bits; an untextured colour cut to
+      // five bits. Without the cut Crash Bandicoot: Warped's level transition, which subtracts
+      // a one-texel colour of 15.5/255 every frame, took 15.5/255 where the PlayStation takes
+      // 1/31, and darkened twice as fast.
+      uvec3 c8 = uvec3(floor(vColor * 255.0 + 0.5));
+      uvec3 f;
       if ((flags & 1) != 0) {
         // The texel is the interpolated coordinate floored, as the PlayStation truncates its
         // own — but where the exact value is a whole number the interpolation lands a hair
@@ -165,23 +191,28 @@ function createHardwareGpu(canvas) {
           t = word(vClut.x + int((w >> uint((tu & 3) << 2)) & 15u), vClut.y);
         }
         if (t == 0u) discard;
+        // The texel's bit 15: what it blends by, and the mask bit its pixel keeps.
+        mask = mask || (t & 0x8000u) != 0u;
         blending = blending && (t & 0x8000u) != 0u;
         if (uPass == 1 && blending) discard;
         if (uPass == 2 && !blending) discard;
-        // Five bits widened to eight by a shift, as the software path does; then texel * colour
-        // / 128, with the colour arriving in 0..1 so 255/128 is the factor.
-        c = vec3(float(t & 31u), float((t >> 5) & 31u), float((t >> 10) & 31u)) * (8.0 / 255.0);
-        if ((flags & 4) == 0) c = min(c * vColor * (255.0 / 128.0), vec3(1.0));
+        uvec3 t5 = uvec3(t & 31u, (t >> 5) & 31u, (t >> 10) & 31u);
+        f = (flags & 4) != 0 ? t5 : min(((t5 << 3u) * c8) >> 7u, uvec3(255u)) >> 3u;
       } else {
-        c = vColor;
+        f = c8 >> 3u;
       }
-      // The blend state is src * ONE + dst * SRC_ALPHA (see the header): alpha is the
-      // destination's weight and the colour is pre-scaled by the source's. Mode 2 is drawn
-      // under a subtracting state of its own, for which (F, 1) is what it needs.
-      if (!blending) oColor = vec4(c, 0.0);
-      else if (vPage.w == 0) oColor = vec4(c * 0.5, 0.5);
-      else if (vPage.w == 3) oColor = vec4(c * 0.25, 1.0);
-      else oColor = vec4(c, 1.0);
+      // fbTex holds a five-bit channel k as (k + 1/2) / 32 (see the header). The blend state is
+      // src * ONE + dst * SRC_ALPHA: alpha is the destination's weight and the colour is
+      // pre-scaled by the source's. Mode 2 is drawn under a subtracting state of its own, for
+      // which (F, 1) is what it needs. Modes 1-3 move in whole steps, as on the PlayStation (mode
+      // 3 adds F >> 2). Mode 0 is (B + F) >> 1 there, which a blend cannot floor: (B + F) / 2 with
+      // F half a step low lands a quarter step under the floor for an even sum and a quarter
+      // over it for an odd one, inside the step either way.
+      if (!blending) oColor = vec4((vec3(f) + 0.5) / 32.0, 0.0);
+      else if (vPage.w == 0) oColor = vec4(vec3(f) / 64.0, 0.5);
+      else if (vPage.w == 3) oColor = vec4(vec3(f >> 2u) / 32.0, 1.0);
+      else oColor = vec4(vec3(f) / 32.0, 1.0);
+      gl_FragDepth = mask ? 1.0 : 0.0;
     }`;
   // A quad from one texture to the current target, with a source rectangle in texels.
   const quadVs = `#version 300 es
@@ -199,14 +230,33 @@ function createHardwareGpu(canvas) {
     precision highp int;
     precision highp usampler2D;
     uniform usampler2D uVram;
-    uniform int uMaskedOnly;     // 1: keep only halfwords with bit 15 set (the stencil pass)
+    uniform int uMaskedOnly;     // unused: the mask bit is written as depth in the one pass
     in vec2 vTexel;
     out vec4 oColor;
     void main() {
       uint t = texelFetch(uVram, ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511), 0).r;
-      if (uMaskedOnly != 0 && (t & 0x8000u) == 0u) discard;
-      oColor = vec4(vec3(float(t & 31u), float((t >> 5) & 31u), float((t >> 10) & 31u)) / 31.0, 1.0);
+      oColor = vec4((vec3(float(t & 31u), float((t >> 5) & 31u), float((t >> 10) & 31u)) + 0.5) / 32.0, 1.0);
+      gl_FragDepth = (t & 0x8000u) != 0u ? 1.0 : 0.0;
     }`;
+  // A copy's pixels from the scratch target, with their mask bits (the scratch depth), under
+  // "set" (bp_gpu_copy).
+  const copyFbFs = `#version 300 es
+    precision highp float;
+    uniform sampler2D uFrame;
+    uniform sampler2D uDepth;
+    uniform int uMaskSet;
+    in vec2 vTexel;
+    out vec4 oColor;
+    void main() {
+      ivec2 p = ivec2(floor(vTexel));
+      oColor = vec4(texelFetch(uFrame, p, 0).rgb, 1.0);
+      gl_FragDepth = (uMaskSet != 0 || texelFetch(uDepth, p, 0).r > 0.5) ? 1.0 : 0.0;
+    }`;
+  // Nothing but the stencil test's side effect (the stencil rebuilt from the mask bits).
+  const noneFs = `#version 300 es
+    precision highp float;
+    out vec4 oColor;
+    void main() { oColor = vec4(0.0); }`;
   // The framebuffer texture to the screen, opaque whatever its alpha says: the canvas is
   // unpremultiplied, so an alpha below one would darken the pixel on the page.
   const blitFs = `#version 300 es
@@ -215,7 +265,10 @@ function createHardwareGpu(canvas) {
     in vec2 vTexel;
     out vec4 oColor;
     void main() {
-      oColor = vec4(texture(uFrame, vTexel / vec2(1024.0, 512.0)).rgb, 1.0);
+      // A channel's five bits out of the (k + 1/2) / 32 the framebuffer texture holds, widened
+      // as the PlayStation's video output does.
+      vec3 k = clamp(floor(texture(uFrame, vTexel / vec2(1024.0, 512.0)).rgb * 32.0), 0.0, 31.0);
+      oColor = vec4(k / 31.0, 1.0);
     }`;
   // 24-bit rows straight out of VRAM: three bytes a pixel from byte offset src_x*2 of each row,
   // the layout MDEC video uses. Read through the halfword texture.
@@ -239,20 +292,22 @@ function createHardwareGpu(canvas) {
     }`;
 
   // Rendered colour back to a VRAM halfword, drawn into vramTex over tiles primitives drew into.
-  // The eight-bit channel the primitive left, shifted down to five: the software rasteriser's
-  // truncation, and exact for a halfword a dirty rectangle copied in (round(c * 255 / 31) >> 3
-  // is c for every five-bit c). Bit 15 comes from the stencil, in a second pass.
+  // A channel holds (k + 1/2) / 32 (see the header), within 1/16 of a step after the eight-bit
+  // store and within a quarter step more after a mode 0 blend: the floor of 32 times it is k.
+  // Bit 15 is read from the depth texture, in the same pass.
   const toWordFs = `#version 300 es
     precision highp float;
     precision highp int;
     uniform sampler2D uFrame;
-    uniform uint uMaskBit;
+    uniform sampler2D uDepth;
     in vec2 vTexel;
     out uvec4 oWord;
     void main() {
-      vec3 c = texelFetch(uFrame, ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511), 0).rgb;
-      uvec3 v = uvec3(round(c * 255.0)) >> 3u;
-      oWord = uvec4(v.r | (v.g << 5u) | (v.b << 10u) | uMaskBit, 0u, 0u, 0u);
+      ivec2 p = ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511);
+      vec3 c = texelFetch(uFrame, p, 0).rgb;
+      uvec3 v = uvec3(clamp(floor(c * 32.0), 0.0, 31.0));
+      uint mask = texelFetch(uDepth, p, 0).r > 0.5 ? 0x8000u : 0u;
+      oWord = uvec4(v.r | (v.g << 5u) | (v.b << 10u) | mask, 0u, 0u, 0u);
     }`;
 
   const primProgram = program(primVs, primFs);
@@ -260,18 +315,26 @@ function createHardwareGpu(canvas) {
   const blitProgram = program(quadVs, blitFs);
   const present24Program = program(quadVs, present24Fs);
   const toWordProgram = program(quadVs, toWordFs);
+  const copyFbProgram = program(quadVs, copyFbFs);
+  const noneProgram = program(quadVs, noneFs);
   const U = (p, name) => gl.getUniformLocation(p, name);
-  const prim = { pass: U(primProgram, 'uPass') };
+  const prim = { pass: U(primProgram, 'uPass'), maskSet: U(primProgram, 'uMaskSet') };
   const quad = (p) => ({ dst: U(p, 'uDst'), src: U(p, 'uSrc'), srcX: U(p, 'uSrcX'),
     maskedOnly: U(p, 'uMaskedOnly'), maskBit: U(p, 'uMaskBit') });
   const copyU = quad(copyProgram), blitU = quad(blitProgram), present24U = quad(present24Program);
   const toWordU = quad(toWordProgram);
+  const copyFbU = Object.assign(quad(copyFbProgram), { maskSet: U(copyFbProgram, 'uMaskSet') });
+  const noneU = quad(noneProgram);
   // Every sampler reads unit 0, which a program keeps from here on; set once, not per draw.
   for (const [p, name] of [[primProgram, 'uVram'], [copyProgram, 'uVram'], [blitProgram, 'uFrame'],
-      [present24Program, 'uVram'], [toWordProgram, 'uFrame']]) {
+      [present24Program, 'uVram'], [toWordProgram, 'uFrame'], [copyFbProgram, 'uFrame']]) {
     gl.useProgram(p);
     gl.uniform1i(U(p, name), 0);
   }
+  gl.useProgram(copyFbProgram);
+  gl.uniform1i(U(copyFbProgram, 'uDepth'), 1);
+  gl.useProgram(toWordProgram);
+  gl.uniform1i(U(toWordProgram, 'uDepth'), 1);
 
   const vramTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, vramTex);
@@ -294,18 +357,39 @@ function createHardwareGpu(canvas) {
   const fbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbTex, 0);
-  const stencilRb = gl.createRenderbuffer();
-  gl.bindRenderbuffer(gl.RENDERBUFFER, stencilRb);
-  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, W, H);
-  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, stencilRb);
+  // The mask bits (depth) and the "check" stencil: a texture, so that a copy can read them.
+  const fbDepth = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, fbDepth);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH24_STENCIL8, W, H);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, fbDepth, 0);
   gl.clearColor(0, 0, 0, 1);
   gl.clearStencil(0);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
-  // vramTex as a target, sharing the stencil, for drawn tiles turned back into halfwords.
+  gl.clearDepth(0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  // vramTex as a target, for drawn tiles turned back into halfwords: colour only, the mask bits
+  // read from fbDepth as a texture. Attached again before every use (syncDrawn).
   const wordFbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, wordFbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, vramTex, 0);
-  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, stencilRb);
+  // A copy's scratch (bp_gpu_copy): what its source held, colour and mask bits, before the copy
+  // writes — source and destination may overlap. Filled and read by drawing, as everything else
+  // here is: the mask bits are read from the depth texture by the shader that writes them.
+  const copyTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, copyTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, W, H);
+  const copyDepth = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, copyDepth);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH24_STENCIL8, W, H);
+  const copyFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, copyTex, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, copyDepth, 0);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
   const primVao = gl.createVertexArray();
@@ -405,6 +489,7 @@ function createHardwareGpu(canvas) {
   // of 64 tiles is two words: bit n of the first for tile n, of the second for tile 32 + n.
   const drawnLo = new Uint32Array(H >> 4), drawnHi = new Uint32Array(H >> 4);
   let syncs = 0;
+  let copies = 0;
 
   function upTo(n) { return n < 0 ? 0 : (n >= 31 ? -1 : (1 << (n + 1)) - 1); }
   // Tiles tx0..tx1 (0 <= tx0 <= tx1 <= 63) as the two words of a row.
@@ -445,19 +530,27 @@ function createHardwareGpu(canvas) {
     flush();
     const px = tx0 << 4, py = ty0 << 4, pw = (tx1 - tx0 + 1) << 4, ph = (ty1 - ty0 + 1) << 4;
     gl.bindFramebuffer(gl.FRAMEBUFFER, wordFbo);
+    // vramTex detached and attached anew each time. ANGLE on Metal (Chrome 152, an Apple GPU)
+    // gives a texture fresh storage when it is uploaded to while the GPU may still read it, and a
+    // framebuffer that had it attached keeps drawing into the old storage: after a palette upload
+    // the words converted here went nowhere, and primitives sampled what vramTex held before.
+    // Crash Bandicoot: Warped's attract loop ends its second demo with a transition 40 frames
+    // after such an upload, and it halved to black at once instead of turning (verified: a word
+    // written here read back unchanged until the attachment was renewed, and right after it was).
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, vramTex, 0);
     gl.viewport(0, 0, W, H);
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
-    gl.enable(gl.STENCIL_TEST);
-    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    gl.useProgram(toWordProgram);
-    gl.stencilFunc(gl.EQUAL, 0, 0xFF);
-    gl.uniform1ui(toWordU.maskBit, 0);
-    quadDraw(toWordProgram, toWordU, fbTex, px, py, pw, ph, W, H, px, py, pw, ph, false);
-    gl.stencilFunc(gl.NOTEQUAL, 0, 0xFF);
-    gl.uniform1ui(toWordU.maskBit, 0x8000);
-    quadDraw(toWordProgram, toWordU, fbTex, px, py, pw, ph, W, H, px, py, pw, ph, false);
     gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.DEPTH_TEST);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fbDepth);
+    gl.activeTexture(gl.TEXTURE0);
+    quadDraw(toWordProgram, toWordU, fbTex, px, py, pw, ph, W, H, px, py, pw, ph, false);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
     for (let ty = ty0; ty <= ty1; ty++) { drawnLo[ty] &= ~lo; drawnHi[ty] &= ~hi; }
     syncs++;
   }
@@ -537,15 +630,55 @@ function createHardwareGpu(canvas) {
     }
   }
 
-  // "check": draw only where no mask bit is set. What is drawn gets a mask bit when "set" is on
-  // or the pass's texels all carry bit 15 (`texelBit`), by incrementing, so the check's
-  // reference of zero needs no second value; otherwise the bit is cleared (see the header).
-  function setStencil(b, texelBit) {
-    const on = b.maskSet || texelBit;
-    const s = (b.maskCheck ? 1 : 0) | (on ? 2 : 0);
-    if (s === glStencil) return;
-    gl.stencilFunc(b.maskCheck ? gl.EQUAL : gl.ALWAYS, 0, 0xFF);
-    gl.stencilOp(gl.KEEP, gl.KEEP, on ? gl.INCR : gl.ZERO);
+  // The mask bits are the depth buffer (see the header); the stencil holds them only for "check",
+  // rebuilt from the depth buffer when something has been written since.
+  let stencilStale = true;
+  let glMaskSet = -1;
+
+  /** The stencil from the mask bits: 1 where the depth buffer holds a set bit (a quad at 0.5 passes
+   *  LESS only where the stored 1.0 is), 0 elsewhere. Leaves fbo bound, blending and the scissor
+   *  off, the depth test ALWAYS with writes on, and the stencil test enabled. */
+  function stencilFromDepth() {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.colorMask(false, false, false, false);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.depthFunc(gl.LESS);
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xFF);
+    gl.stencilOp(gl.ZERO, gl.ZERO, gl.REPLACE);
+    quadDraw(noneProgram, noneU, vramTex, 0, 0, W, H, W, H, 0, 0, W, H, false);
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(true);
+    gl.depthFunc(gl.ALWAYS);
+    stencilStale = false;
+  }
+
+  // "check": draw only where no mask bit is set; under "set" the stencil takes what is drawn as it
+  // goes (incrementing, so the check's reference of zero needs no second value). The mask bit
+  // itself every fragment writes as depth (uMaskSet and the texel's bit 15).
+  function setMask(b) {
+    if (glMaskSet !== b.maskSet) { gl.uniform1i(prim.maskSet, b.maskSet); glMaskSet = b.maskSet; }
+    if (!b.maskCheck) {
+      if (glStencil !== 0) { gl.disable(gl.STENCIL_TEST); glStencil = 0; }
+      return;
+    }
+    if (stencilStale) {
+      stencilFromDepth();
+      gl.useProgram(primProgram);
+      gl.bindVertexArray(primVao);
+      gl.enable(gl.BLEND);
+      glScissor = -1; glSubtract = -1; glStencil = -1;
+      setScissor(b);
+    }
+    const s = b.maskSet ? 2 : 1;
+    if (glStencil === s) return;
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.EQUAL, 0, 0xFF);
+    gl.stencilOp(gl.KEEP, gl.KEEP, b.maskSet ? gl.INCR : gl.KEEP);
     glStencil = s;
   }
 
@@ -584,25 +717,30 @@ function createHardwareGpu(canvas) {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, byteView, 0, vertexCount * VERTEX_BYTES);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, vramTex);
-    gl.enable(gl.STENCIL_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.ALWAYS);
+    gl.depthMask(true);
     gl.enable(gl.BLEND);
-    glScissor = -1; glScissorW = -1; glStencil = -1; glSubtract = -1; glPass = -1;
+    glScissor = -1; glScissorW = -1; glStencil = 0; glSubtract = -1; glPass = -1; glMaskSet = -1;
     for (let i = 0; i < batchCount; i++) {
       const b = batches[i];
       setScissor(b);
-      setStencil(b, false);
+      setMask(b);
       if (b.kind === SUBTRACT_TEX) {
         setSubtract(0); setPass(1);
         gl.drawArrays(gl.TRIANGLES, b.start, b.count);
-        setStencil(b, true); setSubtract(1); setPass(2);
+        setSubtract(1); setPass(2);
       } else {
         setSubtract(b.kind === SUBTRACT ? 1 : 0); setPass(0);
       }
       gl.drawArrays(gl.TRIANGLES, b.start, b.count);
+      stencilStale = true;
     }
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.DEPTH_TEST);
     batchCount = 0;
     open = null;
     vertexCount = 0;
@@ -634,20 +772,97 @@ function createHardwareGpu(canvas) {
     gl.viewport(0, 0, W, H);
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
-    // The colour, with the stencil cleared under the rectangle; then the stencil set again
-    // wherever the halfword's bit 15 is on. The mask bits an upload carried are now the
-    // stencil's, exactly as the software path left them in VRAM.
-    gl.enable(gl.STENCIL_TEST);
+    // The colour, and each halfword's bit 15 as depth: the mask bits an upload carried are the
+    // depth buffer's, exactly as the software path left them in VRAM.
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.ALWAYS);
+    gl.depthMask(true);
     gl.useProgram(copyProgram);
     gl.uniform1i(copyU.maskedOnly, 0);
-    gl.stencilFunc(gl.ALWAYS, 0, 0xFF);
-    gl.stencilOp(gl.REPLACE, gl.REPLACE, gl.REPLACE);
     quadDraw(copyProgram, copyU, vramTex, x, y, w, h, W, H, x, y, w, h, false);
-    gl.uniform1i(copyU.maskedOnly, 1);
-    gl.stencilFunc(gl.ALWAYS, 1, 0xFF);
-    quadDraw(copyProgram, copyU, vramTex, x, y, w, h, W, H, x, y, w, h, false);
-    gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.DEPTH_TEST);
+    stencilStale = true;
     markClean(x, y, w, h);
+  }
+
+  /** GP0(80h) (bp_gpu_copy, ADR-0054): w x h of fbTex and its mask bits from (sx, sy) to (dx, dy),
+   *  both wrapping at VRAM's edges as the PlayStation's copy does, under the mask bits — "check"
+   *  keeps a pixel whose bit is set, "set" sets the bit of every pixel written. fbTex holds what
+   *  emulated VRAM does and what was drawn besides, so this is the copy of a buffer on screen
+   *  too, which emulated VRAM's own copy lacks. */
+  function copy(sx, sy, dx, dy, w, h, _changed) {
+    if (vramWords === null) return;
+    flush();
+    sx &= W - 1; sy &= H - 1; dx &= W - 1; dy &= H - 1;
+    if (w <= 0 || h <= 0) return;
+    if (w > W) w = W;
+    if (h > H) h = H;
+    // Pieces where neither rectangle wraps: the offsets at which either crosses an edge.
+    const cuts = (a, b, n, size) => {
+      const c = [0];
+      for (const at of [size - a, size - b]) if (at > 0 && at < n && c.indexOf(at) < 0) c.push(at);
+      c.sort((p, q) => p - q);
+      c.push(n);
+      return c;
+    };
+    const xs = cuts(sx, dx, w, W), ys = cuts(sy, dy, h, H);
+    for (let j = 0; j + 1 < ys.length; j++) {
+      for (let i = 0; i + 1 < xs.length; i++) {
+        copyPiece((sx + xs[i]) & (W - 1), (sy + ys[j]) & (H - 1), (dx + xs[i]) & (W - 1),
+          (dy + ys[j]) & (H - 1), xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
+      }
+    }
+  }
+
+  function copyPiece(sx, sy, dx, dy, w, h) {
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+    // The source, colour and mask bits, into the scratch at the same place: drawn from fbTex and
+    // its depth, which only fbo has attached.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.ALWAYS);
+    gl.depthMask(true);
+    gl.useProgram(copyFbProgram);
+    gl.uniform1i(copyFbU.maskSet, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fbDepth);
+    gl.activeTexture(gl.TEXTURE0);
+    quadDraw(copyFbProgram, copyFbU, fbTex, sx, sy, w, h, W, H, sx, sy, w, h, false);
+    // Then from the scratch to the destination, under the mask bits.
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+    if (maskCheck) stencilFromDepth();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    if (maskCheck) {
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.EQUAL, 0, 0xFF);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    } else gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.ALWAYS);
+    gl.depthMask(true);
+    gl.useProgram(copyFbProgram);
+    gl.uniform1i(copyFbU.maskSet, maskSet);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, copyDepth);
+    gl.activeTexture(gl.TEXTURE0);
+    quadDraw(copyFbProgram, copyFbU, copyTex, dx, dy, w, h, W, H, sx, sy, w, h, false);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    stencilStale = true;
+    markDrawn(dx, dy, dx + w - 1, dy + h - 1);
+    copies++;
   }
 
   /** Emulated VRAM changed under this rectangle, which may wrap at either edge. */
@@ -705,6 +920,62 @@ function createHardwareGpu(canvas) {
     primitives = 0;
   }
 
-  return { vram, state, tri, rect, dirty, clip, mask, present, get primitives() { return primitives; },
-    get syncs() { return syncs; } };
+  // A pixel of fbTex as the next present would show it (diagnostics: what was drawn where).
+  function peek(x, y) {
+    flush();
+    const out = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    return [out[0], out[1], out[2]];
+  }
+
+  // Whether the 16x16 tile holding (x, y) is marked drawn (diagnostics: what a sample will sync).
+  function drawnTile(x, y) {
+    const tx = (x & (W - 1)) >> 4, ty = (y & (H - 1)) >> 4;
+    return tx < 32 ? (drawnLo[ty] >>> tx) & 1 : (drawnHi[ty] >>> (tx - 32)) & 1;
+  }
+
+  // GL's own view (diagnostics): the pending error and both targets' completeness.
+  function glCheck() {
+    const err = gl.getError();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    const a = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
+    const b = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    return { err, fbo: a === gl.FRAMEBUFFER_COMPLETE, copyFbo: b === gl.FRAMEBUFFER_COMPLETE };
+  }
+
+  // A halfword of vramTex as a primitive samples it (diagnostics), through a 1x1 RGBA8 target.
+  let peekTex = null, peekFbo = null, peekProgram = null, peekU = null;
+  function peekVram(x, y) {
+    flush();
+    if (peekTex === null) {
+      peekTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, peekTex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1, 1);
+      peekFbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, peekFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, peekTex, 0);
+      peekProgram = program(quadVs, `#version 300 es
+        precision highp float; precision highp int; precision highp usampler2D;
+        uniform usampler2D uVram; in vec2 vTexel; out vec4 oColor;
+        void main() { uint t = texelFetch(uVram, ivec2(floor(vTexel)), 0).r;
+          oColor = vec4(float(t & 255u), float(t >> 8u), 0.0, 255.0) / 255.0; }`);
+      peekU = quad(peekProgram);
+      gl.useProgram(peekProgram);
+      gl.uniform1i(U(peekProgram, 'uVram'), 0);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, peekFbo);
+    gl.viewport(0, 0, 1, 1);
+    gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.STENCIL_TEST); gl.disable(gl.DEPTH_TEST);
+    quadDraw(peekProgram, peekU, vramTex, 0, 0, 1, 1, 1, 1, x, y, 1, 1, false);
+    const out = new Uint8Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    return (out[0] | (out[1] << 8)).toString(16);
+  }
+
+  return { vram, state, tri, rect, dirty, copy, clip, mask, present, peek, peekVram, drawnTile, glCheck,
+    get primitives() { return primitives; }, get syncs() { return syncs; }, get copies() { return copies; } };
 }

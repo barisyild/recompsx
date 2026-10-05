@@ -7,7 +7,8 @@
 #   --build-type   CMake build type (default Release; MinSizeRel is the one to reach for when
 #                  the binary will not fit in 16 MB alongside 3.5 MB of emulated machine)
 #   --placement F  place the hot code as F says (scripts/dc-layout.py) instead of the game's own
-#                  games/<SERIAL>/dc-placement.txt, which is used when there is one
+#                  games/<SERIAL>/dc-placement.txt, which is used when there is one, and else
+#                  the runtime's and backend's shared src/backend/dreamcast/dc-code-placement.txt
 #   --no-placement leave the code where the linker puts it
 #   --no-data-placement  leave .data and .bss as the linker lays them out, instead of placing the
 #                  runtime's and backend's hot variables (src/backend/dreamcast/dc-data-placement.txt)
@@ -38,6 +39,7 @@ MAX=0
 BUILD_TYPE="Release"
 PLACEMENT=auto
 DATA_PLACEMENT=src/backend/dreamcast/dc-data-placement.txt
+SHARED_PLACEMENT=src/backend/dreamcast/dc-code-placement.txt
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)        RUN=1 ;;
@@ -60,10 +62,17 @@ TOOLCHAIN="$KOS_BASE/utils/cmake/kallistios.toolchain.cmake"
 DIR="out/$TARGET"
 [ -d "$DIR/cpp/src" ] || { echo "no generated sources in $DIR/cpp/src — generate first"; exit 1; }
 
+# Fastmem (ADR-0049): a tree transpiled for it (build/game-cpp-dc.hxml) reaches guest memory through
+# the SH-4's MMU, and the backend and the arena's layout must agree with it (RECOMPSX_FASTMEM): on for
+# a tree with the runtime's fastmem glue (mem_Fastmem.cpp), off for any other.
+FASTMEM_FLAGS=""
+if [ -f "$DIR/cpp/src/mem_Fastmem.cpp" ]; then FASTMEM_FLAGS="-DRECOMPSX_FASTMEM=1"; echo "fastmem (ADR-0049): on"; fi
+
 # A separate build directory from the desktop one: same sources, different machine, and a shared
 # CMake cache between two toolchains is a morning wasted.
 BUILD="$DIR/build-dc"
 EXTRA=()
+if [ -n "$FASTMEM_FLAGS" ]; then EXTRA=("-DCMAKE_CXX_FLAGS=$FASTMEM_FLAGS" "-DCMAKE_C_FLAGS=$FASTMEM_FLAGS"); fi
 # The --max build's code-generation flags, each measured on Flycast's cycle-counting profile
 # (scripts/dc-flycast-prof.sh; Crash 3 vblanks 4700-5000, Crash Bash 18800-20300), which gives the
 # same count for the same binary every run. Together: Crash 3 -2.6 %, Crash Bash -1.3 %.
@@ -92,7 +101,7 @@ EXTRA=()
 # only once it has been measured. DC_GAME_FLAGS adds flags to the recompiled game's own code only
 # (its shards, overlays and tables; RECOMPSX_GAME_FLAGS in the CMake template), after the rest: a
 # CMake list, its flags separated by semicolons.
-DC_MAX_FLAGS="-mbranch-cost=1 -mdiv=call-fp -flto-partition=one -fschedule-insns -fsched-pressure ${DC_EXTRA_FLAGS:-}"
+DC_MAX_FLAGS="-mbranch-cost=1 -mdiv=call-fp -flto-partition=one -fschedule-insns -fsched-pressure $FASTMEM_FLAGS ${DC_EXTRA_FLAGS:-}"
 # The one partition's code is generated on one core, and it is most of the link. GCC 15's
 # incremental LTO (-flto-incremental) keeps it: a link whose code has not changed takes it from the
 # cache instead. That is the placement's second link, which only moves sections (Crash 3: 181 s ->
@@ -122,9 +131,13 @@ configure() {
 # unless one is named or none is wanted. It is worth more than most code changes — Crash 3's title
 # screen went from 35.1 to 29.5 ms a frame under the cache model — and it costs a second link.
 if [ "$PLACEMENT" = auto ]; then
-  SERIAL="$(sed -n 's/.*SERIAL = "\([A-Z0-9]*\)".*/\1/p' "$DIR/gen/GameInfo.hx" 2>/dev/null | head -1)"
+  # No GameInfo.hx (the demo, a bare executable's tree) is no serial, not a failed build.
+  SERIAL="$(sed -n 's/.*SERIAL = "\([A-Z0-9]*\)".*/\1/p' "$DIR/gen/GameInfo.hx" 2>/dev/null | head -1 || true)"
   PLACEMENT=""
-  if [ -n "$SERIAL" ] && [ -f "games/$SERIAL/dc-placement.txt" ]; then PLACEMENT="games/$SERIAL/dc-placement.txt"; fi
+  if [ -n "$SERIAL" ] && [ -f "games/$SERIAL/dc-placement.txt" ]; then PLACEMENT="games/$SERIAL/dc-placement.txt"
+  # A game with no placement of its own still gets the runtime's and the backend's, which are the
+  # same in every game: more than half of what a game's own placement wins (ledger E-134).
+  elif [ -f "$SHARED_PLACEMENT" ]; then PLACEMENT="$SHARED_PLACEMENT"; fi
 elif [ "$PLACEMENT" = none ]; then
   PLACEMENT=""
 fi

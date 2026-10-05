@@ -54,12 +54,24 @@ static inline __attribute__((always_inline)) int recompsx_gpu_poly_run(const uns
 #if RECOMPSX_GPU_POLY_CHECK
 #include <cstdio>
 #include \"backend_c_api.h\"
-struct recompsx_gpu_poly_state { int shadow[64]; int before[64]; int rc; unsigned calls, drawn, rejected, declined, bad; };
+struct recompsx_gpu_poly_state { int shadow[64]; int before[64]; int rc; unsigned calls, drawn, rejected, declined, bad; unsigned rec[8]; uint32_t* at; };
 inline recompsx_gpu_poly_state& recompsx_gpu_poly_st() { static recompsx_gpu_poly_state s; return s; }
 inline int recompsx_gpu_poly_check(const unsigned char* ram, int at, int op) {
 	recompsx_gpu_poly_state& s = recompsx_gpu_poly_st();
 	for(int i = 0; i < 64; i++) s.shadow[i] = s.before[i] = recompsx_gpu[i];
+	/* The core writes its record where the sink says (ADR-0051): kept aside here, and the sink and
+	 * the line put back, so that the C form, which decides, records the triangle itself in the
+	 * same place, where recompsx_gpu_poly_checked compares the two. */
+	uint32_t* next = bp_gpu_sink.next;
+	const uint16_t tris = *bp_gpu_sink.tris;
+	const int room = bp_gpu_sink.end - next >= 16;
+	unsigned line[8];
+	for(int k = 0; k < 8; k++) line[k] = room ? next[k] : 0;
 	s.rc = (op & 8) ? -1 : recompsx_gpu_poly_run(ram, at, op, s.shadow, 0);
+	s.at = bp_gpu_sink.next != next ? next : 0;
+	for(int k = 0; k < 8; k++) { s.rec[k] = room ? next[k] : 0; if(room) next[k] = line[k]; else {} }
+	bp_gpu_sink.next = next;
+	*bp_gpu_sink.tris = tris;
 	return 1;
 }
 inline void recompsx_gpu_poly_bad(const char* what, int i, int a, int b) {
@@ -82,7 +94,7 @@ inline void recompsx_gpu_poly_checked(int op) {
 			else {}
 	} else {
 		int sent = 0;
-		for(int i = 0; i < 48; i++) {
+		for(int i = 0; i < 36; i++) {
 			if(i >= 19 && i <= 22 && recompsx_gpu[i] != s.before[i]) sent = 1;
 			else {}
 			if(s.shadow[i] != recompsx_gpu[i]) { recompsx_gpu_poly_bad(\"word\", i, s.shadow[i], recompsx_gpu[i]); break; }
@@ -93,6 +105,17 @@ inline void recompsx_gpu_poly_checked(int op) {
 			s.drawn++;
 			if((s.rc == 2) != (sent != 0)) recompsx_gpu_poly_bad(\"state sent\", 0, s.rc, sent);
 			else {}
+			/* The core's record against the C form's in the same place: every word, the tag only
+			 * when the state stayed (answering 2, the core wrote the old one, which the backend
+			 * replaces). */
+			if(!s.at) recompsx_gpu_poly_bad(\"no record\", 0, s.rc, 0);
+			else {
+				for(int k = 0; k < 8; k++) {
+					const unsigned m = (k == 7 && s.rc == 2) ? 0xFFFFu : 0xFFFFFFFFu;
+					if(((s.rec[k] ^ s.at[k]) & m) != 0) { recompsx_gpu_poly_bad(\"record word\", k, (int)s.rec[k], (int)s.at[k]); break; }
+					else {}
+				}
+			}
 		}
 	}
 	if((s.calls & 0xFFFF) == 0) {
@@ -123,6 +146,17 @@ static inline __attribute__((always_inline)) void recompsx_gpu_poly_after(int op
 	(void)op;
 #endif
 }
+/* The core answered 2 (ADR-0051): it recorded the triangle under the state the backend has, and left
+ * the new one in words 52-61, which the backend takes and moves that record into. Only the SH-4's
+ * core answers so; anywhere else this is never reached, and is the state alone. */
+#include \"backend_c_api.h\"
+static inline __attribute__((always_inline)) void recompsx_gpu_state_after_tri(void) {
+#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM) && !RECOMPSX_GPU_POLY_CHECK
+	bp_gpu_state_after_tri(recompsx_gpu + 52);
+#else
+	bp_gpu_state_w(recompsx_gpu + 52);
+#endif
+}
 #endif")
 // <dc-sched scripts/sh4/poly.blk> written by scripts/dc-sched.py --into: never edit by hand
 @:cppFileCode("#if defined(__sh__) && defined(__LITTLE_ENDIAN__) && !defined(RECOMPSX_GPU_NO_ASM)
@@ -146,73 +180,60 @@ __asm__(R\"ASM(
 	add	#-1,r0
 	and	r11,r0
 	mov.l	r0,@(4,r7)
-	mov	r7,r2
-	add	#64,r2
+	mov	r7,r5
+	add	#64,r5
 	mov	r11,r0
 	and	#63,r0
 	shll2	r0
 	shll2	r0
-	mov.l	r0,@(40,r2)
+	mov.l	r0,@(40,r5)
 	mov	r11,r0
 	shlr2	r0
 	shlr2	r0
 	shlr2	r0
-	mov	#2,r3
-	shll8	r3
-	add	#-1,r3
-	and	r3,r0
-	mov.l	r0,@(44,r2)
-	mov.l	@r15+,r14
-	mov.l	@r15+,r13
-	mov.l	@r15+,r12
-	mov.l	@r15+,r11
-	mov.l	@r15+,r10
-	mov.l	@r15+,r9
-	mov.l	@r15+,r8
-	bra	.Lpoly_poly
+	mov	#2,r6
+	shll8	r6
+	add	#-1,r6
+	and	r6,r0
+	mov.l	r0,@(44,r5)
+	tst	r8,r8
+	bf	.Lpoly_page0
+	bra	.Lpoly_body
 	nop
 .Lpoly_page0:
-	mov	#2,r3
-	shll8	r3
-	add	#-1,r3
-	and	r13,r3
-	mov.l	r3,@(0,r7)
-	mov	r7,r2
-	add	#64,r2
+	mov	#2,r6
+	shll8	r6
+	add	#-1,r6
+	and	r13,r6
+	mov.l	r6,@(0,r7)
+	mov	r7,r5
+	add	#64,r5
 	mov	r13,r0
 	and	#15,r0
 	shll2	r0
 	shll2	r0
 	shll2	r0
-	mov.l	r0,@(28,r2)
+	mov.l	r0,@(28,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	and	#1,r0
 	shll8	r0
-	mov.l	r0,@(32,r2)
+	mov.l	r0,@(32,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	shlr	r0
 	and	#3,r0
-	mov.l	r0,@(48,r2)
+	mov.l	r0,@(48,r5)
 	mov	r13,r0
 	shlr2	r0
 	shlr2	r0
 	shlr2	r0
 	shlr	r0
 	and	#3,r0
-	mov.l	r0,@(36,r2)
-	mov.l	@r15+,r14
-	mov.l	@r15+,r13
-	mov.l	@r15+,r12
-	mov.l	@r15+,r11
-	mov.l	@r15+,r10
-	mov.l	@r15+,r9
-	mov.l	@r15+,r8
-	bra	.Lpoly_poly
-	nop
+	bra	.Lpoly_body
+	mov.l	r0,@(36,r5)
 	.global	_recompsx_gpu_poly2
 	.type	_recompsx_gpu_poly2,@function
 _recompsx_gpu_poly2:
@@ -234,53 +255,63 @@ _recompsx_gpu_poly:
 	and	#31,r0
 	mov.l	r9,@-r15
 	shll2	r0
+	mov.l	.Lpoly_ksink,r3
+	shll2	r0
 	mov.l	r10,@-r15
 	shll2	r0
 	mov.l	r11,@-r15
-	shll2	r0
-	mov.l	@(8,r2),r11
-	mov.l	r12,@-r15
+	mov.l	@r3,r8
+	mov	#-32,r10
+	mov.l	@(4,r3),r9
 	mov	r0,r3
+	mov.l	r12,@-r15
+	and	r1,r10
 	mova	.Lpoly_ops,r0
-	shlr16	r11
-	mov.w	.Lpoly_k7fff,r12
+	sub	r8,r9
 	mov.l	r13,@-r15
+	mov	r2,r13
 	add	r0,r3
-	mov.l	@(4,r7),r13
-	and	r11,r12
 	mov.l	r14,@-r15
 	mov.l	@r3,r14
-	xor	r13,r12
-	mov.l	@(28,r3),r10
-	mov	r2,r13
-	add	r14,r13
+	add	#64,r10
+	mov.l	@(8,r2),r11
 	bt	.Lpoly_wrap0
-	and	r10,r12
+	add	r14,r13
+	mov.w	.Lpoly_k7fff,r12
 	mov.l	@(8,r13),r13
-	tst	r12,r12
-	mov.w	.Lpoly_k1ff,r12
+	cmp/ge	r10,r9
+	shlr16	r11
+	mov.l	@(4,r7),r9
+	mov.w	.Lpoly_k1ff,r8
+	and	r11,r12
 	shlr16	r13
-	mov.l	@(0,r7),r8
-	and	r13,r12
-	bf	.Lpoly_clut0
-	xor	r8,r12
-	mov	r14,r9
+	mov.l	@(28,r3),r10
+	mov.l	@(0,r7),r0
+	xor	r9,r12
+	and	r13,r8
+	bf	.Lpoly_wrap0
 	and	r10,r12
-	mov.l	@(8,r7),r10
+	xor	r0,r8
 	tst	r12,r12
-	and	r1,r9
+	and	r10,r8
+	bf	.Lpoly_clut0
+	tst	r8,r8
 	bf	.Lpoly_page0
+.Lpoly_body:
+	mov	r14,r9
 	mov.l	@(32,r3),r4
+	and	r1,r9
 	mov	r7,r5
-	mov	r7,r6
 	and	r9,r4
-	mov.l	@(24,r3),r11
+	mov	r7,r6
 	add	r2,r9
-	mov.w	.Lpoly_k21,r1
+	mov.l	@(8,r7),r10
 	add	#127,r5
+	mov.l	@(24,r3),r11
 	add	r2,r4
-	mov.w	.Lpoly_km21,r2
+	mov.w	.Lpoly_k21,r1
 	add	#4,r9
+	mov.w	.Lpoly_km21,r2
 	add	#17,r5
 	mov.l	r4,@(56,r5)
 	add	#64,r6
@@ -461,67 +492,6 @@ _recompsx_gpu_poly:
 .Lpoly_k5:		.word	5
 .Lpoly_k7fff:	.word	0x7FFF
 .Lpoly_k1ff:		.word	0x1FF
-.Lpoly_join:
-	mov	r7,r6
-	add	#127,r6
-	add	#17,r6
-	mov.l	@(48,r6),r3
-	mov.l	r11,@(20,r6)
-	mov.l	@(4,r3),r1
-	mov.l	@(8,r3),r2
-	shld	r1,r0
-	mov.l	@(32,r3),r5
-	mov	r0,r4
-	mov.l	@(56,r6),r1
-	shlr2	r4
-	mov.l	r8,@(0,r6)
-	add	r4,r0
-	mov.l	r12,@(32,r6)
-	mov	r0,r4
-	mov.l	@r1,r8
-	shlr	r4
-	mov.l	r9,@(4,r6)
-	and	r2,r4
-	mov.l	@(60,r6),r2
-	add	r4,r0
-	mov.l	@(56,r7),r4
-	add	#16,r0
-	mov.l	@(4,r2),r11
-	add	r0,r4
-	mov.l	r13,@(36,r6)
-	mov.l	r4,@(56,r7)
-	mov.l	@r3,r4
-	mov.l	@(28,r3),r14
-	and	r4,r5
-	mov.l	r10,@(16,r6)
-	add	r4,r2
-	mov.l	@(52,r6),r0
-	add	r5,r1
-	mov.l	@(4,r2),r12
-	add	r4,r2
-	mov.l	@r1,r9
-	add	r5,r1
-	mov.l	@(4,r2),r13
-	mov.l	@r1,r10
-	and	r14,r11
-	and	r14,r12
-	mov.l	r8,@(8,r6)
-	and	r14,r13
-	mov.l	r11,@(12,r6)
-	mov.l	r9,@(24,r6)
-	tst	r0,r0
-	mov.l	r12,@(28,r6)
-	mov.l	r10,@(40,r6)
-	mov.l	r13,@(44,r6)
-	bf	.Lpoly_send1
-	mov.l	@r15+,r14
-	mov.l	@r15+,r13
-	mov.l	@r15+,r12
-	mov.l	@r15+,r11
-	mov.l	@r15+,r10
-	mov.l	@r15+,r9
-	rts
-	mov.l	@r15+,r8
 .Lpoly_out1:
 	mov	r8,r1
 	mov	r8,r2
@@ -596,6 +566,102 @@ _recompsx_gpu_poly:
 .Lpoly_nobox:
 	bra	.Lpoly_join
 	mov	#0,r0
+.Lpoly_join:
+	mov	r7,r6
+	mov.l	.Lpoly_ksink,r5
+	add	#127,r6
+	add	#17,r6
+	mov.l	@(48,r6),r3
+	mov.l	@(4,r3),r1
+	mov.l	@(8,r3),r2
+	shld	r1,r0
+	mov.l	@r5,r1
+	mov	r0,r4
+	shlr2	r4
+	add	r4,r0
+	mov	r0,r4
+	shlr	r4
+	and	r2,r4
+	mov	r12,r2
+	add	r4,r0
+	mov.l	@(56,r7),r4
+	add	#16,r0
+	add	r0,r4
+	mov	r8,r0
+	shll16	r0
+	mov.l	r4,@(56,r7)
+	xtrct	r10,r0
+	mov	r11,r4
+	shll16	r2
+	movca.l	r0,@r1
+	xtrct	r9,r2
+	mov.l	@(32,r3),r10
+	shll16	r4
+	mov.l	r2,@(4,r1)
+	xtrct	r13,r4
+	mov.l	@(56,r6),r8
+	mov.l	r4,@(8,r1)
+	mov	#-1,r2
+	mov.l	@r3,r4
+	shlr8	r2
+	mov.l	@r8,r12
+	and	r4,r10
+	mov.l	@(60,r6),r9
+	add	r10,r8
+	mov.l	@(28,r3),r11
+	mov.l	@r8,r13
+	and	r2,r12
+	mov.l	r12,@(12,r1)
+	add	r10,r8
+	and	r2,r13
+	mov.l	@(4,r9),r12
+	add	r4,r9
+	mov.l	r13,@(16,r1)
+	mov.l	@(4,r9),r13
+	add	r4,r9
+	mov.l	@r8,r0
+	and	r11,r12
+	mov.l	@(4,r9),r14
+	and	r11,r13
+	and	r2,r0
+	and	r11,r14
+	mov.l	r0,@(20,r1)
+	extu.b	r14,r0
+	shll8	r0
+	extu.b	r13,r2
+	or	r2,r0
+	shll8	r0
+	extu.b	r12,r2
+	shlr8	r14
+	shlr8	r12
+	or	r2,r0
+	mov.l	@(8,r5),r2
+	shll8	r14
+	shlr8	r13
+	shll16	r12
+	or	r13,r14
+	shll8	r12
+	or	r2,r14
+	mov.l	@(12,r5),r2
+	or	r12,r0
+	mov.l	r0,@(24,r1)
+	mov.w	@r2,r0
+	mov.l	r14,@(28,r1)
+	add	#32,r1
+	add	#1,r0
+	mov.l	r1,@r5
+	mov.w	r0,@r2
+	mov.l	@(52,r6),r0
+	tst	r0,r0
+	bf	.Lpoly_send1
+	mov.l	@r15+,r14
+	mov.l	@r15+,r13
+	mov.l	@r15+,r12
+	mov.l	@r15+,r11
+	mov.l	@r15+,r10
+	mov.l	@r15+,r9
+	rts
+	mov.l	@r15+,r8
 .Lpoly_send1:
 	mov	r7,r13
 	mov	r7,r14
@@ -683,6 +749,7 @@ _recompsx_gpu_poly:
 	.align	2
 .Lpoly_k1ffffc:	.long	0x1FFFFC
 .Lpoly_k1fffd0:	.long	0x1FFFD0
+.Lpoly_ksink:	.long	_bp_gpu_sink
 	.align	5
 .Lpoly_ops:
 	.long	4, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	! 20h
@@ -842,6 +909,11 @@ class Gpu {
 		unchanged copy reported would lay stale pixels over drawn ones.
 	**/
 	public static var reportUploads = false;
+
+	/** A backend that copies what it drew itself hears of every VRAM-to-VRAM copy through
+		`gpuCopy` and of none through `gpuDirty` (bp_caps(BP_CAP_GPU_COPIES), set by the launcher;
+		ADR-0054). **/
+	public static var reportCopies = false;
 
 	// The texture and blend state last handed to a hardware backend, packed. The ABI latches that
 	// state until the next call, so it is sent only when it differs — a quad's second triangle
@@ -1174,8 +1246,8 @@ class Gpu {
 		vc = [for (_ in 0...4) 0];
 		vu = [for (_ in 0...4) 0];
 		vv = [for (_ in 0...4) 0];
-		opCount = RawMem.alloc(256 << 2);
-		wholeWords = RawMem.alloc(0x60 << 2);
+		opCount = GpuTables.ops();
+		wholeWords = GpuTables.whole();
 		for (k in 0...0x60) {
 			final op = 0x20 + k;
 			MemA.set32(wholeWords, k << 2, op <= 0x3F ? polygonWords(op) : (op >= 0x60 ? rectangleWords(op) : -1));
@@ -1299,6 +1371,24 @@ class Gpu {
 		command(v);
 	}
 
+	/**
+		A node that is one whole packet and nothing more — what an ordering table carries nearly
+		always — drawn as `writeGp0Words` draws it, without its loop: the same test (no transfer and
+		no packet in progress, a command it takes whole, every parameter in the node) and the same
+		`wholePacket`, which here ends the node. True when drawn; anything else is the loop's, and
+		nothing has been done. The loop kept its index, its bounds and the node's address live
+		across the polygon's call, and on the SH-4 they went to the stack and back around every
+		node of the list walk (docs/perf/dreamcast-ledger.md, E-160).
+	**/
+	public static inline function wholeNode(ram:RawBuf, addr:Int, count:Int):Bool {
+		final v = MemA.get32(ram, addr & 0x1FFFFC);
+		final n = (xferLeft == 0 && pending == 0) ? wholeParameters(v >>> 24) : -1;
+		final whole = n > 0 && n + 1 == count;
+		if (whole) wholePacket(ram, addr, v >>> 24, n);
+		else {}
+		return whole;
+	}
+
 	/** Parameter words of a packet `writeGp0Words` takes whole — polygons, rectangles — or -1. */
 	static inline function wholeParameters(op:Int):Int {
 		return (op >= 0x20 && op <= 0x7F) ? MemA.get32(wholeWords, (op - 0x20) << 2) : -1;
@@ -1319,9 +1409,87 @@ class Gpu {
 	}
 
 	static function wholeToPacket(ram:RawBuf, at:Int, op:Int, n:Int):Void {
-		for (k in 0...n + 1) packet[k] = MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC);
-		if (op >= 0x60) drawRect(op);
-		else drawPolygon(op);
+		if (op < 0x60 && (op & 0x14) == 0) flatPolygon(ram, at, op);
+		else {
+			for (k in 0...n + 1) packet[k] = MemA.get32(ram, (at + (k << 2)) & 0x1FFFFC);
+			if (op >= 0x60) drawRect(op);
+			else drawPolygon(op);
+		}
+	}
+
+	/**
+		A flat untextured polygon (GP0 20h-23h, a quad 28h-2Bh) the software rasteriser draws —
+		under hardware mode one drawn into VRAM no picture is made of (Crash 3's shadow: ~100
+		triangles a frame of four or five pixels each), everything without a backend — straight
+		from its words: what `drawPolygon` and `triangle` do for it, without the packet's copy, the
+		vertex arrays and the general triangle's choice of path, ~1,100 SH-4 instructions a shadow
+		triangle (docs/perf/dreamcast-ledger.md, E-161). `packet` and the vertex arrays keep what
+		they held: nothing reads them before the next polygon or rectangle writes them.
+	**/
+	static function flatPolygon(ram:RawBuf, at:Int, op:Int):Void {
+		final cmd = MemA.get32(ram, at & 0x1FFFFC);
+		final p1 = MemA.get32(ram, (at + 4) & 0x1FFFFC);
+		final p2 = MemA.get32(ram, (at + 8) & 0x1FFFFC);
+		final p3 = MemA.get32(ram, (at + 12) & 0x1FFFFC);
+		texEnabled = false;
+		texRaw = (op & 0x01) != 0;
+		semiTransparent = (op & 0x02) != 0;
+		final colour = colourOf(cmd);
+		flatTriangle(sx(p1), sy(p1), sx(p2), sy(p2), sx(p3), sy(p3), colour);
+		if ((op & 0x08) != 0) {
+			final p4 = MemA.get32(ram, (at + 16) & 0x1FFFFC);
+			flatTriangle(sx(p2), sy(p2), sx(p3), sy(p3), sx(p4), sy(p4), colour);
+		} else {}
+	}
+
+	/** `triangle` for one colour and no texture, its vertices given: the same winding, rejects,
+	    clipping, GPU time, count, fill rule and spans. */
+	static function flatTriangle(ax:Int, ay:Int, bx:Int, by:Int, cx:Int, cy:Int, colour:Int):Void {
+		// The winding normalised: vertices b and c exchanged when the triangle runs clockwise.
+		final cw = edge(ax, ay, bx, by, cx, cy) < 0;
+		final x0 = ax, y0 = ay;
+		final x1 = cw ? cx : bx, y1 = cw ? cy : by;
+		final x2 = cw ? bx : cx, y2 = cw ? by : cy;
+		var minX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+		var maxX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+		var minY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+		var maxY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+		if (maxX - minX > 1023 || maxY - minY > 511) {} else {
+			final clipLeft = drawAreaTopLeft & 0x3FF;
+			final clipTop = (drawAreaTopLeft >>> 10) & 0x1FF;
+			final clipRight = drawAreaBottomRight & 0x3FF;
+			final clipBottom = (drawAreaBottomRight >>> 10) & 0x1FF;
+			if (minX < clipLeft) minX = clipLeft;
+			else {}
+			if (minY < clipTop) minY = clipTop;
+			else {}
+			if (maxX > clipRight) maxX = clipRight;
+			else {}
+			if (maxY > clipBottom) maxY = clipBottom;
+			else {}
+			final area = edge(x0, y0, x1, y1, x2, y2);
+			if (area != 0) flatCovered(x0, y0, x1, y1, x2, y2, minX, maxX, minY, maxY, area, colour);
+			else {}
+		}
+	}
+
+	/** flatTriangle past its rejects: the GPU time, the count, and the pixels. */
+	static inline function flatCovered(x0:Int, y0:Int, x1:Int, y1:Int, x2:Int, y2:Int,
+			minX:Int, maxX:Int, minY:Int, maxY:Int, area:Int, colour:Int):Void {
+		triangleWork(area, minX, maxX, minY, maxY);
+		primitives++;
+		if (hw) noteDrawn(minX, minY, maxX, maxY);
+		else {}
+		final stepX0 = y1 - y2, stepY0 = x2 - x1;
+		final stepX1 = y2 - y0, stepY1 = x0 - x2;
+		final stepX2 = y0 - y1, stepY2 = x1 - x0;
+		final row0 = edge(x1, y1, x2, y2, minX, minY) + (topLeft(x1, y1, x2, y2) ? 0 : -1);
+		final row1 = edge(x2, y2, x0, y0, minX, minY) + (topLeft(x2, y2, x0, y0) ? 0 : -1);
+		final row2 = edge(x0, y0, x1, y1, minX, minY) + (topLeft(x0, y0, x1, y1) ? 0 : -1);
+		if (maxX - minX < SMALL_WIDTH) smallFlat(minX, maxX, minY, maxY, row0, row1, row2,
+			stepX0, stepX1, stepX2, stepY0, stepY1, stepY2, colour);
+		else flatSpans(minX, maxX, minY, maxY, row0, row1, row2,
+			stepX0, stepX1, stepX2, stepY0, stepY1, stepY2, colour);
 	}
 
 	/**
@@ -1347,26 +1515,25 @@ class Gpu {
 	static function polygonHw(ram:RawBuf, at:Int, op:Int):Void {
 		// On the SH-4 the packet's common case is a core in assembly (ADR-0047: `GpuFile.poly`,
 		// scripts/sh4/poly.blk, scheduled by scripts/dc-sched.py): the texture keys, the flags, each
-		// triangle's rejects, count, GPU time and state test (Gpu.triState, sendState), the backend's
-		// triangle in words 36-47 — 0 drawn, 2 drawn with its state for the backend first in words
-		// 52-61, 3 rejected — or 1 for a packet that could wrap at the end of RAM, which the C form
-		// draws. Elsewhere it is 1 and that form is the whole of it. A triangle drawn is the backend's
-		// record, after the state when there is one to send.
+		// triangle's rejects, count, GPU time and state test (Gpu.triState, sendState), and the
+		// backend's record of the triangle, which it writes itself (ADR-0051) — 0 drawn and recorded,
+		// 2 the same with a new state for the backend in words 52-61, 3 rejected — or 1 for a packet
+		// that could wrap at the end of RAM or the backend has no room for, which the C form draws.
+		// Elsewhere it is 1 and that form is the whole of it. So a triangle drawn under the state the
+		// backend has is done when the core returns: ~100 instructions of the backend's record had
+		// been here, a fifth of the GPU path (docs/perf/dreamcast-ledger.md, E-154).
 		final rc = GpuFile.poly(ram, at, op, 0);
-		if ((rc & 1) == 0 && (op & 0x08) == 0) {
-			if (rc == 2) Backend.gpuStateWords() else {}
-			Backend.gpuTriWords();
-		} else polygonRest(ram, at, op, rc);
+		if (rc == 0 && (op & 0x08) == 0) {} else polygonRest(ram, at, op, rc);
 	}
 
-	/** polygonHw's other cases: a quad's second triangle, a rejected one, and the packet the core
-	    declined (the C form). Out of line, so that the common case's frame is the core's call and the
-	    backend's calls alone. */
+	/** polygonHw's other cases: a new state for the backend, a quad's second triangle, a rejected
+	    one, and the packet the core declined (the C form). Out of line, so that the common case's
+	    frame is the core's call alone. */
 	@:specifier("__attribute__((noinline))")
 	static function polygonRest(ram:RawBuf, at:Int, op:Int, rc:Int):Void {
 		if (rc != 1) {
-			triRecord(rc);
-			if ((op & 0x08) != 0) triRecord(GpuFile.poly(ram, at, op, 1));
+			triDone(rc);
+			if ((op & 0x08) != 0) triDone(GpuFile.poly(ram, at, op, 1));
 			else {}
 		} else {
 			polygonC(ram, at, op);
@@ -1374,13 +1541,11 @@ class Gpu {
 		}
 	}
 
-	/** A triangle the core answered for: the state it left for the backend first (2), then the
-	    backend's record from the GPU file's words; nothing for a rejected one (3). */
-	static inline function triRecord(rc:Int):Void {
-		if (rc != 3) {
-			if (rc == 2) Backend.gpuStateWords() else {}
-			Backend.gpuTriWords();
-		} else {}
+	/** A triangle the core answered for: recorded (0), recorded under the state the backend had,
+	    which then takes the new one from the GPU file's words 52-61 and the record into it (2), or
+	    rejected (3). */
+	static inline function triDone(rc:Int):Void {
+		if (rc == 2) Backend.gpuStateAfterTri() else {}
 	}
 
 	/**
@@ -1784,7 +1949,14 @@ class Gpu {
 		// backend holding a decoded copy of that region now holds a stale one — if a pixel changed.
 		// Crash Bash copies one 2x1 onto itself at every buffer flip, which changes nothing and
 		// told the Dreamcast backend the picture had changed ~500 times per 1000 vblanks.
-		if (hw && copyChanged) Backend.gpuDirty(dx0, dy0, w, h);
+		// A backend that copies what it drew itself (bp_caps(BP_CAP_GPU_COPIES), ADR-0054) hears
+		// of every copy instead, in its place among the primitives: emulated VRAM lacks what the
+		// backend drew, and a copy out of a buffer on screen is a copy of that. Not of one onto
+		// itself, which moves nothing — unless it sets the mask bit.
+		if (hw && reportCopies) {
+			if (sx0 != dx0 || sy0 != dy0 || maskSet) Backend.gpuCopy(sx0, sy0, dx0, dy0, w, h, copyChanged ? 1 : 0);
+			else {}
+		} else if (hw && copyChanged) Backend.gpuDirty(dx0, dy0, w, h);
 		else {}
 	}
 
@@ -2113,6 +2285,9 @@ class Gpu {
 			texturedSpans(a, b, c, x0, y0, c0, x1, y1, c1, x2, y2, c2,
 				minX, maxX, minY, maxY, row0, row1, row2,
 				stepX0, stepX1, stepX2, stepY0, stepY1, stepY2);
+		} else if (c0 == c1 && c1 == c2 && maxX - minX < SMALL_WIDTH) {
+			smallFlat(minX, maxX, minY, maxY, row0, row1, row2,
+				stepX0, stepX1, stepX2, stepY0, stepY1, stepY2, colourOf(c0));
 		} else if (c0 == c1 && c1 == c2) {
 			flatSpans(minX, maxX, minY, maxY, row0, row1, row2,
 				stepX0, stepX1, stepX2, stepY0, stepY1, stepY2, colourOf(c0));
@@ -2176,6 +2351,7 @@ class Gpu {
 		them through calls of seven and nine arguments and spent in the calls what the divisions
 		had cost. Crash 3 draws its shadow into VRAM this way, ~460 rows a frame.
 	**/
+	@:specifier("__attribute__((noinline))")
 	static function flatSpans(minX:Int, maxX:Int, minY:Int, maxY:Int,
 			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
 			stepY0:Int, stepY1:Int, stepY2:Int, colour:Int):Void {
@@ -2243,6 +2419,56 @@ class Gpu {
 			if (m1 >= d1) { m1 = (m1 - d1) | 0; q1 = (q1 + 1) | 0; } else {}
 			q2 = (q2 + qt2) | 0; m2 = (m2 + mt2) | 0;
 			if (m2 >= d2) { m2 = (m2 - d2) | 0; q2 = (q2 + 1) | 0; } else {}
+			y++;
+		}
+		pixels = (pixels + written) | 0;
+	}
+
+	/** A bounding box narrower than this (after clipping) is drawn pixel by pixel (`smallFlat`). */
+	static inline var SMALL_WIDTH = 16;
+
+	/**
+		flatSpans for a narrow bounding box: each of its pixels tested against the three edge
+		functions, stepped by adds along the row and down the rows.
+
+		The same pixels: along a row each edge function is linear in the column, so the columns
+		where all three are non-negative are one run, the run flatSpans solves for in closed form
+		(rowSpan), and the writes and the count are the same — a pixel each, none written twice.
+		What it does without is that solving: six divisions a triangle and a quotient carried for
+		each edge a row, ~1,100 SH-4 instructions for each of the ~100 4x4 triangles of Crash 3's
+		shadow a game frame, where a 4x4 box is sixteen tests. Below SMALL_WIDTH a row of tests
+		costs less than a row of flatSpans' carries, the divisions aside.
+	**/
+	@:specifier("__attribute__((noinline))")
+	static function smallFlat(minX:Int, maxX:Int, minY:Int, maxY:Int,
+			row0:Int, row1:Int, row2:Int, stepX0:Int, stepX1:Int, stepX2:Int,
+			stepY0:Int, stepY1:Int, stepY2:Int, colour:Int):Void {
+		final blend = semiTransparent, mode = semiMode;
+		final check = maskCheck, set = maskSet;
+		final value = set ? colour | 0x8000 : colour;
+		final opaque = !blend && !check;
+		final last = maxX - minX;
+		final px = Vram.buffer();
+		var written = 0;
+		var r0 = row0, r1 = row1, r2 = row2;
+		var first = Vram.rowStart(minY) + minX;
+		var y = minY;
+		while (y <= maxY) {
+			var w0 = r0, w1 = r1, w2 = r2;
+			var k = 0;
+			while (k <= last) {
+				// All three non-negative: no sign bit in any of them.
+				if ((w0 | w1 | w2) >= 0) {
+					if (opaque) {
+						MemA.set16(px, (first + k) << 1, value);
+						written++;
+					} else written += plotPixel(first + k, colour, blend, mode, check, set);
+				} else {}
+				w0 = (w0 + stepX0) | 0; w1 = (w1 + stepX1) | 0; w2 = (w2 + stepX2) | 0;
+				k++;
+			}
+			r0 = (r0 + stepY0) | 0; r1 = (r1 + stepY1) | 0; r2 = (r2 + stepY2) | 0;
+			first += Vram.WIDTH;
 			y++;
 		}
 		pixels = (pixels + written) | 0;
@@ -2414,10 +2640,17 @@ class Gpu {
 					else t = texel4(texRow, pageX, tu, clutRow, clutCol);
 					// A zero texel is transparent. Bit 15 means "blend me" — but only for a
 					// command that asked to blend at all; for an opaque command the same bit
-					// means nothing and the texel is drawn as it is.
+					// means nothing and the texel is drawn as it is. Either way the pixel
+					// written keeps it: "the upper bit of the data written to the framebuffer
+					// is equal to bit15 of the texture color" while GP0(E6h).0 is off
+					// (psx-spx, "GPU Rendering Attributes"). Crash Bandicoot: Warped's
+					// transition draws the frame back over itself as a semi-transparent
+					// texture, so only the pixels its textures marked blend; with the bit
+					// dropped every pixel read as opaque, and the effect lost its colours.
 					if (t != 0) {
 						final c = raw ? t & 0x7FFF : modulate(t, r >> CFRAC, g >> CFRAC, b >> CFRAC);
-						written += plotPixel(pixel, c, blendable && (t & 0x8000) != 0, mode, check, set);
+						final stp = (t & 0x8000) != 0;
+						written += plotPixel(pixel, c, blendable && stp, mode, check, set || stp);
 					} else {}
 					r = (r + drdx) | 0; g = (g + dgdx) | 0; b = (b + dbdx) | 0;
 					u = (u + dudx) | 0; v = (v + dvdx) | 0;

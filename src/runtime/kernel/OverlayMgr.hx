@@ -67,9 +67,10 @@ class OverlayMgr {
 	static var spanLo = 0;
 	static var spanHi = 0;
 	/**
-		Told whenever the declared windows change. The program keeps answers for addresses outside
-		every window (FnTable's fast path), and those hold only while the windows do. A callback
-		rather than a counter the hot path compares: windows change at boot, calls never stop.
+		Told whenever the declared windows change, and whenever what is resident in them does. The
+		program keeps answers to dynamic calls (FnTable's fast path), and those hold only while the
+		windows and their residents do. A callback rather than a counter the hot path compares:
+		windows change at boot and residents at loads, calls never stop.
 	**/
 	static var windowsChanged:Void -> Void = unwatched;
 
@@ -324,6 +325,7 @@ class OverlayMgr {
 	static function evict(i:Int):Void {
 		resident[i] = false;
 		evictions++;
+		windowsChanged();
 		final noteKey = 0x6E100000 | i;
 		if (!Runtime.alreadyReported(noteKey)) {
 			Runtime.noteOnce(noteKey, "overlay " + i + " was overwritten and no longer "
@@ -362,7 +364,7 @@ class OverlayMgr {
 			} else {}
 		}
 		if (found == 0) fruitlessRescans++;
-		else {}
+		else windowsChanged();
 		return found;
 	}
 

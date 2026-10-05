@@ -45,7 +45,8 @@ enum {
     BP_CAP_PREFERRED_SCALE  = 3,
     BP_CAP_GPU_DRAW         = 4,   /* nonzero: this backend can rasterise primitives itself */
     BP_CAP_SPU_VOICES       = 5,   /* nonzero: this backend can play the SPU's voices itself */
-    BP_CAP_GPU_UPLOADS      = 6    /* nonzero: report every upload through bp_gpu_dirty (below) */
+    BP_CAP_GPU_UPLOADS      = 6,   /* nonzero: report every upload through bp_gpu_dirty (below) */
+    BP_CAP_GPU_COPIES       = 7    /* nonzero: report every VRAM-to-VRAM copy through bp_gpu_copy */
 };
 int  bp_caps(int cap_id);
 
@@ -136,6 +137,27 @@ void bp_gpu_tri(int x0, int y0, int c0, int u0, int v0,
  * work, where fifteen arguments made in one frame were spilled around it on the SH-4. */
 void bp_gpu_tri_w(const int* w);
 
+/* The triangle sink (ADR-0051): where an SH-4 runtime's polygon core (ADR-0047) writes a triangle's
+ * record itself, in the 32-byte form the backend keeps them in — words 0-2 the positions as halfword
+ * pairs (x0 x1, x2 y0, y1 y2, the first in the low half), 3-5 the colour words' 24 bits, 6 u0 u1 u2
+ * v0 a byte each, 7 v1 v2 in its low half and `tag` in its high one — and then moves `next` one
+ * record on and counts one in the halfword at `tris`. It writes only while `end - next` leaves room
+ * for every triangle of its packet; a backend closes it (end = next) while a record must go through
+ * bp_gpu_tri_w instead (a frame shown and the next not begun). Only the Dreamcast's backend has one,
+ * and only the SH-4's core reads it. */
+typedef struct {
+    uint32_t* next;
+    uint32_t* end;
+    uint32_t  tag;
+    uint16_t* tris;
+} bp_gpu_sink_t;
+extern bp_gpu_sink_t bp_gpu_sink;
+
+/* The core recorded a triangle under the state the backend had, and found the runtime's state not the
+ * one last sent (ADR-0051): the new state as ten words, as bp_gpu_state_w takes them, and the record
+ * written last taken into it, its tag and its count. */
+void bp_gpu_state_after_tri(const int* w);
+
 /* An axis-aligned rectangle in one flat colour: sprites and GP0(02h) fills both land here. A
  * fill ignores the mask bits on the PlayStation, so it arrives under bp_gpu_mask(0, 0). */
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
@@ -154,6 +176,18 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
  * reported only when they changed something: the runtime copies emulated VRAM, which lacks what
  * the backend drew, so an unchanged copy reported would put stale pixels over drawn ones. */
 void bp_gpu_dirty(int x, int y, int w, int h);
+
+/* GP0(80h), a VRAM-to-VRAM copy of w x h from (sx, sy) to (dx, dy), in its place among the
+ * primitives — only to a backend that answers bp_caps(BP_CAP_GPU_COPIES) nonzero, which then hears
+ * of no copy through bp_gpu_dirty (ADR-0054). A copy onto itself is reported only when it sets the
+ * mask bit. `changed`: whether emulated VRAM's destination changed, which is all a copy out of
+ * what emulated VRAM holds amounts to (bp_gpu_dirty's rule). A copy out of what the backend drew
+ * moves what it drew, which emulated VRAM lacks: Crash Bandicoot: Warped's transition copies the
+ * frame on screen into the other buffer and draws it back over itself, turning, as a texture, and
+ * from emulated VRAM's copy of the buffers that was a stale picture or none. Emulated VRAM has the
+ * copy too, under the mask bits, as always; a backend applies them (bp_gpu_mask) to its own copy,
+ * and where the source is not something it drew, emulated VRAM's result is the copy's. */
+void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed);
 
 /* The drawing area, both corners inclusive, as GP0(E3h)/(E4h) set it. Triangles are drawn only
  * inside it. A double-buffered game draws into the buffer it is not displaying, and its
@@ -215,14 +249,33 @@ int  bp_audio_buffered(void);
  * are the slots A-D of the multitap in port 1, and pad 1 is also port 2 until a game uses the tap
  * (ADR-0042). Pad 0 is the one a one-player game hears.
  * Call bp_input_poll once per emulated vertical blank; the accessors then read a stable
- * snapshot, so a frame never sees input change underneath it. */
+ * snapshot, so a frame never sees input change underneath it.
+ *
+ * What a pad is plugged in as follows bp_pad_type (ADR-0052). BP_PAD_ANALOG, a host controller
+ * with sticks, is a DualShock (SCPH-1200); any other pad that is connected is a digital pad
+ * (SCPH-1080). A DualShock powers on in digital mode, as the real one does, so a game that knows
+ * only digital pads sees one. A game that knows the DualShock switches it to analog mode itself,
+ * or the player does with its ANALOG button: BP_PAD_ANALOG_BUTTON in bp_pad_buttons, a button the
+ * pad keeps to itself and never reports to the machine. bp_pad_axis is read for a BP_PAD_ANALOG pad
+ * only: 0 left or up, 255 right or down, 128 centred. A host with one stick reports the right one
+ * centred.
+ *
+ * bp_pad_rumble carries the DualShock's two motors as the game drives them. `small` (the right
+ * motor) is 0 off or 1 on; `large` (the left motor) is 0 stopped up to 255 fastest, and already 0
+ * where the real motor would not turn. The runtime calls it right after bp_input_poll whenever they
+ * change — (0, 0) when they stop, and when a pad goes away — and they stay so until the next call.
+ * A host whose effects run for a set time renews them from bp_input_poll; a host with one motor
+ * runs it for whichever of the two is stronger; a host with none ignores the call. Like the rest of
+ * the backend it never affects emulated state. */
 enum { BP_PAD_NONE = 0, BP_PAD_DIGITAL = 1, BP_PAD_ANALOG = 2 };
+#define BP_PAD_ANALOG_BUTTON (1u << 16)
 
 void     bp_input_poll(void);
 int      bp_pad_connected(int pad);
 int      bp_pad_type(int pad);
-uint32_t bp_pad_buttons(int pad);          /* PS1 bit layout, active high, low 16 bits */
+uint32_t bp_pad_buttons(int pad);          /* PS1 bit layout, active high, low 16 bits; and bit 16 */
 int      bp_pad_axis(int pad, int axis);   /* 0=LX 1=LY 2=RX 3=RY; 0..255, centre 128 */
+void     bp_pad_rumble(int pad, int small, int large);   /* 0/1, 0..255 */
 int      bp_quit_requested(void);
 
 /* ---- keyboard ------------------------------------------------------------------------------

@@ -7,7 +7,7 @@ import shim.RawBuf;
 import shim.RawMem;
 
 /**
-	SIO0 — the serial port the controllers and memory cards live on, and a digital pad on it.
+	SIO0 — the serial port the controllers and memory cards live on, and the pads on it.
 
 	The port is a byte-at-a-time SPI master: writing DR shifts a byte out while the selected device
 	shifts one back, and a device that wants the next byte pulls /ACK low for a moment — the
@@ -15,15 +15,17 @@ import shim.RawMem;
 	"Serial Interfaces (SIO)" and "Controllers and Memory Cards" (docs/specs/runtime.md §7.11).
 
 	What is plugged in comes from `Pads`, latched once per vblank: digital pads (SCPH-1080)
-	answering the standard read — address 01h, then ID 5A41h and two bytes of buttons, active low.
-	Port 1 has a multitap in it (`Multitap`, ADR-0042), which answers for its slot A as a pad does
-	and, asked, for all four slots. The memory card in slot 1 (`MemoryCard`) answers at 81h with
-	the read, write and ID commands a Sony card has. An empty port, and the card address of an
-	empty slot, answer every byte with FFh and never acknowledge: that is how libpad and libcard see
-	nothing there and move on.
+	answering the standard read — address 01h, then ID 5A41h and two bytes of buttons, active low —
+	and, for a host pad with sticks, DualShocks (`DualShock`, ADR-0052), which answer the same until
+	a game or the player switches them to analog mode. Port 1 has a multitap in it (`Multitap`,
+	ADR-0042), which answers for its slot A as a pad does and, asked, for all four slots. The memory
+	card in slot 1 (`MemoryCard`) answers at 81h with the read, write and ID commands a Sony card
+	has. An empty port, and the card address of an empty slot, answer every byte with FFh and never
+	acknowledge: that is how libpad and libcard see nothing there and move on.
 
 	A digital pad answers every command as it answers 42h (read). It has no configuration mode, so a
-	library probing for one (43h) is handed the digital ID and settles for a digital pad.
+	library probing for one (43h) is handed the digital ID and settles for a digital pad. A DualShock
+	enters configuration mode there.
 **/
 class Sio0 {
 	// SR, 1F801044h.
@@ -86,6 +88,8 @@ class Sio0 {
 	static var device = NOBODY;
 	/** The pad's buttons as of its address byte, so that one transfer reports one moment. */
 	static var latched = 0;
+	/** Which of the host's pads (`Pads`) the selection reads, while `device` is PAD. */
+	static var padIndex = 0;
 	/** The selection is a slot-A read through the multitap: what it answers, and its request —
 	    whether the third byte was 01h — which the tap acts on at the next one. */
 	static var tapAccess = false;
@@ -282,9 +286,9 @@ class Sio0 {
 			if (step == 2 && tapAccess) tapRequest = v == 0x01;
 			else {}
 			if (step == 0) address(v);
-			else if (device == PAD) padByte();
+			else if (device == PAD) padByte(v);
 			else if (device == CARD) cardByte(v);
-			else if (device == TAP_LONG) tapLongByte();
+			else if (device == TAP_LONG) tapLongByte(v);
 			else if (device == TAP_GARBAGE) tapGarbageByte();
 			else {
 				reply = 0xFF;
@@ -309,7 +313,7 @@ class Sio0 {
 		final pad = Pads.padOnPort(port);
 		if (v == 0x01 && pad >= 0 && Pads.isConnected(pad)) {
 			device = PAD;
-			latched = Pads.buttonsOf(pad);
+			choose(pad);
 			acks = true;
 		} else if (v == 0x81 && MemoryCard.isPresent(port)) {
 			device = CARD;
@@ -328,7 +332,7 @@ class Sio0 {
 				tapAccess = true;
 				tapKind = Multitap.next();
 				tapRequest = false;
-				latched = Pads.buttonsOf(0);
+				choose(0);
 				if (tapKind == Multitap.LONG) {
 					Multitap.latch();
 					Multitap.used();
@@ -340,7 +344,7 @@ class Sio0 {
 		} else if (v >= 0x02 && v <= 0x04) {
 			if (Pads.isConnected(v - 1)) {
 				device = PAD;
-				latched = Pads.buttonsOf(v - 1);
+				choose(v - 1);
 				acks = true;
 				Multitap.used();
 			} else {}
@@ -350,8 +354,23 @@ class Sio0 {
 		} else {}
 	}
 
-	/** The long read after its address: ID 5A80h, then the four slots' 32 bytes; no /ACK last. */
-	static function tapLongByte():Void {
+	/** The pad that answers from the next byte on, its buttons (and a DualShock's sticks) as they are now. */
+	static function choose(pad:Int):Void {
+		padIndex = pad;
+		latched = Pads.buttonsOf(pad);
+		if (Pads.isDualShock(pad)) DualShock.select(pad);
+		else {}
+	}
+
+	/**
+		The long read after its address: ID 5A80h, then the four slots' 32 bytes; no /ACK last. Each
+		slot's eight bytes are its controller's answer to the eight the host sent in that window of
+		the *previous* long read — a command, its TAP byte and six more, as a transfer of its own
+		after the address the tap gives it (ADR-0042 amended, ADR-0052). The bytes sent now go to the
+		controllers when this read ends (`Multitap.finished`). So libpad configures a DualShock in a
+		slot, and drives its motors, through long reads, a read behind.
+	**/
+	static function tapLongByte(v:Int):Void {
 		if (step == 1) {
 			reply = 0x80;
 			acks = true;
@@ -360,6 +379,7 @@ class Sio0 {
 			acks = true;
 		} else if (step < 3 + Multitap.SLOT_BYTES) {
 			reply = Multitap.slotByte(step - 3);
+			Multitap.command(step - 3, v);
 			acks = step < 2 + Multitap.SLOT_BYTES;
 		} else {
 			reply = 0xFF;
@@ -376,7 +396,7 @@ class Sio0 {
 			reply = 0x5A;
 			acks = true;
 		} else if (step == 3) {
-			reply = 0x41;
+			reply = Pads.isDualShock(0) ? DualShock.readAt(0, 0) : 0x41;
 			acks = false;
 		} else {
 			reply = 0xFF;
@@ -384,8 +404,17 @@ class Sio0 {
 		}
 	}
 
+	/** A pad after its address byte, `v` the byte the host sends: a DualShock's answer, or a digital pad's. */
+	static function padByte(v:Int):Void {
+		if (Pads.isDualShock(padIndex)) {
+			final r = DualShock.answer(step, v);
+			reply = r & 0xFF;
+			acks = (r & DualShock.ACK) != 0;
+		} else digitalByte();
+	}
+
 	/** A digital pad after its address: ID 5A41h, then the buttons, active low; no /ACK last. */
-	static function padByte():Void {
+	static function digitalByte():Void {
 		if (step == 1) {
 			reply = 0x41;
 			acks = true;

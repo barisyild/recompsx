@@ -49,8 +49,17 @@ class Timers {
 	}
 
 	public static function read(addr:Int, cycles:Int):Int {
-		final t = timerOf(addr);
+		// Timer 2 in a body of its own, its index a constant: it counts the system clock only, so
+		// the dot clock's and the horizontal blank's tests, the fold and the source's lookup leave
+		// it. It is the counter games poll — libpad's timeouts, the sound driver's tempo — and the
+		// commonest port read there is: Crash 3's gameplay reads its mode and count ~280 times a
+		// frame, Crash Bash's ~490 (docs/perf/dreamcast-ledger.md, E-126).
 		final reg = addr & 0xF;
+		if (timerOf(addr) == 2) return readOf(2, reg, cycles);
+		else return readOf(timerOf(addr), reg, cycles);
+	}
+
+	static inline function readOf(t:Int, reg:Int, cycles:Int):Int {
 		if (reg == 0x0) return value(t, cycles);
 		else if (reg == 0x4) return readMode(t, cycles);
 		else if (reg == 0x8) return target[t];

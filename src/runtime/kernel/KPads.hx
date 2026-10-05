@@ -3,6 +3,7 @@ package kernel;
 import core.CpuState;
 import core.Irq;
 import mem.Memory;
+import sio.DualShock;
 import sio.Pads;
 
 /**
@@ -156,14 +157,21 @@ class KPads {
 
 	/**
 		One port, as OpenBIOS `readPad` leaves its buffer: a digital pad writes status 00h, ID 41h
-		and its two button bytes (active low); a port nobody answers only gets status FFh. The BIOS
-		sends 00h as a read's third byte, so a multitap never gives it more than slot A: port 1 is
-		pad 0 either way (`Pads.padOnPort`).
+		and its two button bytes (active low); a port nobody answers only gets status FFh. A
+		DualShock (ADR-0052) writes what it answers a read with: as a digital pad in digital mode,
+		and in analog mode ID 73h, the buttons and the sticks RX RY LX LY — the six bytes its ID
+		counts. The BIOS sends 00h as a read's third byte, so a multitap never gives it more than slot
+		A: port 1 is pad 0 either way (`Pads.padOnPort`). Its motor bytes are not modelled: libetc's
+		pad calls, which this driver serves, never configure a DualShock's motors.
 	**/
 	static function readPad(pad:Int):Void {
 		final on = Pads.padOnPort(pad);
 		if (on < 0 || !Pads.isConnected(on)) {
 			put(pad, 0, 0xFF);
+		} else if (Pads.isDualShock(on)) {
+			put(pad, 1, DualShock.readAt(on, 0));
+			for (k in 2...DualShock.readLength(on)) put(pad, k, DualShock.readAt(on, k));
+			put(pad, 0, 0x00);
 		} else {
 			final pressed = Pads.buttonsOf(on);
 			put(pad, 1, 0x41);

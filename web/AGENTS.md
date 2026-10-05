@@ -12,10 +12,42 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   with the browser tool's console reader.
 - Hardware drawing is `gpu-webgl.js` (ADR-0020): WebGL2, `vramTex` (R16UI, emulated VRAM as the
   runtime wrote it) and `fbTex` (RGBA8, the rendered picture), texels decoded in the shader,
-  primitives in submission order, the four blend equations, the mask bit as the stencil (it
-  stores the bit a write would: cleared unless "set", set in a subtracting primitive's blending
-  pass). Drawn tiles are converted back into `vramTex` when a primitive samples them. The page
-  loads the renderer under its own version from `build.json`.
+  primitives in submission order, the four blend equations. Colour is the PlayStation's five bits
+  a channel (ADR-0054): the shader cuts a primitive's colour as gpu.Gpu's `modulate`/`pack555` do,
+  and fbTex stores k as (k + 1/2) / 32 — read it back as `floor(32 * c)`, never as `c * 255 >> 3`;
+  that lets mode 0 floor like the hardware. Compare a picture against the reference by reading
+  fbTex back (`readPixels` on the context after `peek` binds fbo) and POSTing it to a local
+  receiver, beside `--vram-at` dumps of the same vblanks from Node. The mask bit is the depth buffer
+  (`fbDepth`, a DEPTH24_STENCIL8 texture): every fragment writes the bit the PlayStation stores
+  as `gl_FragDepth` — 1 under "set", otherwise the texel's bit 15, 0 untextured (ADR-0054); the
+  stencil serves "check" alone, rebuilt from the depth. Drawn tiles are converted back into
+  `vramTex` (bit 15 from the depth) when a primitive samples them. VRAM-to-VRAM copies arrive as
+  `bp_gpu_copy` (the shim answers capability 7, `BP_CAP_GPU_COPIES`) and are drawn from fbTex and
+  its depth through a scratch target, so a copy out of a buffer on screen copies what was drawn
+  there (Crash 3's level transitions). The page loads the renderer under its own version from
+  `build.json`.
+- **A framebuffer must renew its texture after an upload (ANGLE on Metal).** Chrome 152 on an Apple
+  GPU gives a texture fresh storage when `texSubImage2D` writes it while the GPU may still read it,
+  and a framebuffer that had it attached goes on drawing into the old storage — silently, no GL
+  error, `checkFramebufferStatus` complete. `syncDrawn` therefore detaches and attaches vramTex to
+  `wordFbo` every time (ADR-0054); any new framebuffer over an uploaded texture needs the same.
+  Found because Crash 3's attract loop ends its second demo with a transition 40 frames after a
+  palette upload: the converted words went nowhere and the picture halved to black at once.
+- Finding a frame in the page itself: `?slow=auto` plays 300 frames in slow motion from each copy
+  of the picture on screen (WebGL only: the renderer counts them), `?slow=A-B,C-D` those frames,
+  `?slowfps=N` how slowly (10), `?ff=N` with the speed limit off and nothing slowed until frame N;
+  any of them, or `?frames`, shows the frame number on the picture (the vblank `--pad-script`
+  counts) and gives the keys "," (slow motion on/off) and "." (one frame, while paused). The loop
+  stops inside a tick when the host pauses (`BrowserLoop`), so a pause is exact to the frame.
+- The page appends each `arg` of its address to the runtime's command line:
+  `?arg=--pad-script&arg=4700:CROSS,4710:-` (sio.PadScript) is a browser run that reaches the same
+  frames every time — how a picture bug is found at one vblank. To watch frames from the first, wrap
+  `recompsxHost.present` from a setter on `globalThis.recompsxHost` defined before Start is pressed
+  (the page creates the host after fetching the files, and the game presents at once); counting
+  presents from a wrapper installed later is off by however many already ran. The renderer's
+  diagnostics (`peek`, `peekVram`, `drawnTile`, `glCheck`, `syncs`, `copies`) read fbTex, vramTex
+  and the tile books at such a frame. A hidden pane runs an unpaced game at ~12 frames a second
+  and a paced one not at all.
 - Because drawn pixels become texels, the renderer must hear of every upload, not only of those
   that changed emulated VRAM: the shim answers `BP_CAP_GPU_UPLOADS` (capability 6) and the
   runtime then reports them all (`Gpu.reportUploads`). Without it Crash Bash's menu lost all its
@@ -31,7 +63,12 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   bundle, which jumped to address zero at boot.
 - Input: `src/shims/js/shim/Input.hx`, browser externs (`js.Browser`, `KeyboardEvent`,
   `Gamepad`), SDL2 key names, the standard gamepad mapping. Four pads: the keyboard with the first
-  gamepad, then the second to fourth gamepads — the multitap's slots A-D (ADR-0042). It also types for the machine's PS/2
+  gamepad, then the second to fourth gamepads — the multitap's slots A-D (ADR-0042). A pad with a
+  gamepad behind it is a DualShock (ADR-0052): axes 0-3 are its sticks (made bytes in plain JS),
+  button 16 its ANALOG button, and its motors play on `vibrationActuator` ("dual-rumble", 500 ms,
+  renewed every 4 polls); the keyboard alone is a digital pad. A fake gamepad (an object with
+  `buttons`, `axes`, `index`, `connected` and a `vibrationActuator` whose `playEffect` records its
+  calls, returned by a replaced `navigator.getGamepads`) tests it in the pane. It also types for the machine's PS/2
   keyboard (ADR-0036, ADR-0040): while text entry is on — while that keyboard is polled —
   `KeyboardEvent.key` goes to a queue and only the arrows stay pad buttons. Synthetic key events reach it, but a pad press must outlast a vblank — and a
   hidden pane throttles rAF to about one frame a second, so hold presses for over a second there.

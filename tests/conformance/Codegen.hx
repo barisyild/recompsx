@@ -224,6 +224,18 @@ class Codegen {
 		else CodegenReference.deadWrites(ctx);
 	}
 
+	/** A span one path needs, taken at that path's block (Emitter.deferEntryTakes): `a0` picks the
+	    path, `a1` the words — in RAM, the scratchpad, or straddling the end of either. */
+	static function runDeferredSpan(ctx:CpuState, opt:Bool, a0:Int, a1:Int):Void {
+		reset(ctx);
+		Memory.write32(a1, (a1 & 0xFFFF) + 3);
+		Memory.write32((a1 + 4) | 0, (a1 & 0xFFFF) + 5);
+		ctx.a0 = a0;
+		ctx.a1 = a1;
+		if (opt) CodegenOptimized.deferredSpan(ctx);
+		else CodegenReference.deferredSpan(ctx);
+	}
+
 	public static function main():Void {
 		final a = new CpuState();
 		final b = new CpuState();
@@ -326,6 +338,12 @@ class Codegen {
 		runDeadWrites(b, true);
 		compare(a, b);
 		Conf.expect("dead-write result", b.v0, 5);
+		for (base in [0x80040100, 0x1F800100, 0x801FFFFC, 0x1F8003FC]) for (a0 in [-1, 1]) {
+			runDeferredSpan(a, false, a0, base);
+			runDeferredSpan(b, true, a0, base);
+			compare(a, b);
+			Conf.expect("deferred span result", b.v0, a0 < 0 ? 7 : a.v0);
+		}
 		// Through RAM, then across the end of RAM into its first mirror (the step leaves the
 		// region, the next turn takes the span again from the new value), then the scratchpad.
 		for (w in [[0x80040200, 5, 7], [0x801FFFF0, 3, 11], [0x1F800100, 4, 13]]) {

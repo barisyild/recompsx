@@ -32,6 +32,12 @@ extern class GpuFile {
 	@:nativeFunctionCode("bp_gpu_tri_w(recompsx_gpu + 36)")
 	public static function backendTri():Void;
 
+	/** After the core recorded a triangle under the backend's state and answered 2 (ADR-0051): the
+	    state words 52-61 hold, which the backend takes and moves that record into
+	    (`recompsx_gpu_state_after_tri` in gpu.Gpu's header: bp_gpu_state_after_tri). */
+	@:nativeFunctionCode("recompsx_gpu_state_after_tri()")
+	public static function backendStateAfterTri():Void;
+
 	/** The core's check build (`-DRECOMPSX_GPU_POLY_CHECK=1`): after the C form drew a packet. */
 	@:nativeFunctionCode("recompsx_gpu_poly_after(({arg0}))")
 	public static function polyChecked(op:Int):Void;

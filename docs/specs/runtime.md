@@ -276,7 +276,10 @@ Texturing: texpage base (X×64, Y×256) + window; 4bpp `clut[(v16 >> 4*(u&3)) & 
 (cmd bit25; texels: only if texel bit15): modes 0 `(B+F)/2`, 1 `B+F`, 2 `B−F`, 3 `B+F/4` per
 5-bit channel, clamp 0..31. Dither (E1 bit9, on 8→5 conversion): `c5 = clamp8(c8 + D[y&3][x&3])
 >> 3`, D rows `{-4,0,-3,1},{2,-2,3,-1},{-3,1,-4,0},{3,-1,2,-2}`; polys if gouraud/modulated,
-lines always, rects never. Mask per E6. Clip: draw-area ∩ VRAM.
+lines always, rects never. Mask per E6: a written pixel's bit 15 is 1 under E6.0, otherwise
+the texel's bit 15 for a textured primitive (psx-spx, GPU Rendering Attributes) and 0 for an
+untextured one ([ADR-0054](../decisions/ADR-0054-reading-back-what-was-drawn.md)). Clip:
+draw-area ∩ VRAM.
 
 **Scanout**: at VBLANK_START build `ScanoutDesc {srcX, srcY, width (from hres divider + h-range,
 clamped to 256/320/368/512/640), height (240/480i), bpp15/24, interlaced, pal, dispEnabled}`;
@@ -539,7 +542,18 @@ JOY_MODE, /ACK 170 cycles after a byte and low for 100, IRQ7 on its edge when bi
 a digital pad (ID 5A41h) on each port `sio.Pads` reports, answering every command as 42h; the
 memory card address and empty ports answer FFh with no /ACK; and the kernel pad path, B0:12h-16h
 (`kernel.KPads`, adapted from OpenBIOS sio0/pad.c and driver.c, MIT). Headless runs keep both
-ports empty. Not yet: analog pads and config mode. Conformance: `PadSio`, `PadBios`.
+ports empty. Conformance: `PadSio`, `PadBios`.
+
+**DualShock (2026-10-04, ADR-0052)**: a host pad with sticks (`bp_pad_type` BP_PAD_ANALOG) is an
+SCPH-1200 (`sio.DualShock`), byte for byte per nocash's psx-spx. It powers on digital (5A41h, L3/R3
+not reported); ANALOG (bit 16 of `bp_pad_buttons`) toggles analog mode (5A73h, 9 bytes, sticks RX
+RY LX LY) unless 44h locked it; 43h's fourth byte 01h enters configuration mode (5AF3h, 9 bytes:
+42h all inputs, 43h exit, 44h mode and lock, 45h/46h/47h/48h/4Ch constants, 4Dh the motor mapping,
+old one out); mapped read bytes drive the small motor (bit 0) and the large one (speed), and an
+unconfigured pad runs its small motor the old way (40h..7Fh, odd). The motors go to the backend
+once a vblank when they change (`bp_pad_rumble`; the large one from 50h at rest down to 38h
+running). The tap's long read, slots B-D, port 2 and the BIOS handler all see it. Scripts:
+`--pad-dualshock`, sticks as `F:B/LX.LY.RX.RY`, `--log-rumble`. Conformance: `DualShockSio`.
 
 **Memory cards (2026-09-28, ADR-0037)**: one card, in slot 1 (`sio.MemoryCard`); slot 2 is empty.
 It answers at 81h on SIO0 with a Sony card's read, write and ID commands (the table below, the
@@ -559,7 +573,7 @@ protocol state. ISR-driven (libpad) and busy-poll loops both ride these events.
 **Controller protocol**: digital `01 42 00 00 00` ⇄ `HiZ 41 5A lo hi` (ID 0x5A41; buttons
 active-low: 0 Sel, 1 L3, 2 R3, 3 Start, 4–7 Up/Right/Down/Left, 8 L2, 9 R2, 10 L1, 11 R1, 12 △,
 13 ○, 14 ✕, 15 □). Analog ID 0x5A73 + RX,RY,LX,LY (center 0x80). Config mode: 0x43 (ID 0xF3),
-0x44 LED, 0x45 status, 0x46/47/4C constants, 0x4D rumble map; P0 scope = digital + analog reads.
+0x44 LED, 0x45 status, 0x46/47/4C constants, 0x4D rumble map — the DualShock above implements them.
 
 **Multitap (2026-09-29, ADR-0042)**: a Multitap is in port 1 (`sio.Multitap`), and the host's
 pads 0-3 are in its slots A-D.
@@ -570,6 +584,9 @@ pads 0-3 are in its slots A-D.
   empty slot A leaves the address unacknowledged.
 - **Other addresses:** 02h-04h answer as slots B-D's pads. 81h is the machine's card; 82h-84h
   hold none.
+- **Slot windows (ADR-0052):** in a long read each slot's eight bytes are a transfer of its own to
+  that slot's controller — the host's command, TAP byte and six more in, its answers out — so a
+  DualShock in a slot is configured and driven there; a digital pad answers every command as a read.
 - **Port 2:** pad 1 is in port 2 as well until the game uses the tap (a long read, or B-D
   answering). Then it is in slot B only.
 - **No digest moves:** with no pads, the tap answers as an empty port does.

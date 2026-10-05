@@ -74,8 +74,15 @@ package core;
 	there are not a `lock` prefix but a gUSA sequence, so if anything the case is stronger.
 **/
 // The machine's own instance on C++ (shim.CpuStateHome): declared for every file that includes
-// this header, defined once beside the class. Ignored by targets without C++ files.
+// this header, defined once beside the class. Ignored by targets without C++ files. With fastmem
+// (ADR-0049) the header also brings the guest accesses' own (recompsx_arena.h, shim.P0): generated
+// code reaches them only through inlined accessors, which leave no class behind for reflaxe.CPP to
+// include, and every generated function names CpuState.
+#if recompsx_fastmem
+@:headerCode("#include \"recompsx_arena.h\"\n#if !RECOMPSX_FASTMEM || !defined(__sh__)\n#error \"a fastmem tree (build/game-cpp-dc.hxml, ADR-0049) is the Dreamcast's: scripts/build-dc.sh builds it with RECOMPSX_FASTMEM\"\n#endif\nnamespace core { class CpuState; }\nextern core::CpuState recompsx_cpustate;")
+#else
 @:headerCode("namespace core { class CpuState; }\nextern core::CpuState recompsx_cpustate;")
+#end
 @:cppFileCode("core::CpuState recompsx_cpustate;")
 @:unsafePtrType
 @:declarationOrder

@@ -7,7 +7,14 @@
 
 const uint16_t* g_vram;          /* emulated VRAM, borrowed; NULL until armed */
 gcmd_t   g_cmds[GPU_MAX_CMDS];
-int      g_cmd_count;
+/* The polygon core's way in (ADR-0051, backend_c_api.h): the next record, the buffer's end, and the
+ * current state's tag and count, which state_enter keeps (sink_state). Its next is the frame's count
+ * (cmd_count): cmd_line appends there too. Open from the start, as a frame is; closed while one is
+ * shown (present_frame), reopened by begin_frame. Before the frame's first state its records count
+ * into g_sink_no_tris, which nothing reads — as bp_gpu_tri_w counted none then. */
+static uint16_t g_sink_no_tris;
+bp_gpu_sink_t bp_gpu_sink = { (uint32_t*)g_cmds, (uint32_t*)(g_cmds + GPU_MAX_CMDS), 0, &g_sink_no_tris };
+_Static_assert(GCMD_TRI == 0, "a sink tag is a state index, a triangle's kind being 0");
 gstate_t g_states[GPU_MAX_STATES];
 int      g_state_count;
 /* The state records name now (cmd_new): the one last entered, which state_enter finds among those
@@ -130,6 +137,36 @@ static inline int bgr_brightens(uint32_t c) {
     return (c & ((c & 0x007F7F7Fu) + 0x007F7F7Fu) & 0x00808080u) != 0;
 }
 
+/* The three above for a vertex's colour at once, from two constants where they take five (run_tris,
+ * where those five and the spread's shift were held in registers the vertex terms wanted, and
+ * spilled: ledger E-159). `t` is the channels' top bits, `l` their low seven, `u` 0x7F in each
+ * channel whose top bit is set (t - (t >> 7)), so that byte_mask(t) is t + u: the doubled colour is
+ * 2l | (t + u), a channel brightens where l & u, and what the clamp loses is (2l | t >> 7) & (t + u).
+ * Every one of the 2^24 colours gives the bits the functions above give (checked on the host). */
+typedef struct { uint32_t t, l, u; } gbgr_t;
+
+static inline gbgr_t bgr_parts(uint32_t c) {
+    gbgr_t p;
+    p.t = c & 0x00808080u;
+    p.l = c ^ p.t;
+    p.u = p.t - ((p.t + p.t) >> 8);
+    return p;
+}
+
+/** swap_rb for a colour of 24 bits, from its one constant: green is what the mask leaves. */
+static inline uint32_t swap_rb24(uint32_t c) {
+    uint32_t x = c & 0x00FF00FFu;
+    const uint32_t g = c ^ x;
+    __asm__("swap.w %1, %0" : "=r" (x) : "r" (x));
+    return x | g;
+}
+
+static inline uint32_t bgr_parts_mod(gbgr_t p) { return swap_rb24((p.l + p.l) | (p.t + p.u)); }
+static inline uint32_t bgr_parts_bright(gbgr_t p) { return p.l & p.u; }
+static inline uint32_t bgr_parts_over(gbgr_t p) {
+    return swap_rb24(((p.l + p.l) | (p.t >> 7)) & (p.t + p.u));
+}
+
 /** Drops the presented frame's geometry, the moment anything belonging to the next one arrives.
  *  Both entry points call it, and both must: state is latched before the primitive that uses it,
  *  so resetting in one place only would dedup a new frame's state against a dead table and then
@@ -155,10 +192,35 @@ static inline void begin_frame_if_needed(void) {
 static uint16_t g_rect_at[RECT_KEEP];
 static int      g_rect_n, g_rect_over, g_marks;
 
+/* The sink's state: what a record the core writes under the current state carries and counts into. */
+static inline void sink_state(void) {
+    bp_gpu_sink.tag = ((uint32_t)g_state_cur & 0x3FFFu) << 16;
+    bp_gpu_sink.tris = &g_states[g_state_cur].tris;
+}
+
 static void begin_frame(void) {
+    /* Through the pictures (ADR-0053) a frame's records are rendered once, at the present after
+     * them; a VRAM mark recorded since — an upload between frames — is not in a picture yet, and
+     * the picture, not emulated VRAM, is the next frame's background. So it moves to the front of
+     * the new frame instead of going with the old one. */
+    int keep = 0;
+    if(g_pic_active) {
+        const int n = cmd_count();
+        for(int i = g_pic_done; i < n; i++) {
+            if(g_cmds[i].is_rect >= GCMD_VRAM) {
+                if(keep != i) shz_memcpy32_1(&g_cmds[keep], &g_cmds[i]);
+                else {}
+                keep++;
+            } else {}
+        }
+    } else {}
+    g_pic_done = 0;
     g_frame_shown = 0;
-    g_cmd_count = 0;
-    g_rect_n = 0; g_rect_over = 0; g_marks = 0;
+    bp_gpu_sink.next = (uint32_t*)(void*)(g_cmds + keep);
+    bp_gpu_sink.end = (uint32_t*)(g_cmds + GPU_MAX_CMDS);
+    bp_gpu_sink.tag = 0;
+    bp_gpu_sink.tris = &g_sink_no_tris;
+    g_rect_n = 0; g_rect_over = 0; g_marks = keep;
     /* The latched state carries over as the new frame's first entry: the ABI latches it until
      * the next bp_gpu_state, and the runtime now sends one only when it changes, so the first
      * primitive of a frame may well arrive under the last frame's state. */
@@ -168,6 +230,7 @@ static void begin_frame(void) {
         g_state_count = 1;
         g_state_cur = 0;
         g_states[0].tris = 0;       /* the new frame's count starts here */
+        sink_state();
     } else {}
     state_table_reset();
 }
@@ -243,6 +306,7 @@ static inline void state_enter(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w
         else {}
         if(state_same(&g_states[k - 1], w0, w1, w2, w3, w4, w5, w6)) {
             g_state_cur = k - 1;
+            sink_state();
             return;
         } else {}
         h = (h + 1) & ((1u << SDEDUP_BITS) - 1);
@@ -262,6 +326,7 @@ static inline void state_enter(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w
     if(g_state_count < SDEDUP_FILL) g_sdedup[h] = (uint16_t)(g_state_count + 1);
     else {}
     g_state_cur = g_state_count++;
+    sink_state();
 }
 
 /* A state from the runtime: its words with the drawing area latched by bp_gpu_clip. */
@@ -297,7 +362,8 @@ void bp_gpu_state_w(const int* w) {
 /* A new record's line, allocated in the cache without a read (see gcmd_t). The caller writes
  * every field a reader of its kind looks at; the rest of the line is undefined, as it was stale. */
 static inline gcmd_t* cmd_alloc(void) {
-    gcmd_t* c = &g_cmds[g_cmd_count++];
+    gcmd_t* c = (gcmd_t*)(void*)bp_gpu_sink.next;
+    bp_gpu_sink.next += 8;
     shz_dcache_alloc_line(c);
     return c;
 }
@@ -306,7 +372,7 @@ static inline gcmd_t* cmd_alloc(void) {
 static inline gcmd_t* cmd_line(void) {
     begin_frame_if_needed();
     g_scene_dirty = 1;
-    if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }
+    if(cmd_count() >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return NULL; }
     return cmd_alloc();
 }
 
@@ -351,9 +417,9 @@ __attribute__((always_inline))
 void bp_gpu_tri_w(const int* w) {
     gcmd_t* c = cmd_line();
     if(!c) return;
-    uint32_t state = 0;
-    if(g_state_count > 0) { state = (uint32_t)g_state_cur; g_states[state].tris++; }
-    else {}
+    /* The current state's tag and count, as the polygon core takes them from the sink: state 0 and
+     * no count before the frame's first state. */
+    (*bp_gpu_sink.tris)++;
     const uint32_t t0 = (uint32_t)w[3], t1 = (uint32_t)w[7], t2 = (uint32_t)w[11];
     c->w[0] = ((uint32_t)w[0] & 0xFFFFu) | ((uint32_t)w[4] << 16);
     c->w[1] = ((uint32_t)w[8] & 0xFFFFu) | ((uint32_t)w[1] << 16);
@@ -362,7 +428,21 @@ void bp_gpu_tri_w(const int* w) {
     c->w[4] = (uint32_t)w[6] & 0x00FFFFFFu;
     c->w[5] = (uint32_t)w[10] & 0x00FFFFFFu;
     c->w[6] = (t0 & 0xFFu) | ((t1 & 0xFFu) << 8) | ((t2 & 0xFFu) << 16) | ((t0 & 0xFF00u) << 16);
-    c->w[7] = (t1 >> 8) | (t2 & 0xFF00u) | (((state & 0x3FFFu) | ((uint32_t)GCMD_TRI << 14)) << 16);
+    c->w[7] = (t1 >> 8) | (t2 & 0xFF00u) | bp_gpu_sink.tag;
+}
+
+/* After the polygon core recorded a triangle under the state it had and answered 2 (ADR-0051): the
+ * new state, and the record the core wrote last moved into it when it is another — the tag in its
+ * last halfword and the count — as if the state had come first, as it does through bp_gpu_tri_w. */
+void bp_gpu_state_after_tri(const int* w) {
+    uint16_t* const was = bp_gpu_sink.tris;
+    bp_gpu_state_w(w);
+    if(bp_gpu_sink.tris != was) {
+        (*was)--;
+        (*bp_gpu_sink.tris)++;
+        uint32_t* const r = bp_gpu_sink.next - 8;
+        r[7] = (r[7] & 0xFFFFu) | bp_gpu_sink.tag;
+    } else {}
 }
 
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
@@ -418,6 +498,48 @@ static int screen_origin(const gstate_t* s, int* ox, int* oy, int* ow, int* oh) 
     return 0;
 }
 
+/* State s's buffer added to the n targets in t, unless it is there already or t is full. */
+static int add_target(int t[][4], int n, int max, const gstate_t* s) {
+    int ox, oy, ow, oh;
+    if(n >= max || !screen_origin(s, &ox, &oy, &ow, &oh)) return n;
+    else {}
+    for(int k = 0; k < n; k++) {
+        if(t[k][0] == ox && t[k][1] == oy && t[k][2] == ow && t[k][3] == oh) return n;
+        else {}
+    }
+    t[n][0] = ox; t[n][1] = oy; t[n][2] = ow; t[n][3] = oh;
+    return n + 1;
+}
+
+/* The buffers the records from `from` on draw into, each the rectangle screen_origin finds, at most
+ * `max` of them, distinct (ADR-0053: the pictures a present renders). By state: each one a triangle
+ * was recorded under, and each fill's. Not every state of the frame: the first is the last frame's
+ * last, carried over (begin_frame), which in a double-buffered game draws into the other buffer.
+ * Counted, it had every present of Crash 3 render the picture on screen again, over itself: a
+ * second scene, a second walk of the frame's records with none of them placed. */
+int state_targets(int t[][4], int max, int from) {
+    int n = 0;
+    for(int i = 0; i < g_state_count && n < max; i++) {
+        if(g_states[i].tris != 0) n = add_target(t, n, max, &g_states[i]);
+        else {}
+    }
+    const int ncmd = cmd_count();
+    if(g_rect_over) {
+        for(int i = from; i < ncmd && n < max; i++) {
+            if(g_cmds[i].is_rect == GCMD_RECT) n = add_target(t, n, max, &g_states[g_cmds[i].state]);
+            else {}
+        }
+    } else {
+        for(int k = 0; k < g_rect_n && n < max; k++) {
+            const int i = g_rect_at[k];
+            if(i >= from && i < ncmd && g_cmds[i].is_rect == GCMD_RECT)
+                n = add_target(t, n, max, &g_states[g_cmds[i].state]);
+            else {}
+        }
+    }
+    return n;
+}
+
 /* True when rectangle a lies inside rectangle b (corner, size). */
 int inside(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     return ax >= bx && ay >= by && ax + aw <= bx + bw && ay + ah <= by + bh;
@@ -441,14 +563,18 @@ int inside(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
 static void mark_vram(int x, int y, int w, int h) {
     if(w <= 0 || h <= 0) return;
     if(!meets(g_disp[0], x, y, w, h) && !meets(g_disp[1], x, y, w, h)) return;
-    int i = g_cmd_count;
-    while(i > 0 && g_cmds[i - 1].is_rect == GCMD_VRAM) i--;
-    for(int k = i; k < g_cmd_count; k++) {
+    const int n = cmd_count();
+    /* Through the pictures (ADR-0053) the marks before g_pic_done are in a picture already: a new
+     * upload inside one is new content, and is neither dropped for it nor compacted with it. */
+    const int floor = g_pic_active ? g_pic_done : 0;
+    int i = n;
+    while(i > floor && g_cmds[i - 1].is_rect == GCMD_VRAM) i--;
+    for(int k = i; k < n; k++) {
         const gcmd_t* m = &g_cmds[k];
         if(inside(x, y, w, h, m->x[0], m->y[0], m->x[1], m->y[1])) return;
     }
     int out = i;
-    for(int k = i; k < g_cmd_count; k++) {
+    for(int k = i; k < n; k++) {
         const gcmd_t* m = &g_cmds[k];
         if(!inside(m->x[0], m->y[0], m->x[1], m->y[1], x, y, w, h)) {
             if(out != k) shz_memcpy32_1(&g_cmds[out], m);
@@ -456,8 +582,8 @@ static void mark_vram(int x, int y, int w, int h) {
             out++;
         } else {}
     }
-    g_cmd_count = out;
-    if(g_cmd_count >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return; }
+    bp_gpu_sink.next = (uint32_t*)(void*)&g_cmds[out];
+    if(out >= GPU_MAX_CMDS) { g_cmd_overflowed = 1; return; }
     gcmd_t* c = cmd_alloc();
     g_marks++;
     c->is_rect = GCMD_VRAM;
@@ -485,8 +611,57 @@ void bp_gpu_mask(int set_bit, int check_bit) {
     g_mask_set = set_bit; g_mask_check = check_bit;
 }
 
+static void textures_stale(int x, int y, int w, int h);
+
 void bp_gpu_dirty(int x, int y, int w, int h) {
     g_scene_dirty = 1;
+    textures_stale(x, y, w, h);
+    mark_vram(x, y, w, h);
+}
+
+/* GP0(80h) (ADR-0054). Out of a buffer this backend draws — through the pictures, a buffer on
+ * screen or the one before it — a record, drawn where it falls among the primitives from the source
+ * buffer's picture (draw_copy): emulated VRAM's copy of a buffer lacks what was drawn in it. Out of
+ * anything else emulated VRAM holds the copy, and it is a write like an upload's, when it changed
+ * something there (`changed`, bp_gpu_dirty's rule). Into VRAM no
+ * picture is made of from a buffer, there is nowhere to put what was drawn: emulated VRAM's copy
+ * stands there, stale, and it is said once. */
+void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed) {
+    /* Onto itself it moves nothing a picture holds: the runtime reports one only when it sets the
+     * mask bit, which a picture does not keep (Crash Bash's 2x1 at every flip of its warning
+     * screen). */
+    if(sx == dx && sy == dy) return;
+    else {}
+    const int drawn = g_pic_active
+        && (inside(sx, sy, w, h, g_disp[0][0], g_disp[0][1], g_disp[0][2], g_disp[0][3])
+            || inside(sx, sy, w, h, g_disp[1][0], g_disp[1][1], g_disp[1][2], g_disp[1][3]));
+    if(!drawn) {
+        if(changed) bp_gpu_dirty(dx, dy, w, h);
+        else {}
+        return;
+    } else {}
+    g_scene_dirty = 1;
+    textures_stale(dx, dy, w, h);
+    if(!meets(g_disp[0], dx, dy, w, h) && !meets(g_disp[1], dx, dy, w, h)) {
+        static int warned;
+        if(!warned) { warned = 1; bp_log(BP_LOG_WARN, "gpu: a copy out of a buffer into VRAM no picture is made of (stale there)"); }
+        else {}
+        return;
+    } else {}
+    gcmd_t* c = cmd_line();
+    if(!c) return;
+    else {}
+    g_marks++;
+    c->is_rect = GCMD_COPY;
+    c->state = 0;
+    c->x[0] = (int16_t)dx; c->y[0] = (int16_t)dy;
+    c->x[1] = (int16_t)w;  c->y[1] = (int16_t)h;
+    c->x[2] = (int16_t)sx; c->y[2] = (int16_t)sy;
+}
+
+/* What emulated VRAM's write under this rectangle makes stale: the background slots and every
+ * texture, palette and patch decoded out of it. */
+static void textures_stale(int x, int y, int w, int h) {
     /* Only the background slots whose rectangle the write meets: games blit into their back
      * buffer every frame while displaying the front one, and treating any write anywhere as "the
      * picture changed" made that 5.5 ms a frame for a picture that had not. A 24bpp slot read
@@ -498,7 +673,6 @@ void bp_gpu_dirty(int x, int y, int w, int h) {
             b->valid = 0;
         else {}
     }
-    mark_vram(x, y, w, h);
     /* Anything decoded out of this rectangle is now a copy of what used to be there. Evict by
      * page and by palette: a CLUT is sixteen or two hundred and fifty-six halfwords on one line,
      * and repainting it changes every texture that reads through it. */
@@ -614,16 +788,47 @@ static int covers(const gcmd_t* c, int sw, int sh) {
 
 int last_cover(int sw, int sh) {
     if(g_rect_over) {
-        for(int i = g_cmd_count - 1; i >= 0; i--) {
+        for(int i = cmd_count() - 1; i >= 0; i--) {
             const gcmd_t* c = &g_cmds[i];
             if(c->is_rect == GCMD_RECT && covers(c, sw, sh)) return i;
             else {}
         }
         return -1;
     } else {}
+    const int n = cmd_count();
     for(int k = g_rect_n - 1; k >= 0; k--) {
         const int i = g_rect_at[k];
-        if(i < g_cmd_count && g_cmds[i].is_rect == GCMD_RECT && covers(&g_cmds[i], sw, sh)) return i;
+        if(i < n && g_cmds[i].is_rect == GCMD_RECT && covers(&g_cmds[i], sw, sh)) return i;
+        else {}
+    }
+    return -1;
+}
+
+/* The last opaque fill from record `from` on that covers the whole of the buffer at tx, ty (sw x sh),
+ * or -1: last_cover, for one picture of several (ADR-0053). */
+static int covers_at(const gcmd_t* c, int tx, int ty, int sw, int sh) {
+    const gstate_t* s = &g_states[c->state];
+    if(s->flags & BP_GPU_SEMI) return 0;
+    int ox, oy, ow, oh;
+    if(!screen_origin(s, &ox, &oy, &ow, &oh) || ox != tx || oy != ty) return 0;
+    const int x0 = c->x[0] - ox, y0 = c->y[0] - oy;
+    return x0 <= 0 && y0 <= 0 && x0 + c->x[1] >= sw && y0 + c->y[1] >= sh;
+}
+
+int last_cover_at(int tx, int ty, int sw, int sh, int from) {
+    const int n = cmd_count();
+    if(g_rect_over) {
+        for(int i = n - 1; i >= from; i--) {
+            const gcmd_t* c = &g_cmds[i];
+            if(c->is_rect == GCMD_RECT && covers_at(c, tx, ty, sw, sh)) return i;
+            else {}
+        }
+        return -1;
+    } else {}
+    for(int k = g_rect_n - 1; k >= 0; k--) {
+        const int i = g_rect_at[k];
+        if(i < from) break;
+        else if(i < n && g_cmds[i].is_rect == GCMD_RECT && covers_at(&g_cmds[i], tx, ty, sw, sh)) return i;
         else {}
     }
     return -1;
@@ -635,9 +840,10 @@ int marks_from(int first, int sx, int sy, int sw, int sh) {
     if(g_marks == 0) return 0;      /* none this frame: no walk */
     else {}
     const int disp[4] = { sx, sy, sw, sh };
-    for(int i = first < 0 ? 0 : first; i < g_cmd_count; i++) {
+    const int n = cmd_count();
+    for(int i = first < 0 ? 0 : first; i < n; i++) {
         const gcmd_t* c = &g_cmds[i];
-        if(c->is_rect == GCMD_VRAM && meets(disp, c->x[0], c->y[0], c->x[1], c->y[1])) return 1;
+        if(c->is_rect >= GCMD_VRAM && meets(disp, c->x[0], c->y[0], c->x[1], c->y[1])) return 1;
     }
     return 0;
 }
@@ -660,6 +866,42 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
     const float w0 = (float)(y0 - sy) / (float)g_txh, w1 = (float)(y1 - sy) / (float)g_txh;
     const float px0 = (float)(x0 - sx) * scale_x, px1 = (float)(x1 - sx) * scale_x;
     const float py0 = (float)(y0 - sy) * scale_y, py1 = (float)(y1 - sy) * scale_y;
+    v.flags = PVR_CMD_VERTEX;
+    v.x = px0; v.y = py0; v.u = u0; v.v = w0; put_vtx(&v);
+    v.x = px1; v.y = py0; v.u = u1; v.v = w0; put_vtx(&v);
+    v.x = px0; v.y = py1; v.u = u0; v.v = w1; put_vtx(&v);
+    v.flags = PVR_CMD_VERTEX_EOL;
+    v.x = px1; v.y = py1; v.u = u1; v.v = w1; put_vtx(&v);
+    return 1;
+}
+
+/** A copy into the buffer at sx, sy being rendered (ADR-0054): the picture of the buffer it reads,
+ *  1:1 and replacing, where its destination falls in this one — the PlayStation copies what that
+ *  buffer holds, which emulated VRAM lacks. A source with no picture yet: emulated VRAM's result,
+ *  as a mark is drawn. Inside one buffer the picture read is the one this render started from.
+ *  Returns 1 when something was drawn. */
+static int draw_copy(const gcmd_t* c, int sx, int sy, int sw, int sh) {
+    int x0 = c->x[0], y0 = c->y[0], x1 = c->x[0] + c->x[1], y1 = c->y[0] + c->y[1];
+    if(x0 < sx) x0 = sx;
+    if(y0 < sy) y0 = sy;
+    if(x1 > sx + sw) x1 = sx + sw;
+    if(y1 > sy + sh) y1 = sy + sh;
+    if(x0 >= x1 || y0 >= y1) return 0;
+    else {}
+    const int cx = c->x[2] + (x0 - c->x[0]), cy = c->y[2] + (y0 - c->y[0]);
+    int px, py;
+    const pvr_poly_hdr_t* src = pic_source(cx, cy, x1 - x0, y1 - y0, &px, &py);
+    if(!src) return draw_mark(c, sx, sy, sw, sh, 1.0f, 1.0f);
+    else {}
+    put_hdr(src);
+    pvr_vertex_t v;
+    v.argb = 0xFFFFFFFFu;
+    v.oargb = 0;
+    v.z = 1.0f;
+    const float u0 = (float)(cx - px) / (float)PIC_W, u1 = (float)(cx - px + x1 - x0) / (float)PIC_W;
+    const float w0 = (float)(cy - py) / (float)PIC_H, w1 = (float)(cy - py + y1 - y0) / (float)PIC_H;
+    const float px0 = (float)(x0 - sx), px1 = (float)(x1 - sx);
+    const float py0 = (float)(y0 - sy), py1 = (float)(y1 - sy);
     v.flags = PVR_CMD_VERTEX;
     v.x = px0; v.y = py0; v.u = u0; v.v = w0; put_vtx(&v);
     v.x = px1; v.y = py0; v.u = u1; v.v = w0; put_vtx(&v);
@@ -699,7 +941,7 @@ static float emit_header_compile(pvr_ptr_t mem, int fmt, int dim, const gstate_t
     pvr_poly_cxt_t cxt;
     const int blends = (s->flags & BP_GPU_SEMI) && kind == HK_NORMAL;
     if(mem && kind != HK_INVERT) {
-        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim, dim, mem, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, fmt, dim, dim_v(dim), mem, PVR_FILTER_NONE);
         /* MODULATE keeps the texel's own alpha: a transparent texel reaches the blender with
          * alpha 0 and the blend below keeps the destination, which is what the PlayStation's
          * "texel zero draws nothing" means. */
@@ -753,10 +995,11 @@ static float emit_header_compile(pvr_ptr_t mem, int fmt, int dim, const gstate_t
  * multiply-add, and on the SH-4 fmac takes its multiplier in fr0 and overwrites its addend, so each
  * one also cost a move into fr0 and a copy of the offset. Texture terms stay exact: rh = rdim / 2
  * is a power of two. */
-typedef struct { float sx, sy, rh; int ox, oy, ou2, ov2; } gvert_t;
+typedef struct { float sx, sy, rh, rv; int ox, oy, ou2, ov2; } gvert_t;
 
-static inline void vert_set(gvert_t* t, float sx, float sy, int ox, int oy, float rdim, int ou, int ov) {
-    t->sx = sx; t->sy = sy; t->rh = 0.5f * rdim;
+static inline void vert_set(gvert_t* t, float sx, float sy, int ox, int oy, float rdim, float rdimv,
+                            int ou, int ov) {
+    t->sx = sx; t->sy = sy; t->rh = 0.5f * rdim; t->rv = 0.5f * rdimv;
     t->ox = ox; t->oy = oy; t->ou2 = 2 * ou - 1; t->ov2 = 2 * ov - 1;
 }
 
@@ -801,7 +1044,7 @@ static inline uint32_t put_tri_at(uint32_t a, const gcmd_t* c, const uint32_t* c
         const float x = (float)(c->x[k] - t->ox) * t->sx;
         const float y = (float)(c->y[k] - t->oy) * t->sy;
         const float u = (float)(2 * c->u[k] - t->ou2) * t->rh;
-        const float v = (float)(2 * c->v[k] - t->ov2) * t->rh;
+        const float v = (float)(2 * c->v[k] - t->ov2) * t->rv;
         a ^= 32;
         sq_vertex(a + 32, (k == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, x, y, u, v, col[k]);
     }
@@ -900,7 +1143,13 @@ typedef struct __attribute__((aligned(32))) {
     };
     int16_t   bank, slot;
     uint8_t   patch8, bind_ok, hdr_ok;
+    /* What a return to the state can take from here without asking anything again (build_scene's
+     * fast path): 0 nothing; else the header is the one its triangles' binding wants, and that
+     * binding is a page mirror's bank (SRES_MIR), a page slot's (SRES_SLOT, checked against what the
+     * slot holds) or none, untextured (SRES_FLAT). */
+    uint8_t   fast;
 } gsres_t;
+enum { SRES_MIR = 1, SRES_SLOT = 2, SRES_FLAT = 3 };
 static gsres_t g_sres[1 << SRES_BITS];
 
 /* A binding of the semi-transparent path, as semi_bind made it (see g_semi_binds). */
@@ -916,12 +1165,16 @@ typedef struct {
     /* What put_clipped adds after scaling, for the triangle it is given: the reciprocal of the bound
      * texture's size, so the clipper multiplies where it used to divide — SH-4's FDIV is expensive
      * and poorly pipelined — and the offsets. */
-    float     rdim, xo, yo, uo, vo;
+    float     rdim, rdimv, xo, yo, uo, vo;
     /* The current state's buffer corner in VRAM (screen_origin) and its drawing area, both in
      * VRAM units: the area as integers for the inside test, and as the edges the clipper cuts
      * at — the right and bottom one past the last pixel, since pixel x covers [x, x + 1). */
     int       ox, oy, clx0, cly0, clx1, cly1;
     int       cut_x, cut_y;   /* whether an edge of that axis lies inside the picture at all */
+    /* The same edges as tri_inside takes them: a coordinate is inside when (unsigned)(v - lo) is at
+     * most span (cut_span). */
+    int       xlo, ylo;
+    uint32_t  xspan, yspan;
     /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
      * and the run's next primitive must say its own again. That used to be a full lookup — the
      * state compared, the cache hashed and searched — twice per brightened primitive, and a busy
@@ -979,6 +1232,8 @@ typedef struct {
     int       bank[AM_N], slot[AM_N];   /* -2: not asked yet */
     int       patch8, cls;
     pvr_ptr_t mir;
+    pvr_ptr_t pic;                      /* a page in a buffer's picture (ADR-0054), its offsets */
+    int       pou, pov;
 } grun_t;
 
 static void run_begin(grun_t* r, const gstate_t* s, int state) {
@@ -993,6 +1248,17 @@ static void run_begin(grun_t* r, const gstate_t* s, int state) {
      * whole page is decoded only for a primitive sampling across patches. */
     r->patch8 = s->depth == 1 && plain;
     r->cls = (s->flags & BP_GPU_SEMI) ? clut_class(s) : CLS_SOLID;
+    /* A 15-bit page in a buffer this backend draws: its picture (ADR-0054). A picture keeps no bit
+     * 15, so every texel is taken as the PlayStation's "blend me" one — what most of a frame drawn
+     * from Crash Bandicoot: Warped's textures carries (83 % of its pixels when its transition
+     * reads it back). */
+    r->pic = NULL;
+    if(s->depth == 2 && (s->window & 0x3FF) == 0 && pic_page(s->tex_x, s->tex_y, &r->pic, &r->pou, &r->pov)) {
+        r->mir = NULL;
+        r->patch8 = 0;
+        if(s->flags & BP_GPU_SEMI) r->cls = CLS_STP;
+        else {}
+    } else {}
 }
 
 /* The 64x64 patch a primitive samples within, if it samples within one. */
@@ -1135,17 +1401,33 @@ static void put_clipped(const gcmd_t* c, const uint32_t* col, const gscene_t* g)
         v[k].g = (float)((col[k] >> 8) & 0xFF);
         v[k].b = (float)(col[k] & 0xFF);
     }
-    /* Only the edges that lie inside the picture, each step writing the other buffer. */
+    /* Only the edges that lie inside the picture, each step writing the other buffer — and of
+     * those only the ones the triangle reaches past: a step with every vertex on its inner side
+     * copies them as they are, in order, and adds none, so it is left out. The triangle's own
+     * integers decide it: a step on one axis adds vertices at its edge, an area's height or width
+     * away from the other edge of that axis; one on x adds vertices whose y is interpolated and may
+     * lie an ulp outside the triangle's, so after one the y edges are skipped only when the
+     * triangle is a whole unit inside them. A triangle crossing the drawing area's bottom took four
+     * steps where it needs one (ledger E-113). */
+    const int xmin = c->x[0] < c->x[1] ? (c->x[0] < c->x[2] ? c->x[0] : c->x[2]) : (c->x[1] < c->x[2] ? c->x[1] : c->x[2]);
+    const int xmax = c->x[0] > c->x[1] ? (c->x[0] > c->x[2] ? c->x[0] : c->x[2]) : (c->x[1] > c->x[2] ? c->x[1] : c->x[2]);
+    const int ymin = c->y[0] < c->y[1] ? (c->y[0] < c->y[2] ? c->y[0] : c->y[2]) : (c->y[1] < c->y[2] ? c->y[1] : c->y[2]);
+    const int ymax = c->y[0] > c->y[1] ? (c->y[0] > c->y[2] ? c->y[0] : c->y[2]) : (c->y[1] > c->y[2] ? c->y[1] : c->y[2]);
     int n = 3;
+    int xcut = 0;
     cvert_t* t;
     if(g->cut_x) {
-        n = clip_step(v, n, w, 0, (float)g->clx0, 1);          t = v; v = w; w = t;
-        if(n) { n = clip_step(v, n, w, 0, (float)(g->clx1 + 1), 0); t = v; v = w; w = t; }
-    }
+        if(xmin < g->clx0) { n = clip_step(v, n, w, 0, (float)g->clx0, 1); t = v; v = w; w = t; xcut = 1; }
+        else {}
+        if(n && xmax > g->clx1 + 1) { n = clip_step(v, n, w, 0, (float)(g->clx1 + 1), 0); t = v; v = w; w = t; xcut = 1; }
+        else {}
+    } else {}
     if(g->cut_y && n) {
-        n = clip_step(v, n, w, 1, (float)g->cly0, 1);          t = v; v = w; w = t;
-        if(n) { n = clip_step(v, n, w, 1, (float)(g->cly1 + 1), 0); t = v; v = w; w = t; }
-    }
+        if(ymin < g->cly0 + xcut) { n = clip_step(v, n, w, 1, (float)g->cly0, 1); t = v; v = w; w = t; }
+        else {}
+        if(n && ymax > g->cly1 + 1 - xcut) { n = clip_step(v, n, w, 1, (float)(g->cly1 + 1), 0); t = v; v = w; w = t; }
+        else {}
+    } else {}
     if(n < 3) return;
     /* A convex polygon as a strip: v0, v1, v(n-1), v2, v(n-2), ... */
     int order[8], m = 0, lo = 1, hi = n - 1;
@@ -1163,7 +1445,7 @@ static void put_clipped(const gcmd_t* c, const uint32_t* col, const gscene_t* g)
         d->y = q->y * g->scale_y + g->yo;
         d->z = 1.0f;
         d->u = q->u * g->rdim + g->uo;
-        d->v = q->v * g->rdim + g->vo;
+        d->v = q->v * g->rdimv + g->vo;
         d->argb = a | ((uint32_t)(q->r + 0.5f) << 16) | ((uint32_t)(q->g + 0.5f) << 8)
                 | (uint32_t)(q->b + 0.5f);
         d->oargb = 0;
@@ -1179,17 +1461,29 @@ static void put_clipped(const gcmd_t* c, const uint32_t* col, const gscene_t* g)
  * differences non-negative, one OR and one sign test an axis — and nothing at all for an axis
  * whose edges are the picture's own. The clipper sorts out the rest, including a triangle wholly
  * outside (nothing survives it). */
+/* lo <= v <= hi is (unsigned)(v - lo) <= hi - lo, one compare a coordinate where it was two
+ * differences and their signs (E-159); an edge pair with no coordinate between them takes a lo no
+ * record holds (positions are eleven bits and an offset of eleven), so that nothing is inside. */
+static inline void cut_span(int lo, int hi, int* base, uint32_t* span) {
+    if(hi >= lo) { *base = lo; *span = (uint32_t)(hi - lo); }
+    else { *base = 32767; *span = 0; }
+}
+
 static inline int tri_inside(const gcmd_t* c, const gscene_t* g) {
     if(g->cut_y) {
-        const int lo = g->cly0, hi = g->cly1 + 1;
-        const int y0 = c->y[0], y1 = c->y[1], y2 = c->y[2];
-        if(((y0 - lo) | (y1 - lo) | (y2 - lo) | (hi - y0) | (hi - y1) | (hi - y2)) < 0) return 0;
-    }
+        const int lo = g->ylo;
+        const uint32_t sp = g->yspan;
+        if(((uint32_t)(c->y[0] - lo) > sp) | ((uint32_t)(c->y[1] - lo) > sp) | ((uint32_t)(c->y[2] - lo) > sp))
+            return 0;
+        else {}
+    } else {}
     if(g->cut_x) {
-        const int lo = g->clx0, hi = g->clx1 + 1;
-        const int x0 = c->x[0], x1 = c->x[1], x2 = c->x[2];
-        if(((x0 - lo) | (x1 - lo) | (x2 - lo) | (hi - x0) | (hi - x1) | (hi - x2)) < 0) return 0;
-    }
+        const int lo = g->xlo;
+        const uint32_t sp = g->xspan;
+        if(((uint32_t)(c->x[0] - lo) > sp) | ((uint32_t)(c->x[1] - lo) > sp) | ((uint32_t)(c->x[2] - lo) > sp))
+            return 0;
+        else {}
+    } else {}
     return 1;
 }
 
@@ -1211,7 +1505,7 @@ struct __attribute__((aligned(32))) gsemibind {
     gvert_t   t;
     int       state, fmt, dim, ou, ov, kind;
     pvr_ptr_t mem;
-    float     rdim, xo, yo, uo, vo;
+    float     rdim, rdimv, xo, yo, uo, vo;
     uint32_t  a;              /* the vertex alpha the header's blend wants, in place */
     int       uv256;          /* the common binding: put_tri_uv256_at's coordinates */
 };
@@ -1244,6 +1538,7 @@ static const gsemibind_t* semi_bind(gscene_t* g, int state, const gstate_t* s, c
     e->state = state; e->mem = b->mem; e->fmt = b->fmt; e->dim = b->dim;
     e->ou = b->ou; e->ov = b->ov; e->kind = kind;
     e->rdim = 1.0f / (float)b->dim;
+    e->rdimv = 1.0f / (float)dim_v(b->dim);
     const float alpha = emit_header(b->mem, b->fmt, b->dim, s, 0, kind, &e->hdr);
     /* What put_tri adds after scaling: the buffer's corner on screen, and in the texture the texel
      * centre less the patch origin. rdim is a power of two, so the texture terms are exact either
@@ -1251,10 +1546,10 @@ static const gsemibind_t* semi_bind(gscene_t* g, int state, const gstate_t* s, c
     e->xo = -(float)g->ox * g->scale_x;
     e->yo = -(float)g->oy * g->scale_y;
     e->uo = (0.5f - (float)b->ou) * e->rdim;
-    e->vo = (0.5f - (float)b->ov) * e->rdim;
-    vert_set(&e->t, g->scale_x, g->scale_y, g->ox, g->oy, e->rdim, b->ou, b->ov);
+    e->vo = (0.5f - (float)b->ov) * e->rdimv;
+    vert_set(&e->t, g->scale_x, g->scale_y, g->ox, g->oy, e->rdim, e->rdimv, b->ou, b->ov);
     e->a = (uint32_t)(alpha * 255.0f) << 24;
-    e->uv256 = e->t.ou2 == -1 && e->t.ov2 == -1 && e->t.rh == 1.0f / 512.0f;
+    e->uv256 = e->t.ou2 == -1 && e->t.ov2 == -1 && e->t.rh == 1.0f / 512.0f && e->t.rv == e->t.rh;
     g->e = e;
     return e;
 }
@@ -1276,7 +1571,7 @@ static void semi_tri(gscene_t* g, const gsemibind_t* e, const gcmd_t* c, const u
         else if(e->uv256) pvr_dr_addr = put_tri_uv256_at(pvr_dr_addr, c, col, &e->t);
         else put_tri(c, col, &e->t);
     } else {
-        g->rdim = e->rdim; g->xo = e->xo; g->yo = e->yo; g->uo = e->uo; g->vo = e->vo;
+        g->rdim = e->rdim; g->rdimv = e->rdimv; g->xo = e->xo; g->yo = e->yo; g->uo = e->uo; g->vo = e->vo;
         put_clipped(c, col, g);
     }
 }
@@ -1331,7 +1626,12 @@ static void scene_bright(gscene_t* g, const gsemibind_t* e, const gcmd_t* c, con
  *  mirror whose palette already has its bank, and a page slot already bound this run. The
  *  rest — a first ask, a baked patch, a fallback — goes the full way. */
 static inline int bind_texture(const gcmd_t* c, const gstate_t* s, int am, grun_t* r, gbind_t* b) {
-    if(r->mir) {
+    if(r->pic) {
+        b->mem = r->pic;
+        b->fmt = PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED;
+        b->dim = PIC_TEXDIM; b->ou = r->pou; b->ov = r->pov;
+        return 1;
+    } else if(r->mir) {
         if(r->bank[am] >= 0) {
             b->mem = r->mir;
             b->fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am]) | PVR_TXRFMT_TWIDDLED;
@@ -1465,6 +1765,12 @@ typedef struct {
     pvr_ptr_t mem;
     int fmt, dim;
     const gstate_t* s;
+    /* For run_switch: whether the run's binding is its state's (a run of a baked patch is one record),
+     * the drawing area placed and the alpha the run's vertices were made for; and the last state the
+     * run went on into, for build_scene to take as its own (-1 none). */
+    int may_switch, area;
+    float alpha;
+    int switched;
 } gpass_t;
 
 /** The brightening header (emit_header's `over`), the first time a run asks for it: compiled or
@@ -1475,8 +1781,37 @@ static void over_header(gpass_t* h) {
     h->over_ready = 1;
 }
 
+static inline uint32_t sres_key(int state);
+static inline int slot_holds(int i, const gstate_t* s);
+
+/** Whether the run may go on into record c's state as build_scene's fast path would take it, and if
+ *  so its bookkeeping done: a triangle under a state whose binding and header g_sres holds (`fast`),
+ *  of the run's kind (textured or not), on the same drawing area, with the same alpha and the same
+ *  RAW flag — so the vertex terms and alpha the run's vertices are made with stay what they are, and
+ *  only the header changes. The header itself the caller sends (g_run_hdr_p). What build_scene's
+ *  fast path does besides — its own variables — it does from `switched` when the run returns. */
+static inline int run_switch(const gcmd_t* c, int textured, int raw, gpass_t* h) {
+    if(c->is_rect != GCMD_TRI || !h->may_switch) return 0;
+    const gsres_t* fr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
+    if(fr->key != sres_key(c->state)
+       || (textured ? fr->fast != SRES_MIR && fr->fast != SRES_SLOT : fr->fast != SRES_FLAT))
+        return 0;
+    const gstate_t* s = &g_states[c->state];
+    if((int)s->area != h->area || fr->alpha != h->alpha || ((s->flags & BP_GPU_RAW) != 0) != raw
+       || (fr->fast == SRES_SLOT && !slot_holds(fr->slot, s)))
+        return 0;
+    if(fr->fast == SRES_SLOT) g_tex[fr->slot].bound_frame = g_tex_frame;
+    else {}
+    h->restate = 0; h->over_ready = 0;
+    h->mem = fr->mem; h->fmt = fr->fmt; h->dim = TEX_DIM; h->s = s;
+    g_run_hdr_p = &fr->hdr;
+    h->switched = (int)c->state;
+    return 1;
+}
+
 /** An opaque run: `c` and the triangles after it recorded under the same state (one compare of
- *  the record's tag), drawn with the binding `c` was, up to `end`. Everything else build_scene's
+ *  the record's tag), drawn with the binding `c` was, up to `end` — and on into the next state when
+ *  run_switch says it may, its header sent between (ledger E-117). Everything else build_scene's
  *  loop asks of a record — its state's area and blending, its texture, the header — is the same for
  *  all of them, and each was ~40 instructions of that loop a triangle. A brightened triangle's second
  *  pass goes out here too, under the brightening header, and the run's header after it (`restate`):
@@ -1487,29 +1822,32 @@ static void over_header(gpass_t* h) {
 __attribute__((noinline))
 static const gcmd_t* run_tris(const gcmd_t* c, const gcmd_t* end, uint32_t a, int textured, int raw,
                               const gscene_t* g, const gvert_t* bt, gpass_t* h) {
-    const uint16_t tag = c->tag;
+    uint16_t tag = c->tag;
     const gvert_t t = *bt;
     uint32_t q = pvr_dr_addr;
     uint32_t col[3];
     /* The common binding's coordinates from g_uv256 (see there): ou2 and ov2 are 2 * 0 - 1, rh 1/512. */
-    const int uv256 = t.ou2 == -1 && t.ov2 == -1 && t.rh == 1.0f / 512.0f;
+    const int uv256 = t.ou2 == -1 && t.ov2 == -1 && t.rh == 1.0f / 512.0f && t.rv == t.rh;
     if(textured) {
-        for(; c < end && c->tag == tag; c++) {
+        for(; c < end; c++) {
+            if(c->tag != tag) {
+                if(!run_switch(c, 1, raw, h)) break;
+                else {}
+                tag = c->tag;
+                q ^= 32;
+                sq_header(q + 32, g_run_hdr_p);
+            } else {}
             SHZ_PREFETCH(c + 4);
             if(!tri_inside(c, g)) break;
             else {}
-            int bright = 0;
-            /* A flat triangle's three colours are the command word's (the polygon core writes it
-             * for each vertex): converted once. */
-            const uint32_t c0 = c->argb[0];
-            if(c->argb[1] == c0 && c->argb[2] == c0) {
-                col[0] = col[1] = col[2] = bgr_to_rgb_mod(c0) | a;
-                bright = bgr_brightens(c0);
-            } else {
-                for(int k = 0; k < 3; k++) {
-                    col[k] = bgr_to_rgb_mod(c->argb[k]) | a;
-                    bright |= bgr_brightens(c->argb[k]);
-                }
+            /* Each colour doubled and clamped and whether any brightens (bgr_parts). A flat
+             * triangle's three are the command word's, converted three times: a test for it cost
+             * every triangle what the two conversions save the few flat ones (E-159). */
+            uint32_t bright = 0;
+            for(int k = 0; k < 3; k++) {
+                const gbgr_t p = bgr_parts(c->argb[k]);
+                col[k] = bgr_parts_mod(p) | a;
+                bright |= bgr_parts_bright(p);
             }
             if(h->restate) {
                 q ^= 32;
@@ -1528,11 +1866,7 @@ static const gcmd_t* run_tris(const gcmd_t* c, const gcmd_t* end, uint32_t a, in
                     over_header(h);
                     q = pvr_dr_addr;
                 }
-                if(c->argb[1] == c0 && c->argb[2] == c0) col[0] = col[1] = col[2] = bgr_to_rgb_over(c0) | a;
-                else {
-                    for(int k = 0; k < 3; k++)
-                        col[k] = bgr_to_rgb_over(c->argb[k]) | a;
-                }
+                for(int k = 0; k < 3; k++) col[k] = bgr_parts_over(bgr_parts(c->argb[k])) | a;
                 q = uv256 ? put_tri_uv256_at(q, c, col, &t) : put_tri_at(q, c, col, &t);
                 h->restate = 1;
 #if RECOMPSX_DC_PROFILE
@@ -1541,7 +1875,14 @@ static const gcmd_t* run_tris(const gcmd_t* c, const gcmd_t* end, uint32_t a, in
             } else {}
         }
     } else {
-        for(; c < end && c->tag == tag; c++) {
+        for(; c < end; c++) {
+            if(c->tag != tag) {
+                if(!run_switch(c, 0, raw, h)) break;
+                else {}
+                tag = c->tag;
+                q ^= 32;
+                sq_header(q + 32, g_run_hdr_p);
+            } else {}
             SHZ_PREFETCH(c + 4);
             if(!tri_inside(c, g)) break;
             else {}
@@ -1604,12 +1945,29 @@ static inline void sres_bind(gsres_t* sr, int state, pvr_ptr_t mir, int bank, in
     } else {}
     sr->mir = mir; sr->bank = (int16_t)bank; sr->slot = (int16_t)slot; sr->patch8 = (uint8_t)patch8;
     sr->bind_ok = 1;
+    sr->fast = 0;
 }
 
-PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first) {
+/* The base of a picture's render (g_base_*, set by present_pictures): a rectangle from (0,0). */
+static void base_rect(void) {
+    pvr_vertex_t v;
+    v.argb = 0xFFFFFFFFu;
+    v.oargb = 0;
+    v.z = 1.0f;
+    v.flags = PVR_CMD_VERTEX;
+    v.x = 0.0f;       v.y = 0.0f;       v.u = 0.0f;       v.v = 0.0f;       put_vtx(&v);
+    v.x = g_base_x1;  v.y = 0.0f;       v.u = g_base_u1;  v.v = 0.0f;       put_vtx(&v);
+    v.x = 0.0f;       v.y = g_base_y1;  v.u = 0.0f;       v.v = g_base_v1;  put_vtx(&v);
+    v.flags = PVR_CMD_VERTEX_EOL;
+    v.x = g_base_x1;  v.y = g_base_y1;  v.u = g_base_u1;  v.v = g_base_v1;  put_vtx(&v);
+}
+
+PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first,
+                               int to_picture) {
     if(sw <= 0 || sh <= 0) return;
-    const float scale_x = 640.0f / (float)sw;
-    const float scale_y = 480.0f / (float)sh;
+    /* A picture is the buffer at its own resolution; the screen is 640 x 480. */
+    const float scale_x = to_picture ? 1.0f : 640.0f / (float)sw;
+    const float scale_y = to_picture ? 1.0f : 480.0f / (float)sh;
 
     pvr_list_begin(PVR_LIST_TR_POLY);
 #if RECOMPSX_TA_HASH
@@ -1617,10 +1975,13 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
     g_ta_hashing = 1;
 #endif
 
-    if(with_background) {
+    if(with_background && to_picture) {
+        put_hdr(g_base_hdr);
+        base_rect();
+    } else if(with_background) {
         put_hdr(&g_hdr);
         draw_quad(sw, sh);
-    }
+    } else {}
 
     if(g_uv256[255] == 0.0f) {
         for(int u = 0; u < 256; u++) g_uv256[u] = (float)(2 * u + 1) * (1.0f / 512.0f);
@@ -1642,10 +2003,13 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
     g.scale_x = scale_x; g.scale_y = scale_y;
     g.e = NULL;
     g.rdim = 1.0f / (float)TEX_DIM;
+    g.rdimv = g.rdim;
     g.xo = 0.0f; g.yo = 0.0f; g.uo = 0.0f; g.vo = 0.0f;
     g.restate = 0; g.over_ready = 0;
     g.ox = 0; g.oy = 0; g.clx0 = 0; g.cly0 = 0; g.clx1 = 1023; g.cly1 = 511;
     g.cut_x = 0; g.cut_y = 0;
+    cut_span(g.clx0, g.clx1 + 1, &g.xlo, &g.xspan);
+    cut_span(g.cly0, g.cly1 + 1, &g.ylo, &g.yspan);
     grun_t semi_run;
     semi_run.state = -1;
     int placed_state = -1, placed = 0, placed_area = -1;
@@ -1655,10 +2019,16 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * divide. The divisor is constant for a whole run of primitives and SH-4's FDIV is expensive
      * and poorly pipelined; at three vertices and two coordinates each, a busy scene was asking
      * for nine thousand divisions a frame to compute a number that changes a few dozen times. */
-    float cur_rdim = 1.0f / (float)TEX_DIM;
+    float cur_rdim = 1.0f / (float)TEX_DIM, cur_rdimv = cur_rdim;
     pvr_ptr_t cur_mem = NULL;
     /* Resolved once per run of primitives sharing a state — which is how they arrive. */
     int run_state = -1, run_bank = -1, run_slot = -1, run_patch8 = 0;
+    /* The patch the last record baked through bound to, by its state and corner: the records of a
+     * mesh sample a page's patches over and over, and each asked bake_slot again — a hash, a check
+     * of nine fields — for the slot the record before it had (243 asks a frame of Crash 3's
+     * gameplay). Same key, same answer: nothing between two records evicts or rebinds a patch
+     * bound this frame (the in-flight rule), and the slot's frame is already this one. */
+    int memo_state = -1, memo_tu = -1, memo_tv = -1, memo_b = -1;
     pvr_ptr_t run_mir = NULL;
     float alpha = 1.0f;
     /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
@@ -1668,21 +2038,28 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * copied back (`restate`), and the brightening header is looked up once per run. */
     gpass_t h;
     h.restate = 0; h.over_ready = 0; h.mem = NULL; h.fmt = 0; h.dim = TEX_DIM; h.s = NULL;
+    h.may_switch = 0; h.area = -1; h.alpha = 1.0f; h.switched = -1;
     float cur_xo = 0.0f, cur_yo = 0.0f, cur_uo = 0.0f, cur_vo = 0.0f;
     gvert_t cur_t;
-    vert_set(&cur_t, scale_x, scale_y, 0, 0, cur_rdim, 0, 0);
+    vert_set(&cur_t, scale_x, scale_y, 0, 0, cur_rdim, cur_rdimv, 0, 0);
     uint32_t cur_a = 0xFF000000u;
     /* What the vertex terms and cur_a were last worked out from (cur_dim is the size): none yet. */
     int vs_ou = -1, vs_ov = -1, vs_ox = 0x7FFFFFFF, vs_oy = 0x7FFFFFFF;
     float vs_alpha = -1.0f;
-    for(int i = first; i < g_cmd_count; i++) {
+    /* The frame's records (cmd_count): nothing the walk below calls appends one. */
+    const int ncmd = cmd_count();
+    for(int i = first; i < ncmd; i++) {
         const gcmd_t* c = &g_cmds[i];
         /* Four records — four lines — ahead: the buffer is far larger than the cache and is read
          * once, front to back, so every line is a miss unless it was asked for in time. Past the
          * end it touches the memory after the array, which is harmless. */
         SHZ_PREFETCH(c + 4);
-        if(c->is_rect == GCMD_VRAM) {
-            if(draw_mark(c, sx, sy, sw, sh, scale_x, scale_y)) { h.restate = 1; g.e = NULL; }
+        if(c->is_rect >= GCMD_VRAM) {
+            /* A copy out of a buffer (ADR-0054) from that buffer's picture; on the old path,
+             * where there are none, emulated VRAM's result, as a mark. */
+            const int drew = c->is_rect == GCMD_COPY && to_picture ? draw_copy(c, sx, sy, sw, sh)
+                           : draw_mark(c, sx, sy, sw, sh, scale_x, scale_y);
+            if(drew) { h.restate = 1; g.e = NULL; }
             else {}
             continue;
         } else {}
@@ -1690,6 +2067,38 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         /* States are recorded in the order primitives use them, so the next one is where the
          * walk is going; past the last one this touches the array's own tail, harmlessly. */
         SHZ_PREFETCH(s + 1);
+        pvr_ptr_t mem = NULL;
+        int fmt = 0, dim = TEX_DIM, ou = 0, ov = 0;
+        /* Whether the binding is the state's, not the record's: then the records after this one
+         * under the same state bind the same way (run_tris). A baked patch is per record. */
+        int per_state = 1;
+        /* A return to a state this build has drawn a triangle under, on the drawing area the
+         * last one had: its binding and its header as g_sres kept them (`fast`), and the walk
+         * below — the area, the blending, the texture answers asked again, six compares for the
+         * header — skipped. What it would have done is done here, the same way: the same header
+         * sent, the same terms. Two thirds of the records of Crash 3's gameplay change the state,
+         * ~200 instructions each on that walk (ledger E-114). */
+        if((int)c->state != cur_state) {
+            const gsres_t* fr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
+            if(fr->key == sres_key(c->state) && fr->fast && placed && (int)s->area == placed_area
+               && !c->is_rect && (fr->fast != SRES_SLOT || slot_holds(fr->slot, s))) {
+                placed_state = (int)c->state;
+                if(fr->fast != SRES_FLAT) {
+                    run_state = (int)c->state;
+                    run_mir = fr->mir; run_bank = fr->bank; run_slot = fr->slot;
+                    run_patch8 = fr->patch8;
+                    if(fr->fast == SRES_SLOT) g_tex[run_slot].bound_frame = g_tex_frame;
+                    else {}
+                } else {}
+                mem = fr->mem; fmt = fr->fmt;
+                cur_state = (int)c->state;
+                cur_mem = mem; cur_fmt = fmt; cur_ou = 0; cur_ov = 0;
+                put_hdr(&fr->hdr);
+                alpha = fr->alpha;
+                g_run_hdr_p = &fr->hdr;
+                goto header_made;
+            } else {}
+        } else {}
         /* Where the state's buffer is on screen, and which edges of its drawing area to cut at:
          * a function of the drawing area alone, which changes a few times a frame, where the
          * state changes at nearly every primitive. A new origin reaches the header's offsets
@@ -1699,7 +2108,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             if((int)s->area != placed_area) {
                 placed_area = (int)s->area;
                 int ow = 0, oh = 0;   /* unset when not placed, and then never read */
-                placed = screen_origin(s, &g.ox, &g.oy, &ow, &oh);
+                placed = screen_origin(s, &g.ox, &g.oy, &ow, &oh)
+                         && (!to_picture || (g.ox == sx && g.oy == sy));
                 /* Only the edges of the drawing area that lie inside the picture are cut here;
                  * one at or past the picture's own edge is where the screen ends anyway. Crash
                  * 3's area is its buffer's whole width, and cutting every triangle that crossed
@@ -1710,6 +2120,8 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 g.cly1 = s->clip_y1 + 1 < g.oy + oh ? s->clip_y1 : 32766;
                 g.cut_x = g.clx0 != -32768 || g.clx1 != 32766;
                 g.cut_y = g.cly0 != -32768 || g.cly1 != 32766;
+                cut_span(g.clx0, g.clx1 + 1, &g.xlo, &g.xspan);
+                cut_span(g.cly0, g.cly1 + 1, &g.ylo, &g.yspan);
             }
         }
         if(!placed) continue;       /* drawn into VRAM off screen: not a picture */
@@ -1720,99 +2132,116 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         }
 
         const int textured = (s->flags & BP_GPU_TEXTURED) && !c->is_rect;
-        pvr_ptr_t mem = NULL;
-        int fmt = 0, dim = TEX_DIM, ou = 0, ov = 0;
-        /* Whether the binding is the state's, not the record's: then the records after this one
-         * under the same state bind the same way (run_tris). A baked patch is per record. */
-        int per_state = 1;
 
         if(textured) {
-            if((int)c->state != run_state) {
-                run_state = (int)c->state;
-                const uint32_t pk = (uint32_t)s->tex_x | ((uint32_t)s->tex_y << 16);
-                const uint32_t ck = (uint32_t)s->clut_x | ((uint32_t)s->clut_y << 16);
-                gsres_t* sr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
-                gtbind_t* tb;
-                if(sr->key == sres_key(c->state) && sr->bind_ok
-                   && (sr->slot < 0 || slot_holds(sr->slot, s))) {
-                    run_mir = sr->mir; run_bank = sr->bank; run_slot = sr->slot;
-                    run_patch8 = sr->patch8;
-                } else if(tb = tbind_at(pk, ck, s->window, s->depth),
-                   tb->gen == g_tbind_gen && tb->page == pk && tb->clut == ck
-                   && tb->window == s->window && tb->depth == s->depth
-                   && (tb->slot < 0 || slot_holds(tb->slot, s))) {
-                    run_mir = tb->mir; run_bank = tb->bank; run_slot = tb->slot;
-                    run_patch8 = tb->patch8;
-                    sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
-                } else {
-                    run_bank = -1; run_slot = -1; run_mir = NULL;
-                    /* The page grid is the mirror's index, so a page origin that is not on
-                     * the grid would silently read a neighbour. The texpage encoding cannot
-                     * produce one; the guard costs a compare and removes the assumption. */
-                    if(s->depth == 0 && (s->window & 0x3FF) == 0
-                       && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
-                        run_mir = page4_mirror(s);
-                    else {}
-                    /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
-                     * (bake_slot); the whole page is decoded only for a primitive sampling
-                     * across patches, below. */
-                    run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
-                              && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
-                    if(run_mir) {
-                        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
-                    } else if(!run_patch8) {
-                        run_slot = tex_slot(s, AM_VIS);
-                        if(run_slot >= 0 && s->depth == 0)
-                            run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
-                        else {}
-                    } else {}
-                    tb->page = pk; tb->clut = ck; tb->window = s->window;
-                    tb->depth = s->depth; tb->gen = g_tbind_gen;
-                    tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
-                    tb->patch8 = (uint8_t)run_patch8;
-                    sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
-                }
-            }
-            if(run_mir && run_bank >= 0) {
-                mem = run_mir;
-                fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank) | PVR_TXRFMT_TWIDDLED;
-            } else if(run_mir || run_patch8) {
-                /* No bank was left for this palette, or an 8bpp page: texels with the CLUT
-                 * already in them — exact, and only as large as this primitive samples. */
+            pvr_ptr_t pmem;
+            int pou, pov;
+            if(to_picture && s->depth == 2 && (s->window & 0x3FF) == 0
+               && pic_page(s->tex_x, s->tex_y, &pmem, &pou, &pov)) {
+                /* A page in a buffer this backend draws (ADR-0054): its picture, which holds what
+                 * was drawn there and emulated VRAM's copy of the buffer does not. Bound per record,
+                 * since the state's own answers (g_sres) are the page's in emulated VRAM. */
                 per_state = 0;
-                int tu, tv;
-                const int b = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, AM_VIS) : -1;
-                if(b >= 0) {
-                    mem = g_bake[b].mem;
-                    fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
-                    dim = BAKE_DIM; ou = tu * BAKE_STEP; ov = tv * BAKE_STEP;
-                } else if(run_mir) {
-                    /* Sampling wider than one patch, or the patch pool is all in flight: the
-                     * nearest banked palette, which is the only lossy path left in the scene. */
-                    g_bake_miss++;
-                    const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
+                run_state = -1;
+                mem = pmem;
+                fmt = PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED;
+                dim = PIC_TEXDIM; ou = pou; ov = pov;
+            } else {
+                if((int)c->state != run_state) {
+                    run_state = (int)c->state;
+                    const uint32_t pk = (uint32_t)s->tex_x | ((uint32_t)s->tex_y << 16);
+                    const uint32_t ck = (uint32_t)s->clut_x | ((uint32_t)s->clut_y << 16);
+                    gsres_t* sr = &g_sres[c->state & ((1 << SRES_BITS) - 1)];
+                    gtbind_t* tb;
+                    if(sr->key == sres_key(c->state) && sr->bind_ok
+                       && (sr->slot < 0 || slot_holds(sr->slot, s))) {
+                        run_mir = sr->mir; run_bank = sr->bank; run_slot = sr->slot;
+                        run_patch8 = sr->patch8;
+                    } else if(tb = tbind_at(pk, ck, s->window, s->depth),
+                       tb->gen == g_tbind_gen && tb->page == pk && tb->clut == ck
+                       && tb->window == s->window && tb->depth == s->depth
+                       && (tb->slot < 0 || slot_holds(tb->slot, s))) {
+                        run_mir = tb->mir; run_bank = tb->bank; run_slot = tb->slot;
+                        run_patch8 = tb->patch8;
+                        sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
+                    } else {
+                        run_bank = -1; run_slot = -1; run_mir = NULL;
+                        /* The page grid is the mirror's index, so a page origin that is not on
+                         * the grid would silently read a neighbour. The texpage encoding cannot
+                         * produce one; the guard costs a compare and removes the assumption. */
+                        if(s->depth == 0 && (s->window & 0x3FF) == 0
+                           && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
+                            run_mir = page4_mirror(s);
+                        else {}
+                        /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
+                         * (bake_slot); the whole page is decoded only for a primitive sampling
+                         * across patches, below. */
+                        run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
+                                  && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
+                        if(run_mir) {
+                            run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
+                        } else if(!run_patch8) {
+                            run_slot = tex_slot(s, AM_VIS);
+                            if(run_slot >= 0 && s->depth == 0)
+                                run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
+                            else {}
+                        } else {}
+                        tb->page = pk; tb->clut = ck; tb->window = s->window;
+                        tb->depth = s->depth; tb->gen = g_tbind_gen;
+                        tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
+                        tb->patch8 = (uint8_t)run_patch8;
+                        sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
+                    }
+                }
+                if(run_mir && run_bank >= 0) {
                     mem = run_mir;
-                    fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb)
-                        | PVR_TXRFMT_TWIDDLED;
-                } else {
-                    /* Sampling wider than one patch, or every patch in flight: the page. */
-                    if(run_slot < 0) run_slot = tex_slot(s, AM_VIS);
-                    else {}
-                    if(run_slot < 0) continue;
-                    else {}
+                    fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank) | PVR_TXRFMT_TWIDDLED;
+                } else if(run_mir || run_patch8) {
+                    /* No bank was left for this palette, or an 8bpp page: texels with the CLUT
+                     * already in them — exact, and only as large as this primitive samples. */
+                    per_state = 0;
+                    int tu, tv;
+                    int b = -1;
+                    if(one_patch(c, &tu, &tv)) {
+                        if((int)c->state == memo_state && tu == memo_tu && tv == memo_tv) b = memo_b;
+                        else {
+                            b = bake_slot(s, tu, tv, AM_VIS);
+                            if(b >= 0) { memo_state = (int)c->state; memo_tu = tu; memo_tv = tv; memo_b = b; }
+                            else {}
+                        }
+                    } else {}
+                    if(b >= 0) {
+                        mem = g_bake[b].mem;
+                        fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+                        dim = BAKE_DIM; ou = tu * BAKE_STEP; ov = tv * BAKE_STEP;
+                    } else if(run_mir) {
+                        /* Sampling wider than one patch, or the patch pool is all in flight: the
+                         * nearest banked palette, which is the only lossy path left in the scene. */
+                        g_bake_miss++;
+                        const int nb = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
+                        mem = run_mir;
+                        fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(nb < 0 ? 0 : nb)
+                            | PVR_TXRFMT_TWIDDLED;
+                    } else {
+                        /* Sampling wider than one patch, or every patch in flight: the page. */
+                        if(run_slot < 0) run_slot = tex_slot(s, AM_VIS);
+                        else {}
+                        if(run_slot < 0) continue;
+                        else {}
+                        g_tex[run_slot].bound_frame = g_tex_frame;
+                        mem = g_tex[run_slot].mem;
+                        fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+                    }
+                } else if(run_slot >= 0) {
                     g_tex[run_slot].bound_frame = g_tex_frame;
                     mem = g_tex[run_slot].mem;
-                    fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
+                    fmt = s->depth == 0
+                        ? (PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank < 0 ? 0 : run_bank)
+                           | PVR_TXRFMT_TWIDDLED)
+                        : (PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED);
+                } else {
+                    continue;   /* nowhere to put this page; drawing it untextured would be worse */
                 }
-            } else if(run_slot >= 0) {
-                g_tex[run_slot].bound_frame = g_tex_frame;
-                mem = g_tex[run_slot].mem;
-                fmt = s->depth == 0
-                    ? (PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank < 0 ? 0 : run_bank)
-                       | PVR_TXRFMT_TWIDDLED)
-                    : (PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED);
-            } else {
-                continue;   /* nowhere to put this page; drawing it untextured would be worse */
             }
         }
 
@@ -1826,19 +2255,28 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             if(!per_state) {
                 alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &g_run_hdr);
                 g_run_hdr_p = &g_run_hdr;
-            } else if(sr->key == sres_key(c->state) && sr->hdr_ok && sr->mem == mem
-                      && sr->fmt == fmt && sr->dim == dim) {
-                put_hdr(&sr->hdr);
-                alpha = sr->alpha;
-                g_run_hdr_p = &sr->hdr;
             } else {
-                if(sr->key != sres_key(c->state)) {
-                    sr->key = sres_key(c->state); sr->bind_ok = 0;
-                } else {}
-                alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &sr->hdr);
-                sr->mem = mem; sr->fmt = fmt; sr->dim = dim; sr->alpha = alpha; sr->hdr_ok = 1;
+                if(sr->key == sres_key(c->state) && sr->hdr_ok && sr->mem == mem
+                   && sr->fmt == fmt && sr->dim == dim) {
+                    put_hdr(&sr->hdr);
+                    alpha = sr->alpha;
+                } else {
+                    if(sr->key != sres_key(c->state)) {
+                        sr->key = sres_key(c->state); sr->bind_ok = 0;
+                    } else {}
+                    alpha = emit_header(mem, fmt, dim, s, 0, HK_NORMAL, &sr->hdr);
+                    sr->mem = mem; sr->fmt = fmt; sr->dim = dim; sr->alpha = alpha; sr->hdr_ok = 1;
+                }
                 g_run_hdr_p = &sr->hdr;
+                /* The fast path's leave to come back here: a triangle's header for the binding the
+                 * state's own answers give (bind_ok: they are this state's), or an untextured one. */
+                sr->fast = c->is_rect ? 0
+                         : !mem ? SRES_FLAT
+                         : !sr->bind_ok ? 0
+                         : (run_mir && run_bank >= 0) ? SRES_MIR
+                         : (!run_mir && !run_patch8 && run_slot >= 0) ? SRES_SLOT : 0;
             }
+        header_made:
             h.restate = 0;
             h.over_ready = 0;
             h.mem = mem; h.fmt = fmt; h.dim = dim; h.s = s;
@@ -1850,11 +2288,12 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             if(dim != cur_dim || ou != vs_ou || ov != vs_ov || g.ox != vs_ox || g.oy != vs_oy) {
                 cur_dim = dim; vs_ou = ou; vs_ov = ov; vs_ox = g.ox; vs_oy = g.oy;
                 cur_rdim = 1.0f / (float)dim;
+                cur_rdimv = 1.0f / (float)dim_v(dim);
                 cur_xo = -(float)g.ox * scale_x;
                 cur_yo = -(float)g.oy * scale_y;
                 cur_uo = (0.5f - (float)ou) * cur_rdim;
-                cur_vo = (0.5f - (float)ov) * cur_rdim;
-                vert_set(&cur_t, scale_x, scale_y, g.ox, g.oy, cur_rdim, ou, ov);
+                cur_vo = (0.5f - (float)ov) * cur_rdimv;
+                vert_set(&cur_t, scale_x, scale_y, g.ox, g.oy, cur_rdim, cur_rdimv, ou, ov);
             } else {}
             if(alpha != vs_alpha) {
                 vs_alpha = alpha;
@@ -1890,8 +2329,24 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         } else {
             /* This triangle and the records after it under the same binding: run_tris, unless this
              * one reaches past the drawing area. A baked patch binds one record (per_state 0). */
-            const gcmd_t* next = run_tris(c, per_state ? &g_cmds[g_cmd_count] : c + 1, a, mem != NULL,
+            h.may_switch = per_state; h.area = placed_area; h.alpha = alpha;
+            const gcmd_t* next = run_tris(c, per_state ? &g_cmds[ncmd] : c + 1, a, mem != NULL,
                                           (s->flags & BP_GPU_RAW) != 0, &g, &cur_t, &h);
+            if(h.switched >= 0) {
+                /* The run went on into other states (run_switch): what the fast path above would
+                 * have left in this loop's variables for the last of them. */
+                const int sw = h.switched;
+                const gsres_t* fr = &g_sres[sw & ((1 << SRES_BITS) - 1)];
+                h.switched = -1;
+                placed_state = sw;
+                if(fr->fast != SRES_FLAT) {
+                    run_state = sw;
+                    run_mir = fr->mir; run_bank = fr->bank; run_slot = fr->slot; run_patch8 = fr->patch8;
+                } else {}
+                cur_state = sw;
+                cur_mem = fr->mem; cur_fmt = fr->fmt; cur_ou = 0; cur_ov = 0;
+                g.e = NULL;
+            } else {}
             if(next != c) {
                 i = (int)(next - g_cmds) - 1;
                 continue;
@@ -1908,7 +2363,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 col[k] = (mem ? bgr_to_rgb_mod(c->argb[k]) : bgr_to_rgb(c->argb[k])) | a;
                 if(mem && bgr_brightens(c->argb[k])) bright = 1;
             }
-            g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.uo = cur_uo; g.vo = cur_vo;
+            g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.rdimv = cur_rdimv; g.uo = cur_uo; g.vo = cur_vo;
             put_clipped(c, col, &g);
             if(bright && !(s->flags & BP_GPU_RAW)) {
                 if(h.over_ready) put_hdr(&g_run_over);
@@ -1932,12 +2387,15 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         bp_log(BP_LOG_WARN, m);
     }
 #endif
+    /* Last, and on the screen only — never into a picture, which keeps what the game drew: the list
+     * is drawn in submission order, so anything submitted before the game's primitives is painted
+     * over by them — as the overlay was, when it followed the background. */
+    if(!to_picture) {
 #if RECOMPSX_DC_PROFILE_OVERLAY
-    /* Last: the list is drawn in submission order, so anything submitted before the game's
-     * primitives is painted over by them — as the overlay was, when it followed the background. */
-    draw_profile_overlay();
+        draw_profile_overlay();
 #endif
-    draw_mouse_pointer();
+        draw_mouse_pointer();
+    } else {}
     pvr_list_finish();
 
 #if RECOMPSX_DC_PROFILE
@@ -1951,10 +2409,10 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
          * not cheap either; neither belongs inside a timed region, and the interval is now a
          * thousand scenes rather than a hundred. */
         static int every;
-        if(g_cmd_count > 0 && (every++ % 1000) == 0) {
+        if(cmd_count() > 0 && (every++ % 1000) == 0) {
             const gcmd_t* c = &g_cmds[0];
             const gstate_t* s0 = &g_states[c->state];
-            g_diag.prim = g_cmd_count;      g_diag.state = g_state_count;
+            g_diag.prim = cmd_count();      g_diag.state = g_state_count;
             g_diag.mir = g_mir_decodes;     g_diag.tex_dec = g_tex_decodes;
             g_diag.tex_hit = g_tex_hits;    g_diag.tex_conf = g_tex_conflicts;
             g_diag.bake_live = g_bake_live; g_diag.bake_dec = g_bake_decodes;
