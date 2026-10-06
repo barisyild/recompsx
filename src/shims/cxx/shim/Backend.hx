@@ -27,6 +27,9 @@ class Backend {
 	public static inline var PRESENT_PAL       = 4;
 	public static inline var PRESENT_FAST      = 8;
 	public static inline var PRESENT_DRAWING   = 16;
+	public static inline var PRESENT_HOLD      = 32;
+	public static inline var PRESENT_WIDE      = 64;
+	public static inline var PRESENT_WIDE_FILL = 128;
 
 	public static inline function init(title:String):Int
 		return BackendNative.bp_init(ConstCharPtr.fromString(title));
@@ -76,6 +79,10 @@ class Backend {
 			semiMode:Int):Void
 		BackendNative.bp_gpu_rect(x, y, w, h, bgr, semi, semiMode);
 
+	public static inline function gpuSprite(x:Int, y:Int, w:Int, h:Int, u:Int, v:Int, bgr:Int,
+			flip:Int):Void
+		BackendNative.bp_gpu_sprite(x, y, w, h, u, v, bgr, flip);
+
 	public static inline function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void
 		BackendNative.bp_gpu_dirty(x, y, w, h);
 
@@ -87,6 +94,9 @@ class Backend {
 
 	public static inline function gpuMask(setBit:Int, checkBit:Int):Void
 		BackendNative.bp_gpu_mask(setBit, checkBit);
+
+	public static inline function gpuScale(percent:Int):Void
+		BackendNative.bp_gpu_scale(percent);
 
 	public static inline function audioPush(frames:RawBuf, frameCount:Int):Void
 		BackendNative.bp_audio_push(RawMem.s16Ptr(frames), frameCount);

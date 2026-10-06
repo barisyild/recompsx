@@ -27,6 +27,7 @@ typedef struct {
     uint16_t entry[16];         /* the palette itself, ARGB1555 — the content IS the key */
     uint32_t hash;
     uint32_t bound_frame;
+    uint32_t wgen;              /* bumped whenever the bank is written: what a memo saw */
     uint8_t  used;
 } gpal_t;
 static gpal_t g_pal4[PAL_BANKS_4BPP];
@@ -500,6 +501,10 @@ static void tex_decode(pvr_ptr_t dst, const gstate_t* s, int amode) {
  *  PlayStation did. Staleness cannot exist: content cannot drift from itself, which is why
  *  bp_gpu_dirty has no palette work at all. */
 uint32_t g_pal_memo_gen = 1;
+uint32_t g_vram_row_gen[VRAM_H];
+/* Whether pal_bank_at's last answer was a bank holding the palette exactly (found or written),
+ * rather than a refusal or the nearest bank: only those are kept past the build (pal_bank_cached). */
+static int g_pal_exact;
 
 /* Every bank in use by its content's hash: open addressing, linear probing, one entry per bank
  * (PAL_BANKS_4BPP of PAL_INDEX), moved with backward-shift deletion when a bank is written again.
@@ -536,6 +541,7 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
         if(g_pal4[i].hash == h && memcmp(g_pal4[i].entry, want, sizeof(want)) == 0) {
             if(g_pal4[i].bound_frame != g_tex_frame) g_pal_live++;
             g_pal4[i].bound_frame = g_tex_frame;
+            g_pal_exact = 1;
             return i;
         } else {}
     }
@@ -558,6 +564,7 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
     }
     /* The caller decides whether an approximation is acceptable. When a baked entry can carry
      * this palette exactly, it says no, and the scene keeps its true colours. */
+    g_pal_exact = 0;
     if(bank < 0 && !allow_approx) return -1;
     if(bank < 0) {
         /* Capacity truth, remeasured with the state table uncapped: the crate arena runs about
@@ -607,6 +614,8 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
     g_pal_next = (bank + 1) % PAL_BANKS_4BPP;
     g_pal4[bank].used = 1;
     g_pal4[bank].hash = h;
+    g_pal4[bank].wgen++;
+    g_pal_exact = 1;
     {
         int p = pal_home(h);
         while(g_pal_index[p] != 0) p = (p + 1) & (PAL_INDEX - 1);
@@ -632,17 +641,33 @@ PROF_NOINLINE static int pal_bank_at(int clut_x, int clut_y, int allow_approx, i
  *  when no bank is in use at all, bumps the generation. Keyed by position and by whether an
  *  approximation was allowed, since the two can answer differently. */
 #define PAL_MEMO 512
-static struct { uint32_t gen; uint16_t cx, cy; int16_t bank; uint8_t approx, amode; } g_pal_memo[PAL_MEMO];
+/* An exact bank is kept past its build (bgen: the bank's generation then, plus one; zero for an
+ * answer of this build only), while the CLUT's row (rgen) and the bank are what they were: then
+ * pal_bank_at would find the same content in the same bank, and what its hit does is done here.
+ * A refusal and a nearest match depend on which banks are in flight, and stay per build. */
+static struct { uint32_t gen, bgen, rgen; uint16_t cx, cy; int16_t bank; uint8_t approx, amode; } g_pal_memo[PAL_MEMO];
 
 PROF_NOINLINE int pal_bank_cached(int clut_x, int clut_y, int allow_approx, int amode) {
     const uint32_t k = (((uint32_t)clut_x >> 4) ^ ((uint32_t)clut_y * 0x9E5u)
                         ^ ((uint32_t)allow_approx << 8) ^ ((uint32_t)amode << 6)) & (PAL_MEMO - 1);
-    if(g_pal_memo[k].gen == g_pal_memo_gen && g_pal_memo[k].cx == clut_x
-       && g_pal_memo[k].cy == clut_y && g_pal_memo[k].approx == allow_approx
-       && g_pal_memo[k].amode == amode)
-        return g_pal_memo[k].bank;
+    if(g_pal_memo[k].cx == clut_x && g_pal_memo[k].cy == clut_y && g_pal_memo[k].approx == allow_approx
+       && g_pal_memo[k].amode == amode) {
+        if(g_pal_memo[k].gen == g_pal_memo_gen) return g_pal_memo[k].bank;
+        else {}
+        const int b = g_pal_memo[k].bank;
+        if(g_pal_memo[k].bgen != 0 && g_pal_memo[k].bgen == g_pal4[b].wgen + 1
+           && g_pal_memo[k].rgen == g_vram_row_gen[clut_y & (VRAM_H - 1)]) {
+            if(g_pal4[b].bound_frame != g_tex_frame) g_pal_live++;
+            else {}
+            g_pal4[b].bound_frame = g_tex_frame;
+            g_pal_memo[k].gen = g_pal_memo_gen;
+            return b;
+        } else {}
+    } else {}
     const int bank = pal_bank_at(clut_x, clut_y, allow_approx, amode);
     g_pal_memo[k].gen = g_pal_memo_gen;
+    g_pal_memo[k].bgen = g_pal_exact && bank >= 0 ? g_pal4[bank].wgen + 1 : 0;
+    g_pal_memo[k].rgen = g_vram_row_gen[clut_y & (VRAM_H - 1)];
     g_pal_memo[k].cx = (uint16_t)clut_x;
     g_pal_memo[k].cy = (uint16_t)clut_y;
     g_pal_memo[k].approx = (uint8_t)allow_approx;
@@ -718,23 +743,27 @@ PROF_NOINLINE int tex_slot(const gstate_t* s, int amode) {
 static void bake_unindex(int i);
 
 /* A page sampled for the first time takes its memory back from the bake patches it carried
- * (ADR-0055) — unless the PVR may still read one of them: then the page waits a frame, and its
- * primitives take a page slot (the caller's path for a page without a mirror). For good: a page
- * once sampled keeps its memory. */
+ * (ADR-0055). They leave the pool at once, so that nothing binds them again; if the PVR may still
+ * read one, the page waits, a frame or two, and its primitives take a page slot meanwhile (the
+ * caller's path for a page without a mirror). Leaving them in the pool until they were idle could
+ * have kept a page waiting for as long as a scene kept binding them. For good: a page once sampled
+ * keeps its memory. */
 static int page_reclaim(gpage4_t* pg) {
     if(g_bake_lent0 < 0) { pg->own = 1; return 1; }
     else {}
     const int first = g_bake_lent0 + (int)(pg - g_page4) * BAKE_PER_PAGE;
+    int busy = 0;
     for(int k = 0; k < BAKE_PER_PAGE; k++) {
-        const gbake_t* b = &g_bake[first + k];
-        if(b->bound_frame != 0 && b->bound_frame + 1 >= g_tex_frame) return 0;
-        else {}
+        gbake_t* b = &g_bake[first + k];
+        if(!b->gone) {
+            bake_unindex(first + k);
+            b->used = 0;
+            b->gone = 1;
+        } else {}
+        busy |= b->bound_frame != 0 && b->bound_frame + 1 >= g_tex_frame;
     }
-    for(int k = 0; k < BAKE_PER_PAGE; k++) {
-        bake_unindex(first + k);
-        g_bake[first + k].used = 0;
-        g_bake[first + k].gone = 1;
-    }
+    if(busy) return 0;
+    else {}
     pg->own = 1;
     return 1;
 }
@@ -785,6 +814,223 @@ PROF_NOINLINE pvr_ptr_t page4_mirror(const gstate_t* s) {
     } else {}
     pg->bound_frame = g_tex_frame;
     return pg->mem;
+}
+
+/* ---- VQ page slots (ADR-0061; the layout is in dc_internal.h) ------------------------------- */
+
+/* A codebook: one CLUT in one variant (AM_*), good while its CLUT's VRAM row is as it was when it
+ * was written (rgen, g_vram_row_gen), never rewritten while a scene in flight may read it. */
+typedef struct {
+    uint16_t clut_x, clut_y;
+    uint32_t rgen;
+    uint32_t bound_frame;
+    uint8_t  amode, used;
+} gvqcb_t;
+
+/* A slot: a page's indices and its codebooks. Rows [dy0, dy1) of the page were written in emulated
+ * VRAM since the indices were taken (vq_stale): taken again at the next bind, or after one more
+ * frame of the old ones when the slot is in flight (as page4_mirror defers). */
+typedef struct {
+    pvr_ptr_t mem;                  /* the codebooks; the indices at mem + VQ_AREA */
+    uint16_t  tex_x, tex_y;
+    uint32_t  bound_frame;
+    int16_t   dy0, dy1;
+    uint8_t   depth, used, defer, next;
+    gvqcb_t   cb[VQ_CB4_N];
+} gvq_t;
+
+static gvq_t g_vq[VQ_SLOTS];
+int g_vq_n, g_vq_uploads, g_vq_books, g_vq_no_slot, g_vq_no_book, g_vq_calls, g_vq_hits;
+static int g_vq_next;
+
+static inline int vq_free(uint32_t bound_frame) {
+    return bound_frame == 0 || bound_frame + 1 < g_tex_frame;
+}
+
+/* Rows [y0, y1) of slot v's page into its indices, through the store queues: a byte a texel, a
+ * 4bpp halfword's nibbles as four bytes, an 8bpp halfword's bytes as they are. */
+static void vq_upload(const gvq_t* v, int y0, int y1) {
+    uint32_t* d = twid_open((pvr_ptr_t)((uint8_t*)v->mem + VQ_AREA + (size_t)y0 * VQ_ROW));
+    for(int y = y0; y < y1; y++) {
+        const uint16_t* row = g_vram + (size_t)((v->tex_y + y) & 511) * VRAM_W;
+        if(y + 1 < y1) SHZ_PREFETCH(row + VRAM_W + (v->tex_x & 1023));
+        else {}
+        if(v->depth == 0) {
+            /* 64 halfwords, eight a burst: each word two halfwords' eight nibbles' first four. */
+            for(int b = 0; b < 8; b++) {
+                const uint16_t* s = row + ((v->tex_x + 8 * b) & 1023);
+                for(int k = 0; k < 8; k++) {
+                    const uint32_t h = s[k];
+                    d[k] = (h & 0xFu) | ((h & 0xF0u) << 4) | ((h & 0xF00u) << 8) | ((h & 0xF000u) << 12);
+                }
+                sq_flush(d);
+                d += 8;
+            }
+        } else {
+            /* 128 halfwords, sixteen a burst, as they lie. */
+            for(int b = 0; b < 8; b++) {
+                const uint32_t* s = (const uint32_t*)(row + ((v->tex_x + 16 * b) & 1023));
+                for(int k = 0; k < 8; k++) d[k] = s[k];
+                sq_flush(d);
+                d += 8;
+            }
+        }
+    }
+    twid_close();
+    g_vq_uploads++;
+}
+
+/* Codebook k of slot v as CLUT (clut_x, clut_y) in variant am: each colour four times over. */
+static void vq_book(const gvq_t* v, int k, int clut_x, int clut_y, int am) {
+    const int n = v->depth == 0 ? 16 : 256;
+    const int step = v->depth == 0 ? VQ_ROW : 2048;
+    uint32_t* d = twid_open((pvr_ptr_t)((uint8_t*)v->mem + VQ_AREA - 2048 - (size_t)k * step));
+    const uint16_t* clut = g_vram + (size_t)(clut_y & 511) * VRAM_W;
+    for(int i = 0; i < n; i += 4) {
+        for(int e = 0; e < 4; e++) {
+            const uint32_t c = texel_argb(clut[(clut_x + i + e) & 1023], am);
+            d[2 * e] = c | (c << 16);
+            d[2 * e + 1] = c | (c << 16);
+        }
+        sq_flush(d);
+        d += 8;
+    }
+    twid_close();
+    g_vq_books++;
+}
+
+/* vq_bind's answers by what was asked — the page, its depth, the CLUT and the variant — each kept
+ * while the slot still holds that page with clean indices and the codebook that CLUT unchanged
+ * (its row's generation): then the walk of slots and codebooks below would find the same pair. A
+ * scene binds a few dozen pairs a few hundred times. Direct-mapped. */
+#define VQ_MEMO 256
+static struct { uint16_t tex_x, tex_y, clut_x, clut_y; uint8_t depth, am, slot, k; } g_vq_memo[VQ_MEMO];
+
+static inline void vq_answer(gvq_t* v, int k, pvr_ptr_t* mem, int* rows) {
+    v->cb[k].bound_frame = g_tex_frame;
+    v->bound_frame = g_tex_frame;
+    const int step = v->depth == 0 ? VQ_ROW : 2048;
+    *mem = (pvr_ptr_t)((uint8_t*)v->mem + VQ_AREA - 2048 - (size_t)k * step);
+    *rows = v->depth == 0 ? k : 8 * k;
+}
+
+int vq_bind(const gstate_t* s, int am, pvr_ptr_t* mem, int* rows) {
+    g_vq_calls++;
+    const int depth = s->depth;
+    const uint32_t rgen = g_vram_row_gen[s->clut_y & (VRAM_H - 1)];
+    const uint32_t mk = (((uint32_t)s->tex_x >> 6) ^ ((uint32_t)s->tex_y >> 4) ^ ((uint32_t)s->clut_x >> 4)
+                         ^ ((uint32_t)s->clut_y * 0x9E5u) ^ ((uint32_t)am << 5) ^ ((uint32_t)depth << 7))
+                        & (VQ_MEMO - 1);
+    {
+        const int i = g_vq_memo[mk].slot;
+        if(i < g_vq_n && g_vq_memo[mk].tex_x == s->tex_x && g_vq_memo[mk].tex_y == s->tex_y
+           && g_vq_memo[mk].clut_x == s->clut_x && g_vq_memo[mk].clut_y == s->clut_y
+           && g_vq_memo[mk].depth == depth && g_vq_memo[mk].am == am) {
+            gvq_t* v = &g_vq[i];
+            const gvqcb_t* b = &v->cb[g_vq_memo[mk].k];
+            if(v->used && v->tex_x == s->tex_x && v->tex_y == s->tex_y && v->depth == depth
+               && v->dy1 <= v->dy0 && b->used && b->clut_x == s->clut_x && b->clut_y == s->clut_y
+               && b->amode == am && b->rgen == rgen) {
+                vq_answer(v, g_vq_memo[mk].k, mem, rows);
+                g_vq_hits++;
+                return 1;
+            } else {}
+        } else {}
+    }
+    if(g_vq_n == 0) return 0;
+    else {}
+    /* The page's slot, or a free one for it. */
+    gvq_t* v = NULL;
+    for(int i = 0; i < g_vq_n; i++) {
+        if(g_vq[i].used && g_vq[i].tex_x == s->tex_x && g_vq[i].tex_y == s->tex_y && g_vq[i].depth == depth) {
+            v = &g_vq[i];
+            break;
+        } else {}
+    }
+    if(!v) {
+        int c = g_vq_next;
+        for(int i = 0; i < g_vq_n && !v; i++) {
+            if(vq_free(g_vq[c].bound_frame)) v = &g_vq[c];
+            else {}
+            c = c + 1 == g_vq_n ? 0 : c + 1;
+        }
+        if(!v) { g_vq_no_slot++; return 0; }
+        else {}
+        g_vq_next = (int)(v - g_vq) + 1 == g_vq_n ? 0 : (int)(v - g_vq) + 1;
+        v->tex_x = s->tex_x; v->tex_y = s->tex_y; v->depth = (uint8_t)depth;
+        v->used = 1; v->defer = 0; v->next = 0;
+        v->dy0 = 0; v->dy1 = TEX_DIM;
+        for(int k = 0; k < VQ_CB4_N; k++) v->cb[k].used = 0;
+    } else {}
+    /* Its indices, as emulated VRAM has them now: in flight, the old ones a frame more. */
+    if(v->dy1 > v->dy0) {
+        if(!vq_free(v->bound_frame) && v->defer == 0) v->defer = 1;
+        else {
+            vq_upload(v, v->dy0, v->dy1);
+            v->dy0 = 0; v->dy1 = 0; v->defer = 0;
+        }
+    } else {}
+    /* The codebook: the CLUT's in this variant while its row is unchanged, else one written now
+     * where no scene in flight reads. */
+    const int nk = depth == 0 ? VQ_CB4_N : VQ_CB8_N;
+    int k = -1, stale = -1;
+    for(int j = 0; j < nk; j++) {
+        const gvqcb_t* b = &v->cb[j];
+        if(b->used && b->clut_x == s->clut_x && b->clut_y == s->clut_y && b->amode == am) {
+            if(b->rgen == rgen) { k = j; break; }
+            else stale = j;
+        } else {}
+    }
+    if(k < 0) {
+        if(stale >= 0 && vq_free(v->cb[stale].bound_frame)) k = stale;
+        else {
+            int c = v->next < nk ? v->next : 0;
+            for(int j = 0; j < nk && k < 0; j++) {
+                if(!v->cb[c].used || vq_free(v->cb[c].bound_frame)) k = c;
+                else {}
+                c = c + 1 == nk ? 0 : c + 1;
+            }
+        }
+        if(k < 0) { g_vq_no_book++; return 0; }
+        else {}
+        v->next = (uint8_t)(k + 1 == nk ? 0 : k + 1);
+        vq_book(v, k, s->clut_x, s->clut_y, am);
+        v->cb[k].clut_x = s->clut_x; v->cb[k].clut_y = s->clut_y;
+        v->cb[k].amode = (uint8_t)am; v->cb[k].rgen = rgen; v->cb[k].used = 1;
+    } else {}
+    /* Remembered only with clean indices: a deferred page is asked again until it is taken. */
+    if(v->dy1 <= v->dy0) {
+        g_vq_memo[mk].tex_x = s->tex_x; g_vq_memo[mk].tex_y = s->tex_y;
+        g_vq_memo[mk].clut_x = s->clut_x; g_vq_memo[mk].clut_y = s->clut_y;
+        g_vq_memo[mk].depth = (uint8_t)depth; g_vq_memo[mk].am = (uint8_t)am;
+        g_vq_memo[mk].slot = (uint8_t)(v - g_vq); g_vq_memo[mk].k = (uint8_t)k;
+    } else {}
+    vq_answer(v, k, mem, rows);
+    return 1;
+}
+
+void vq_stale(int x, int y, int w, int h) {
+    for(int i = 0; i < g_vq_n; i++) {
+        gvq_t* v = &g_vq[i];
+        if(!v->used) continue;
+        else {}
+        const int pw = v->depth == 0 ? 64 : 128;
+        if(v->tex_x + pw <= x || x + w <= v->tex_x || v->tex_y + TEX_DIM <= y || y + h <= v->tex_y) continue;
+        else {}
+        int y0 = y - v->tex_y, y1 = y + h - v->tex_y;
+        if(y0 < 0) y0 = 0;
+        else {}
+        if(y1 > TEX_DIM) y1 = TEX_DIM;
+        else {}
+        if(v->dy1 > v->dy0) {
+            if(v->dy0 < y0) y0 = v->dy0;
+            else {}
+            if(v->dy1 > y1) y1 = v->dy1;
+            else {}
+        } else {}
+        v->dy0 = (int16_t)y0;
+        v->dy1 = (int16_t)y1;
+    }
 }
 
 /** One 64x64 patch of a page with its CLUT already applied: a 4bpp page's, for palettes that
@@ -859,6 +1105,8 @@ static void bake_unindex(int i) {
     g_bake_index[hole] = 0;
 }
 
+static int bake_slot_find(const gstate_t* s, int tu, int tv, int amode) __attribute__((noinline));
+
 static inline int bake_is(int i, const gstate_t* s, int tu, int tv, int amode) {
     return g_bake[i].used && g_bake[i].tex_x == s->tex_x && g_bake[i].tex_y == s->tex_y
         && g_bake[i].clut_x == s->clut_x && g_bake[i].clut_y == s->clut_y
@@ -866,7 +1114,31 @@ static inline int bake_is(int i, const gstate_t* s, int tu, int tv, int amode) {
         && g_bake[i].amode == amode;
 }
 
+/* bake_slot's answers for this build: by the state record (its content is fixed for the frame),
+ * the patch and the variant. Direct-mapped; an entry is this build's while `frame` is g_tex_frame. */
+#define BAKE_MEMO 64
+static struct { const gstate_t* s; uint32_t frame; uint8_t tu, tv, amode; int16_t slot; } g_bake_memo[BAKE_MEMO];
+
 PROF_NOINLINE int bake_slot(const gstate_t* s, int tu, int tv, int amode) {
+    const uint32_t mk = (((uint32_t)(uintptr_t)s >> 5) ^ ((uint32_t)tu << 1) ^ ((uint32_t)tv << 3)
+                         ^ ((uint32_t)amode << 5)) & (BAKE_MEMO - 1);
+    if(g_bake_memo[mk].s == s && g_bake_memo[mk].frame == g_tex_frame && g_bake_memo[mk].tu == tu
+       && g_bake_memo[mk].tv == tv && g_bake_memo[mk].amode == amode)
+        return g_bake_memo[mk].slot;
+    else {}
+    const int found = bake_slot_find(s, tu, tv, amode);
+    if(found >= 0) {
+        g_bake_memo[mk].s = s; g_bake_memo[mk].frame = g_tex_frame;
+        g_bake_memo[mk].tu = (uint8_t)tu; g_bake_memo[mk].tv = (uint8_t)tv;
+        g_bake_memo[mk].amode = (uint8_t)amode; g_bake_memo[mk].slot = (int16_t)found;
+    } else {}
+    return found;
+}
+
+/* bake_slot's work: the patch's slot found by its key, else baked into a free one. Out of line: as
+ * GCC inlined it, the memo's hit — four in five calls — opened its frame of seven saved registers
+ * and 96 bytes for the bake's tables. */
+static int bake_slot_find(const gstate_t* s, int tu, int tv, int amode) {
     const int h = bake_hash(s, tu, tv, amode);
     /* A key is in at most one slot in use, so the probe finds the slot the walk over the pool did. */
     for(int p = h; g_bake_index[p] != 0; p = (p + 1) & (BAKE_INDEX - 1)) {
@@ -976,10 +1248,12 @@ PROF_NOINLINE void palette_priority(void) {
 
 void bp_gpu_vram(const uint16_t* vram) {
     g_vram = vram;
+    vram_rows_written(0, VRAM_H);
     g_scene_dirty = 1;
-    if(!g_mir_base) {
+    if(!g_mir_base && RECOMPSX_VQ < 2) {
         /* One megabyte, taken first and in one piece, because it is the entire PlayStation
-         * VRAM and every other allocation here is a luxury next to it. */
+         * VRAM and every other allocation here is a luxury next to it. (With RECOMPSX_VQ the VQ
+         * page slots hold the pages instead, ADR-0061.) */
         g_mir_base = pvr_mem_malloc(PAGE4_N * PAGE4_BYTES);
         for(int i = 0; i < PAGE4_N; i++) {
             g_page4[i].mem = g_mir_base
@@ -992,7 +1266,9 @@ void bp_gpu_vram(const uint16_t* vram) {
         /* Big pool first, then small slots until the floor: every remaining 32 KB buys another
          * 4bpp page, and the floor keeps a margin so this can never silently starve a later
          * allocation — the lesson of the 9 MB night. */
-        while(g_tex_big_n < TEX_BIG_SLOTS) {
+        /* With the VQ slots holding 8bpp pages (ADR-0061) the big pool keeps 15-bit and windowed
+         * pages only: half of it. */
+        while(g_tex_big_n < (RECOMPSX_VQ ? TEX_BIG_SLOTS / 2 : TEX_BIG_SLOTS)) {
             pvr_ptr_t m = pvr_mem_malloc(TEX_DIM * TEX_DIM * 2);
             if(!m) break;
             g_tex[g_tex_big_n++].mem = m;
@@ -1005,6 +1281,39 @@ void bp_gpu_vram(const uint16_t* vram) {
             g_tex_small_n++;
         }
     }
+#if RECOMPSX_VQ
+    /* The VQ page slots (ADR-0061) where the bake pool was: the bake pool stays empty, so its
+     * patches are never asked for and the mirror pages lend nothing. */
+    if(g_vq_n == 0) {
+        while(g_vq_n < VQ_SLOTS && pvr_mem_available() >= VQ_SLOT_BYTES + 128 * 1024) {
+            pvr_ptr_t m = pvr_mem_malloc(VQ_SLOT_BYTES);
+            if(!m) break;
+            else {}
+            g_vq[g_vq_n].mem = m;
+            g_vq[g_vq_n].used = 0;
+            g_vq[g_vq_n].bound_frame = 0;
+            g_vq_n++;
+        }
+    } else {}
+    for(int i = 0; i < g_vq_n; i++) g_vq[i].used = 0;
+#else
+#if RECOMPSX_VQ8
+    /* The 8bpp pages' VQ slots (RECOMPSX_VQ8), from the bake pool's own memory: the big pool keeps its
+     * twelve slots (halved, Crash 3's intro ran out of them and rewrote slots in flight: ledger E-183),
+     * and the pool keeps the mirror pages' lending and what is left past VQ8_FLOOR. */
+    if(g_vq_n == 0) {
+        while(g_vq_n < VQ8_SLOTS && pvr_mem_available() >= VQ_SLOT_BYTES + VQ8_FLOOR) {
+            pvr_ptr_t m = pvr_mem_malloc(VQ_SLOT_BYTES);
+            if(!m) break;
+            else {}
+            g_vq[g_vq_n].mem = m;
+            g_vq[g_vq_n].used = 0;
+            g_vq[g_vq_n].bound_frame = 0;
+            g_vq_n++;
+        }
+    } else {}
+    for(int i = 0; i < g_vq_n; i++) g_vq[i].used = 0;
+#endif
     if(g_bake_lent0 < 0) {
         while(g_bake_n < BAKE_MAX && pvr_mem_available() >= BAKE_BYTES + 128 * 1024) {
             pvr_ptr_t m = pvr_mem_malloc(BAKE_BYTES);
@@ -1020,6 +1329,7 @@ void bp_gpu_vram(const uint16_t* vram) {
             }
         } else {}
     } else {}
+#endif
     for(int i = 0; i < g_tex_big_n + g_tex_small_n; i++) g_tex[i].used = 0;
     for(int i = 0; i < g_bake_n; i++) g_bake[i].used = 0;
     /* Said out loud, because the failure mode is silent and looks like a rendering bug: a pool
@@ -1029,10 +1339,10 @@ void bp_gpu_vram(const uint16_t* vram) {
     const int own = g_bake_lent0 < 0 ? g_bake_n : g_bake_lent0;
     snprintf(msg, sizeof(msg),
              "gpu: PVR draws the primitives — VRAM mirror %s, %d big + %d small slots, "
-             "%d bake patches and %d in mirror pages not sampled yet, %u KB free",
+             "%d bake patches and %d in mirror pages not sampled yet, %d VQ page slots, %u KB free",
              g_mir_base ? "resident" : "MISSING",
-             g_tex_big_n, g_tex_small_n, own, bake_pool_size() - own,
+             g_tex_big_n, g_tex_small_n, own, bake_pool_size() - own, g_vq_n,
              (unsigned)(pvr_mem_available() / 1024));
-    bp_log(g_mir_base && g_tex_big_n == TEX_BIG_SLOTS && own >= 32
+    bp_log((g_mir_base || RECOMPSX_VQ >= 2) && g_tex_big_n >= TEX_BIG_SLOTS / 2 && (own >= 32 || g_vq_n >= VQ_SLOTS / 2)
            ? BP_LOG_INFO : BP_LOG_WARN, msg);
 }

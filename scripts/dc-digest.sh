@@ -27,6 +27,9 @@ home="${FLYCAST_PROF_HOME:-$HOME/Desktop/Project/flycast-home}-dg-$name"
 D="out/_dg_$name"
 rm -rf "$D"; mkdir -p "$D/bd" "$D/gdi" "$home"
 ln "$data/BOOT.EXE" "$D/bd/BOOT.EXE"; ln "$data/DISC.BIN" "$D/bd/DISC.BIN"
+# The run-time layout's table (ADR-0063), when the build has one: DIGEST_ARGS=--dc-hotcode=FROM:TO moves
+# the code during the run, which must leave the digest as it was.
+if [ -f "$(dirname "$elf")/HOTCODE.BIN" ]; then cp "$(dirname "$elf")/HOTCODE.BIN" "$D/bd/"; fi
 printf '/cd/BOOT.EXE\n/cd/DISC.BIN\n--headless-hash\n%s\n' "$frames" > "$D/bd/RECOMPSX.CFG"
 if [ -n "${DIGEST_ARGS:-}" ]; then printf '%s\n' "$DIGEST_ARGS" >> "$D/bd/RECOMPSX.CFG"; fi
 serial="$(strings -n 9 "$elf" | grep -m1 -E '^S[CL][EUP][SM][0-9]{5}$' || true)"

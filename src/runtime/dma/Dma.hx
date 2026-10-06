@@ -38,6 +38,8 @@ class Dma {
 	static inline var BCR = 0x4;
 	static inline var CHCR = 0x8;
 
+	static inline var CH_MDEC_IN = 0;
+	static inline var CH_MDEC_OUT = 1;
 	static inline var CH_GPU = 2;
 	static inline var CH_CDROM = 3;
 	static inline var CH_SPU = 4;
@@ -75,6 +77,7 @@ class Dma {
 		listAt = -1;
 		listClock = 0;
 		listLinks = 0;
+		mdecOutLeft = 0;
 	}
 
 	public static inline function contains(p:Int):Bool {
@@ -121,6 +124,24 @@ class Dma {
 		else channelWrite(p, v);
 	}
 
+	/**
+		A byte or a halfword of a DMA register (psx-spx's "Partial-Word Writes"), the rest of the
+		word as it is: Psy-Q's DMA callbacks write DICR's upper half (the enables, and the flags to
+		acknowledge). For DICR only the flags in the bytes written are acknowledged — the others'
+		ones, read back as set, are not written back.
+	**/
+	public static function writeNarrow(p:Int, v:Int, valueMask:Int):Void {
+		final reg = p & ~3;
+		final shift = (p & 3) << 3;
+		if (reg == 0x1F8010F4) {
+			final w = (dicr & 0x00FFFFFF & ~(valueMask << shift)) | ((v & valueMask) << shift);
+			writeDicr(w);
+		} else {
+			final old = read(reg);
+			write(reg, (old & ~(valueMask << shift)) | ((v & valueMask) << shift));
+		}
+	}
+
 	/** DICR's flag bits are write-1-to-clear; the enables are ordinary. */
 	static inline function writeDicr(v:Int):Void {
 		final acked = (v >>> 24) & 0x7F;
@@ -141,6 +162,8 @@ class Dma {
 		chcr[ch] = v;
 		// Clearing the start bit stops a list the channel is still walking.
 		if (ch == CH_GPU && listAt >= 0 && (v & CHCR_BUSY) == 0) stopList();
+		else {}
+		if (ch == CH_MDEC_OUT && (v & CHCR_BUSY) == 0) mdecOutLeft = 0;
 		else {}
 		if (!enabled(ch)) return;
 		else {}
@@ -163,14 +186,56 @@ class Dma {
 	static function run(ch:Int):Void {
 		final sync = (chcr[ch] >>> 9) & 3;
 		if (ch == CH_GPU && sync == 2) startList();
+		else if (ch == CH_MDEC_OUT) mdecOut();
 		else {
 			if (ch == CH_GPU) toGpu();
 			else if (ch == CH_CDROM) sectorToRam();
 			else if (ch == CH_SPU) ramToSpu();
 			else if (ch == CH_OTC) clearOrderingTable();
+			else if (ch == CH_MDEC_IN) mdecIn();
 			else unimplementedChannel(ch);
 			finish(ch);
 		}
+	}
+
+	/** Words a channel's BCR asks for: a burst's count (0 = 10000h), or blocks of a size. */
+	static inline function wordsOf(ch:Int):Int {
+		final size = bcr[ch] & 0xFFFF;
+		final blocks = (bcr[ch] >>> 16) & 0xFFFF;
+		final sync = (chcr[ch] >>> 9) & 3;
+		return sync == 0 ? (size == 0 ? 0x10000 : size) : size * (blocks == 0 ? 1 : blocks);
+	}
+
+	/** Words DMA1 still wants from the MDEC (`mdecOut` waiting for input), 0 when none. */
+	static var mdecOutLeft = 0;
+
+	/** DMA0: the compressed data, into the MDEC; then a DMA1 waiting for it may go on. */
+	static function mdecIn():Void {
+		final total = wordsOf(CH_MDEC_IN);
+		mdec.Mdec.dmaIn(Memory.ram(), madr[CH_MDEC_IN] & 0x1FFFFC, total);
+		madr[CH_MDEC_IN] = (madr[CH_MDEC_IN] + (total << 2)) & 0xFFFFFF;
+		mdecMore();
+	}
+
+	/**
+		DMA1: the pixels, out of the MDEC into RAM, as many as it can decode now. The rest is taken
+		when input arrives (`mdecMore`), the channel busy meanwhile — the MDEC's FIFOs pace the
+		two channels on the hardware, and a game may start DMA1 before DMA0.
+	**/
+	static function mdecOut():Void {
+		mdecOutLeft = wordsOf(CH_MDEC_OUT);
+		mdecMore();
+	}
+
+	/** Input reached the MDEC (DMA0, or a word at its port): DMA1, if waiting, takes what it can. */
+	public static function mdecMore():Void {
+		if (mdecOutLeft <= 0) return;
+		else {}
+		final n = mdec.Mdec.dmaOut(Memory.ram(), madr[CH_MDEC_OUT] & 0x1FFFFC, mdecOutLeft);
+		madr[CH_MDEC_OUT] = (madr[CH_MDEC_OUT] + (n << 2)) & 0xFFFFFF;
+		mdecOutLeft -= n;
+		if (mdecOutLeft <= 0) finish(CH_MDEC_OUT);
+		else {}
 	}
 
 	/**

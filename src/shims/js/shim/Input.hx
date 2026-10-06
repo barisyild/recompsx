@@ -40,9 +40,10 @@ import js.html.PointerEvent;
 	and a key held when text entry ends becomes a button only when it is pressed again.
 
 	The pointer is the HLE kernel's mouse (`kernel.KMouse`, ADR-0038), over the element the page
-	shows the picture in (`recompsxHost.screen`): both renderers stretch the picture over that
-	element's whole content box, so its edges are the picture's. A position is a fraction of it,
-	0..65535, worked out in plain JavaScript so that no float reaches Haxe; a press counts until
+	shows the picture in (`recompsxHost.screen`): both renderers stretch the picture over the canvas
+	shown in it, whose edges are the picture's — the element's whole content box, or its middle three
+	quarters for a picture drawn for 4:3 on a 16:9 screen (ADR-0064). A position is a fraction of the
+	canvas, 0..65535, worked out in plain JavaScript so that no float reaches Haxe; a press counts until
 	the next poll even when it was let go before; and over the picture the right button opens no
 	context menu and the side buttons leave the page's history alone, since they are the game's.
 **/
@@ -275,10 +276,12 @@ class Input {
 		} else {}
 	}
 
-	/** Where the pointer is, as fractions of the element's content box (0..65535). */
+	/** Where the pointer is, as fractions of the picture's canvas (0..65535): the one shown in the
+	    element, or the element itself where there is none. */
 	static function point(screen:Element, e:PointerEvent):Void {
-		pointerX = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientX - ({0}).getBoundingClientRect().left - ({0}).clientLeft) / ({0}).clientWidth * 65536) | 0))", screen, e);
-		pointerY = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientY - ({0}).getBoundingClientRect().top - ({0}).clientTop) / ({0}).clientHeight * 65536) | 0))", screen, e);
+		final area:Element = js.Syntax.code("(({0}).querySelector('canvas:not([hidden])') || ({0}))", screen);
+		pointerX = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientX - ({0}).getBoundingClientRect().left - ({0}).clientLeft) / ({0}).clientWidth * 65536) | 0))", area, e);
+		pointerY = js.Syntax.code("Math.min(65535, Math.max(0, ((({1}).clientY - ({0}).getBoundingClientRect().top - ({0}).clientTop) / ({0}).clientHeight * 65536) | 0))", area, e);
 		pointerOver = true;
 	}
 

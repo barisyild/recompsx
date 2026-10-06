@@ -846,6 +846,7 @@ class Memory {
 		else if (p == 0x1F801814) return gpu.Gpu.readStatus(cycleHint());
 		else if (isMemControl(p)) return memControl[(p - MEMCTRL_BASE) >> 2];
 		else if (p == RAM_SIZE_REG) return ramSizeReg;
+		else if (mdec.Mdec.contains(p)) return mdec.Mdec.read(p);
 		else return ioUnknownRead(p);
 	}
 
@@ -932,7 +933,14 @@ class Memory {
 		else if (p == 0x1F801814) gpu.Gpu.writeGp1(v);
 		else if (isMemControl(p)) memControl[(p - MEMCTRL_BASE) >> 2] = v;
 		else if (p == RAM_SIZE_REG) ramSizeReg = v;
+		else if (mdec.Mdec.contains(p)) mdecWrite(p, v);
 		else ioUnknownWrite(p, v);
+	}
+
+	/** A word for the MDEC; a DMA1 transfer waiting for its input then takes what it can. */
+	static function mdecWrite(p:Int, v:Int):Void {
+		mdec.Mdec.write(p, v);
+		dma.Dma.mdecMore();
 	}
 
 	/**
@@ -975,6 +983,7 @@ class Memory {
 		// a 32-bit word would read three neighbours that mean something else entirely.
 		else if (isCdrom(p)) return inline cd.Cdrom.readPolled(p, raHint());
 		else if (isSio(p)) return inline sio.Sio0.read8(p);
+		else if (dma.Dma.contains(p)) return (dma.Dma.read(p & ~3) >>> ((p & 3) << 3)) & 0xFF;
 		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 3) << 3)) & 0xFF;
 		else if (isRom(p)) return inline romRead8(p);
 		#if recompsx_mods
@@ -1050,6 +1059,7 @@ class Memory {
 		else if (isCdrom(p)) return (inline cd.Cdrom.read8(p)) | ((inline cd.Cdrom.read8(p + 1)) << 8);
 		else if (isSio(p)) return inline sio.Sio0.read16(p);
 		else if (spu.Spu.contains(p)) return inline spu.Spu.read16(p);
+		else if (dma.Dma.contains(p)) return (dma.Dma.read(p & ~3) >>> ((p & 2) << 3)) & 0xFFFF;
 		else if (isIo(p)) return ((inline ioRead32(p & ~3)) >>> ((p & 2) << 3)) & 0xFFFF;
 		else if (isRom(p)) return (inline romRead8(p)) | ((inline romRead8(p + 1)) << 8);
 		#if recompsx_mods
@@ -1116,6 +1126,7 @@ class Memory {
 		if (isScratch(p)) RawMem.set8(scratch(), p - SCRATCH_BASE, v);
 		else if (isCdrom(p)) inline cd.Cdrom.write8(p, v, cycleHint());
 		else if (isSio(p)) inline sio.Sio0.write8(p, v);
+		else if (dma.Dma.contains(p)) dma.Dma.writeNarrow(p, v & 0xFF, 0xFF);
 		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFF, 0xFF);
 		#if recompsx_mods
 		else if (mod.ModRam.contains(p)) mod.ModRam.write8(p, v);
@@ -1144,6 +1155,7 @@ class Memory {
 		else if (isTimer(p)) inline timers.Timers.write(p, v & 0xFFFF, cycleHint());
 		else if (isCdrom(p)) inline cdHalfWrite(p, v & 0xFFFF);
 		else if (spu.Spu.contains(p)) inline spu.Spu.write16(p, v & 0xFFFF);
+		else if (dma.Dma.contains(p)) dma.Dma.writeNarrow(p & ~1, v & 0xFFFF, 0xFFFF);
 		else if (isIo(p)) inline ioWriteNarrow(p, v & 0xFFFF, 0xFFFF);
 		#if recompsx_mods
 		else if (mod.ModRam.contains(p)) mod.ModRam.write16(p, v);

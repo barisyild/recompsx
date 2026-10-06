@@ -53,9 +53,11 @@ which the texture unit cannot read.
 - **The 432 KB come from the 4bpp mirror's unsampled pages.** The mirror is the whole of PlayStation
   VRAM as 32 pages of 32 KB, but a game never samples as 4bpp textures the pages its display buffers
   cover: Crash 3 samples 16 of them (the lower row, `ffff0000`), Crash Bash 20. Each page's memory
-  carries four bake patches until the page is first sampled (`page_reclaim`): then the patches go,
-  unless the PVR may still read one, and the page waits a frame while its primitives take a page slot.
-  A page once sampled keeps its memory. Without this the pictures' memory came out of the bake pool
+  carries four bake patches until the page is first sampled (`page_reclaim`): then the patches leave
+  the pool at once, so that nothing binds them again, and if the PVR may still read one the page waits
+  a frame or two while its primitives take a page slot. (The first form left them in the pool until
+  they were idle, which a scene binding them every frame could have put off for good.) A page once
+  sampled keeps its memory. Without this the pictures' memory came out of the bake pool
   alone — 128 patches to 92, and to 76 with the profile overlay's texture — and Crash 3's attract demo
   wants more in a frame: 772 misses by present 5000, bake_slot re-baking (the demo window 20.87 →
   21.57 ms a frame under the model), and the owner saw the DEMO text drawn wrong for a frame each time

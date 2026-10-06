@@ -68,6 +68,12 @@ class Cdrom {
 		out of the data FIFO means — file contents, or the minute of the sector's own address.
 	**/
 	static inline var MODE_WHOLE_SECTOR = 0x20;
+	/** Setmode bit 6: XA-ADPCM sectors go to the SPU's CD input, not to the CPU. */
+	static inline var MODE_XA_ADPCM = 0x40;
+	/** Setmode bit 3: only the XA-ADPCM sectors Setfilter names are played. */
+	static inline var MODE_XA_FILTER = 0x08;
+	/** Submode bit 2 (the subheader's third byte): an audio sector. */
+	static inline var SUBMODE_AUDIO = 0x04;
 
 	/** How many bytes of the held sector are real, which depends on the mode it was read in. */
 	static var sectorLen = 2048;
@@ -143,6 +149,11 @@ class Cdrom {
 		pendingCount = 0;
 		now = 0;
 		sector = RawMem.alloc(SECTOR_BYTES);
+		header = RawMem.alloc(8);
+		xaSector = RawMem.alloc(Iso9660.WHOLE_BYTES);
+		XaAdpcm.init();
+		filterFile = 0;
+		filterChannel = 0;
 		index = 0;
 		status = ST_MOTOR;
 		mode = 0;
@@ -529,7 +540,10 @@ class Cdrom {
 		else if (cmd == 0x09) pause(cycles);
 		else if (cmd == 0x0A) initCommand(cycles);
 		else if (cmd == 0x0B || cmd == 0x0C) ackWith1(status);  // Mute / Demute
+		else if (cmd == 0x0D) setfilter();
 		else if (cmd == 0x0E) setmode();
+		else if (cmd == 0x10) getlocL();
+		else if (cmd == 0x11) getlocP();
 		else if (cmd == 0x13) getTn();
 		else if (cmd == 0x14) getTd();
 		else if (cmd == 0x15 || cmd == 0x16) seek(cycles);
@@ -539,6 +553,52 @@ class Cdrom {
 		else if (cmd == 0x1C) resetCommand();
 		else unknownCommand(cmd);
 		paramCount = 0;
+	}
+
+	/** Setfilter's file and channel: which interleaved XA-ADPCM sectors play under Setmode bit 3. */
+	static var filterFile = 0;
+	static var filterChannel = 0;
+	/** GetlocL's eight bytes, read for the sector held. */
+	static var header:RawBuf;
+
+	/** `Setfilter file,channel` (0Dh). */
+	static function setfilter():Void {
+		if (paramCount >= 2) {
+			filterFile = param[0];
+			filterChannel = param[1];
+		} else {}
+		ackWith1(status);
+	}
+
+	/**
+		`GetlocL` (10h): the last sector read's address header and subheader — minute, second and
+		frame in BCD, the mode, then file, channel, submode and coding info. A movie player reads
+		them to tell video sectors from audio ones.
+	**/
+	static function getlocL():Void {
+		if (!Iso9660.headerBytes(heldLba, header)) return errorWith(0x80);
+		else {}
+		for (i in 0...8) response[i] = RawMem.get8(header, i);
+		respond(INT3_ACK, 8);
+	}
+
+	/**
+		`GetlocP` (11h): where the head is, from the subchannel — track and index (01, 01: the one
+		data track), the position in the track, and on the disc, as minute, second and frame in BCD.
+		The track starts at LBA 0, so its position is the LBA; the disc's adds the lead-in.
+	**/
+	static function getlocP():Void {
+		final rel = heldLba;
+		final abs = heldLba + 150;
+		response[0] = 0x01;
+		response[1] = 0x01;
+		response[2] = toBcd(shim.IntMath.div(rel, 60 * 75));
+		response[3] = toBcd(shim.IntMath.mod(shim.IntMath.div(rel, 75), 60));
+		response[4] = toBcd(shim.IntMath.mod(rel, 75));
+		response[5] = toBcd(shim.IntMath.div(abs, 60 * 75));
+		response[6] = toBcd(shim.IntMath.mod(shim.IntMath.div(abs, 75), 60));
+		response[7] = toBcd(shim.IntMath.mod(abs, 75));
+		respond(INT3_ACK, 8);
 	}
 
 	static function unknownCommand(cmd:Int):Void {
@@ -623,6 +683,7 @@ class Cdrom {
 	static function stop():Void {
 		reading = false;
 		dropHeldSector();
+		XaAdpcm.flush();
 		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING | ST_MOTOR);
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
@@ -639,6 +700,7 @@ class Cdrom {
 		readLba = seekLba;
 		headInLeadIn = false;
 		dropHeldSector();
+		XaAdpcm.reset();
 		reading = true;
 		status = (status | ST_READING) & ~ST_SEEKING;
 		ackWith1(status);
@@ -647,6 +709,7 @@ class Cdrom {
 	static function pause(cycles:Int):Void {
 		reading = false;
 		dropHeldSector();
+		XaAdpcm.flush();
 		status &= ~(ST_READING | ST_SEEKING | ST_PLAYING);
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
@@ -656,6 +719,7 @@ class Cdrom {
 		mode = 0;
 		reading = false;
 		dropHeldSector();
+		XaAdpcm.flush();
 		status = ST_MOTOR;
 		queue(INT2_DONE, status, 1);
 		ackWith1(status);
@@ -872,7 +936,11 @@ class Cdrom {
 	static function afterAnswer(ctx:CpuState):Void {
 		if (queuedInt != 0) return schedule(ctx.cycles, ACK);
 		else {}
-		if (reading) schedule(ctx.cycles, sectorInterval());
+		// Streaming XA-ADPCM, the drive reads in real time: a sector every sectorInterval, the
+		// answer's latency inside that time rather than added to it. Added, a double-speed stream
+		// read 123 sectors a second where the disc holds 150, and the sound it carries — mastered
+		// for 150 — ran dry every half second (Tekken 3's movie). Other reads keep their timing.
+		if (reading) schedule(ctx.cycles, (mode & MODE_XA_ADPCM) != 0 ? sectorInterval() - ACK : sectorInterval());
 		else {}
 	}
 
@@ -884,6 +952,12 @@ class Cdrom {
 		not before. Scheduling both from here made the two overwrite each other in the same slot.
 	**/
 	static function deliverSector(ctx:CpuState):Void {
+		// An XA-ADPCM sector is the drive's own business: played or skipped, never delivered, and
+		// the next one read a sector's time later whether or not the CPU has taken the last.
+		if ((mode & MODE_XA_ADPCM) != 0 && audioSector(readLba)) {
+			readLba++;
+			return schedule(ctx.cycles, sectorInterval());
+		} else {}
 		if (currentInt != 0) return schedule(ctx.cycles, ACK);   // the CPU has not caught up
 		else {}
 		// Nor does the drive overwrite a sector the CPU has not finished with.
@@ -910,6 +984,28 @@ class Cdrom {
 		readLba++;
 		sectorsDelivered++;
 		respond(INT1_DATA, statusOnly());
+	}
+
+	/** The sector an XA-ADPCM check reads whole, subheader and all. */
+	static var xaSector:RawBuf;
+
+	/**
+		Under Setmode bit 6, whether the sector at `lba` is audio (submode bit 2) — and if so it
+		is played, when Setfilter's file and channel match it or bit 3 does not ask them to
+		(psx-spx, "Setfilter": the filter selects which of a file's interleaved songs plays; data
+		sectors are delivered whatever it says). Tekken 3 streams its music this way, eight
+		channels interleaved in one file, and its movies their sound beside the pictures.
+	**/
+	static function audioSector(lba:Int):Bool {
+		if (!Iso9660.wholeSector(lba, xaSector)) return false;
+		else {}
+		if ((RawMem.get8(xaSector, 6) & SUBMODE_AUDIO) == 0) return false;
+		else {}
+		final matches = (mode & MODE_XA_FILTER) == 0
+			|| (RawMem.get8(xaSector, 4) == filterFile && RawMem.get8(xaSector, 5) == filterChannel);
+		if (matches) XaAdpcm.decodeSector(xaSector);
+		else {}
+		return true;
 	}
 
 	/**

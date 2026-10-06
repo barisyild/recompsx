@@ -112,12 +112,29 @@ static inline void txr_put(const void* src, pvr_ptr_t dst, size_t bytes) {
  * allocated and nothing is drawn, so the only cost is the 128 KB text buffer in main RAM. */
 #define RECOMPSX_DC_PROFILE_OVERLAY 1
 
+/* The hot code laid out at run time (ADR-0063, dc_hotcode.c): when the game is behind its rate and has
+ * moved on to code the copies do not hold, the emulation's PC is sampled over a window of presents and the
+ * hottest functions are copied into an arena laid out for the caches. In every build; `--dc-hotcode=off` on
+ * a disc's command line turns it off, and -DRECOMPSX_HOTCODE=0 leaves it out. */
+#ifndef RECOMPSX_HOTCODE
+#define RECOMPSX_HOTCODE 1
+#endif
+
 /* Diagnosis mode: every texture cache slot decodes to one solid colour instead of its real
  * texels. The picture stops being a picture and becomes a map of which slot each surface binds:
  * stable colour patches mean the binding is right and the decoded *content* is the suspect;
  * patches that flicker between frames mean slots are being re-bound or evicted mid-scene. One
  * look answers what three rounds of hypothesis could not. */
 #define RECOMPSX_DC_TEX_DEBUG 0
+
+/* Whether a picture whose records all draw within one drawing area smaller than its buffer is built
+ * with them uncut, the picture outside the area drawn again from itself after them (area_uncut):
+ * the scene build cuts nothing at the area's edges (ledger E-179: Crash 3's demo cf 17.54 -> 17.15;
+ * its pictures the same but for the dither of gradients reaching across an edge). -DRECOMPSX_UNCUT=0
+ * builds the cutting form, whose TA stream earlier hashes were taken of. */
+#ifndef RECOMPSX_UNCUT
+#define RECOMPSX_UNCUT 1
+#endif
 
 /* ---- video ----------------------------------------------------------------------------------- */
 
@@ -324,6 +341,46 @@ typedef struct {
  * drawn with every texel blended it was see-through. */
 enum { AM_VIS = 0, AM_SOLID = 1, AM_STP = 2, AM_N = 3 };
 
+/* A texture page's CLUTs as VQ codebooks (ADR-0061): what the bake pool drew — 8bpp pages, a 4bpp
+ * CLUT with no palette bank, a semi-transparent 4bpp primitive's solid and STP variants — drawn
+ * from a slot holding the page's indices once, a byte a texel in scan order, 256 a row (64 KB),
+ * after 16 KB of codebooks: a VQ entry is four texels, a row of four in scan order, so an entry of
+ * one colour four times over is one CLUT colour, and each byte one texel four wide. The PVR reads a
+ * VQ texture's indices 2 KB after its address, so codebook k, k rows (256 B) below the first,
+ * shares the page's indices when V moves down k rows: a 4bpp codebook (16 entries, 128 B) every
+ * row, 57 of them; an 8bpp one (256 entries, 2 KB) every eight rows, 8. Bound per state, not per
+ * record. RECOMPSX_VQ 0 builds the bake pool instead. */
+#ifndef RECOMPSX_VQ
+#define RECOMPSX_VQ 0      /* 1: VQ where the bake pool was; 2: every plain 4bpp page too (ADR-0061) */
+#endif
+/* With RECOMPSX_VQ 0: 8bpp pages alone as VQ pages, in VQ8_SLOTS slots beside the bake pool, which
+ * keeps the 4bpp cases (ADR-0061, Measured: the form left to try). An 8bpp page's CLUTs are few —
+ * Crash 3's at most three a page over two presents — and its records bind per state, in runs, where
+ * each baked one was a header and a bake_slot of its own; the slots take the bake pool's own memory
+ * down to VQ8_FLOOR before the pool is made. */
+#ifndef RECOMPSX_VQ8
+#define RECOMPSX_VQ8 0
+#endif
+#define VQ8_SLOTS     8
+#ifndef VQ8_FLOOR
+#define VQ8_FLOOR     (192 * 1024)
+#endif
+#define VQ_SLOTS      24
+#define VQ_AREA       (16 * 1024)
+#define VQ_INDEX      (TEX_DIM * TEX_DIM)
+#define VQ_SLOT_BYTES (VQ_AREA + VQ_INDEX)
+#define VQ_ROW        256
+#define VQ_CB4_N      ((VQ_AREA - 2048) / VQ_ROW + 1)
+#define VQ_CB8_N      ((VQ_AREA - 2048) / 2048 + 1)
+#define VQ_FMT        (PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED)
+/** The VQ binding of state s's page through its CLUT in variant `am`: the texture's address (a
+ *  codebook's) into *mem and the rows V moves down into *rows; 0 when no slot or codebook may be
+ *  written now (every one in flight) — the caller's fallback is the one the bake pool had. */
+int vq_bind(const gstate_t* s, int am, pvr_ptr_t* mem, int* rows);
+/** A VRAM write over x, y, w, h: the slots holding a page it meets take those rows again. */
+void vq_stale(int x, int y, int w, int h);
+extern int g_vq_n, g_vq_uploads, g_vq_books, g_vq_no_slot, g_vq_no_book, g_vq_calls, g_vq_hits;
+
 /* The background: the displayed rectangle of emulated VRAM, as a texture behind the geometry.
  *
  * Kept per rectangle, in slots carved out of the one megabyte g_txr: a slot is a whole texture at
@@ -371,9 +428,20 @@ typedef struct {
 #define TXR_BYTES (TXR_PIC_BYTES > TXR_MAX_W * TXR_MAX_H * 2 ? TXR_PIC_BYTES : TXR_MAX_W * TXR_MAX_H * 2)
 typedef struct {
     int x, y, w, h;    /* the buffer's VRAM rectangle */
+    int pw, ph;        /* the picture's size: the screen's, or the buffer's times the scale (ADR-0056) */
     int valid;
     uint32_t used;     /* g_tex_frame of its last use */
 } gpic_t;
+/* The picture's resolution (bp_gpu_scale, ADR-0056), in percent of the PlayStation's: from this
+ * one up a picture is the screen's PIC_W x PIC_H, as ADR-0055 drew every picture, and this is the
+ * scale the backend draws at until told one (BP_CAP_GPU_SCALE). Below it a picture is its buffer's
+ * size times the scale, and the screen shows it stretched. The screen's PIC_H lines are the most
+ * it draws (BP_CAP_GPU_LINES). */
+#define PIC_SCALE_SCREEN 200
+/* The size a scene is built for: the screen's 640x480, or the picture being rendered's. */
+extern int g_scene_w, g_scene_h;
+/* A picture's memory is declared at another size now: the headers kept for it are forgotten. */
+void hdr_forget(pvr_ptr_t mem);
 extern int g_pic_ok;       /* the memories exist: presents that can use pictures do */
 extern int g_pic_active;   /* the last present went through the pictures */
 extern int g_pic_done;     /* records already rendered into the pictures */
@@ -389,11 +457,26 @@ int pictures_init(void);
  * no texture is that size. */
 #define PIC_TEXDIM 1024
 extern float g_pic_ru[PIC_N], g_pic_rv[PIC_N];
-static inline int dim_u(int dim) { return dim >= PIC_TEXDIM ? PIC_TEXW : dim; }
-static inline int dim_v(int dim) { return dim >= PIC_TEXDIM ? PIC_TEXH : dim; }
+/* The size picture i is declared at: the next powers of two of its own (ADR-0056) — PIC_TEXW x
+ * PIC_TEXH at the screen's size — which is the texture Flycast keeps a render to texture as and
+ * matches a read of it by. */
+extern int g_pic_tw[PIC_N], g_pic_th[PIC_N];
+/* A VQ page's binding (ADR-0061, VQ_TEXDIM below): declared 1024 x 512, a texel coordinate's unit
+ * the PlayStation texel — 256 across, and 512 down to leave room for the rows a codebook moves V by. */
+#define VQ_TEXDIM 1536
+static inline int dim_u(int dim) {
+    return dim == VQ_TEXDIM ? 1024 : (dim >= PIC_TEXDIM ? g_pic_tw[dim - PIC_TEXDIM] : dim);
+}
+static inline int dim_v(int dim) {
+    return dim == VQ_TEXDIM ? 512 : (dim >= PIC_TEXDIM ? g_pic_th[dim - PIC_TEXDIM] : dim);
+}
 /* What put_tri multiplies a texel coordinate by: one over the size, or a picture's scale over it. */
-static inline float dim_ru(int dim) { return dim >= PIC_TEXDIM ? g_pic_ru[dim - PIC_TEXDIM] : 1.0f / (float)dim; }
-static inline float dim_rv(int dim) { return dim >= PIC_TEXDIM ? g_pic_rv[dim - PIC_TEXDIM] : 1.0f / (float)dim; }
+static inline float dim_ru(int dim) {
+    return dim == VQ_TEXDIM ? 1.0f / 256.0f : (dim >= PIC_TEXDIM ? g_pic_ru[dim - PIC_TEXDIM] : 1.0f / (float)dim);
+}
+static inline float dim_rv(int dim) {
+    return dim == VQ_TEXDIM ? 1.0f / 512.0f : (dim >= PIC_TEXDIM ? g_pic_rv[dim - PIC_TEXDIM] : 1.0f / (float)dim);
+}
 int pic_page(int tx, int ty, pvr_ptr_t* mem, int* dim, int* ou, int* ov);
 const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py, float* ru, float* rv);
 
@@ -406,6 +489,12 @@ extern int g_inited;
 extern gbg_t g_bgs[BG_SLOTS];
 extern int g_bg_slots;
 void draw_quad(int sw, int sh);
+/* A 4:3 picture on a 16:9 screen (BP_PRESENT_WIDE without BP_PRESENT_WIDE_FILL, ADR-0064): the last
+ * screen showed it in the middle three quarters, x PILLAR_X0 to PILLAR_X0 + PILLAR_W, between black
+ * bars, which a 16:9 television stretches back to 4:3. The pointer moves over that band then. */
+#define PILLAR_X0 80
+#define PILLAR_W  480
+extern int g_pillarbox;
 
 /* dc_scene.c */
 extern const uint16_t* g_vram;
@@ -430,6 +519,14 @@ int marks_from(int first, int sx, int sy, int sw, int sh);
  * (0,0) to (x1,y1), with the texture from (0,0) to (u1,v1). */
 extern const pvr_poly_hdr_t* g_base_hdr;
 extern float g_base_x1, g_base_y1, g_base_u1, g_base_v1;
+/* The picture of the buffer at tx, ty (tw x th) built with the records from `first` on uncut
+ * (RECOMPSX_UNCUT): 1 when that is exact — every triangle of the buffer's under one drawing area,
+ * inside the buffer and not all of it, every rectangle within it, no VRAM mark — and the next
+ * build_scene cuts at none of the area's edges and draws the picture outside the area again from
+ * the base (g_base_hdr, the picture itself) after the records; else 0, the build as ever. Asked
+ * only over a picture that is its own base; area_uncut_end after that build. */
+int area_uncut(int tx, int ty, int tw, int th, int first);
+void area_uncut_end(void);
 /* The frame's records, the rectangle sx..sh scaled to 640 x 480: onto the screen (`to_picture` 0,
  * the background g_hdr) or into the picture of the buffer at sx, sy (1: that buffer's records only,
  * the base g_base_hdr, no overlay or pointer). */
@@ -457,6 +554,13 @@ extern int g_pal_conflicts;
 extern uint32_t g_tex_frame;
 void twid_init(void);
 extern uint32_t g_pal_memo_gen;
+/* A generation per VRAM row, bumped by every write that reaches the backend (textures_stale): what
+ * a memo worked out from a row is still true while the row's generation is the one it saw. */
+extern uint32_t g_vram_row_gen[VRAM_H];
+static inline void vram_rows_written(int y, int h) {
+    const int n = h < VRAM_H ? h : VRAM_H;
+    for(int r = 0; r < n; r++) g_vram_row_gen[(y + r) & (VRAM_H - 1)]++;
+}
 PROF_NOINLINE int pal_bank_cached(int clut_x, int clut_y, int allow_approx, int amode);
 PROF_NOINLINE int tex_slot(const gstate_t* s, int amode);
 PROF_NOINLINE pvr_ptr_t page4_mirror(const gstate_t* s);
@@ -554,6 +658,23 @@ extern uint32_t g_frame_emu_us, g_frame_present_us;
 #if RECOMPSX_DC_PROFILE_OVERLAY
 void draw_profile_overlay(void);
 #endif
+#endif
+
+/* dc_hotcode.c */
+#if RECOMPSX_HOTCODE
+void hotcode_init(const char* window, const char* kb);
+void hotcode_present(uint32_t presents);
+/* A copy's address as its original's (the address itself outside every arena): for the profiler. */
+uint32_t hotcode_original(uint32_t a);
+/* One of the profiler's own samples (samp_tick), the emulation thread's: auto mode's look (dc_hotcode.c). */
+void hotcode_tick(uint32_t pc);
+/* Whether a layout's work is under way, and a slice of it until `until` (the pacer's spare time). */
+int  hotcode_pending(void);
+void hotcode_idle(uint64_t until);
+/* What the game waited for a vblank, in microseconds (the pacer): auto mode lays code out only when it is behind. */
+void hotcode_slack(uint32_t us);
+/* The profiling run's layout lines, kept in RAM until the bench stops (the serial port is slow): printed. */
+void hotcode_flush(void);
 #endif
 
 /* dc_fastmem.c */

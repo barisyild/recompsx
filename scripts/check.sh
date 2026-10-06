@@ -81,6 +81,18 @@ if [ -d src/runtime ]; then
   fi
 fi
 
+# --- 3b. a console's name is a mod's ---------------------------------------------------------
+# A Dreamcast tree is transpiled with `-D dreamcast` (build/game-cpp-dc.hxml) so that a mod can
+# offer what that console can do (ADR-0033; the RES line's scales, ADR-0056). The runtime, the
+# shims, shared/ and the tool know a console only through the backend ABI (bp_caps): never by name.
+hits="$(grep -rnE '#(if|elseif)[^A-Za-z0-9_].*(^|[^A-Za-z0-9_])dreamcast([^A-Za-z0-9_]|$)' \
+        src/runtime src/shims shared tools/recomp/src --include='*.hx' 2>/dev/null || true)"
+if [ -n "$hits" ]; then
+  fail "#if dreamcast outside a mod:"; echo "$hits" >&2
+else
+  ok "no #if dreamcast outside the mods"
+fi
+
 # --- 4. no hand-edited generated code ---------------------------------------------------------
 # out/ is gitignored; if anything under it is tracked, someone committed generated output.
 tracked_out="$(git ls-files out/ 2>/dev/null || true)"

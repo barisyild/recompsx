@@ -1,0 +1,14 @@
+{
+  "id": "widescreen",
+  "title": "WIDESCREEN, an option in the pause screen's OPTIONS: the game drawn for 16:9",
+  "_description": "WIDESCREEN, an option in OPTIONS on the pause screen (the menu mod's Menu.option: a button that opens its choices): the console's screen shape, 4:3, 16:9 or STRETCH, kept as the console's setting video.wide (the PS1 Pro calls GetWidescreen and SetWidescreen, ADR-0064). On a 16:9 screen the game draws for it, anamorphic: its own aspect routine, which scales the camera matrix's Y row by 5/8 for its 512-wide pixels, scales the X row by 3/4 as well; what faces the screen (sprites, the world's billboards, the HUD's icons) is narrowed by 3/4 in its own matrix, the screen's objects placed at 3/4 of their x from the middle, and the glyphs of texts narrowed toward the middle; the mod says so (SetWidePicture). The pause screen stays 4:3, shown in the middle of the screen.",
+  "entry": "widescreen.Widescreen",
+  "needs": ["menu"],
+  "_hooks": "0x80018988: the camera's projection matrix made from its rotation (a0 the projection's, a1 the rotation's): row 0 copied, row 1 times -5/8, row 2 negated, the translation copied. 0x80041fd8: the matrix of what faces the screen, from five words in t0..t4 (row 0 in t0 and t1's low half). 0x8003e67c: a screen object's place (TRX from its x at +60h of the object in $gp). 0x8001c3f8: a text's glyphs, written into the frame's primitive buffer (*80061A84h + 8).",
+  "hooks": [
+    { "_addr": "0x80018988", "addr": 2147584392, "in": "exe" },
+    { "_addr": "0x80041fd8", "addr": 2147753944, "in": "exe" },
+    { "_addr": "0x8003e67c", "addr": 2147739260, "in": "exe" },
+    { "_addr": "0x8001c3f8", "addr": 2147599352, "in": "exe" }
+  ]
+}

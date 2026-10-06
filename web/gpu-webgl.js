@@ -77,6 +77,15 @@
   A VRAM-to-VRAM copy (bp_gpu_copy, ADR-0054) is done here, from fbTex and its mask bits: fbTex
   holds everything emulated VRAM does and what was drawn besides, and a copy out of a buffer on
   screen is a copy of what was drawn there — which emulated VRAM's own copy lacks.
+
+  The picture's resolution is the console's setting (bp_gpu_scale, ADR-0056): fbTex, its depth and
+  the copy's scratch are VRAM's size times the scale — half of it, the PlayStation's own, twice,
+  three times — and everything drawn into them is drawn at it. Coordinates stay VRAM's everywhere:
+  the vertex shader maps the whole of VRAM onto the target whatever its size, and only the viewport,
+  the scissor and a copy's texels count target pixels. Textures stay VRAM's too: vramTex is what the
+  runtime wrote, and a drawn tile is read back into it at one target pixel a VRAM pixel, the one at
+  the VRAM pixel's centre — so what a game draws and then samples (Crash's shadow, a transition's
+  frame) is sampled at the PlayStation's resolution, and only what goes to the screen is finer.
 */
 function createHardwareGpu(canvas) {
   const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false,
@@ -294,16 +303,19 @@ function createHardwareGpu(canvas) {
   // Rendered colour back to a VRAM halfword, drawn into vramTex over tiles primitives drew into.
   // A channel holds (k + 1/2) / 32 (see the header), within 1/16 of a step after the eight-bit
   // store and within a quarter step more after a mode 0 blend: the floor of 32 times it is k.
-  // Bit 15 is read from the depth texture, in the same pass.
+  // Bit 15 is read from the depth texture, in the same pass. At a scale the word is the target
+  // pixel at the VRAM pixel's centre.
   const toWordFs = `#version 300 es
     precision highp float;
     precision highp int;
     uniform sampler2D uFrame;
     uniform sampler2D uDepth;
+    uniform vec2 uScale;
     in vec2 vTexel;
     out uvec4 oWord;
     void main() {
-      ivec2 p = ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511);
+      ivec2 q = ivec2(int(floor(vTexel.x)) & 1023, int(floor(vTexel.y)) & 511);
+      ivec2 p = ivec2(floor((vec2(q) + 0.5) * uScale));
       vec3 c = texelFetch(uFrame, p, 0).rgb;
       uvec3 v = uvec3(clamp(floor(c * 32.0), 0.0, 31.0));
       uint mask = texelFetch(uDepth, p, 0).r > 0.5 ? 0x8000u : 0u;
@@ -322,7 +334,7 @@ function createHardwareGpu(canvas) {
   const quad = (p) => ({ dst: U(p, 'uDst'), src: U(p, 'uSrc'), srcX: U(p, 'uSrcX'),
     maskedOnly: U(p, 'uMaskedOnly'), maskBit: U(p, 'uMaskBit') });
   const copyU = quad(copyProgram), blitU = quad(blitProgram), present24U = quad(present24Program);
-  const toWordU = quad(toWordProgram);
+  const toWordU = Object.assign(quad(toWordProgram), { scale: U(toWordProgram, 'uScale') });
   const copyFbU = Object.assign(quad(copyFbProgram), { maskSet: U(copyFbProgram, 'uMaskSet') });
   const noneU = quad(noneProgram);
   // Every sampler reads unit 0, which a program keeps from here on; set once, not per draw.
@@ -335,6 +347,22 @@ function createHardwareGpu(canvas) {
   gl.uniform1i(U(copyFbProgram, 'uDepth'), 1);
   gl.useProgram(toWordProgram);
   gl.uniform1i(U(toWordProgram, 'uDepth'), 1);
+  gl.uniform2f(toWordU.scale, 1, 1);
+
+  // The scale the targets are drawn at (ADR-0056): FW x FH in all, SX x SY target pixels a VRAM
+  // pixel (the scale, as the rounding of FW and FH leaves it; S as it was asked for).
+  let S = 1, SX = 1, SY = 1, FW = W, FH = H;
+
+  function texture(format, w, h) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, w, h);
+    return t;
+  }
 
   const vramTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, vramTex);
@@ -347,22 +375,12 @@ function createHardwareGpu(canvas) {
   gl.pixelStorei(gl.UNPACK_ROW_LENGTH, W);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
 
-  const fbTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, fbTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, W, H);
+  let fbTex = texture(gl.RGBA8, FW, FH);
   const fbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbTex, 0);
   // The mask bits (depth) and the "check" stencil: a texture, so that a copy can read them.
-  const fbDepth = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, fbDepth);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH24_STENCIL8, W, H);
+  let fbDepth = texture(gl.DEPTH24_STENCIL8, FW, FH);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, fbDepth, 0);
   gl.clearColor(0, 0, 0, 1);
   gl.clearStencil(0);
@@ -376,16 +394,8 @@ function createHardwareGpu(canvas) {
   // A copy's scratch (bp_gpu_copy): what its source held, colour and mask bits, before the copy
   // writes — source and destination may overlap. Filled and read by drawing, as everything else
   // here is: the mask bits are read from the depth texture by the shader that writes them.
-  const copyTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, copyTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, W, H);
-  const copyDepth = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, copyDepth);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH24_STENCIL8, W, H);
+  let copyTex = texture(gl.RGBA8, FW, FH);
+  let copyDepth = texture(gl.DEPTH24_STENCIL8, FW, FH);
   const copyFbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, copyTex, 0);
@@ -402,7 +412,9 @@ function createHardwareGpu(canvas) {
   gl.enableVertexAttribArray(1);
   gl.vertexAttribPointer(1, 3, gl.UNSIGNED_BYTE, true, VERTEX_BYTES, 8);
   gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 2, gl.UNSIGNED_BYTE, false, VERTEX_BYTES, 12);
+  // Texture coordinates as signed halfwords: a polygon's are 0-255, a sprite's run past 255 or
+  // below 0 where it wraps (sprite()), and the shader takes them modulo 256.
+  gl.vertexAttribPointer(2, 2, gl.SHORT, false, VERTEX_BYTES, 12);
   gl.enableVertexAttribArray(3);
   gl.vertexAttribIPointer(3, 3, gl.UNSIGNED_INT, VERTEX_BYTES, 16);
 
@@ -584,7 +596,7 @@ function createHardwareGpu(canvas) {
     posView[w] = x;
     posView[w + 1] = y;
     wordView[w + 2] = bgr;                        // r g b, then a byte the attribute ignores
-    wordView[w + 3] = (u & 255) | ((v & 255) << 8);
+    wordView[w + 3] = (u & 0xFFFF) | ((v & 0xFFFF) << 16);
     wordView[w + 4] = pageWord;
     wordView[w + 5] = clutWord;
     wordView[w + 6] = windowWord;
@@ -602,6 +614,35 @@ function createHardwareGpu(canvas) {
     const bx0 = Math.max(Math.min(x0, x1, x2), clipX0), bx1 = Math.min(Math.max(x0, x1, x2), clipX1);
     const by0 = Math.max(Math.min(y0, y1, y2), clipY0), by1 = Math.min(Math.max(y0, y1, y2), clipY1);
     markDrawn(bx0, by0, bx1, by1);
+  }
+
+  /**
+    A textured rectangle (bp_gpu_sprite), already clipped to the drawing area: texel u, v at x, y
+    and the next one a pixel to the right and down — the one before under flip's bit 0 (x) and bit
+    1 (y). Two triangles whose coordinates run on past 255 or below 0 where the sprite wraps, as
+    the shader takes them modulo 256 through the window's AND. Unlike tri()'s, the corners are not
+    shifted half a pixel: a texel's edges are the pixel's, coordinate u + i from the left edge of
+    pixel i to its right one (u + 1 - i down to u - i under a flip), so wherever a target pixel's
+    centre falls inside a VRAM pixel — at any scale (ADR-0056) — it takes that pixel's texel.
+  **/
+  function sprite(x, y, w, h, u, v, bgr, flip) {
+    const fx = (flip & 1) !== 0, fy = (flip & 2) !== 0;
+    const ul = fx ? u + 1 : u, ur = fx ? u + 1 - w : u + w;
+    const vt = fy ? v + 1 : v, vb = fy ? v + 1 - h : v + h;
+    if ((sFlags & TEXTURED) !== 0) {
+      // The texels it reads, every one of a row or column it wraps around.
+      let u0 = fx ? u - w + 1 : u, u1 = fx ? u : u + w - 1;
+      let v0 = fy ? v - h + 1 : v, v1 = fy ? v : v + h - 1;
+      if (u0 < 0 || u1 > 255) { u0 = 0; u1 = 255; }
+      if (v0 < 0 || v1 > 255) { v0 = 0; v1 = 255; }
+      sampled(u0, v0, u1, v1, u0, v0);
+    }
+    const at = batchFor(6, false);
+    const x1 = x + w, y1 = y + h;
+    vertex(at, x, y, bgr, ul, vt); vertex(at + 1, x1, y, bgr, ur, vt); vertex(at + 2, x, y1, bgr, ul, vb);
+    vertex(at + 3, x, y1, bgr, ul, vb); vertex(at + 4, x1, y, bgr, ur, vt); vertex(at + 5, x1, y1, bgr, ur, vb);
+    primitives++;
+    markDrawn(x, y, x1 - 1, y1 - 1);
   }
 
   function rect(x, y, w, h, bgr) {
@@ -622,7 +663,9 @@ function createHardwareGpu(canvas) {
     if (b.clipped && b.sw > 0 && b.sh > 0) {
       if (glScissor !== 1) { gl.enable(gl.SCISSOR_TEST); glScissor = 1; }
       if (glScissorX !== b.sx || glScissorY !== b.sy || glScissorW !== b.sw || glScissorH !== b.sh) {
-        gl.scissor(b.sx, b.sy, b.sw, b.sh);
+        // The drawing area in target pixels: every one a VRAM pixel inside it covers, even in part.
+        const x0 = Math.floor(b.sx * SX), y0 = Math.floor(b.sy * SY);
+        gl.scissor(x0, y0, Math.ceil((b.sx + b.sw) * SX) - x0, Math.ceil((b.sy + b.sh) * SY) - y0);
         glScissorX = b.sx; glScissorY = b.sy; glScissorW = b.sw; glScissorH = b.sh;
       }
     } else if (glScissor !== 0) {
@@ -640,7 +683,7 @@ function createHardwareGpu(canvas) {
    *  off, the depth test ALWAYS with writes on, and the stencil test enabled. */
   function stencilFromDepth() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, FW, FH);
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     gl.colorMask(false, false, false, false);
@@ -710,7 +753,7 @@ function createHardwareGpu(canvas) {
   function flush() {
     if (batchCount === 0) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, FW, FH);
     gl.useProgram(primProgram);
     gl.bindVertexArray(primVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, primVbo);
@@ -769,7 +812,7 @@ function createHardwareGpu(canvas) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RED_INTEGER, gl.UNSIGNED_SHORT,
       vramWords.subarray(y * W + x, (y + h - 1) * W + x + w));
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, FW, FH);
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     // The colour, and each halfword's bit 15 as depth: the mask bits an upload carried are the
@@ -821,7 +864,7 @@ function createHardwareGpu(canvas) {
     // The source, colour and mask bits, into the scratch at the same place: drawn from fbTex and
     // its depth, which only fbo has attached.
     gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, FW, FH);
     gl.disable(gl.STENCIL_TEST);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.ALWAYS);
@@ -831,14 +874,14 @@ function createHardwareGpu(canvas) {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, fbDepth);
     gl.activeTexture(gl.TEXTURE0);
-    quadDraw(copyFbProgram, copyFbU, fbTex, sx, sy, w, h, W, H, sx, sy, w, h, false);
+    quadDraw(copyFbProgram, copyFbU, fbTex, sx, sy, w, h, W, H, sx * SX, sy * SY, w * SX, h * SY, false);
     // Then from the scratch to the destination, under the mask bits.
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.activeTexture(gl.TEXTURE0);
     if (maskCheck) stencilFromDepth();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, W, H);
+    gl.viewport(0, 0, FW, FH);
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     if (maskCheck) {
@@ -854,7 +897,7 @@ function createHardwareGpu(canvas) {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, copyDepth);
     gl.activeTexture(gl.TEXTURE0);
-    quadDraw(copyFbProgram, copyFbU, copyTex, dx, dy, w, h, W, H, sx, sy, w, h, false);
+    quadDraw(copyFbProgram, copyFbU, copyTex, dx, dy, w, h, W, H, sx * SX, sy * SY, w * SX, h * SY, false);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.activeTexture(gl.TEXTURE0);
@@ -889,6 +932,66 @@ function createHardwareGpu(canvas) {
     refresh(0, 0, W, H);
   }
 
+  /**
+    bp_gpu_scale (ADR-0056): from the next primitive on, the targets are VRAM's size times `percent`
+    percent, rounded — 80 four fifths of it, 100 the PlayStation's own, 200 twice, 300 three times
+    (25 to 400). Coordinates stay VRAM's, so a scale that is no whole number of target pixels a VRAM
+    pixel (0.8) needs nothing else: the viewport maps VRAM onto the target. They are made anew at
+    that size with what they held carried over, scaled: the picture on screen, what was drawn and
+    not yet read back, the mask bits. A size the GPU cannot hold keeps the scale there was.
+  **/
+  function scale(percent) {
+    const p = Math.max(25, Math.min(400, percent | 0));
+    const fw = Math.round(W * p / 100), fh = Math.round(H * p / 100);
+    if (fw === FW && fh === FH) return;
+    const most = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (fw > most || fh > most) {
+      console.log(`[webgl] a ${fw}x${fh} picture is past this GPU's ${most}: the scale stays ${S}`);
+      return;
+    }
+    flush();
+    const oldTex = fbTex, oldDepth = fbDepth, oldW = FW, oldH = FH;
+    fbTex = texture(gl.RGBA8, fw, fh);
+    fbDepth = texture(gl.DEPTH24_STENCIL8, fw, fh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, fbDepth, 0);
+    // The old picture and its mask bits, nearest texel for each new pixel, as a copy draws them.
+    gl.viewport(0, 0, fw, fh);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.ALWAYS);
+    gl.depthMask(true);
+    gl.useProgram(copyFbProgram);
+    gl.uniform1i(copyFbU.maskSet, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, oldDepth);
+    gl.activeTexture(gl.TEXTURE0);
+    quadDraw(copyFbProgram, copyFbU, oldTex, 0, 0, W, H, W, H, 0, 0, oldW, oldH, false);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.disable(gl.DEPTH_TEST);
+    gl.deleteTexture(oldTex);
+    gl.deleteTexture(oldDepth);
+    // The copy's scratch holds nothing between copies: made anew, empty.
+    gl.deleteTexture(copyTex);
+    gl.deleteTexture(copyDepth);
+    copyTex = texture(gl.RGBA8, fw, fh);
+    copyDepth = texture(gl.DEPTH24_STENCIL8, fw, fh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copyFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, copyTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, copyDepth, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    FW = fw; FH = fh; S = p / 100; SX = fw / W; SY = fh / H;
+    gl.useProgram(toWordProgram);
+    gl.uniform2f(toWordU.scale, SX, SY);
+    stencilStale = true;
+    console.log(`[webgl] drawing at ${S}x: ${fw}x${fh}`);
+  }
+
   function present(_vramBytes, sx, sy, sw, sh, flags) {
     flush();
     // Nothing composites a hidden page, and a blit into its drawing buffer can stall the main
@@ -897,9 +1000,12 @@ function createHardwareGpu(canvas) {
     if (document.hidden) { primitives = 0; return; }
     if (sw > W) sw = W;
     if (sh > H) sh = H;
-    if (canvas.width !== sw || canvas.height !== sh) {
-      canvas.width = Math.max(sw, 1);
-      canvas.height = Math.max(sh, 1);
+    // The canvas holds the picture at its own resolution (ADR-0056): the display's pixels times
+    // the scale, one target pixel each.
+    const cw = Math.max(Math.round(sw * SX), 1), ch = Math.max(Math.round(sh * SY), 1);
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -920,12 +1026,13 @@ function createHardwareGpu(canvas) {
     primitives = 0;
   }
 
-  // A pixel of fbTex as the next present would show it (diagnostics: what was drawn where).
+  // A pixel of fbTex as the next present would show it (diagnostics: what was drawn where), at
+  // VRAM's (x, y): the target pixel at its centre.
   function peek(x, y) {
     flush();
     const out = new Uint8Array(4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    gl.readPixels(Math.floor((x + 0.5) * SX), Math.floor((y + 0.5) * SY), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
     return [out[0], out[1], out[2]];
   }
 
@@ -976,6 +1083,7 @@ function createHardwareGpu(canvas) {
     return (out[0] | (out[1] << 8)).toString(16);
   }
 
-  return { vram, state, tri, rect, dirty, copy, clip, mask, present, peek, peekVram, drawnTile, glCheck,
-    get primitives() { return primitives; }, get syncs() { return syncs; }, get copies() { return copies; } };
+  return { vram, state, tri, rect, sprite, dirty, copy, clip, mask, scale, present, peek, peekVram, drawnTile, glCheck,
+    get primitives() { return primitives; }, get syncs() { return syncs; }, get copies() { return copies; },
+    get scaled() { return S; } };
 }

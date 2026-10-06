@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "id": "SLUS00402",
+  "title": "Tekken 3",
+  "region": "NTSC-U",
+  "exePath": "\\TEKKEN3\\SLUS_004.02;1",
+  "exeSha256": "fbda8b68e5799dbef4af39a161783bc670c15b0aa0e87dce65e210717da19b8c",
+  "_functionHints": "Entries the game reaches only through pointers, each reported by the runtime as it was first missed (\"no function at\"), in that order. Addresses decimal, per the schema rule.",
+  "functionHints": [
+    2148033564,
+    2148034116,
+    2147999808,
+    2148093156,
+    2148091912,
+    2147925492,
+    2147768868,
+    2147768852,
+    2148092276,
+    2147887300,
+    2147768792,
+    2147887508,
+    2147881932
+  ],
+  "_overlays": "Code the game loads from the disc into windows inside the executable's own image. The runtime reports each one when it first misses: the span the disc was read into and the sector it came from; the file and offset follow from the disc's directory. Addresses decimal, per the schema rule.",
+  "overlays": [
+    {
+      "id": "ovl_251748",
+      "_loadAddr": "0x800b8d58",
+      "loadAddr": 2148240728,
+      "length": 284988,
+      "source": {
+        "kind": "discFile",
+        "path": "\\TEKKEN3\\TEKKEN3.BNS;1",
+        "offset": 3260416,
+        "length": 284988
+      },
+      "entryHints": [
+        2148380972,
+        2148381112
+      ],
+      "hashWords": 64
+    },
+    {
+      "id": "ovl_251471",
+      "_loadAddr": "0x800b0548",
+      "loadAddr": 2148205896,
+      "length": 17664,
+      "source": {
+        "kind": "discFile",
+        "path": "\\TEKKEN3\\TEKKEN3.BNS;1",
+        "offset": 2693120,
+        "length": 17664
+      },
+      "entryHints": [
+        2148219844,
+        2148211880
+      ],
+      "hashWords": 64
+    },
+    {
+      "id": "ovl_251888",
+      "_loadAddr": "0x800b8d58",
+      "loadAddr": 2148240728,
+      "length": 76576,
+      "source": {
+        "kind": "discFile",
+        "path": "\\TEKKEN3\\TEKKEN3.BNS;1",
+        "offset": 3547136,
+        "length": 76576
+      },
+      "entryHints": [
+        2148281788,
+        2148279348
+      ],
+      "hashWords": 64
+    },
+    {
+      "id": "ovl_250156",
+      "_loadAddr": "0x800b8d58",
+      "loadAddr": 2148240728,
+      "length": 514860,
+      "source": {
+        "kind": "discFile",
+        "path": "\\TEKKEN3\\TEKKEN3.BNS;1",
+        "offset": 0,
+        "length": 514860
+      },
+      "entryHints": [
+        2148349444,
+        2148349580,
+        2148348456,
+        2148352536,
+        2148349268
+      ],
+      "hashWords": 64
+    },
+    {
+      "id": "ovl_251522",
+      "_loadAddr": "0x800b8d58",
+      "loadAddr": 2148240728,
+      "length": 460856,
+      "source": {
+        "kind": "discFile",
+        "path": "\\TEKKEN3\\TEKKEN3.BNS;1",
+        "offset": 2797568,
+        "length": 460856
+      },
+      "entryHints": [
+        2148597580
+      ],
+      "hashWords": 64
+    }
+  ]
+}

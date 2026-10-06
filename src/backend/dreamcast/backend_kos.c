@@ -294,6 +294,10 @@ int bp_init(const char* title) {
     }
 #endif
 
+#if RECOMPSX_HOTCODE
+    hotcode_init(arg_value("--dc-hotcode="), arg_value("--dc-hotcode-kb="));
+#endif
+
 #if RECOMPSX_DC_PROFILE_OVERLAY
     /* After the arguments, because they are what asks for it. */
     if(has_arg("--dc-overlay")) {
@@ -353,6 +357,13 @@ int bp_caps(int cap_id) {
         case BP_CAP_SPU_VOICES:      return g_snd_up;
         /* VRAM-to-VRAM copies out of the buffers it draws, through the pictures (ADR-0054). */
         case BP_CAP_GPU_COPIES:      return g_pic_ok;
+        /* The picture's resolution (ADR-0056): through the pictures, the screen's unless told. */
+        case BP_CAP_GPU_SCALE:       return g_pic_ok ? PIC_SCALE_SCREEN : 0;
+        case BP_CAP_GPU_LINES:       return g_pic_ok ? PIC_H : 0;
+        /* A 16:9 screen (ADR-0064) as the Dreamcast's own widescreen games had one: the frame filled
+         * with a picture drawn for it, which a 16:9 television stretches; a 4:3 picture kept to the
+         * middle three quarters (dc_video.c, g_pillarbox). */
+        case BP_CAP_WIDESCREEN:      return 1;
         default:                     return 0;
     }
 }
@@ -382,6 +393,9 @@ void bp_pace_frame(int target_us) {
         next_deadline = now + (uint64_t)(target_us > 0 ? target_us : 0);
         return;
     }
+#if RECOMPSX_HOTCODE
+    hotcode_slack(now < next_deadline ? (uint32_t)(next_deadline - now) : 0u);
+#endif
 
     for(;;) {
         /* Sleeping hands the CPU to whatever else KOS is running, but it also stops feeding the
@@ -397,6 +411,12 @@ void bp_pace_frame(int target_us) {
         if(at >= next_deadline) break;
         const uint64_t left = next_deadline - at;
         if(left <= 2000ull) break;
+#if RECOMPSX_HOTCODE
+        /* The time a game waits for its vblank is the run-time layout's, while it has work (ADR-0063):
+         * a frame that waits has nothing better to do with it. */
+        if(left > 3000ull && hotcode_pending()) { hotcode_idle(at + left - 1500ull); continue; }
+        else {}
+#endif
         thd_sleep((unsigned)((left - 1000ull) / 1000ull));
     }
     while(bp_time_us() < next_deadline) { /* spin */ }

@@ -43,6 +43,7 @@ BD="$DIR/benchdata"
 rm -rf "$BD" "$DIR/gdi"; mkdir -p "$BD" "$DIR/gdi" "$DIR/model"
 ln "$data/BOOT.EXE" "$BD/BOOT.EXE"; ln "$data/DISC.BIN" "$BD/DISC.BIN"
 cp "$data/RECOMPSX.CFG" "$DIR/build-dc-max/SYMS.BIN" "$BD/"
+[ -f "$DIR/build-dc-max/HOTCODE.BIN" ] && cp "$DIR/build-dc-max/HOTCODE.BIN" "$BD/"
 cp "$DIR/build-dc-max/recompsx.elf" "$DIR/model/traced.elf"
 cp "$DIR/build-dc-max/recompsx.map" "$DIR/model/traced.map"
 mkdcdisc -q --allow-overwrite -F gdi -e "$DIR/model/traced.elf" -D "$BD" -n "$name" -a recompsx \

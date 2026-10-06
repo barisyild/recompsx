@@ -26,6 +26,27 @@ applies in full; JavaScript is also the reference target for digests (ADR-0003).
   its depth through a scratch target, so a copy out of a buffer on screen copies what was drawn
   there (Crash 3's level transitions). The page loads the renderer under its own version from
   `build.json`.
+- **The picture's resolution** (ADR-0056): `gpu.scale(percent)` (`bp_gpu_scale`; the shim answers
+  capability 8, `BP_CAP_GPU_SCALE`, with 100, and 9, `BP_CAP_GPU_LINES`, with 0: no limit) makes
+  fbTex, fbDepth and the copy's scratch VRAM's size times the scale, rounded — 25 to 400 percent,
+  819x410 at 80 — carrying their contents over, and the canvas the display's pixels times it.
+  Coordinates are VRAM's everywhere; only the viewport, the scissor (`setScissor`) and a copy's
+  source texels count target pixels, at each axis's rounded scale (`SX`, `SY`), and `toWord` reads
+  the target pixel at a VRAM pixel's centre. `gpu.scaled` says the scale asked for; `peek(x, y)`
+  takes VRAM coordinates. The setting is `video.scale` in `recompsx:system.cfg`, a multiplier, so a
+  page boots at the last scale chosen: clear it (`localStorage.removeItem('recompsx:system.cfg')`)
+  for a run at 1x. Programs set it with the PS1 Pro system calls (ADR-0060). A hidden pane skips the
+  present, so the canvas keeps its size until the pane shows; read fbTex back to see a scale there.
+  A present with PRESENT_HOLD (32; HoldPicture) is skipped in the page's `present` before any
+  blit, as fast-forwarding skips one: the canvas keeps the last picture while a program draws it
+  anew (Crash 3's RES redrawing its pause picture), and the drawing waits in fbTex for the next.
+- **The screen's shape (ADR-0064).** The host says `widescreen: true` (BP_CAP_WIDESCREEN), and every
+  present carries PRESENT_WIDE (64, the console's screen is 16:9) and PRESENT_WIDE_FILL (128, the
+  picture fills it): `present` puts them on `.screen` as the classes `wide` and `wide-fill` when they
+  change — after the hold check, so a held picture keeps its shape. The CSS makes `.screen.wide`
+  16:9, stretches the canvas over it with `wide-fill`, and keeps it to the middle three quarters
+  without (a 4:3 picture between black bars); `shim.Input` reads the pointer over the canvas shown,
+  not the element. The setting is `video.wide` in `recompsx:system.cfg` (0 4:3, 1 16:9, 2 STRETCH).
 - **A framebuffer must renew its texture after an upload (ANGLE on Metal).** Chrome 152 on an Apple
   GPU gives a texture fresh storage when `texSubImage2D` writes it while the GPU may still read it,
   and a framebuffer that had it attached goes on drawing into the old storage — silently, no GL

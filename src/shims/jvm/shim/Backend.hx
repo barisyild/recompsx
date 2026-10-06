@@ -32,6 +32,9 @@ class Backend {
 	public static inline var PRESENT_PAL       = 4;
 	public static inline var PRESENT_FAST      = 8;
 	public static inline var PRESENT_DRAWING   = 16;
+	public static inline var PRESENT_HOLD      = 32;
+	public static inline var PRESENT_WIDE      = 64;
+	public static inline var PRESENT_WIDE_FILL = 128;
 
 	static var args:Array<String> = [];
 	static var quit = false;
@@ -61,10 +64,13 @@ class Backend {
 	public static function gpuStateAfterTri():Void {}
 	public static function gpuRect(x:Int, y:Int, w:Int, h:Int, bgr:Int, semi:Int,
 			semiMode:Int):Void {}
+	public static function gpuSprite(x:Int, y:Int, w:Int, h:Int, u:Int, v:Int, bgr:Int,
+			flip:Int):Void {}
 	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {}
 	public static function gpuCopy(sx:Int, sy:Int, dx:Int, dy:Int, w:Int, h:Int, changed:Int):Void {}
 	public static function gpuClip(x0:Int, y0:Int, x1:Int, y1:Int):Void {}
 	public static function gpuMask(setBit:Int, checkBit:Int):Void {}
+	public static function gpuScale(percent:Int):Void {}
 
 	public static function argCount():Int {
 		if (args.length == 0) args = Sys.args();

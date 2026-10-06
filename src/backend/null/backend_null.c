@@ -135,6 +135,10 @@ void bp_gpu_tri_w(const int* w) {
                w[4], w[5], w[6] & 0xFFFFFF, w[7] & 0xFF, (w[7] >> 8) & 0xFF,
                w[8], w[9], w[10] & 0xFFFFFF, w[11] & 0xFF, (w[11] >> 8) & 0xFF);
 }
+void bp_gpu_sprite(int x, int y, int w, int h, int u, int v, int bgr, int flip) {
+    (void)x; (void)y; (void)w; (void)h; (void)u; (void)v; (void)bgr; (void)flip;
+}
+
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     if (!g_gpu_hashing) return;
     gpu_call(3); gpu_mix(x); gpu_mix(y); gpu_mix(w); gpu_mix(h); gpu_mix(bgr); gpu_mix(semi);
@@ -159,6 +163,8 @@ void bp_gpu_mask(int set_bit, int check_bit) {
     if (!g_gpu_hashing) return;
     gpu_call(6); gpu_mix(set_bit); gpu_mix(check_bit);
 }
+/* Never offered (BP_CAP_GPU_SCALE is 0), and the picture's resolution is not the stream's to hash. */
+void bp_gpu_scale(int percent) { (void)percent; }
 
 void bp_audio_push(const int16_t* frames, int frame_count) { (void)frames; (void)frame_count; }
 int  bp_audio_buffered(void) { return 0; }

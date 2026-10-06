@@ -61,16 +61,27 @@ void bp_exit_to_menu(void);           /* QUIT (ADR-0041): the host's own menu �
                                          BIOS menu, the desktop, the page's start; the runtime has
                                          kept the memory card first */
 enum { BP_CAP_MAX_PADS = 0, BP_CAP_HAS_AUDIO = 1, BP_CAP_HAS_STORAGE = 2, BP_CAP_PREFERRED_SCALE = 3, BP_CAP_GPU_DRAW = 4,
-       BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6, BP_CAP_GPU_COPIES = 7 };
+       BP_CAP_SPU_VOICES = 5, BP_CAP_GPU_UPLOADS = 6, BP_CAP_GPU_COPIES = 7,
+       BP_CAP_GPU_SCALE = 8,     /* the scale a drawing backend draws at until told one, percent; 0: none */
+       BP_CAP_GPU_LINES = 9,     /* the most lines it draws a picture at; 0: no limit of its own */
+       BP_CAP_WIDESCREEN = 10 }; /* nonzero: it shows pictures on a 16:9 screen (ADR-0064) */
 int  bp_caps(int cap_id);
 /* video: vram = borrowed 1024x512 uint16 (pitch 1024 halfwords); src rect in VRAM coords;
    24bpp: packed RGB888 rows starting at byte offset src_x*2 */
 enum { BP_PRESENT_24BPP = 1 << 0, BP_PRESENT_INTERLACE = 1 << 1, BP_PRESENT_PAL = 1 << 2,
        BP_PRESENT_FAST = 1 << 3,     /* FAST: memory card sectors are moving (ADR-0037); a backend
                                         that paces at present need not hold this frame */
-       BP_PRESENT_DRAWING = 1 << 4 };/* DRAWING: a DMA list is still being drawn (ADR-0039); a
+       BP_PRESENT_DRAWING = 1 << 4,  /* DRAWING: a DMA list is still being drawn (ADR-0039); a
                                         backend showing the primitives it was handed must not
                                         close its picture on this present */
+       BP_PRESENT_HOLD = 1 << 5,     /* HOLD: a program is drawing the picture anew (PS1 Pro
+                                        HoldPicture, ADR-0060): show the last picture again, the
+                                        drawing joins the next; pace and pump sound as ever. A
+                                        backend that cannot simply shows this one */
+       BP_PRESENT_WIDE = 1 << 6,     /* WIDE: the console's screen is 16:9 (ADR-0064) */
+       BP_PRESENT_WIDE_FILL = 1 << 7 }; /* FILL: and this picture fills it — drawn for one, or
+                                        the console's STRETCH; without, it is 4:3, kept to the
+                                        middle three quarters between black bars */
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 /* audio: 44100 Hz stereo s16 interleaved; count = stereo frames */
 void bp_audio_push(const int16_t* frames, int frame_count);
@@ -253,8 +264,13 @@ void bp_gpu_tri(int x0,int y0,int c0,int u0,int v0,
                 int x1,int y1,int c1,int u1,int v1,
                 int x2,int y2,int c2,int u2,int v2);
 void bp_gpu_rect(int x,int y,int w,int h,int bgr,int semi,int semi_mode);
+void bp_gpu_sprite(int x,int y,int w,int h,int u,int v,int bgr,int flip);   /* a textured rectangle:
+                                    texel u, v at x, y, counting up (down under flip bit 0 x, bit 1 y),
+                                    wrapping at 256; its far edge passes a byte (ADR-0058) */
 void bp_gpu_dirty(int x,int y,int w,int h);
 void bp_gpu_copy(int sx,int sy,int dx,int dy,int w,int h,int changed);   /* BP_CAP_GPU_COPIES */
+void bp_gpu_scale(int percent);  /* BP_CAP_GPU_SCALE: draw from the next primitive at this percent of
+                                    the PlayStation's resolution (80, 100 its own, 200 twice) */
 /* The same state and triangle as words, the way the runtime holds them (ADR-0047): the state's ten
    arguments in order; the triangle's x, y, colour word (BGR in bits 0-23), texture word (u bits 0-7,
    v bits 8-15, bits 16-31 zero) a vertex. Read before returning. A backend may implement them by
@@ -282,7 +298,23 @@ copy out of what emulated VRAM holds amounts to. A copy out of what the backend 
 emulated VRAM lacks: Crash 3's level transition copies the frame on screen into the other buffer
 and draws it back over itself as a texture ([ADR-0054](../decisions/ADR-0054-reading-back-what-was-drawn.md)).
 The browser's renderer and the Dreamcast answer it; a copy onto itself is reported only when it
-sets the mask bit. The original decision and its measurements are preserved as
+sets the mask bit. A backend answering `BP_CAP_GPU_SCALE` nonzero draws at the console's
+resolution setting, `video.scale` (`kernel.KVideo`, [ADR-0056](../decisions/ADR-0056-the-pictures-resolution.md)):
+the runtime calls `bp_gpu_scale` at boot when a scale is kept and whenever a program changes it
+(the PS1 Pro system call SetVideoScale, [ADR-0060](../decisions/ADR-0060-ps1-pro-system-calls.md)),
+in percent of the PlayStation's resolution, and the backend draws at it, or at the most it can,
+keeping the picture so far. The answer is the scale it draws at until told: the browser's 100 (the
+PlayStation's own), the Dreamcast's 200 (its 640x480 screen, ADR-0055). `BP_CAP_GPU_LINES` is the
+most lines it draws a picture at — the Dreamcast's 480, the browser's 0 (no limit) — which is what
+GetVideoLines holds a scale's lines to. A backend handed the finished picture (SDL2) answers 0 to
+both and is never called. A backend answering `BP_CAP_WIDESCREEN` nonzero shows the console's 16:9
+screen ([ADR-0064](../decisions/ADR-0064-the-screens-shape.md)): every present carries the screen's
+shape and the picture's — `BP_PRESENT_WIDE`, the screen is 16:9, and `BP_PRESENT_WIDE_FILL`, the
+picture fills it (drawn anamorphic for it, or stretched over it on the console's STRETCH); a picture
+without FILL was drawn for 4:3 and is shown at 4:3 in the middle of the screen. The browser makes its
+element 16:9, SDL2 letterboxes in its window, and the Dreamcast fills its 640x480 frame for a 16:9
+television to stretch, as its own widescreen games did, with a 4:3 picture in the middle 480 pixels.
+Null and JVM answer 0, and a program there stays at 4:3. The original decision and its measurements are preserved as
 [ADR-0011](../decisions/ADR-0011-hardware-presentation-fork.md) (renumbered from that branch's
 ADR-0008 to preserve main's machine-IR decision).
 

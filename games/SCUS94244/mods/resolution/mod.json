@@ -1,0 +1,8 @@
+{
+  "id": "resolution",
+  "title": "RESOLUTION, an option in the pause screen's OPTIONS",
+  "_description": "RESOLUTION, an option in OPTIONS on the pause screen (the menu mod's Menu.option: a button that opens its choices): the picture's resolution, a multiplier of the PlayStation's own (1, 2, 3; 1 and 2 in a Dreamcast build, #if dreamcast) offered as the lines the backend draws (240P, 480P, 720P), kept as the console's setting video.scale and drawn at from the next frame by a backend that draws the primitives itself (ADR-0056). A change of scale has the game draw the pause screen's frozen picture anew, at the new scale.",
+  "entry": "resolution.Resolution",
+  "needs": ["menu"],
+  "hooks": []
+}

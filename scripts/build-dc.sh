@@ -6,9 +6,10 @@
 #   --run          upload and start it with $KOS_LOADER when the build succeeds
 #   --build-type   CMake build type (default Release; MinSizeRel is the one to reach for when
 #                  the binary will not fit in 16 MB alongside 3.5 MB of emulated machine)
-#   --placement F  place the hot code as F says (scripts/dc-layout.py) instead of the game's own
-#                  games/<SERIAL>/dc-placement.txt, which is used when there is one, and else
-#                  the runtime's and backend's shared src/backend/dreamcast/dc-code-placement.txt
+#   --placement F  place the hot code as F says (scripts/dc-layout.py) instead of the runtime's and
+#                  backend's shared src/backend/dreamcast/dc-code-placement.txt, which every game
+#                  gets: a game's own hot code is laid out on the console at run time (ADR-0063), and
+#                  a placement of its own (games/<SERIAL>/dc-placement.txt) adds nothing to that
 #   --no-placement leave the code where the linker puts it
 #   --no-data-placement  leave .data and .bss as the linker lays them out, instead of placing the
 #                  runtime's and backend's hot variables (src/backend/dreamcast/dc-data-placement.txt)
@@ -127,17 +128,16 @@ configure() {
     ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
 }
 
-# The hot code's placement for the 8 KB direct-mapped instruction cache (ADR-0043): the game's own
+# The hot code's placement for the 8 KB direct-mapped instruction cache (ADR-0043): the shared one
 # unless one is named or none is wanted. It is worth more than most code changes — Crash 3's title
 # screen went from 35.1 to 29.5 ms a frame under the cache model — and it costs a second link.
 if [ "$PLACEMENT" = auto ]; then
-  # No GameInfo.hx (the demo, a bare executable's tree) is no serial, not a failed build.
-  SERIAL="$(sed -n 's/.*SERIAL = "\([A-Z0-9]*\)".*/\1/p' "$DIR/gen/GameInfo.hx" 2>/dev/null | head -1 || true)"
+  # The runtime's and the backend's placement, the same in every game. A game's own hot code is laid
+  # out on the console at run time (ADR-0063, dc_hotcode.c), and a placement made for one game from a
+  # trace of it adds nothing to that (Crash 3's demo: r144's own 19.71, the shared one 19.32, ledger
+  # E-187): a game's speed does not depend on work done for that game.
   PLACEMENT=""
-  if [ -n "$SERIAL" ] && [ -f "games/$SERIAL/dc-placement.txt" ]; then PLACEMENT="games/$SERIAL/dc-placement.txt"
-  # A game with no placement of its own still gets the runtime's and the backend's, which are the
-  # same in every game: more than half of what a game's own placement wins (ledger E-134).
-  elif [ -f "$SHARED_PLACEMENT" ]; then PLACEMENT="$SHARED_PLACEMENT"; fi
+  if [ -f "$SHARED_PLACEMENT" ]; then PLACEMENT="$SHARED_PLACEMENT"; fi
 elif [ "$PLACEMENT" = none ]; then
   PLACEMENT=""
 fi
@@ -205,6 +205,13 @@ if [ -n "$NM_TOOL" ] && command -v python3 >/dev/null 2>&1; then
   python3 scripts/dc-syms.py "$NM_TOOL" "$ELF" "$BUILD/SYMS.BIN"
 else
   echo "skipped SYMS.BIN (no sh-elf-nm or python3) — the overlay profile will be off"
+fi
+
+# The run-time layout's table (scripts/dc-hotcode.py, ADR-0063), for a build compiled with it
+# (-DRECOMPSX_HOTCODE=1: the ELF has hotcode_anchor). Copy HOTCODE.BIN beside SYMS.BIN.
+# (grep -c, not -q: -q stops reading at the match, nm dies of SIGPIPE, and pipefail makes that a "no".)
+if [ -n "$NM_TOOL" ] && [ "$("$NM_TOOL" "$ELF" 2>/dev/null | grep -cE " _?hotcode_anchor$" || true)" -gt 0 ]; then
+  python3 scripts/dc-hotcode.py "$ELF" "$BUILD/recompsx.map" "$BUILD/HOTCODE.BIN"
 fi
 
 SCRAMBLE="$KOS_BASE/utils/scramble/scramble"

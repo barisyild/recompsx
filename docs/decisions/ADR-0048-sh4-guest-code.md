@@ -100,6 +100,21 @@ through a base) where it places a RAM test at every access. So the quarter fewer
 allocator's result, not a translator's; and the ten hottest functions of real play (E-130) also need
 loops with their pumps, GTE transfers inline and switch tables before any of it reaches them.
 
+## Measured: an allocator and a scheduler (2026-10-05, ledger E-177)
+
+The emitter rewritten for fastmem with what the first step lacked: guest values as webs with a
+graph-colouring allocator (`Sh4Webs`), a list scheduler by the cache model's issue rules
+(`Sh4Sched`), loops with their pumps, checked returns, switch tables, and the ports PortBases
+expects through the runtime's decode. Exact (the digest at Crash 3's 5000 is JavaScript's). On the
+two hot leaves it is ~15 % faster than GCC's code conflict-free — fewer instructions (−5 %) but
+mostly far fewer dependency stalls — and slower on the short ones that make up most of what it
+takes: a function GOOL calls 216 times a frame for twenty guest instructions pays its webs' loads
+at the entry and six callee-saved registers on every call. The renderer functions, where most of
+the generated code's time is, all call, touch the GTE and switch through tables; the remaining
+steps (lazy entry loads, saves only on the paths that need them, GTE transfers and the quick
+commands inline, calls with summaries) were estimated at 0.3-0.5 ms of Crash 3's demo at best.
+Not pursued further for now: the emitter stays opt-in, off.
+
 ## Consequences
 
 - Weeks: an instruction selector for the R3000A's integer, memory, branch, COP0/COP2-transfer and GTE

@@ -47,6 +47,9 @@ class Program {
 	/** Function bodies a second universe did not need to emit because the first had them. */
 	public var deduplicated(default, null) = 0;
 
+	/** JALR sites numbered so far (`numberSites`): FnTable's SITES once every body is written. */
+	public var sites(default, null) = 0;
+
 	/**
 		Memory projections share one helper/adapter pair per class when their texts are equal up to
 		the pair's own names (ProjectionShare). Off only for comparisons (`--no-projection-share`).
@@ -112,12 +115,14 @@ class Program {
 			u.emitter.projectedTargetOf = (a, required, suffix) -> projectedFor(u, a, required, suffix);
 			u.emitter.scalarPool = scalarPool;
 			u.emitter.dynamicCall = "FnTable.run";
+			u.emitter.dynamicSite = "FnTable.runAt";
 		}
 		for (r in this.relocSets) {
 			for (unit in r.units) {
 				unit.emitter = new Emitter(unit.image, unit.discovery, optimize, structureRegions, scalarFunctions, valueRegions, valueCfg);
 				unit.emitter.relocatable = true;
 				unit.emitter.dynamicCall = "FnTable.run";
+				unit.emitter.dynamicSite = "FnTable.runAt";
 				unit.emitter.staticTargetOf = a -> staticTargetFor(universes[0], a);
 				unit.emitter.writesOf = a -> writesFor(universes[0], a);
 				unit.emitter.scalarTargetOf = a -> scalarFor(universes[0], a);
@@ -282,7 +287,7 @@ class Program {
 		ensureDir(dir);
 		for (u in universes) u.emitter.clearScalarPlans();
 		emitted.clear(); scalarPool.clear();
-		filesWritten = 0; linesWritten = 0; deduplicated = 0; projectionsShared = 0;
+		filesWritten = 0; linesWritten = 0; deduplicated = 0; projectionsShared = 0; sites = 0;
 		// Remove every previously generated file first. Shard names carry their split point, so
 		// when a discovery change moves a split, the old file's name no longer matches anything —
 		// and a directory that accumulates every layout it has ever had is a haunted one: twenty
@@ -303,6 +308,16 @@ class Program {
 		write('$dir/RelocTable.hx', relocTableSource());
 		write('$dir/GameInfo.hx', gameInfoSource());
 		if (scalarPool.count > 0) write('$dir/${scalarPool.className}.hx', scalarPool.source());
+		write('$dir/Layout.txt', layoutSource());
+	}
+
+	/** The static estimate of each function's heat (codegen.LayoutHints, ADR-0063): every function of
+	    the executable, its overlays and its relocatable code, under the class that holds it. */
+	function layoutSource():String {
+		final hints = new LayoutHints();
+		for (u in universes) for (s in u.shards.shards) for (fn in s.functions) hints.add(s.className, fn, u.image);
+		for (r in relocSets) for (s in r.shards) for (fn in s.functions) hints.add(s.className, fn, relocOf(r, fn).unit.image);
+		return hints.source();
 	}
 
 	// ---- one shard --------------------------------------------------------------------------
@@ -325,10 +340,12 @@ class Program {
 			var body = bodyOf(u, shard, fn, share);
 			final forwarder = StringTools.startsWith(body, '\t/** Identical to');
 			var wrapped = false;
-			if (sh4 && u.isBase() && !forwarder) {
+			// A mod's hook runs in the C++ form's entry, which the assembly would go around.
+			if (sh4 && u.isBase() && !forwarder && !u.emitter.hooked.exists(fn.entry)) {
 				if (sh4Emitter == null) sh4Emitter = new Sh4Emitter(u.image, u.discovery);
 				else {}
 				final symbol = 'rx_' + StringTools.hex(fn.entry, 8).toLowerCase();
+				sh4Emitter.idleLoops = u.emitter.emittedIdleLoop();
 				final code = sh4Emitter.emit(fn, symbol);
 				if (code != null) {
 					body = sh4Wrap(fn, body, symbol);
@@ -485,14 +502,15 @@ class Program {
 		c.add('#include "mem_Access.h"\n#include "mem_Memory.h"\n#include "core_Ops.h"\n');
 		c.add('#define RX_GLUE extern "C" __attribute__((used, externally_visible, noinline))\n');
 		if (Sh4Emitter.FASTMEM) {
-			// Fastmem's assembly reaches memory through the MMU itself; these serve the shared
-			// routines alone, the same way: the clock written, then the access through P0.
-			c.add('RX_GLUE int rx_rd8s(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld8((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
-			c.add('RX_GLUE int rx_rd16s(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld16((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
-			c.add('RX_GLUE int rx_rd32(core::CpuState* ctx, int a, int cyc) { ctx->cycles = cyc; return recompsx_p0_ld32((unsigned int)a & 0x1FFFFFFFu, &ctx->cycles); }\n');
-			c.add('RX_GLUE void rx_wr8(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st8((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
-			c.add('RX_GLUE void rx_wr16(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st16((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
-			c.add('RX_GLUE void rx_wr32(core::CpuState* ctx, int a, int v, int cyc) { ctx->cycles = cyc; recompsx_p0_st32((unsigned int)a & 0x1FFFFFFFu, v, &ctx->cycles); }\n');
+			// Fastmem's assembly reaches RAM and the scratchpad through the MMU itself; these serve the
+			// accesses the recompiler expects at a port (PortBases), decoded in software as the C++
+			// form's `*pt` accessors do (Memory.portRead*, portWrite*), where the MMU would trap.
+			c.add('RX_GLUE int rx_rd8s(core::CpuState* ctx, int a, int cyc) { return (int)(signed char)mem::Memory::portRead8(a, ctx, cyc); }\n');
+			c.add('RX_GLUE int rx_rd16s(core::CpuState* ctx, int a, int cyc) { return (int)(short)mem::Memory::portRead16(a, ctx, cyc); }\n');
+			c.add('RX_GLUE int rx_rd32(core::CpuState* ctx, int a, int cyc) { return mem::Memory::portRead32(a, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr8(core::CpuState* ctx, int a, int v, int cyc) { mem::Memory::portWrite8(a, v, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr16(core::CpuState* ctx, int a, int v, int cyc) { mem::Memory::portWrite16(a, v, ctx, cyc); }\n');
+			c.add('RX_GLUE void rx_wr32(core::CpuState* ctx, int a, int v, int cyc) { mem::Memory::portWrite32(a, v, ctx, cyc); }\n');
 		} else {
 			c.add('RX_GLUE int rx_rd8s(core::CpuState* ctx, int a, int cyc) { return (int)(signed char)mem::Access::read8ut(a, ctx, cyc); }\n');
 			c.add('RX_GLUE int rx_rd16s(core::CpuState* ctx, int a, int cyc) { return (int)(short)mem::Access::read16ut(a, ctx, cyc); }\n');
@@ -505,6 +523,9 @@ class Program {
 		c.add('RX_GLUE int rx_lwr(core::CpuState* ctx, int a, int cur) { (void)ctx; return mem::Memory::lwr(a, cur); }\n');
 		c.add('RX_GLUE void rx_swl(core::CpuState* ctx, int a, int v) { (void)ctx; mem::Memory::swl(a, v); }\n');
 		c.add('RX_GLUE void rx_swr(core::CpuState* ctx, int a, int v) { (void)ctx; mem::Memory::swr(a, v); }\n');
+		// A loop header's due pump (Sh4Emitter.pump), and its unwind test.
+		c.add('RX_GLUE void rx_pump(core::CpuState* ctx) { core::Runtime::pump(ctx); }\n');
+		c.add('RX_GLUE int rx_unwinding(core::CpuState* ctx, int cont) { return core::Runtime::unwinding(ctx, cont) ? 1 : 0; }\n');
 		c.add('RX_GLUE void rx_div(core::CpuState* ctx, int a, int b) { core::Ops::div(ctx, a, b); }\n');
 		c.add('RX_GLUE void rx_divu(core::CpuState* ctx, int a, int b) { core::Ops::divu(ctx, a, b); }\n');
 		c.add('__asm__(R"SH4(\n' + Sh4Emitter.sharedRoutines() + ')SH4");\n');
@@ -530,8 +551,40 @@ class Program {
 		emitted.set(text, shard.className);
 		// After the comparison above, which saw every projection under its own name: a body
 		// another universe forwards to is the one emitted here, with its class's shared pairs.
-		final body = StringTools.replace(text, token, Std.string(u.shards.handleOf(fn.entry)));
+		final body = StringTools.replace(numberSites(text), token, Std.string(u.shards.handleOf(fn.entry)));
 		return share == null ? body : share.apply(body, u.emitter.lastProjections);
+	}
+
+	/**
+		A body's JALR sites (Emitter.SITE_TOKEN, numbered from 0 in each function) numbered
+		program-wide: FnTable keeps one answer per number (`runAt`). Done after the comparison for
+		duplicates, which saw each function's own ordinals, so a duplicate (a forwarder) has none.
+		In emission order, which is deterministic, as every other number in the output is.
+	**/
+	/** FnTable's site slots: every numbered site, and at least one, so its array has a size. */
+	function siteSlots():Int return sites > 0 ? sites : 1;
+
+	function numberSites(text:String):String {
+		final tok = Emitter.SITE_TOKEN;
+		var i = text.indexOf(tok);
+		if (i < 0) return text;
+		else {}
+		final out = new StringBuf();
+		var at = 0;
+		var most = -1;
+		while (i >= 0) {
+			final end = text.indexOf("__", i + tok.length);
+			final k = Std.parseInt(text.substring(i + tok.length, end));
+			out.add(text.substring(at, i));
+			out.add(Std.string(sites + k));
+			if (k > most) most = k;
+			else {}
+			at = end + 2;
+			i = text.indexOf(tok, at);
+		}
+		out.add(text.substr(at));
+		sites += most + 1;
+		return out.toString();
 	}
 
 	// ---- the dispatch table -------------------------------------------------------------------
@@ -615,9 +668,10 @@ class Program {
 		// Last, the empty state of the CpuState's last answer (`run`): its address is odd, which no
 		// table answers, and this asks the long way, as a miss does.
 		final table = new StringBuf();
-		table.add('typedef void (*RecompsxFn)(core::CpuState*, int);\\n'
-			+ 'static void recompsx_unanswered(core::CpuState* ctx, int entry) { (void)entry; core::Runtime::callOnce(ctx, ctx->_callAt); }\\n'
-			+ 'static const RecompsxFn recompsx_fns[] = {\\n');
+		// The array has external linkage, and the header declares it (FnTable's @:headerCode): a JALR
+		// site calls through it where `runAt` is inlined, in every shard.
+		table.add('static void recompsx_unanswered(core::CpuState* ctx, int entry) { (void)entry; core::Runtime::callOnce(ctx, ctx->_callAt); }\\n'
+			+ 'extern \\"C\\" const RecompsxFn recompsx_fns[] = {\\n');
 		var col = 0;
 		for (r in fnRefs) {
 			table.add(r + ',');
@@ -630,6 +684,8 @@ class Program {
 		// lines a colour (src/backend/dreamcast/dc-data-placement.txt, `.bss.recompsx_fnfast`) where
 		// malloc put them wherever the heap had room, and they missed on what else was hot (E-150).
 		table.add('extern \\"C\\" { unsigned char recompsx_fnfast[' + (FAST_SLOTS_GEN << 4) + '] __attribute__((aligned(32))); }\\n');
+		// Each call site's last answer (`runAt`): the address and the function (FnTable's header has the type).
+		table.add('extern \\"C\\" { RecompsxSite recompsx_fnsite[' + siteSlots() + '] __attribute__((aligned(32))); }\\n');
 		// With `gen --sh4`, a build defining `recompsx_sh4` also gets the assembly's glue here.
 		if (sh4Functions > 0) {
 			buf.add('#if recompsx_sh4\n');
@@ -638,6 +694,20 @@ class Program {
 			buf.add('@:cppFileCode("' + table.toString() + '")\n');
 			buf.add('#end\n');
 		} else buf.add('@:cppFileCode("' + table.toString() + '")\n');
+		// What an inlined `runAt` names in a shard's file: the pointer array and the sites' answers.
+		buf.add('@:headerCode("namespace core { class CpuState; }\\n'
+			+ 'typedef void (*RecompsxFn)(core::CpuState*, int);\\n'
+			+ 'typedef struct { int at; RecompsxFn fn; } RecompsxSite;\\n'
+			+ 'extern \\"C\\" { extern const RecompsxFn recompsx_fns[]; extern RecompsxSite recompsx_fnsite[]; }\\n'
+			// A jump site's answer as a tail call (ADR-0062), where the compiler guarantees one across
+			// the two signatures — GCC 15's musttail; Clang's wants the caller's own signature: the site
+			// tail-calls FnTable::tailJump, which tail-calls the answer or leaves the jump to the caller
+			// (ADR-0026) — one shared compare, and each site one exit. Elsewhere nothing, and the site's
+			// own tailAt follows. `ctx` is every generated function's CpuState.
+			+ '#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 15\\n'
+			+ '#define RECOMPSX_TAIL(site, target) __attribute__((musttail)) return FnTable::tailJump(ctx, (target), (site))\\n'
+			+ '#define RECOMPSX_TAILHIT(site, target) if (__builtin_expect(recompsx_fnsite[site].at == (target), 1)) { __attribute__((musttail)) return recompsx_fnsite[site].fn(ctx, 0); }\\n'
+			+ '#else\\n#define RECOMPSX_TAIL(site, target) ((void)0)\\n#define RECOMPSX_TAILHIT(site, target) ((void)0)\\n#endif\\n")\n');
 		buf.add('class FnTable {\n');
 		buf.add('\t/** `recompsx_unanswered`\'s place in the native pointer array (C++): after every function. */\n');
 		buf.add('\tstatic inline var NONE:Int = ${fnRefs.length};\n\n');
@@ -669,6 +739,8 @@ class Program {
 		buf.add('\t];\n\n');
 
 		buf.add('\tstatic final N:Int = ${addrs.length};\n\n');
+		buf.add('\t/** JALR sites in the program, each with an answer of its own on C++ (`runAt`). */\n');
+		buf.add('\tstatic inline final SITES = ${siteSlots()};\n\n');
 		buf.add(flatTables());
 
 		buf.add("	/** The row for an address, or -1 if this program has no code there. */
@@ -745,14 +817,21 @@ class Program {
 		var target = addr;
 		while (true) {
 			#if cxx
-			// The last answer first (CpuState._callAt): a compare in a line that is always in the
-			// cache, where FAST's slot is wherever the address puts it.
-			if (shim.MemA.likely(ctx._callAt == target)) FnPtr.call(ctx._callFn, ctx, ctx._callBlock);
+			// A tail jump a site left (`tailAt`): that site's answer. Else the last answer first
+			// (CpuState._callAt): a compare in a line that is always in the cache, where FAST's slot
+			// is wherever the address puts it.
+			final site = tailSite;
+			if (site >= 0) {
+				tailSite = -1;
+				if (shim.MemA.likely(SiteStore.at(site) == target)) SiteStore.call(site, ctx);
+				else runSite(ctx, target, site);
+			} else if (shim.MemA.likely(ctx._callAt == target)) FnPtr.call(ctx._callFn, ctx, ctx._callBlock);
 			else runFast(ctx, target);
 			#else
 			final at = ((target >>> 2) & (FAST_SLOTS - 1)) << 4;
 			if (shim.MemA.get32(FAST, at) == target) dispatch(shim.MemA.get32(FAST, at + 4), shim.MemA.get32(FAST, at + 8), ctx);
-			else Runtime.callOnce(ctx, target);
+			else if (!RelocTable.quick(target, ctx)) Runtime.callOnce(ctx, target);
+			else {}
 			#end
 			if (ctx.unwindToken != Runtime.TAIL) return;
 			else {}
@@ -775,7 +854,100 @@ class Program {
 			ctx._callFn = fn;
 			ctx._callBlock = block;
 			FnPtr.call(fn, ctx, block);
-		} else Runtime.callOnce(ctx, target);
+		} else if (!RelocTable.quick(target, ctx)) Runtime.callOnce(ctx, target);
+		else {}
+	}
+	#end
+
+	/**
+		A call by address at one place in the program (`site`, numbered by the generator): on C++
+		that place's own last answer first — a JIT's inline cache, one entry a site — then FAST's
+		and the long way, as `run` asks them.
+
+		The CpuState's last answer is the program's: one dynamic call in two of Crash 3's demo found
+		another target there (150,202 of 279,561 over vblanks 4700-5000), each then ~100 cycles of
+		`runFast` with its table line often evicted. A site calls the same function again far more
+		often than the program does: one entry a site misses 31,135 of them. A hit is a compare and a
+		call through the function's own pointer, which the site keeps. The answers are FAST's, kept
+		for a function's entry (block 0) and forgotten with FAST's (`clearFast`). The tail jumps the
+		callee leaves are not run here: every site is followed by the unwind check
+		(`Runtime.unwinding`), which runs them, as it did for those `run` handed back.
+	**/
+	#if cxx
+	public static inline function runAt(ctx:CpuState, addr:Int, site:Int):Void {
+		if (shim.MemA.likely(SiteStore.at(site) == addr)) SiteStore.call(site, ctx);
+		else runSite(ctx, addr, site);
+	}
+
+	/** `runAt` when the site's answer is another address: FAST's answer, kept for the site when it
+	    is a function's entry, or the long way. */
+	@:specifier(\"__attribute__((noinline))\")
+	static function runSite(ctx:CpuState, target:Int, site:Int):Void {
+		final at = ((target >>> 2) & (FAST_SLOTS - 1)) << 4;
+		if (shim.MemA.get32(FAST, at) == target) {
+			final fn = shim.MemA.get32(FAST, at + 12);
+			final block = shim.MemA.get32(FAST, at + 8);
+			if (block == 0) SiteStore.keep(site, target, fn);
+			else {}
+			FnPtr.call(fn, ctx, block);
+		} else if (!RelocTable.quick(target, ctx)) Runtime.callOnce(ctx, target);
+		else {}
+	}
+	#else
+	public static inline function runAt(ctx:CpuState, addr:Int, site:Int):Void {
+		run(ctx, addr);
+	}
+	#end
+
+	/** The site of the tail jump pending (`tailAt`), whose answer `run` takes first; -1 when the
+	    jump pending is none of a site's (the runtime's own Runtime.tail). C++ only. */
+	static var tailSite:Int = -1;
+
+	/**
+		A jump the caller runs (ADR-0026), from a site the generator numbered: `Runtime.tail`, and
+		on C++ the site, so that `run` asks its answer. A computed jump goes to one function nearly
+		every time: Crash 3's renderer hands over from routine to routine through registers, 983
+		jumps a present over vblanks 4700-5000 (294,918 in all), and the program's one last answer
+		missed 279,863 of them, each then `runFast`; one entry a site misses 323.
+	**/
+	public static inline function tailAt(ctx:CpuState, addr:Int, site:Int):Void {
+		#if cxx
+		tailSite = site;
+		#end
+		Runtime.tail(ctx, addr);
+	}
+
+	#if cxx
+	/** A jump site's answer, tail-called from the site (`RECOMPSX_TAIL`): the site's function, by a
+	    tail call of its own; else the jump left to the caller, `tailAt`'s way. Its `return` reaches
+	    the site's caller, the site's frame being gone. Kept (`@:keep`): only C++ text names it. */
+	@:keep @:specifier(\"__attribute__((noinline))\")
+	public static function tailJump(ctx:CpuState, target:Int, site:Int):Void {
+		untyped __cpp__(\"RECOMPSX_TAILHIT(({0}), ({1}))\", site, target);
+		tailSite = site;
+		Runtime.tail(ctx, target);
+	}
+	#end
+
+	/**
+		The check after a call whose callee left a token: `Runtime.unwinding`, with a tail jump run
+		here on C++ — through `run` itself, where the runtime's form went through Runtime.call and
+		the runner the program bound (`run`, by a std::function). Out of line: only a set token comes.
+	**/
+	#if cxx
+	@:specifier(\"__attribute__((noinline))\")
+	public static function unwound(ctx:CpuState, cont:Int):Bool {
+		if (ctx.unwindToken == Runtime.TAIL) {
+			ctx.unwindToken = 0;
+			run(ctx, ctx.tailTarget);
+		} else {}
+		if (ctx.unwindToken == Runtime.RETURN && ctx.returnTarget == cont) ctx.unwindToken = 0;
+		else {}
+		return ctx.unwindToken != 0;
+	}
+	#else
+	public static inline function unwound(ctx:CpuState, cont:Int):Bool {
+		return Runtime.unwinding(ctx, cont);
 	}
 	#end
 
@@ -851,6 +1023,19 @@ private extern class FastStore {
 	@:nativeFunctionCode(\"(recompsx_fnfast)\")
 	public static function buf():shim.RawBuf;
 }
+
+/** The sites' answers, the array FnTable's C++ file defines (`recompsx_fnsite`): a site's address
+    and the function's own pointer, so a hit calls it without the pointer array's line. */
+private extern class SiteStore {
+	@:nativeFunctionCode(\"(recompsx_fnsite[({arg0})].at)\")
+	public static function at(site:Int):Int;
+	@:nativeFunctionCode(\"(recompsx_fnsite[({arg0})].fn(({arg1}), 0))\")
+	public static function call(site:Int, ctx:CpuState):Void;
+	@:nativeFunctionCode(\"((void)(recompsx_fnsite[({arg0})].at = ({arg1}), recompsx_fnsite[({arg0})].fn = recompsx_fns[({arg2})]))\")
+	public static function keep(site:Int, addr:Int, fn:Int):Void;
+	@:nativeFunctionCode(\"((void)(recompsx_fnsite[({arg0})].at = 1))\")
+	public static function forget(site:Int):Void;
+}
 #end
 ");
 		return buf.toString();
@@ -901,9 +1086,17 @@ private extern class FastStore {
 			shim.MemA.set32(FAST, i << 4, ((i + 1) & (FAST_SLOTS - 1)) << 2);
 			i++;
 		}
+		// The relocatable code's too, which `RelocTable.quick` answers before the overlays are asked.
+		RelocTable.forget();
 		#if cxx
-		// And the one the machine's CpuState keeps (`run`).
+		// And the one the machine's CpuState keeps (`run`), and each site's (`runAt`): an odd
+		// address, which no call matches — also at init, where the array is zeros and 0 an address.
 		forgetLast(mem.Memory.machine);
+		i = 0;
+		while (i < SITES) {
+			SiteStore.forget(i);
+			i++;
+		}
 		#end
 	}
 
@@ -972,7 +1165,7 @@ private extern class FastStore {
 			final rf = relocOf(r, fn);
 			final token = '__RECOMPSX_CONTINUATION_HANDLE__';
 			rf.unit.emitter.continuationToken = token;
-			final text = StringTools.replace(rf.unit.emitter.emitFunction(fn), token, Std.string(rf.handle));
+			final text = StringTools.replace(numberSites(rf.unit.emitter.emitFunction(fn)), token, Std.string(rf.handle));
 			buf.add(splitEntry(fn.name, text, rf.unit.emitter.hopTarget));
 			buf.add("\n");
 		}
@@ -1218,6 +1411,37 @@ private extern class FastStore {
 		core.Reloc.base = addr;
 		core.Reloc.calls = (core.Reloc.calls + 1) | 0;
 		FnTable.dispatch(handle, 0, ctx);
+	}
+
+	/**
+		`call` for an address it has a kept answer for, whose words are still those: run, and true;
+		anything else false, with nothing done. FnTable asks this before the long way — the
+		dispatcher, the resident overlay, the executable's table, then `call` — because a kept
+		address has been that way already: no overlay held it and the executable has no code there.
+		The executable's code cannot move, and FnTable has these answers forgotten (`forget`)
+		whenever what is resident changes, as it forgets its own. Crash 3's demo calls its GOOL
+		code ~36 times a vblank, nine in ten to a kept answer, each ~800 cycles the long way.
+	**/
+	public static function quick(addr:Int, ctx:CpuState):Bool {
+		if (KEY_COUNT == 0 || (addr & 3) != 0 || !ready) return false;
+		else {}
+		final m = ((addr >>> 2) & (MEMO_SLOTS - 1)) << MEMO_SHIFT;
+		if (shim.MemA.get32(MEMO_F, m << 2) == (addr | 1) && memoHolds(m, addr)) {
+			enter(addr, shim.MemA.get32(MEMO_F, (m + 1) << 2), ctx);
+			return true;
+		} else {}
+		return false;
+	}
+
+	/** Every kept answer forgotten: what is resident changed (FnTable.clearFast). */
+	public static function forget():Void {
+		if (!ready) return;
+		else {}
+		var i = 0;
+		while (i < MEMO_SLOTS) {
+			shim.MemA.set32(MEMO_F, (i << MEMO_SHIFT) << 2, 0);
+			i++;
+		}
 	}
 
 	/** Whether the HASH_WORDS words at `addr` are still the ones slot `m`'s answer was found by. */

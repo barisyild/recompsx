@@ -277,6 +277,24 @@ class Iso9660 {
 	}
 
 	/** The sector's address, in the minutes/seconds/frames the drive counts in. */
+	/**
+		A sector's address header and first subheader (GetlocL's eight bytes) into `dst`: from the
+		image when it is raw, made up as `synthesizeWhole` makes them when it is not.
+	**/
+	public static function headerBytes(lba:Int, dst:RawBuf):Bool {
+		if (!mounted) return false;
+		else if (sectorSize == RAW_SIZE) {
+			return Backend.fileRead(slot, lba * RAW_SIZE + HEADER_AT, dst, 8) == 8;
+		} else {
+			writeHeader(lba, dst);
+			RawMem.set8(dst, 4, 0);
+			RawMem.set8(dst, 5, 0);
+			RawMem.set8(dst, 6, 0x08);
+			RawMem.set8(dst, 7, 0);
+			return true;
+		}
+	}
+
 	static function writeHeader(lba:Int, dst:RawBuf):Void {
 		// LBA 0 is 00:02:00 on the disc: the first 150 frames are the lead-in.
 		final total = lba + 150;

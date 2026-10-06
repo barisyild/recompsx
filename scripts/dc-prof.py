@@ -109,6 +109,56 @@ def load_fa(path):
     return fa
 
 
+def hotcode_moves(prof):
+    """The copies the run-time layout made (ADR-0063, dc_hotcode.c), from the run's log beside the profile:
+    each layout's line ("layout N: ... into K KB at ARENA") and its "@@hc copy original size" lines. A function
+    to name a copy's address by its original's, so a moved function's samples and costs are its own; the
+    identity without them. An arena given back can be the heap a later one is made from, so an address is
+    named as the newest arena holding it names it — as the backend's own hotcode_original does — and an
+    address in an arena's padding is left as it is."""
+    log = re.sub(r"\.txt$", "", prof) + ".log"
+    layouts = []          # (arena start, arena end, [(copy, size, original)] sorted)
+    if os.path.exists(log):
+        with open(log, errors="replace") as f:
+            for line in f:
+                m = re.search(r"hotcode: layout \d+: .* into (\d+) KB at ([0-9a-f]{8})", line)
+                if m:
+                    lo = int(m.group(2), 16)
+                    layouts.append((lo, lo + int(m.group(1)) * 1024, []))
+                    continue
+                m = re.search(r"@@hc (?:p\d+ )?([0-9a-f]{8}) ([0-9a-f]{8}) ([0-9a-f]+)\s*$", line)
+                if m:
+                    if not layouts:   # a log without layout lines: one arena spanning its copies
+                        layouts.append((0, 1 << 32, []))
+                    layouts[-1][2].append((int(m.group(1), 16), int(m.group(3), 16), int(m.group(2), 16)))
+    for lay in layouts:
+        lay[2].sort()
+    firsts = [[c for c, _, _ in lay[2]] for lay in layouts]
+
+    def at(addr):
+        for k in range(len(layouts) - 1, -1, -1):
+            lo, hi, copies = layouts[k]
+            if not lo <= addr < hi:
+                continue
+            j = bisect.bisect_right(firsts[k], addr) - 1
+            if j >= 0 and addr < copies[j][0] + copies[j][1]:
+                return copies[j][2] + addr - copies[j][0]
+            return addr
+        return addr
+    return at, sum(len(lay[2]) for lay in layouts)
+
+
+def merged(d, at):
+    """A per-address dict of cost tuples with every copy's address named by its original's."""
+    if d is None:
+        return None
+    out = {}
+    for addr, c in d.items():
+        a = at(addr)
+        out[a] = tuple(x + y for x, y in zip(out[a], c)) if a in out else c
+    return out
+
+
 def load_symbols(nm, elf):
     out = subprocess.run([nm, "-n", "-S", "-C", elf], check=True, capture_output=True, text=True).stdout
     starts, ends, names = [], [], []
@@ -151,6 +201,9 @@ def main():
     tools = os.path.expanduser("~/toolchains/dc/sh-elf/bin/")
     nm = nm or os.path.join(tools, "sh-elf-nm")
     meta, samples = load_profile(prof)
+    at, nmoved = hotcode_moves(prof)
+    if nmoved:
+        samples = [(at(a), c) for a, c in samples]
     starts, ends, names = load_symbols(nm, elf)
     slice_ = meta.get("timeslice", 448)
     total = sum(c for _, c in samples) + meta.get("other", 0)
@@ -170,6 +223,9 @@ def main():
     print(f"outside RAM {meta.get('other', 0)}, outside any symbol {unknown}")
     costs = load_costs(prof + ".cache")
     fa = load_fa(prof + ".cache.fa") if costs is not None else None
+    if nmoved:
+        costs, fa = merged(costs, at), merged(fa, at)
+        print(f"run-time layout: {nmoved} functions moved, their copies named by their originals")
     per_cost = {}
     if costs is not None:
         # per function: ifill ofill dep ext iconf oconf wb wbconf sq, in cycles

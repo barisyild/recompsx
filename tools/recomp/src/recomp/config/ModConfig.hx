@@ -29,6 +29,11 @@ typedef ModHook = {addr:Int, scope:Null<String>};
 	9F000000h), `memory` bytes of it (64 KB when unsaid; the largest request wins). A manifest may
 	instead name a `heap` {addr, size} in guest RAM, for data the game must reach by DMA.
 
+	A mod may build on another of the same game: `needs` names their ids, and asking for the mod
+	brings them along, each before the mods that need it — their sources are copied too (a mod's
+	code imports their packages) and their `install` runs first. Crash 3's RES line needs `menu`,
+	which owns the pause screen's OPTIONS and gives other mods lines in it.
+
 	Addresses are decimal, as in game.json, with the hex beside them under an underscore key. A
 	hook's `in` scopes it to one overlay (or "exe"): windows are shared, and the same address is a
 	different function in each overlay that loads there.
@@ -49,9 +54,11 @@ class ModConfig {
 	public final memory:Int;
 	/** The directory holding mod.json and the sources. */
 	public final dir:String;
+	/** The ids of the mods this one builds on (`needs`). */
+	public final needs:Array<String>;
 
 	function new(id:String, title:String, entry:String, hooks:Array<ModHook>, heapAddr:Null<Int>,
-			heapSize:Int, memory:Int, dir:String) {
+			heapSize:Int, memory:Int, dir:String, needs:Array<String>) {
 		this.id = id;
 		this.title = title;
 		this.entry = entry;
@@ -60,11 +67,13 @@ class ModConfig {
 		this.heapSize = heapSize;
 		this.memory = memory;
 		this.dir = dir;
+		this.needs = needs;
 	}
 
 	/**
 		The mods `--mods` names, from a game's config directory: a comma-separated list of ids, or
-		"all" for every directory under `mods/` that has a mod.json.
+		"all" for every directory under `mods/` that has a mod.json — and the mods they need, each
+		before the first that needs it.
 	**/
 	public static function select(configDir:String, which:String):Array<ModConfig> {
 		final root = configDir + "/mods";
@@ -77,7 +86,24 @@ class ModConfig {
 				found;
 			}
 		} else [for (s in which.split(",")) if (StringTools.trim(s) != "") StringTools.trim(s)];
-		return [for (id in ids) load('$root/$id')];
+		final out:Array<ModConfig> = [];
+		final placed:Map<String, Bool> = [];
+		final placing:Map<String, Bool> = [];
+		function place(id:String, neededBy:Null<String>) {
+			if (placed.exists(id)) return;
+			if (placing.exists(id)) throw new LoaderError('mod $id needs itself, through $neededBy');
+			if (neededBy != null && !FileSystem.exists('$root/$id/mod.json')) {
+				throw new LoaderError('mod $neededBy needs "$id", which $root does not have');
+			}
+			placing.set(id, true);
+			final m = load('$root/$id');
+			for (n in m.needs) place(n, id);
+			placing.remove(id);
+			placed.set(id, true);
+			out.push(m);
+		}
+		for (id in ids) place(id, null);
+		return out;
 	}
 
 	public static function load(dir:String):ModConfig {
@@ -112,8 +138,19 @@ class ModConfig {
 			throw new LoaderError('$at: "memory" is $memory; it must be a multiple of 4, at most 8 MB '
 				+ '(expansion region 1)');
 		}
+		final needs:Array<String> = [];
+		final rawNeeds:Dynamic = Reflect.field(root, "needs");
+		if (rawNeeds != null) {
+			if (!Std.isOfType(rawNeeds, Array)) throw new LoaderError('$at: "needs" must be a list of mod ids');
+			for (n in (rawNeeds : Array<Dynamic>)) {
+				if (!Std.isOfType(n, String) || !validId(n)) {
+					throw new LoaderError('$at: "needs" holds ${Std.string(n)}, which is no mod id');
+				}
+				needs.push(n);
+			}
+		}
 		return new ModConfig(id, GameConfig.stringField(root, "title", id), entry, hooks, heapAddr,
-			heapSize, memory, dir);
+			heapSize, memory, dir, needs);
 	}
 
 	static function validId(s:String):Bool {
@@ -145,7 +182,8 @@ class ModConfig {
 	}
 
 	public function describe():String {
-		return 'mod $id ($title): ${hooks.length} hook${hooks.length == 1 ? "" : "s"}';
+		final on = needs.length == 0 ? "" : ', needs ${needs.join(", ")}';
+		return 'mod $id ($title): ${hooks.length} hook${hooks.length == 1 ? "" : "s"}$on';
 	}
 
 	public static function hexOf(a:Int):String return Vaddr.hex(a);

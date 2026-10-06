@@ -242,6 +242,15 @@ class ModHost {
 	/** Sets and keeps a console setting; false when the backend could not keep it. */
 	public static inline function setSetting(key:String, value:String):Bool return kernel.KSettings.set(key, value);
 
+	/**
+		A `syscall`, as the game's own instruction makes it: the function in `ctx.a0`, its arguments
+		in `a1`-`a3`, the answer in `v0` (`kernel.Kernel.syscall`). How a mod uses what the kernel
+		offers a game — the "PS1 Pro" calls (`kernel.KPro`, ADR-0060), such as the picture's
+		resolution — exactly as a game would, so that what a mod shows is what a game can do. The
+		registers are the guest's: save what the game still needs around it.
+	**/
+	public static inline function syscall(ctx:CpuState):Void kernel.Kernel.syscall(ctx, 0);
+
 	/** The buttons held on the host's pad `pad` (0..3; with the multitap, slot A..D), PS1 layout,
 	    active high — what the game will read this frame. */
 	public static inline function buttons(pad:Int):Int return sio.Pads.buttonsOf(pad);

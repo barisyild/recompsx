@@ -3,6 +3,12 @@
 
 #include "dc_internal.h"
 
+/* No loop unswitching in the scene build (ledger E-185): at -O3 GCC copied the record loops once for
+ * each value of their invariant tests — build_scene 13.8 KB, run_tris 4.0 KB — and the build's hot
+ * code no longer fitted the SH-4's 8 KB instruction cache; without it they are 7.3 and 2.8 KB, the
+ * same code. Every function below this line. */
+#pragma GCC optimize("no-unswitch-loops")
+
 /* ---- the command buffer: what the frame drew, in order (types in dc_internal.h) ---------------- */
 
 const uint16_t* g_vram;          /* emulated VRAM, borrowed; NULL until armed */
@@ -76,6 +82,15 @@ enum { HK_NORMAL = 0, HK_OPAQUE = 1, HK_ADD = 2, HK_INVERT = 3 };
 static inline uint32_t hdr_key(int dim, const gstate_t* s, int over, int kind) {
     return (uint32_t)dim | ((uint32_t)s->flags << 11) | ((uint32_t)s->semi_mode << 19)
          | ((uint32_t)over << 23) | ((uint32_t)kind << 24) | (1u << 27);
+}
+
+/* A picture's memory declared at another size (ADR-0056): every header kept for it is the old
+ * size's, and Flycast matches a render to texture by its size. */
+void hdr_forget(pvr_ptr_t mem) {
+    for(int k = 0; k < HDRC_N; k++) {
+        if(g_hdrc[k].mem == mem) g_hdrc[k].key = 0;
+        else {}
+    }
 }
 
 static inline int hdr_slot(pvr_ptr_t mem, int fmt, uint32_t key) {
@@ -460,6 +475,50 @@ void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     c->argb[0] = (uint32_t)bgr & 0x00FFFFFFu;   /* BGR, converted at build time */
 }
 
+/* One axis of a sprite (bp_gpu_sprite) as runs a triangle's texture bytes can carry: from texel `t`
+ * for `n` pixels, counting up (`dir` 1) or down (-1), wrapping at 256. A run's vertices carry the
+ * texel at its first pixel and the one past its last, as a polygon's do, so its far coordinate must
+ * stay in a byte: the column at texel 255 counting up (0 counting down), whose far coordinate would
+ * be 256 (-1), is a run of its own with that texel at both ends. Up to the edge, the edge, after the
+ * wrap — three runs for a sprite of up to 256, a few more for one that repeats its texture. */
+typedef struct { int at, n, t0, t1; } gspan_t;
+#define SPRITE_SPANS 12
+
+static int sprite_spans(int t, int n, int dir, gspan_t* s) {
+    int k = 0, at = 0;
+    while(n > 0 && k < SPRITE_SPANS) {
+        t &= 255;
+        const int edge = dir > 0 ? 255 : 0;
+        const int room = dir > 0 ? 255 - t : t;    /* texels before the edge one */
+        if(room == 0) {
+            s[k].at = at; s[k].n = 1; s[k].t0 = edge; s[k].t1 = edge;
+            at += 1; n -= 1; t += dir;
+        } else {
+            const int m = n < room ? n : room;
+            s[k].at = at; s[k].n = m; s[k].t0 = t; s[k].t1 = t + dir * m;
+            at += m; n -= m; t += dir * m;
+        }
+        k++;
+    }
+    return k;
+}
+
+/* A sprite as the triangles of the quads its runs make, each a polygon the scene draws as it draws
+ * the game's own: the binding, the texel centres, the passes. Almost every sprite is one quad. */
+void bp_gpu_sprite(int x, int y, int w, int h, int u, int v, int bgr, int flip) {
+    gspan_t su[SPRITE_SPANS], sv[SPRITE_SPANS];
+    const int nu = sprite_spans(u, w, (flip & 1) ? -1 : 1, su);
+    const int nv = sprite_spans(v, h, (flip & 2) ? -1 : 1, sv);
+    for(int j = 0; j < nv; j++) {
+        const int y0 = y + sv[j].at, y1 = y0 + sv[j].n, v0 = sv[j].t0, v1 = sv[j].t1;
+        for(int i = 0; i < nu; i++) {
+            const int x0 = x + su[i].at, x1 = x0 + su[i].n, u0 = su[i].t0, u1 = su[i].t1;
+            bp_gpu_tri(x0, y0, bgr, u0, v0, x1, y0, bgr, u1, v0, x0, y1, bgr, u0, v1);
+            bp_gpu_tri(x1, y0, bgr, u1, v0, x0, y1, bgr, u0, v1, x1, y1, bgr, u1, v1);
+        }
+    }
+}
+
 /* The last two display rectangles presented: a double-buffered game shows one and writes the
  * other, and a write into either is a write into a picture this backend draws. */
 int g_disp[2][4];
@@ -538,6 +597,104 @@ int state_targets(int t[][4], int max, int from) {
         }
     }
     return n;
+}
+
+/* A picture whose records are drawn uncut (area_uncut): its drawing area, relative to the buffer's
+ * corner (VRAM units, the right and bottom edges one past), for the build that follows. */
+static int g_uncut, g_uncut_x0, g_uncut_y0, g_uncut_x1, g_uncut_y1;
+
+/* Crash Bandicoot: Warped draws into y 12..227 of its 240-line buffers, so every triangle reaching
+ * across either edge was cut in software (put_clipped, clip_step: 63 a present of its gameplay,
+ * ~1,000 cycles each). Drawn whole instead, and the picture outside the area drawn again from the
+ * picture itself after them (area_restore) — what the base did there, read before this render
+ * writes a tile — the outside ends as it began and the inside as cutting left it. Only where that
+ * holds: every triangle the frame recorded for this buffer under one drawing area (a state with
+ * none, such as the frame's first, carried over from the last, is no matter), inside the buffer
+ * and not all of it, every rectangle of the buffer within the area (fills ignore it), and no VRAM
+ * mark (drawn from emulated VRAM, outside the area too). The caller asks only over a picture that
+ * is its own base. */
+int area_uncut(int tx, int ty, int tw, int th, int first) {
+    g_uncut = 0;
+    if(g_marks != 0 || g_rect_over || g_state_count <= 0) return 0;
+    else {}
+    int area = -1;
+    /* Which buffer a state draws into depends only on its buffer corner and drawing area (words
+     * 3-5), which the frame's states share by the hundred: worked out once for each. */
+    uint32_t last_w3 = 0, last_w4 = 0, last_w5 = 0;
+    int last_here = -1;
+    for(int i = 0; i < g_state_count; i++) {
+        const gstate_t* s = &g_states[i];
+        if(s->tris == 0) continue;
+        else {}
+        if(last_here < 0 || ((s->w[3] ^ last_w3) | (s->w[4] ^ last_w4) | (s->w[5] ^ last_w5)) != 0) {
+            int ox, oy, ow, oh;
+            last_w3 = s->w[3]; last_w4 = s->w[4]; last_w5 = s->w[5];
+            last_here = screen_origin(s, &ox, &oy, &ow, &oh) && ox == tx && oy == ty;
+        } else {}
+        if(!last_here) continue;
+        else {}
+        if(area < 0) area = i;
+        else if(s->w[4] != g_states[area].w[4] || s->w[5] != g_states[area].w[5]) return 0;
+        else {}
+    }
+    if(area < 0) return 0;
+    else {}
+    const gstate_t* a = &g_states[area];
+    const int x0 = a->clip_x0, y0 = a->clip_y0, x1 = a->clip_x1 + 1, y1 = a->clip_y1 + 1;
+    if(x0 < tx || y0 < ty || x1 > tx + tw || y1 > ty + th || x1 <= x0 || y1 <= y0) return 0;
+    else {}
+    if(x0 == tx && y0 == ty && x1 == tx + tw && y1 == ty + th) return 0;   /* nothing to cut */
+    else {}
+    const int n = cmd_count();
+    for(int k = 0; k < g_rect_n; k++) {
+        const int i = g_rect_at[k];
+        if(i < first || i >= n || g_cmds[i].is_rect != GCMD_RECT) continue;
+        else {}
+        const gcmd_t* c = &g_cmds[i];
+        int ox, oy, ow, oh;
+        if(!screen_origin(&g_states[c->state], &ox, &oy, &ow, &oh) || ox != tx || oy != ty) continue;
+        else {}
+        if(c->x[0] < x0 || c->y[0] < y0 || c->x[0] + c->x[1] > x1 || c->y[0] + c->y[1] > y1) return 0;
+        else {}
+    }
+    g_uncut = 1;
+    g_uncut_x0 = x0 - tx; g_uncut_y0 = y0 - ty; g_uncut_x1 = x1 - tx; g_uncut_y1 = y1 - ty;
+    return 1;
+}
+
+void area_uncut_end(void) {
+    g_uncut = 0;
+}
+
+/** The picture outside the drawing area drawn again from the picture itself, last (area_uncut): up
+ *  to four bands — above, below, left and right of the area — through the base's header, each
+ *  texel where it is. A band's edge at a fraction of a pixel (a scale that is not whole) covers
+ *  the pixels whose centres lie outside the area, the ones cutting left alone. */
+__attribute__((noinline))
+static void area_restore(float scale_x, float scale_y) {
+    const float pw = g_base_x1, ph = g_base_y1;
+    const float x0 = (float)g_uncut_x0 * scale_x, x1 = (float)g_uncut_x1 * scale_x;
+    const float y0 = (float)g_uncut_y0 * scale_y, y1 = (float)g_uncut_y1 * scale_y;
+    const float band[4][4] = {
+        { 0.0f, 0.0f, pw, y0 }, { 0.0f, y1, pw, ph }, { 0.0f, y0, x0, y1 }, { x1, y0, pw, y1 },
+    };
+    const float su = g_base_u1 / pw, sv = g_base_v1 / ph;
+    put_hdr(g_base_hdr);
+    for(int k = 0; k < 4; k++) {
+        const float bx0 = band[k][0], by0 = band[k][1], bx1 = band[k][2], by1 = band[k][3];
+        if(bx1 <= bx0 || by1 <= by0) continue;
+        else {}
+        pvr_vertex_t v;
+        v.argb = 0xFFFFFFFFu;
+        v.oargb = 0;
+        v.z = 1.0f;
+        v.flags = PVR_CMD_VERTEX;
+        v.x = bx0; v.y = by0; v.u = bx0 * su; v.v = by0 * sv; put_vtx(&v);
+        v.x = bx1; v.y = by0; v.u = bx1 * su; v.v = by0 * sv; put_vtx(&v);
+        v.x = bx0; v.y = by1; v.u = bx0 * su; v.v = by1 * sv; put_vtx(&v);
+        v.flags = PVR_CMD_VERTEX_EOL;
+        v.x = bx1; v.y = by1; v.u = bx1 * su; v.v = by1 * sv; put_vtx(&v);
+    }
 }
 
 /* True when rectangle a lies inside rectangle b (corner, size). */
@@ -662,6 +819,7 @@ void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed) {
 /* What emulated VRAM's write under this rectangle makes stale: the background slots and every
  * texture, palette and patch decoded out of it. */
 static void textures_stale(int x, int y, int w, int h) {
+    vram_rows_written(y, h);   /* the palette and CLUT memos' rows (g_vram_row_gen) */
     /* Only the background slots whose rectangle the write meets: games blit into their back
      * buffer every frame while displaying the front one, and treating any write anywhere as "the
      * picture changed" made that 5.5 ms a frame for a picture that had not. A 24bpp slot read
@@ -716,6 +874,9 @@ static void textures_stale(int x, int y, int w, int h) {
             pg->dx1 = (int16_t)x1; pg->dy1 = (int16_t)y1;
         }
     }
+    /* A VQ slot's indices are the page's (ADR-0061): the rows written go again at the next bind;
+     * its codebooks go stale by their CLUT's row generation, asked at the bind. */
+    vq_stale(x, y, w, h);
     /* A baked patch has the CLUT inside it, so it goes stale from either direction. */
     for(int i = 0; i < g_bake_n; i++) {
         if(!g_bake[i].used) continue;
@@ -850,6 +1011,7 @@ int marks_from(int first, int sx, int sy, int sw, int sh) {
 
 /** The part of the background texture a VRAM mark covers, drawn where the mark sits in the order.
  *  Returns 1 when something was drawn, so the caller restates its own header after it. */
+__attribute__((noinline))
 static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scale_x, float scale_y) {
     int x0 = c->x[0], y0 = c->y[0], x1 = c->x[0] + c->x[1], y1 = c->y[0] + c->y[1];
     if(x0 < sx) x0 = sx;
@@ -881,6 +1043,7 @@ static int draw_mark(const gcmd_t* c, int sx, int sy, int sw, int sh, float scal
  *  same size, as both pictures are the screen's. A source with no picture yet: emulated VRAM's
  *  result, as a mark is drawn. Inside one buffer the picture read is the one this render started
  *  from (pic_page says where that holds). Returns 1 when something was drawn. */
+__attribute__((noinline))
 static int draw_copy(const gcmd_t* c, int sx, int sy, int sw, int sh, float scale_x, float scale_y) {
     int x0 = c->x[0], y0 = c->y[0], x1 = c->x[0] + c->x[1], y1 = c->y[0] + c->y[1];
     if(x0 < sx) x0 = sx;
@@ -1151,8 +1314,11 @@ typedef struct __attribute__((aligned(32))) {
      * slot holds) or none, untextured (SRES_FLAT). */
     uint8_t   fast;
 } gsres_t;
-enum { SRES_MIR = 1, SRES_SLOT = 2, SRES_FLAT = 3 };
+enum { SRES_MIR = 1, SRES_SLOT = 2, SRES_FLAT = 3, SRES_VQ = 4 };
 static gsres_t g_sres[1 << SRES_BITS];
+/* A VQ binding's rows (ADR-0061), for an entry whose `fast` is SRES_VQ: the codebook's V offset, kept
+ * beside the entries rather than in them, which are two cache lines exactly. */
+static int8_t g_sres_rows[1 << SRES_BITS];
 
 /* A binding of the semi-transparent path, as semi_bind made it (see g_semi_binds). */
 typedef struct gsemibind gsemibind_t;
@@ -1194,7 +1360,9 @@ typedef struct { pvr_ptr_t mem; int fmt, dim, ou, ov; } gbind_t;
 enum { CLS_NONE = 0, CLS_SOLID = 1, CLS_STP = 2, CLS_MIXED = 3 };
 
 #define CLS_MEMO 256
-static struct { uint32_t gen; uint16_t cx, cy; uint8_t depth, cls; } g_cls_memo[CLS_MEMO];
+/* Kept past its build while the CLUT's row is unchanged (rgen, g_vram_row_gen): the class is read
+ * from that row alone. `ok` marks an entry ever written. */
+static struct { uint32_t gen, rgen; uint16_t cx, cy; uint8_t depth, cls, ok; } g_cls_memo[CLS_MEMO];
 
 /* Remembered for one scene build, as pal_bank_cached's answers are: VRAM is still while the scene
  * is built, and a semi-transparent state's CLUT was scanned again at every run that used it — an
@@ -1204,10 +1372,14 @@ static int clut_class(const gstate_t* s) {
     if(s->depth == 2) return CLS_MIXED;
     const uint32_t k = (((uint32_t)s->clut_x >> 4) ^ ((uint32_t)s->clut_y * 0x9E5u)
                         ^ ((uint32_t)s->depth << 7)) & (CLS_MEMO - 1);
-    if(g_cls_memo[k].gen == g_pal_memo_gen && g_cls_memo[k].cx == s->clut_x
-       && g_cls_memo[k].cy == s->clut_y && g_cls_memo[k].depth == s->depth)
+    if(g_cls_memo[k].ok && g_cls_memo[k].cx == s->clut_x && g_cls_memo[k].cy == s->clut_y
+       && g_cls_memo[k].depth == s->depth
+       && (g_cls_memo[k].gen == g_pal_memo_gen
+           || g_cls_memo[k].rgen == g_vram_row_gen[s->clut_y & (VRAM_H - 1)]))
         return g_cls_memo[k].cls;
     const int cls = clut_class_scan(s);
+    g_cls_memo[k].ok = 1;
+    g_cls_memo[k].rgen = g_vram_row_gen[s->clut_y & (VRAM_H - 1)];
     g_cls_memo[k].gen = g_pal_memo_gen;
     g_cls_memo[k].cx = s->clut_x;
     g_cls_memo[k].cy = s->clut_y;
@@ -1235,20 +1407,26 @@ typedef struct {
     int       patch8, cls;
     pvr_ptr_t mir;
     pvr_ptr_t pic;                      /* a page in a buffer's picture (ADR-0054), its binding */
+    pvr_ptr_t vqm[AM_N];                /* a VQ page's binding per variant (ADR-0061), when vqr >= 0 */
+    int8_t    vqr[AM_N];                /* its rows; -2 not asked yet, -1 none */
     int       pdim, pou, pov;
 } grun_t;
 
 static void run_begin(grun_t* r, const gstate_t* s, int state) {
     r->state = state;
-    for(int k = 0; k < AM_N; k++) { r->bank[k] = -2; r->slot[k] = -2; }
+    for(int k = 0; k < AM_N; k++) { r->bank[k] = -2; r->slot[k] = -2; r->vqr[k] = -2; }
     /* The page grid is the mirror's index, so a page origin that is not on the grid would
      * silently read a neighbour. The texpage encoding cannot produce one; the guard costs a
      * compare and removes the assumption. */
     const int plain = (s->window & 0x3FF) == 0 && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
+#if RECOMPSX_VQ >= 2
+    r->mir = NULL;          /* every plain 4bpp page a VQ page too (ADR-0061): no mirror, no bank */
+#else
     r->mir = (s->depth == 0 && plain) ? page4_mirror(s) : NULL;
+#endif
     /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT (bake_slot); the
      * whole page is decoded only for a primitive sampling across patches. */
-    r->patch8 = s->depth == 1 && plain;
+    r->patch8 = (s->depth == 1 || (RECOMPSX_VQ >= 2 && s->depth == 0)) && plain;
     r->cls = (s->flags & BP_GPU_SEMI) ? clut_class(s) : CLS_SOLID;
     /* A 15-bit page in a buffer this backend draws: its picture (ADR-0054). A picture keeps no bit
      * 15, so every texel is taken as the PlayStation's "blend me" one — what most of a frame drawn
@@ -1261,6 +1439,36 @@ static void run_begin(grun_t* r, const gstate_t* s, int state) {
         if(s->flags & BP_GPU_SEMI) r->cls = CLS_STP;
         else {}
     } else {}
+}
+
+/** Whether a semi-transparent record is one pass in its state's own blend, which build_scene draws
+ *  as it draws an opaque record — the same header (emit_header, HK_NORMAL: the state's blend), the
+ *  same colours and brightening pass, in runs, its state's answers kept in g_sres — rather than
+ *  through semi_prim, whose passes, bindings and their caches are for the primitives that need
+ *  more than one: a triangle untextured or through a CLUT whose every visible texel blends
+ *  (CLS_STP; at 4 or 8 bits, where the bank or the patch is the visible variant's either way), in
+ *  any mode but B - F. Crash 3's demo sends ~45 such triangles a present, each ~1,500 cycles
+ *  through semi_prim's passes against ~300 in a run. A CLUT with solid texels as well (two passes),
+ *  one with none (nothing drawn), a 15-bit page and a rectangle keep semi_prim. */
+#ifndef RECOMPSX_SEMI_SINGLE
+#define RECOMPSX_SEMI_SINGLE 1      /* 0: every semi-transparent record through semi_prim, as before */
+#endif
+static inline uint32_t sres_key(int state);
+/* The states of this build semi_single has said no to (their sres_key, by their g_sres index): a
+ * state that needs semi_prim's passes asks again at every record — no fast path ever takes it — and
+ * clut_class's memo was ~95 cycles each time (ledger E-182). */
+static uint32_t g_semi_multi[1 << SRES_BITS];
+static inline int semi_single(const gcmd_t* c, const gstate_t* s) {
+    if(!RECOMPSX_SEMI_SINGLE || s->semi_mode == 2 || c->is_rect) return 0;
+    else if(!(s->flags & BP_GPU_TEXTURED)) return 1;
+    else {}
+    const uint32_t key = sres_key(c->state);
+    uint32_t* const m = &g_semi_multi[c->state & ((1 << SRES_BITS) - 1)];
+    if(*m == key) return 0;
+    else if(s->depth != 2 && clut_class(s) == CLS_STP) return 1;
+    else {}
+    *m = key;
+    return 0;
 }
 
 /* The 64x64 patch a primitive samples within, if it samples within one. */
@@ -1284,11 +1492,25 @@ static int one_patch(const gcmd_t* c, int* tu, int* tv) {
     return patch_origin(umin, umax, tu) && patch_origin(vmin, vmax, tv);
 }
 
+/** State s's page through its CLUT in variant `am` as a VQ codebook (ADR-0061), into b: the
+ *  state's binding, the same for every record under it. */
+static int bind_vq(const gstate_t* s, int am, gbind_t* b) {
+    pvr_ptr_t vm;
+    int rows;
+    if(!vq_bind(s, am, &vm, &rows)) return 0;
+    else {}
+    b->mem = vm; b->fmt = VQ_FMT; b->dim = VQ_TEXDIM; b->ou = 0; b->ov = -rows;
+    return 1;
+}
+
 /** Where primitive c's texels come from in variant `am`, into b; 0 when nowhere, and then the
  *  primitive is skipped — drawing it untextured would be worse. */
 __attribute__((noinline))
 static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t* r, gbind_t* b) {
     int tu, tv;
+#if RECOMPSX_VQ
+    (void)c; (void)tu; (void)tv;      /* the bake's patch (ADR-0061) */
+#endif
     b->ou = 0; b->ov = 0; b->dim = TEX_DIM;
     if(r->mir) {
         if(r->bank[am] == -2) r->bank[am] = pal_bank_cached(s->clut_x, s->clut_y, 0, am);
@@ -1297,8 +1519,12 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
             b->fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(r->bank[am]) | PVR_TXRFMT_TWIDDLED;
             return 1;
         }
-        /* No bank was left for this palette, so draw it from texels that already have the CLUT
-         * in them — exact, and only as large as this primitive samples. */
+        /* No bank was left for this palette: the page's indices through its CLUT as a VQ codebook
+         * (ADR-0061), or texels that already have the CLUT in them — exact either way. */
+#if RECOMPSX_VQ
+        if(bind_vq(s, am, b)) return 1;
+        else {}
+#else
         const int k = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, am) : -1;
         if(k >= 0) {
             b->mem = g_bake[k].mem;
@@ -1306,6 +1532,7 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
             b->dim = BAKE_DIM; b->ou = tu * BAKE_STEP; b->ov = tv * BAKE_STEP;
             return 1;
         }
+#endif
         /* Sampling wider than one patch, or the patch pool is all in flight: the nearest banked
          * palette, which is the only lossy path left in the scene. */
         g_bake_miss++;
@@ -1315,6 +1542,30 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
         return 1;
     }
     if(r->patch8) {
+#if RECOMPSX_VQ
+        /* Asked once a run and variant: the state's answer for the build. */
+        if(r->vqr[am] == -2) {
+            int rows;
+            r->vqr[am] = vq_bind(s, am, &r->vqm[am], &rows) ? (int8_t)rows : -1;
+        } else {}
+        if(r->vqr[am] >= 0) {
+            b->mem = r->vqm[am]; b->fmt = VQ_FMT; b->dim = VQ_TEXDIM; b->ou = 0; b->ov = -r->vqr[am];
+            return 1;
+        } else {}
+#else
+#if RECOMPSX_VQ8
+        /* An 8bpp page as a VQ page, asked once a run and variant (RECOMPSX_VQ8). */
+        if(s->depth == 1) {
+            if(r->vqr[am] == -2) {
+                int rows;
+                r->vqr[am] = vq_bind(s, am, &r->vqm[am], &rows) ? (int8_t)rows : -1;
+            } else {}
+            if(r->vqr[am] >= 0) {
+                b->mem = r->vqm[am]; b->fmt = VQ_FMT; b->dim = VQ_TEXDIM; b->ou = 0; b->ov = -r->vqr[am];
+                return 1;
+            } else {}
+        } else {}
+#endif
         const int k = one_patch(c, &tu, &tv) ? bake_slot(s, tu, tv, am) : -1;
         if(k >= 0) {
             b->mem = g_bake[k].mem;
@@ -1322,6 +1573,7 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
             b->dim = BAKE_DIM; b->ou = tu * BAKE_STEP; b->ov = tv * BAKE_STEP;
             return 1;
         }
+#endif
         /* Sampling wider than one patch, or every patch in flight: the page. */
         if(r->slot[am] == -2) r->slot[am] = tex_slot(s, am);
         if(r->slot[am] < 0) return 0;
@@ -1348,6 +1600,10 @@ static int bind_texture_slow(const gcmd_t* c, const gstate_t* s, int am, grun_t*
 /** Variant `am` of the one 64x64 patch primitive c samples, baked with its CLUT applied: exact,
  *  and no palette bank spent. 0 when c samples more than one patch or the pool is all in flight. */
 static int bind_baked(const gcmd_t* c, const gstate_t* s, int am, gbind_t* b) {
+#if RECOMPSX_VQ
+    (void)c;
+    return bind_vq(s, am, b);
+#endif
     int tu, tv;
     if(!one_patch(c, &tu, &tv)) return 0;
     const int k = bake_slot(s, tu, tv, am);
@@ -1751,7 +2007,7 @@ static void semi_prim(gscene_t* g, grun_t* r, const gcmd_t* c, int state, const 
             return;
         }
     }
-    const int split = r->cls == CLS_MIXED && s->depth != 0;
+    const int split = r->cls == CLS_MIXED && (s->depth != 0 || RECOMPSX_VQ >= 2);
     if(split && bind_texture(c, s, AM_SOLID, r, &b)) scene_pass(g, c, state, s, &b, HK_OPAQUE, &p);
     if(!bind_texture(c, s, split ? AM_STP : AM_VIS, r, &b)) return;
     if(sub) subtract_passes(g, c, state, s, &b, &p);
@@ -1964,12 +2220,131 @@ static void base_rect(void) {
     v.x = g_base_x1;  v.y = g_base_y1;  v.u = g_base_u1;  v.v = g_base_v1;  put_vtx(&v);
 }
 
+/* build_scene's rare paths, out of line: the record loop runs ~700 times a present and its own
+ * lines are what the instruction cache should keep; these run a few times a frame, or for the few
+ * records that need them, and as part of its body they spread its hot lines over 20 KB (ledger
+ * E-170). Each is the loop's code as it was, moved. */
+
+/** Where state s's buffer is on screen, and which edges of its drawing area to cut at: when the
+ *  drawing area changes, a few times a frame. Whether the buffer is placed in this scene. */
+__attribute__((noinline))
+static int place_area(const gstate_t* s, gscene_t* g, int to_picture, int sx, int sy) {
+    int ow = 0, oh = 0;   /* unset when not placed, and then never read */
+    const int placed = screen_origin(s, &g->ox, &g->oy, &ow, &oh)
+                       && (!to_picture || (g->ox == sx && g->oy == sy));
+    /* Only the edges of the drawing area that lie inside the picture are cut here; one at or past
+     * the picture's own edge is where the screen ends anyway. Crash 3's area is its buffer's whole
+     * width, and cutting every triangle that crossed the side of the screen cost 200 ms of the
+     * window for nothing. */
+    /* With the area's outside drawn again from the picture after the records (area_uncut), nothing
+     * is cut at its edges: what reaches past them is painted over. */
+    g->clx0 = s->clip_x0 > g->ox && !g_uncut ? s->clip_x0 : -32768;
+    g->clx1 = s->clip_x1 + 1 < g->ox + ow && !g_uncut ? s->clip_x1 : 32766;
+    g->cly0 = s->clip_y0 > g->oy && !g_uncut ? s->clip_y0 : -32768;
+    g->cly1 = s->clip_y1 + 1 < g->oy + oh && !g_uncut ? s->clip_y1 : 32766;
+    g->cut_x = g->clx0 != -32768 || g->clx1 != 32766;
+    g->cut_y = g->cly0 != -32768 || g->cly1 != 32766;
+    cut_span(g->clx0, g->clx1 + 1, &g->xlo, &g->xspan);
+    cut_span(g->cly0, g->cly1 + 1, &g->ylo, &g->yspan);
+    return placed;
+}
+
+/** A state's texture binding worked out in full, when neither g_sres nor g_tbind holds it: the 4bpp
+ *  mirror and its palette bank, an 8bpp page's patches, or a slot; kept in both caches. */
+__attribute__((noinline))
+static void resolve_binding(const gstate_t* s, int state, gsres_t* sr, gtbind_t* tb, uint32_t pk,
+                            uint32_t ck, pvr_ptr_t* mir, int* bank, int* slot, int* patch8) {
+    int run_bank = -1, run_slot = -1;
+    pvr_ptr_t run_mir = NULL;
+    /* The page grid is the mirror's index, so a page origin that is not on the grid would silently
+     * read a neighbour. The texpage encoding cannot produce one; the guard costs a compare and
+     * removes the assumption. */
+    if(RECOMPSX_VQ < 2 && s->depth == 0 && (s->window & 0x3FF) == 0 && (s->tex_x & 63) == 0
+       && (s->tex_y & 255) == 0)
+        run_mir = page4_mirror(s);
+    else {}
+    /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT (bake_slot); the whole
+     * page is decoded only for a primitive sampling across patches. With RECOMPSX_VQ (ADR-0061) an
+     * unwindowed 8bpp page is a VQ page, its CLUT a codebook — and at 2 a 4bpp one too, with no
+     * mirror and no banks: `run_patch8` says so. */
+    const int run_patch8 = (s->depth == 1 || (RECOMPSX_VQ >= 2 && s->depth == 0)) && (s->window & 0x3FF) == 0
+                        && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
+    if(run_mir) {
+        run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
+    } else if(!run_patch8) {
+        run_slot = tex_slot(s, AM_VIS);
+        if(run_slot >= 0 && s->depth == 0)
+            run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
+        else {}
+    } else {}
+    tb->page = pk; tb->clut = ck; tb->window = s->window;
+    tb->depth = s->depth; tb->gen = g_tbind_gen;
+    tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
+    tb->patch8 = (uint8_t)run_patch8;
+    sres_bind(sr, state, run_mir, run_bank, run_slot, run_patch8);
+    *mir = run_mir; *bank = run_bank; *slot = run_slot; *patch8 = run_patch8;
+}
+
+/** A rectangle record: four vertices, untextured (the runtime clipped it already). */
+__attribute__((noinline))
+static void put_rect_record(const gcmd_t* c, float scale_x, float scale_y, float xo, float yo,
+                            uint32_t a) {
+    const float x0 = (float)c->x[0] * scale_x + xo;
+    const float y0 = (float)c->y[0] * scale_y + yo;
+    const float x1 = (float)(c->x[0] + c->x[1]) * scale_x + xo;
+    const float y1 = (float)(c->y[0] + c->y[1]) * scale_y + yo;
+    const uint32_t argb = bgr_to_rgb(c->argb[0]) | a;
+    for(int k = 0; k < 4; k++) {
+        pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
+        v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        v->x = (k & 1) ? x1 : x0;
+        v->y = (k & 2) ? y1 : y0;
+        v->z = 1.0f;
+        v->u = 0.0f; v->v = 0.0f;
+        v->argb = argb;
+        v->oargb = 0;
+        TA_HASH(v);
+        pvr_dr_commit(v);
+    }
+}
+
+/** A primitive reaching past the drawing area, cut to it (g's terms already set): its colours, the
+ *  part above 1.0 of a brightening one as a second, additive pass, and the run's header after. */
+__attribute__((noinline))
+static void put_cut(const gcmd_t* c, pvr_ptr_t mem, const gstate_t* s, uint32_t a, gscene_t* g,
+                    gpass_t* h) {
+    /* A textured primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to nearly
+     * 2.0 — which the PVR's modulate cannot, so a menu's text drawn in a bright gradient over a grey
+     * font came out at half its brightness, dull and olive. The part above 1.0 is drawn as a second,
+     * additive pass of the same triangle (emit_header's `over`); only primitives that brighten pay
+     * for it. */
+    uint32_t col[3];
+    int bright = 0;
+    for(int k = 0; k < 3; k++) {
+        col[k] = (mem ? bgr_to_rgb_mod(c->argb[k]) : bgr_to_rgb(c->argb[k])) | a;
+        if(mem && bgr_brightens(c->argb[k])) bright = 1;
+    }
+    put_clipped(c, col, g);
+    if(bright && !(s->flags & BP_GPU_RAW)) {
+        if(h->over_ready) put_hdr(&g_run_over);
+        else over_header(h);
+        for(int k = 0; k < 3; k++)
+            col[k] = bgr_to_rgb_over(c->argb[k]) | a;
+        put_clipped(c, col, g);
+        h->restate = 1;      /* the next primitive of the run restates its header */
+#if RECOMPSX_DC_PROFILE
+        g_bright_prims++;
+#endif
+    } else {}
+}
+
 PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_background, int first,
                                int to_picture) {
     if(sw <= 0 || sh <= 0) return;
-    /* The screen and a picture alike are 640 x 480 (ADR-0055). */
-    const float scale_x = 640.0f / (float)sw;
-    const float scale_y = 480.0f / (float)sh;
+    /* The screen is 640 x 480, and so is a picture (ADR-0055) unless it is drawn at a lower
+     * resolution (ADR-0056): then its own size. */
+    const float scale_x = (to_picture ? (float)g_scene_w : 640.0f) / (float)sw;
+    const float scale_y = (to_picture ? (float)g_scene_h : 480.0f) / (float)sh;
 
     pvr_list_begin(PVR_LIST_TR_POLY);
 #if RECOMPSX_TA_HASH
@@ -1990,11 +2365,13 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
     } else {}
 
     g_pal_memo_gen++;         /* VRAM may have changed since the last build */
-    palette_priority();
+#if RECOMPSX_VQ < 2
+    palette_priority();     /* the banks' frame (at RECOMPSX_VQ 2 only windowed 4bpp pages take banks) */
+#endif
     semi_binds_clear();
     if(++g_tbind_gen == 0) {   /* a wrapped generation would find last builds' answers valid */
         for(int k = 0; k < (1 << TBIND_BITS); k++) g_tbind[k].gen = 0;
-        for(int k = 0; k < (1 << SRES_BITS); k++) g_sres[k].gen = 0;
+        for(int k = 0; k < (1 << SRES_BITS); k++) { g_sres[k].gen = 0; g_semi_multi[k] = 0; }
         g_tbind_gen = 1;
     } else {}
     g_run_hdr_p = &g_run_hdr;
@@ -2031,6 +2408,9 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
      * gameplay). Same key, same answer: nothing between two records evicts or rebinds a patch
      * bound this frame (the in-flight rule), and the slot's frame is already this one. */
     int memo_state = -1, memo_tu = -1, memo_tv = -1, memo_b = -1;
+#if RECOMPSX_VQ
+    (void)memo_state; (void)memo_tu; (void)memo_tv; (void)memo_b;   /* the bake's (ADR-0061) */
+#endif
     pvr_ptr_t run_mir = NULL;
     float alpha = 1.0f;
     /* A brightening pass or a VRAM mark puts another header on the list in the middle of a run,
@@ -2075,6 +2455,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
         /* Whether the binding is the state's, not the record's: then the records after this one
          * under the same state bind the same way (run_tris). A baked patch is per record. */
         int per_state = 1;
+        int bound_vq = 0;           /* the binding is a VQ page's (ADR-0061): SRES_VQ below */
         /* A return to a state this build has drawn a triangle under, on the drawing area the
          * last one had: its binding and its header as g_sres kept them (`fast`), and the walk
          * below — the area, the blending, the texture answers asked again, six compares for the
@@ -2094,8 +2475,12 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                     else {}
                 } else {}
                 mem = fr->mem; fmt = fr->fmt;
+                if(fr->fast == SRES_VQ) {
+                    dim = VQ_TEXDIM;
+                    ov = -g_sres_rows[c->state & ((1 << SRES_BITS) - 1)];
+                } else {}
                 cur_state = (int)c->state;
-                cur_mem = mem; cur_fmt = fmt; cur_ou = 0; cur_ov = 0;
+                cur_mem = mem; cur_fmt = fmt; cur_ou = 0; cur_ov = ov;
                 put_hdr(&fr->hdr);
                 alpha = fr->alpha;
                 g_run_hdr_p = &fr->hdr;
@@ -2110,25 +2495,11 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
             placed_state = (int)c->state;
             if((int)s->area != placed_area) {
                 placed_area = (int)s->area;
-                int ow = 0, oh = 0;   /* unset when not placed, and then never read */
-                placed = screen_origin(s, &g.ox, &g.oy, &ow, &oh)
-                         && (!to_picture || (g.ox == sx && g.oy == sy));
-                /* Only the edges of the drawing area that lie inside the picture are cut here;
-                 * one at or past the picture's own edge is where the screen ends anyway. Crash
-                 * 3's area is its buffer's whole width, and cutting every triangle that crossed
-                 * the side of the screen cost 200 ms of the window for nothing. */
-                g.clx0 = s->clip_x0 > g.ox ? s->clip_x0 : -32768;
-                g.clx1 = s->clip_x1 + 1 < g.ox + ow ? s->clip_x1 : 32766;
-                g.cly0 = s->clip_y0 > g.oy ? s->clip_y0 : -32768;
-                g.cly1 = s->clip_y1 + 1 < g.oy + oh ? s->clip_y1 : 32766;
-                g.cut_x = g.clx0 != -32768 || g.clx1 != 32766;
-                g.cut_y = g.cly0 != -32768 || g.cly1 != 32766;
-                cut_span(g.clx0, g.clx1 + 1, &g.xlo, &g.xspan);
-                cut_span(g.cly0, g.cly1 + 1, &g.ylo, &g.yspan);
+                placed = place_area(s, &g, to_picture, sx, sy);
             }
         }
         if(!placed) continue;       /* drawn into VRAM off screen: not a picture */
-        if(s->flags & BP_GPU_SEMI) {
+        if((s->flags & BP_GPU_SEMI) && !semi_single(c, s)) {
             semi_prim(&g, &semi_run, c, (int)c->state, s);
             cur_state = -1;         /* its headers went out after this loop's */
             continue;
@@ -2168,52 +2539,47 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                         run_patch8 = tb->patch8;
                         sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
                     } else {
-                        run_bank = -1; run_slot = -1; run_mir = NULL;
-                        /* The page grid is the mirror's index, so a page origin that is not on
-                         * the grid would silently read a neighbour. The texpage encoding cannot
-                         * produce one; the guard costs a compare and removes the assumption. */
-                        if(s->depth == 0 && (s->window & 0x3FF) == 0
-                           && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0)
-                            run_mir = page4_mirror(s);
-                        else {}
-                        /* An unwindowed 8bpp page is drawn from 64x64 patches through its CLUT
-                         * (bake_slot); the whole page is decoded only for a primitive sampling
-                         * across patches, below. */
-                        run_patch8 = s->depth == 1 && (s->window & 0x3FF) == 0
-                                  && (s->tex_x & 63) == 0 && (s->tex_y & 255) == 0;
-                        if(run_mir) {
-                            run_bank = pal_bank_cached(s->clut_x, s->clut_y, 0, AM_VIS);
-                        } else if(!run_patch8) {
-                            run_slot = tex_slot(s, AM_VIS);
-                            if(run_slot >= 0 && s->depth == 0)
-                                run_bank = pal_bank_cached(s->clut_x, s->clut_y, 1, AM_VIS);
-                            else {}
-                        } else {}
-                        tb->page = pk; tb->clut = ck; tb->window = s->window;
-                        tb->depth = s->depth; tb->gen = g_tbind_gen;
-                        tb->mir = run_mir; tb->bank = (int16_t)run_bank; tb->slot = (int16_t)run_slot;
-                        tb->patch8 = (uint8_t)run_patch8;
-                        sres_bind(sr, c->state, run_mir, run_bank, run_slot, run_patch8);
+                        resolve_binding(s, (int)c->state, sr, tb, pk, ck,
+                                        &run_mir, &run_bank, &run_slot, &run_patch8);
                     }
                 }
                 if(run_mir && run_bank >= 0) {
                     mem = run_mir;
                     fmt = PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(run_bank) | PVR_TXRFMT_TWIDDLED;
                 } else if(run_mir || run_patch8) {
-                    /* No bank was left for this palette, or an 8bpp page: texels with the CLUT
-                     * already in them — exact, and only as large as this primitive samples. */
-                    per_state = 0;
-                    int tu, tv;
+                    /* No bank was left for this palette, or an 8bpp page: the page's indices through
+                     * the CLUT as a VQ codebook (ADR-0061) — the state's binding, so the records
+                     * after it run on — or texels with the CLUT already in them, as large as this
+                     * primitive samples. Exact either way. */
+                    int tu = 0, tv = 0;
                     int b = -1;
-                    if(one_patch(c, &tu, &tv)) {
-                        if((int)c->state == memo_state && tu == memo_tu && tv == memo_tv) b = memo_b;
-                        else {
-                            b = bake_slot(s, tu, tv, AM_VIS);
-                            if(b >= 0) { memo_state = (int)c->state; memo_tu = tu; memo_tv = tv; memo_b = b; }
-                            else {}
-                        }
+#if RECOMPSX_VQ
+                    pvr_ptr_t vm = NULL;
+                    int rows = 0;
+                    const int vq = vq_bind(s, AM_VIS, &vm, &rows);
+#else
+                    pvr_ptr_t vm = NULL;
+                    int rows = 0;
+                    /* An 8bpp page as a VQ page (RECOMPSX_VQ8): the state's binding, its run goes on. */
+                    const int vq = RECOMPSX_VQ8 && s->depth == 1 && vq_bind(s, AM_VIS, &vm, &rows);
+                    if(!vq) {
+                        per_state = 0;
+                        if(one_patch(c, &tu, &tv)) {
+                            if((int)c->state == memo_state && tu == memo_tu && tv == memo_tv) b = memo_b;
+                            else {
+                                b = bake_slot(s, tu, tv, AM_VIS);
+                                if(b >= 0) { memo_state = (int)c->state; memo_tu = tu; memo_tv = tv; memo_b = b; }
+                                else {}
+                            }
+                        } else {}
                     } else {}
-                    if(b >= 0) {
+#endif
+                    if(vq) {
+                        mem = vm;
+                        fmt = VQ_FMT;
+                        dim = VQ_TEXDIM; ou = 0; ov = -rows;
+                        bound_vq = 1;
+                    } else if(b >= 0) {
                         mem = g_bake[b].mem;
                         fmt = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_TWIDDLED;
                         dim = BAKE_DIM; ou = tu * BAKE_STEP; ov = tv * BAKE_STEP;
@@ -2276,8 +2642,11 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 sr->fast = c->is_rect ? 0
                          : !mem ? SRES_FLAT
                          : !sr->bind_ok ? 0
+                         : bound_vq ? SRES_VQ
                          : (run_mir && run_bank >= 0) ? SRES_MIR
                          : (!run_mir && !run_patch8 && run_slot >= 0) ? SRES_SLOT : 0;
+                if(bound_vq) g_sres_rows[c->state & ((1 << SRES_BITS) - 1)] = (int8_t)(-ov);
+                else {}
             }
         header_made:
             h.restate = 0;
@@ -2312,23 +2681,7 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
          * stack and copied it through a call. */
         const uint32_t a = cur_a;
         if(c->is_rect) {
-            const float x0 = (float)c->x[0] * scale_x + cur_xo;
-            const float y0 = (float)c->y[0] * scale_y + cur_yo;
-            const float x1 = (float)(c->x[0] + c->x[1]) * scale_x + cur_xo;
-            const float y1 = (float)(c->y[0] + c->y[1]) * scale_y + cur_yo;
-            const uint32_t argb = bgr_to_rgb(c->argb[0]) | a;
-            for(int k = 0; k < 4; k++) {
-                pvr_vertex_t* v = (pvr_vertex_t*)pvr_dr_target();
-                v->flags = (k == 3) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-                v->x = (k & 1) ? x1 : x0;
-                v->y = (k & 2) ? y1 : y0;
-                v->z = 1.0f;
-                v->u = 0.0f; v->v = 0.0f;
-                v->argb = argb;
-                v->oargb = 0;
-                TA_HASH(v);
-                pvr_dr_commit(v);
-            }
+            put_rect_record(c, scale_x, scale_y, cur_xo, cur_yo, a);
         } else {
             /* This triangle and the records after it under the same binding: run_tris, unless this
              * one reaches past the drawing area. A baked patch binds one record (per_state 0). */
@@ -2354,33 +2707,15 @@ PROF_NOINLINE void build_scene(int sx, int sy, int sw, int sh, int with_backgrou
                 i = (int)(next - g_cmds) - 1;
                 continue;
             } else {}
-            /* Cut to the drawing area where it reaches past an edge inside the picture. A textured
-             * primitive's colour multiplies the texel, 0x80 meaning 1.0, and can go to nearly 2.0 —
-             * which the PVR's modulate cannot, so a menu's text drawn in a bright gradient over a
-             * grey font came out at half its brightness, dull and olive. The part above 1.0 is
-             * drawn as a second, additive pass of the same triangle (emit_header's `over`); only
-             * primitives that brighten pay for it. */
-            uint32_t col[3];
-            int bright = 0;
-            for(int k = 0; k < 3; k++) {
-                col[k] = (mem ? bgr_to_rgb_mod(c->argb[k]) : bgr_to_rgb(c->argb[k])) | a;
-                if(mem && bgr_brightens(c->argb[k])) bright = 1;
-            }
+            /* Cut to the drawing area where it reaches past an edge inside the picture (put_cut). */
             g.xo = cur_xo; g.yo = cur_yo; g.rdim = cur_rdim; g.rdimv = cur_rdimv; g.uo = cur_uo; g.vo = cur_vo;
-            put_clipped(c, col, &g);
-            if(bright && !(s->flags & BP_GPU_RAW)) {
-                if(h.over_ready) put_hdr(&g_run_over);
-                else over_header(&h);
-                for(int k = 0; k < 3; k++)
-                    col[k] = bgr_to_rgb_over(c->argb[k]) | a;
-                put_clipped(c, col, &g);
-                h.restate = 1;      /* the next primitive of the run restates its header */
-#if RECOMPSX_DC_PROFILE
-                g_bright_prims++;
-#endif
-            } else {}
+            put_cut(c, mem, s, a, &g, &h);
         }
     }
+    /* Drawn uncut (area_uncut): the picture outside the drawing area as it was, over what reached
+     * past it. */
+    if(g_uncut && to_picture) area_restore(scale_x, scale_y);
+    else {}
 #if RECOMPSX_TA_HASH
     g_ta_hashing = 0;
     {

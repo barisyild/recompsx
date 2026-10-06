@@ -165,6 +165,7 @@ int bp_caps(int cap_id) {
         case BP_CAP_HAS_AUDIO:       return g_audio != 0;
         case BP_CAP_HAS_STORAGE:     return 1;
         case BP_CAP_PREFERRED_SCALE: return 2;
+        case BP_CAP_WIDESCREEN:      return 1;   /* bp_present letterboxes a 16:9 picture */
         default:                     return 0;
     }
 }
@@ -216,9 +217,11 @@ void bp_present(const uint16_t* vram, int sx, int sy, int sw, int sh, int flags)
     SDL_GetRendererOutputSize(g_renderer, &win_w, &win_h);
 
     /* Every PS1 horizontal resolution covers the same physical width, so the picture is 4:3
-     * regardless of sw. Letterbox to 4:3 and centre; integer-scale when it fits exactly. */
-    int dst_w = win_w, dst_h = (win_w * 3) / 4;
-    if (dst_h > win_h) { dst_h = win_h; dst_w = (win_h * 4) / 3; }
+     * regardless of sw — or 16:9 where it fills a 16:9 screen (BP_PRESENT_WIDE_FILL, ADR-0064); one
+     * drawn for 4:3 stays 4:3 on a 16:9 screen, between bars. Letterbox to it and centre. */
+    const int aw = (flags & BP_PRESENT_WIDE_FILL) ? 16 : 4, ah = (flags & BP_PRESENT_WIDE_FILL) ? 9 : 3;
+    int dst_w = win_w, dst_h = (win_w * ah) / aw;
+    if (dst_h > win_h) { dst_h = win_h; dst_w = (win_h * aw) / ah; }
 
     const SDL_Rect dst = { (win_w - dst_w) / 2, (win_h - dst_h) / 2, dst_w, dst_h };
     g_picture = dst;
@@ -268,6 +271,10 @@ void bp_gpu_tri_w(const int* w) {
                w[8], w[9], w[10] & 0xFFFFFF, w[11] & 0xFF, (w[11] >> 8) & 0xFF);
 }
 
+void bp_gpu_sprite(int x, int y, int w, int h, int u, int v, int bgr, int flip) {
+    (void)x; (void)y; (void)w; (void)h; (void)u; (void)v; (void)bgr; (void)flip;
+}
+
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode) {
     (void)x; (void)y; (void)w; (void)h; (void)bgr; (void)semi; (void)semi_mode;
 }
@@ -278,6 +285,8 @@ void bp_gpu_copy(int sx, int sy, int dx, int dy, int w, int h, int changed) {
 }
 void bp_gpu_clip(int x0, int y0, int x1, int y1) { (void)x0; (void)y0; (void)x1; (void)y1; }
 void bp_gpu_mask(int set_bit, int check_bit) { (void)set_bit; (void)check_bit; }
+/* The finished picture is the PlayStation's resolution: BP_CAP_GPU_SCALE is 0 (ADR-0056). */
+void bp_gpu_scale(int percent) { (void)percent; }
 
 /* ---- audio -------------------------------------------------------------------------------- */
 

@@ -196,20 +196,30 @@ static void upload_24bpp(const uint16_t* vram, int sx, int sy, int sw, int sh, p
  * straight to the screen, which a picture at the buffer's resolution scaled up lost. A render draws
  * into the picture it starts from: the PVR draws a tile at a time, and the copy it starts from is
  * 1:1 and point sampled, so each tile reads only its own pixels, before it writes them. That keeps
- * two memories where a copy elsewhere and a swap needed three (1.8 MB at this size). */
+ * two memories where a copy elsewhere and a swap needed three (1.8 MB at this size).
+ *
+ * At a lower resolution (bp_gpu_scale, ADR-0056) a picture is its buffer's size times the scale —
+ * 512x240 at 1X, 256x120 at 0.5X — in the same memory, its rows still PIC_W apart, and the screen
+ * shows it stretched and filtered. */
 
 int g_pic_ok, g_pic_active, g_pic_done;
 static pvr_ptr_t g_pic_mem[PIC_N];
 static pvr_poly_hdr_t g_pic_point[PIC_N];       /* point sampled: the base, the screen, a copy */
+static pvr_poly_hdr_t g_pic_linear[PIC_N];      /* RECOMPSX_DC_FILTER: a smaller one onto the screen */
 static gpic_t g_pic[PIC_N];
 float g_pic_ru[PIC_N], g_pic_rv[PIC_N];         /* screen pixels per buffer pixel, over the size */
+int g_pic_tw[PIC_N], g_pic_th[PIC_N];           /* the size each is declared at (dc_internal.h) */
+int g_scene_w = PIC_W, g_scene_h = PIC_H;
+/* The scale asked for (bp_gpu_scale) and the one the pictures are at: a new one is taken at the
+ * next present through the pictures (pictures_rescale). */
+static int g_scale = PIC_SCALE_SCREEN, g_pic_scale = PIC_SCALE_SCREEN;
 
 const pvr_poly_hdr_t* g_base_hdr;
 float g_base_x1, g_base_y1, g_base_u1, g_base_v1;
 
-static void pic_compile(pvr_poly_hdr_t* hdr, pvr_ptr_t mem) {
+static void pic_compile(pvr_poly_hdr_t* hdr, pvr_ptr_t mem, int filter, int tw, int th) {
     pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PIC_FMT, PIC_TEXW, PIC_TEXH, mem, PVR_FILTER_NONE);
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PIC_FMT, tw, th, mem, filter);
     cxt.blend.src = PVR_BLEND_ONE;
     cxt.blend.dst = PVR_BLEND_ZERO;
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
@@ -228,9 +238,14 @@ int pictures_init(void) {
     for(int i = 0; i < PIC_N; i++) {
         g_pic_mem[i] = (pvr_ptr_t)((uint8_t*)g_txr + (size_t)PIC_SRC_W * PIC_SRC_H * 2
                                    + (size_t)i * PIC_BYTES);
-        pic_compile(&g_pic_point[i], g_pic_mem[i]);
+        g_pic_tw[i] = PIC_TEXW;
+        g_pic_th[i] = PIC_TEXH;
+        pic_compile(&g_pic_point[i], g_pic_mem[i], PVR_FILTER_NONE, PIC_TEXW, PIC_TEXH);
+        pic_compile(&g_pic_linear[i], g_pic_mem[i], RECOMPSX_DC_FILTER, PIC_TEXW, PIC_TEXH);
         g_pic[i].valid = 0;
         g_pic[i].w = 0;
+        g_pic[i].pw = PIC_W;
+        g_pic[i].ph = PIC_H;
         g_pic[i].used = 0;
         g_pic_ru[i] = 1.0f / (float)PIC_TEXW;
         g_pic_rv[i] = 1.0f / (float)PIC_TEXH;
@@ -262,6 +277,49 @@ static void pictures_enter(void) {
     for(int i = 0; i < PIC_N; i++) g_pic[i].valid = 0;
     g_pic_done = 0;
     g_pic_active = 1;
+    g_pic_scale = g_scale;     /* none holds anything to keep */
+}
+
+/* A picture's size for a buffer of w x h at `percent` (ADR-0056): the screen's from
+ * PIC_SCALE_SCREEN up, whatever the buffer's own (ADR-0055); below it the buffer's times the scale,
+ * rounded. */
+static void pic_size(int w, int h, int percent, int* pw, int* ph) {
+    if(percent >= PIC_SCALE_SCREEN) {
+        *pw = PIC_W;
+        *ph = PIC_H;
+    } else {
+        const int x = (w * percent + 50) / 100, y = (h * percent + 50) / 100;
+        *pw = x < 1 ? 1 : (x > PIC_W ? PIC_W : x);
+        *ph = y < 1 ? 1 : (y > PIC_H ? PIC_H : y);
+    }
+}
+
+/* The smallest power of two at least v, and at least 8: the side of a PVR texture. */
+static int pic_pow2(int v) {
+    int n = 8;
+    while(n < v) n <<= 1;
+    return n;
+}
+
+/* Picture i at pw x ph: declared at the next powers of two of its size, the texture Flycast keeps
+ * a render to texture as (pvr_begin_queued_render's clip, rounded up) and matches a read of it by —
+ * on a console only the coordinates' scale; its headers made again when that changes, and the
+ * bindings kept for its memory forgotten. Its texel coordinates, in its buffer's pixels, reach its
+ * own through its scale (`g_pic_ru`, `g_pic_rv`). */
+static void pic_resize(int i, int pw, int ph) {
+    gpic_t* p = &g_pic[i];
+    p->pw = pw;
+    p->ph = ph;
+    const int tw = pic_pow2(pw), th = pic_pow2(ph);
+    if(tw != g_pic_tw[i] || th != g_pic_th[i]) {
+        g_pic_tw[i] = tw;
+        g_pic_th[i] = th;
+        pic_compile(&g_pic_point[i], g_pic_mem[i], PVR_FILTER_NONE, tw, th);
+        pic_compile(&g_pic_linear[i], g_pic_mem[i], RECOMPSX_DC_FILTER, tw, th);
+        hdr_forget(g_pic_mem[i]);
+    } else {}
+    g_pic_ru[i] = (float)pw / ((float)p->w * (float)tw);
+    g_pic_rv[i] = (float)ph / ((float)p->h * (float)th);
 }
 
 static gpic_t* pic_find(int x, int y, int w, int h) {
@@ -286,10 +344,9 @@ static gpic_t* pic_take(int x, int y, int w, int h) {
     }
     p->x = x; p->y = y; p->w = w; p->h = h;
     p->valid = 0;
-    /* Its texel coordinates, in the buffer's pixels, reach the picture's through its scale. */
-    const int i = (int)(p - g_pic);
-    g_pic_ru[i] = (float)PIC_W / ((float)w * (float)PIC_TEXW);
-    g_pic_rv[i] = (float)PIC_H / ((float)h * (float)PIC_TEXH);
+    int pw, ph;
+    pic_size(w, h, g_pic_scale, &pw, &ph);
+    pic_resize((int)(p - g_pic), pw, ph);
     return p;
 }
 
@@ -331,6 +388,35 @@ const pvr_poly_hdr_t* pic_source(int x, int y, int w, int h, int* px, int* py, f
     return NULL;
 }
 
+/* A rectangle from (0,0) to (x1,y1), the texture from (u0,v0) to (u1,v1), after its header. */
+static void tex_rect_uv(float x1, float y1, float u0, float v0, float u1, float v1) {
+    pvr_vertex_t vert;
+    vert.flags = PVR_CMD_VERTEX;
+    vert.argb  = 0xFFFFFFFFu;
+    vert.oargb = 0;
+    vert.z     = 1.0f;
+    vert.x = 0.0f; vert.y = 0.0f; vert.u = u0; vert.v = v0; put_vtx(&vert);
+    vert.x = x1;   vert.y = 0.0f; vert.u = u1; vert.v = v0; put_vtx(&vert);
+    vert.x = 0.0f; vert.y = y1;   vert.u = u0; vert.v = v1; put_vtx(&vert);
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    vert.x = x1;   vert.y = y1;   vert.u = u1; vert.v = v1; put_vtx(&vert);
+}
+
+/* The screen's band a picture is shown in: x from x0 to x1, the whole height, the texture from
+ * (u0,v0) to (u1,v1), after its header. */
+static void screen_rect(float x0, float x1, float u0, float v0, float u1, float v1) {
+    pvr_vertex_t vert;
+    vert.flags = PVR_CMD_VERTEX;
+    vert.argb  = 0xFFFFFFFFu;
+    vert.oargb = 0;
+    vert.z     = 1.0f;
+    vert.x = x0; vert.y = 0.0f;   vert.u = u0; vert.v = v0; put_vtx(&vert);
+    vert.x = x1; vert.y = 0.0f;   vert.u = u1; vert.v = v0; put_vtx(&vert);
+    vert.x = x0; vert.y = 480.0f; vert.u = u0; vert.v = v1; put_vtx(&vert);
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    vert.x = x1; vert.y = 480.0f; vert.u = u1; vert.v = v1; put_vtx(&vert);
+}
+
 /* A rectangle from (0,0) to (x1,y1), the texture from (0,0) to (u1,v1), after its header. */
 static void tex_rect(float x1, float y1, float u1, float v1) {
     pvr_vertex_t vert;
@@ -345,11 +431,15 @@ static void tex_rect(float x1, float y1, float u1, float v1) {
     vert.x = x1;   vert.y = y1;   vert.u = u1;   vert.v = v1;   put_vtx(&vert);
 }
 
-void draw_quad(int sw, int sh) {
+/* A 4:3 picture on a 16:9 screen, as the last screen showed it (dc_internal.h). */
+int g_pillarbox = 0;
+
+/* The background texture over the screen's band from x1 to x2. */
+static void draw_quad_band(int sw, int sh, float x1, float x2) {
     const float u1 = 0.0f, v1 = 0.0f;
     const float u2 = (float)sw / (float)g_txw;
     const float v2 = (float)sh / (float)g_txh;
-    const float x1 = 0.0f, y1 = 0.0f, x2 = 640.0f, y2 = 480.0f;
+    const float y1 = 0.0f, y2 = 480.0f;
 
     pvr_vertex_t vert;
     vert.flags = PVR_CMD_VERTEX;
@@ -362,6 +452,10 @@ void draw_quad(int sw, int sh) {
     vert.x = x1; vert.y = y2; vert.u = u1; vert.v = v2; put_vtx(&vert);
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = x2; vert.y = y2; vert.u = u2; vert.v = v2; put_vtx(&vert);
+}
+
+void draw_quad(int sw, int sh) {
+    draw_quad_band(sw, sh, 0.0f, 640.0f);
 }
 
 /* ---- presenting a frame: the scene (dc_scene.c) or the software picture, paced -------------- */
@@ -473,21 +567,32 @@ static void render_picture(const uint16_t* vram, int tx, int ty, int tw, int th,
     } else {}
     const int i = (int)(p - g_pic);
     if(cover < 0) {
-        g_base_x1 = (float)PIC_W;
-        g_base_y1 = (float)PIC_H;
+        g_base_x1 = (float)p->pw;
+        g_base_y1 = (float)p->ph;
         if(p->valid) {
             /* The picture itself, 1:1: drawn into it, each tile reads only what it then writes. */
             g_base_hdr = &g_pic_point[i];
-            g_base_u1 = (float)PIC_W / (float)PIC_TEXW;
-            g_base_v1 = (float)PIC_H / (float)PIC_TEXH;
+            g_base_u1 = (float)p->pw / (float)g_pic_tw[i];
+            g_base_v1 = (float)p->ph / (float)g_pic_th[i];
         } else {
             g_base_hdr = &g_hdr;
             g_base_u1 = (float)tw / (float)g_txw;
             g_base_v1 = (float)th / (float)g_txh;
         }
     } else {}
-    pvr_scene_begin_rtt(g_pic_mem[i], PIC_W, PIC_H, PIC_W);
+    g_scene_w = p->pw;
+    g_scene_h = p->ph;
+    /* Over a picture that is its own base, its records drawn uncut and the outside of their drawing
+     * area drawn again from it after them, where that is exact (RECOMPSX_UNCUT, area_uncut). */
+#if RECOMPSX_UNCUT
+    const int uncut = cover < 0 && p->valid && area_uncut(tx, ty, tw, th, from);
+#else
+    const int uncut = 0;
+#endif
+    pvr_scene_begin_rtt(g_pic_mem[i], p->pw, p->ph, PIC_W);
     build_scene(tx, ty, tw, th, cover < 0, cover < 0 ? from : cover, 1);
+    if(uncut) area_uncut_end();
+    else {}
     pvr_scene_finish();
     p->valid = 1;
     p->used = g_tex_frame;
@@ -509,18 +614,87 @@ static int picture_targets(int t[4][4]) {
     return n;
 }
 
+/* One render: memory `mem` drawn at w x h from a picture through `hdr`, (0,0) to (u1,v1) of it —
+ * its own scene, as a picture's render is. */
+static void pic_render_from(const pvr_poly_hdr_t* hdr, pvr_ptr_t mem, int w, int h, float u0, float v0,
+                            float u1, float v1) {
+    pvr_wait_ready();
+    pvr_scene_begin_rtt(mem, w, h, PIC_W);
+    pvr_list_begin(PVR_LIST_TR_POLY);
+    put_hdr(hdr);
+    tex_rect_uv((float)w, (float)h, u0, v0, u1, v1);
+    pvr_list_finish();
+    pvr_scene_finish();
+}
+
+/* A new scale (bp_gpu_scale, ADR-0056), at the first present through the pictures after it. The
+ * pictures keep what they hold — what a frame does not redraw, the pause's frozen game, is nowhere
+ * else — at their new size: the picture shown (or else the last used) is drawn at it into the other
+ * picture's memory, filtered, and that back into its own, 1:1. A render in place would read tiles
+ * it has already written wherever the picture grows. The other picture then holds the same: it stays
+ * valid when its buffer is the same size — a double-buffered game's other buffer, which the game
+ * draws over again — and starts again from emulated VRAM otherwise. Returns whether a picture
+ * changed. */
+static int pictures_rescale(int sx, int sy, int sw, int sh) {
+    g_pic_scale = g_scale;
+    gpic_t* a = pic_find(sx, sy, sw, sh);
+    if(!a) {
+        for(int i = 0; i < PIC_N; i++) {
+            if(g_pic[i].valid && (!a || g_pic[i].used > a->used)) a = &g_pic[i];
+            else {}
+        }
+    } else {}
+    if(!a) return 0;
+    else {}
+    int pw, ph;
+    pic_size(a->w, a->h, g_pic_scale, &pw, &ph);
+    if(pw == a->pw && ph == a->ph) return 0;
+    else {}
+    const int ia = (int)(a - g_pic), ib = (ia + 1) % PIC_N;
+    gpic_t* b = &g_pic[ib];
+    const int keep = b->valid && b->w == a->w && b->h == a->h;
+    const float tw = (float)g_pic_tw[ia], th = (float)g_pic_th[ia];
+    pic_render_from(&g_pic_linear[ia], g_pic_mem[ib], pw, ph, 0.5f / tw, 0.5f / th,
+                    ((float)a->pw - 0.5f) / tw, ((float)a->ph - 0.5f) / th);
+    /* b's memory holds a's picture now, at the new size: declared so, and copied back into a's. */
+    if(!keep) {
+        b->valid = 0;
+        b->w = a->w;
+        b->h = a->h;
+    } else {}
+    pic_resize(ib, pw, ph);
+    pic_render_from(&g_pic_point[ib], g_pic_mem[ia], pw, ph, 0.0f, 0.0f,
+                    (float)pw / (float)g_pic_tw[ib], (float)ph / (float)g_pic_th[ib]);
+    pic_resize(ia, pw, ph);
+    return 1;
+}
+
+/* The picture's resolution (ADR-0056), 25..400 percent of the PlayStation's: taken at the next
+ * present through the pictures. The direct path, for a picture the pictures cannot show, draws at the
+ * screen's resolution whatever it is. */
+void bp_gpu_scale(int percent) {
+    g_scale = percent < 25 ? 25 : (percent > 400 ? 400 : percent);
+}
+
 /* A present through the pictures: the new records into their buffers' pictures, then the displayed
  * buffer's picture onto the screen. A present with nothing new for the same rectangle is skipped,
  * and the screen keeps the last one. One during a list still being walked (`hold`, ADR-0039)
  * renders nothing yet, though the buffer being drawn is not the one shown: rendered now, the frame
  * would be two scenes, each with a scene's fixed cost, and its second half drawn over a copy of
- * the first. It shows a buffer the game has just flipped to. Returns 0 when skipped. */
-static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh, int hold) {
-    static int shown_x = -1, shown_y = -1, shown_w = -1, shown_h = -1;
+ * the first. It shows a buffer the game has just flipped to. One a program asked to keep the
+ * picture for (`keep`, BP_PRESENT_HOLD: HoldPicture, ADR-0060) renders its records into the
+ * pictures as any present does — a new scale with them — and leaves the screen as it is; the first
+ * present after it shows anew. Returns 0 when skipped. */
+static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh, int hold, int keep,
+                            int pillar) {
+    static int shown_x = -1, shown_y = -1, shown_w = -1, shown_h = -1, shown_pillar = 0;
     if(!g_pic_active) {
         shown_x = -1;
         pictures_enter();
     } else {}
+    /* A new scale: the pictures at it, and the screen shown again. */
+    if(g_scale != g_pic_scale && pictures_rescale(sx, sy, sw, sh)) shown_x = -1;
+    else {}
     if(sx != g_disp[0][0] || sy != g_disp[0][1] || sw != g_disp[0][2] || sh != g_disp[0][3]) {
         shz_memcpy4(g_disp[1], g_disp[0], sizeof(g_disp[0]));
         g_disp[0][0] = sx; g_disp[0][1] = sy; g_disp[0][2] = sw; g_disp[0][3] = sh;
@@ -528,9 +702,14 @@ static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh
     /* A texture upload alone (g_scene_dirty) changes no picture: a picture is drawn already, and
      * an upload into a buffer is a VRAM mark, a record. */
     const int render = cmd_count() > g_pic_done && !hold;
-    if(!render && sx == shown_x && sy == shown_y && sw == shown_w && sh == shown_h) return 0;
+    /* Kept, or shown in another band of the screen (ADR-0064): the screen built again after it. */
+    if(keep || pillar != shown_pillar) shown_x = -1;
     else {}
-    shown_x = sx; shown_y = sy; shown_w = sw; shown_h = sh;
+    if(!render && (keep || (sx == shown_x && sy == shown_y && sw == shown_w && sh == shown_h))) return 0;
+    else {}
+    if(!keep) {
+        shown_x = sx; shown_y = sy; shown_w = sw; shown_h = sh; shown_pillar = pillar;
+    } else {}
     g_scene_dirty = 0;
     if(render) {
         int t[4][4];
@@ -541,6 +720,8 @@ static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh
         g_frame_shown = 1;
         bp_gpu_sink.end = bp_gpu_sink.next;
     } else {}
+    if(keep) return render;
+    else {}
     gpic_t* p = pic_find(sx, sy, sw, sh);
     if(!p) {
         /* Never drawn into: emulated VRAM's picture of it, as the old path showed — the base
@@ -554,10 +735,22 @@ static int present_pictures(const uint16_t* vram, int sx, int sy, int sw, int sh
 #if RECOMPSX_DC_PROFILE
     g_pic_screens++;
 #endif
-    if(p) {
+    g_pillarbox = pillar;
+    if(p && p->pw == PIC_W && p->ph == PIC_H && !pillar) {
         /* The screen's own size: a pixel a texel. */
         put_hdr(&g_pic_point[(int)(p - g_pic)]);
         tex_rect((float)PIC_W, (float)PIC_H, (float)PIC_W / (float)PIC_TEXW, (float)PIC_H / (float)PIC_TEXH);
+        p->used = g_tex_frame;
+    } else if(p) {
+        /* Smaller (ADR-0056), or a 4:3 picture kept to the middle of a 16:9 screen (ADR-0064):
+         * stretched over its band, filtered, its edge texels' centres at the band's edges — the
+         * memory past its rows is not its. */
+        const int i = (int)(p - g_pic);
+        const float tw = (float)g_pic_tw[i], th = (float)g_pic_th[i];
+        const float x0 = pillar ? (float)PILLAR_X0 : 0.0f;
+        put_hdr(&g_pic_linear[i]);
+        screen_rect(x0, x0 + (pillar ? (float)PILLAR_W : (float)PIC_W), 0.5f / tw, 0.5f / th,
+                    ((float)p->pw - 0.5f) / tw, ((float)p->ph - 0.5f) / th);
         p->used = g_tex_frame;
     } else {}
 #if RECOMPSX_DC_PROFILE_OVERLAY
@@ -602,8 +795,12 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
         const int hold = (flags & BP_PRESENT_DRAWING) && cmd_count() > g_pic_done
                          && g_held < HOLD_MAX;
         g_held = hold ? g_held + 1 : 0;
+        /* A program drawing the picture anew keeps this one on screen (HoldPicture, ADR-0060). */
+        const int keep = (flags & BP_PRESENT_HOLD) != 0;
+        /* A 4:3 picture on a 16:9 screen, kept to its middle (ADR-0064). */
+        const int pillar = (flags & BP_PRESENT_WIDE) && !(flags & BP_PRESENT_WIDE_FILL);
 #if RECOMPSX_DC_PROFILE
-        const int built = present_pictures(vram, sx, sy, sw, sh, hold);
+        const int built = present_pictures(vram, sx, sy, sw, sh, hold, keep, pillar);
         const uint64_t tb = bp_time_us();
         /* All of it `submit`, as on the other path, the build inside it: the bench's total is
          * the sum of the columns. */
@@ -613,7 +810,7 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
         g_prof_end = tb;
         g_frame_present_us = (uint32_t)(tb - t0);
 #else
-        const int built = present_pictures(vram, sx, sy, sw, sh, hold);
+        const int built = present_pictures(vram, sx, sy, sw, sh, hold, keep, pillar);
 #endif
 #if RECOMPSX_DC_PROFILE
         if(built) present_counted();
@@ -695,7 +892,10 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
 
     pvr_scene_begin();
     if(cmd_count() > 0) {
-        /* Hardware drawing: the picture is geometry, over whatever VRAM already held. */
+        /* Hardware drawing: the picture is geometry, over whatever VRAM already held — over the
+         * whole screen, a 4:3 picture on a 16:9 one too (the band is the pictures' and the
+         * background's, ADR-0064). */
+        g_pillarbox = 0;
         build_scene(sx, sy, sw, sh, !blank && cover < 0, cover < 0 ? 0 : cover, 0);
 #if RECOMPSX_DC_PROFILE
         g_prof_build += bp_time_us() - t2;
@@ -705,9 +905,12 @@ static void present_frame(const uint16_t* vram, int sx, int sy, int sw, int sh, 
         /* A blank present submits nothing and the background colour becomes the whole screen —
          * which is the point: the display being off is a picture in its own right, and leaving
          * the last frame up instead would be a lie. */
+        /* A 4:3 picture on a 16:9 screen in the middle of it (ADR-0064): a film, say. */
+        g_pillarbox = (flags & BP_PRESENT_WIDE) && !(flags & BP_PRESENT_WIDE_FILL);
         if(!blank) {
             put_hdr(&g_hdr);
-            draw_quad(sw, sh);
+            if(g_pillarbox) draw_quad_band(sw, sh, (float)PILLAR_X0, (float)(PILLAR_X0 + PILLAR_W));
+            else draw_quad(sw, sh);
         }
 #if RECOMPSX_DC_PROFILE_OVERLAY
         draw_profile_overlay();

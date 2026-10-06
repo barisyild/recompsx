@@ -2,131 +2,133 @@
 # a colour being the variable's first line, mod 512, in the 16 KB direct-mapped operand cache.
 # scripts/dc-layout.py place lists .data and .bss in full at every Dreamcast link with these first
 # (scripts/build-dc.sh). Global: the same for every game, since the variables are the runtime's and
-# the backend's, not a game's (docs/perf/dreamcast-ledger.md, E-007, E-022, E-043, E-058, E-069, E-100, E-107, E-109, E-128, E-137, E-148, E-151, E-152).
+# the backend's, not a game's (docs/perf/dreamcast-ledger.md, E-007, E-022, E-043, E-058, E-069, E-100, E-107, E-109, E-128, E-137, E-148, E-151, E-152, E-163, E-169, E-178).
 #
-# Made 2026-10-04 (round r140, E-152) for fastmem's builds (ADR-0049: the arena's RAM 1 MB-aligned,
-# its scratchpad copy at +0x204000) by dc-ocache-sim dopt over seven windows' operand traces —
-# Crash 3's title screen, its gameplay demo, the intro's Uka Uka scene and the warp room (60, 60,
-# 40 and 40 MB of their traces), and Crash Bash's Ballistix window in all three of its phases (the
-# match, a disc load at 19840, the scene after it at 20100: 40 + 20 + 20 MB joined) — taken from
-# builds with the code where it now is (each game's dc-placement.txt instruction colours of the same
-# round, r140p1), with the main stack at its start (backend_kos.c, 235 lines below the top of RAM):
-# 109 variables — FnTable's FAST (`recompsx_fnfast`) and the GPU's two tables (`recompsx_gpu_ops`,
-# `recompsx_gpu_whole`) placeable now (E-150) — the repo's and every other data object a window
-# touches 10,000 times, one colour each for every game, two rounds: each window's operand cost 0.93,
-# 0.90, 0.90, 0.89 and 0.88 of its link's (r139's colours; the literal-pool halves were then chosen
-# with these). Regenerate it
+# Made 2026-10-05 (round r144, E-178; on the code after E-170..E-173) for fastmem's builds (ADR-0049:
+# the arena's RAM 1 MB-aligned, its scratchpad copy at +0x204000) by dc-ocache-sim dopt over seven
+# windows' operand traces — Crash 3's title screen, its gameplay demo, the intro's Uka Uka scene and
+# the warp room (60, 60, 40 and 40 MB of their traces), and Crash Bash's Ballistix window in all three
+# of its phases (the match, a disc load at 19840, the scene after it at 20100: 40 + 20 + 20 MB
+# joined) — taken from builds with the code where it now is (each game's dc-placement.txt
+# instruction colours of the same round, r144p1), with the main stack at its start (backend_kos.c,
+# 235 lines below the top of RAM): the variables a window touches 10,000 times, one colour each for
+# every game, two rounds: each window's operand cost 0.91, 0.87, 0.88, 0.87 and 0.79 of its link's
+# (r142's colours; the literal-pool halves were then chosen with these). Regenerate it
 # the same way — after the code placements, from traces of a build that has them — when the hot
 # variables change
 # (out/_work/round5d.sh in the session that made it; ledger E-100, E-108).
 # Since: `bp_gpu_sink` has g_cmd_count's colour, the frame's record count it replaced (ADR-0051).
 #
-290 .bss.recompsx_cpustate
-344 .bss.recompsx_gte
-397 .bss.recompsx_gpu
-6 .bss.recompsx_mem
-231 .bss.g_cmds
-408 .bss.g_states
-330 .bss.recompsx_timers
-115 .bss.recompsx_spu
-342 .bss.recompsx_sched
-46 .bss.g_semi_binds
-250 .bss.g_sres
-89 .bss.g_uv256
-110 .bss.recompsx_fnfast
-158 .bss.g_hdrc
-329 .bss.recompsx_gpu_ops
-82 .data.bp_gpu_sink
-83 .data.pvr_dr_addr
-252 .bss.g_pull
-401 .bss.g_bake
-77 .bss.g_state_cur
-357 .rodata._ZL12recompsx_fns
-350 .bss.g_state_count
-218 .bss.g_run_over
-55 .bss.g_frame_shown
-296 .bss._ZN3gpu3Gpu7opCountE
-13 .bss._ZN3mem6Memory7machineE
-304 .bss._ZN3gpu3Gpu6packetE
-351 .data.g_scene_dirty
-279 .bss._ZN3gpu3Gpu10wholeWordsE
-301 .bss.recompsx_gpu_whole
-179 .bss._ZN4core8TimeBase7perLineE
-57 .bss.g_where_depth
-327 .bss._ZN7FnTable4FASTE
-428 .bss.dc_boot_time
-280 .bss.g_prio
-189 .bss.g_pal4
-114 .bss.next_deadline.1
-200 .data.g_where
-58 .data._ZN3dma3Dma6listAtE
-175 .bss.g_area_w
-88 .bss.g_sdedup
-191 .bss._ZN4core3Irq4statE
-87 .bss.g_tbind_gen
-258 .bss.g_where_outer
-80 .bss._ZN3dma3Dma10wordsToGpuE
-156 .bss._ZN3dma3Dma9listLinksE
-168 .bss._ZN3dma3Dma9listClockE
-196 .bss.g_bright_prims
-67 .bss.timer_ms_counter
-252 .bss.timer_ms_countdown
-84 .data._impure_ptr
-338 .bss._ZN3gpu3Gpu7maskSetE
-50 .bss._ZN3gpu3Gpu9maskCheckE
-337 .bss._ZN3gpu3Gpu7texPageE
-189 .bss._ZN4core3Irq4maskE
-375 .bss.g_page4
-121 .bss.g_hdr_hits
-236 .bss.g_ring
-433 .bss.g_pal_memo
-12 .bss._ZN4core8TimeBase7lineLenE
-85 .bss._ZN4core8TimeBase8lineFromE
-83 .bss.g_clip_x0
-328 .data.g_clip_y1
-306 .bss.g_clip_y0
-246 .data.g_clip_x1
-207 .data.g_run_hdr_p
-311 .bss._ZN3gpu3Gpu12dmaDirectionE
-14 .bss._ZN3gpu3Gpu11displayModeE
-340 .data._ZN3gpu3Gpu15displayDisabledE
-318 .bss._ZN4core8TimeBase8lineHeldE
-364 .bss._ZN3gpu3Gpu10readPixelsE
-317 .bss._ZN3gpu3Gpu10irqPendingE
-219 .bss.g_winbuf
-32 .bss.g_disp
-323 .bss._ZN4core9Scheduler5ownerE
-206 .bss._ZN6kernel7KEvents11postedCountE
-462 .bss._ZN4core7Runtime6runnerE
-398 .bss._ZN3gpu3Gpu7xferColE
-307 .bss.g_tbind
-324 .bss._ZN6kernel7KEvents7evFlagsE
-59 .bss._ZN3spu3Spu8softMaskE
-275 .bss._ZN3gpu4Vram4dataE
-35 .bss._ZN3gpu3Gpu2vyE
-270 .bss._ZN3gpu3Gpu2vxE
-30 .bss._ZN3gpu3Gpu2vcE
-253 .bss.maple_state
-185 .bss.inside_int
-460 .bss._ZN6kernel7KEvents7evClassE
-211 .bss.g_run_hdr
-504 .bss._ZN3gpu3Gpu6pixelsE
-226 .bss.g_spu_pcm
-509 .bss._ZN3gpu3Gpu19drawAreaBottomRightE
-86 .data.g_tex_frame
-295 .bss.g_cls_memo
-34 .bss.g_samp_hit
-63 .data.g_pal_memo_gen
-77 .rodata.none.0
-52 .bss._ZN3spu3Spu3ramE
-35 .bss.g_samp_key
-397 .bss.g_spread
-370 .bss._ZN4core12ScalarResult6value1E
-122 .bss.g_semi_next
-145 .bss.g_fm_fault
-190 .bss._ZN3spu3Spu10samplesOutE
-310 .bss._ZN3spu3Spu8outCountE
-102 .bss.g_fm_traps
-392 .bss._ZN3spu3Spu4accRE
-325 .bss._ZN3spu3Spu4accLE
-442 .bss._ZN3spu3Spu9nonSilentE
+96 .bss.recompsx_cpustate
+289 .bss.recompsx_gte
+29 .bss.recompsx_mem
+187 .bss.recompsx_gpu
+266 .bss.g_cmds
+399 .bss.g_states
+299 .data.bp_gpu_sink
+355 .bss.recompsx_timers
+85 .bss.recompsx_spu
+71 .bss.g_semi_binds
+348 .bss.recompsx_sched
+273 .bss.g_sres
+95 .bss.g_uv256
+194 .bss.g_hdrc
+374 .bss.recompsx_fnfast
+138 .data.pvr_dr_addr
+242 .bss.recompsx_gpu_ops
+261 .bss.g_pull
+33 .bss.g_bake
+257 .bss.g_run_over
+345 .rodata._ZL12recompsx_fns
+272 .bss.g_disp
+469 .bss._ZN3mem6Memory7machineE
+253 .bss._ZN3gpu3Gpu7opCountE
+63 .bss._ZN3gpu3Gpu10wholeWordsE
+72 .bss.recompsx_gpu_whole
+192 .bss._ZN4core8TimeBase7perLineE
+40 .bss.g_prio
+373 .bss.g_where_depth
+347 .bss._ZN7FnTable4FASTE
+224 .bss.g_pal4
+79 .bss.dc_boot_time
+352 .data.g_where
+244 .bss.g_state_cur
+64 .data._ZN3dma3Dma6listAtE
+198 .bss.g_area_w
+223 .bss.g_tbind_gen
+413 .bss.next_deadline.1
+334 .bss._ZN3gpu3Gpu6packetE
+292 .bss.g_pal_memo
+113 .bss.g_sdedup
+486 .bss._ZN4core3Irq4statE
+361 .bss.g_page4
+233 .bss.g_bright_prims
+262 .bss.g_state_count
+66 .bss.g_where_outer
+227 .bss.g_hdr_hits
+392 .bss._ZN3dma3Dma10wordsToGpuE
+302 .bss._ZN3dma3Dma9listLinksE
+106 .bss._ZN3dma3Dma9listClockE
+351 .bss._ZN3gpu3Gpu9maskCheckE
+335 .bss._ZN3gpu3Gpu7maskSetE
+507 .bss._ZN3gpu3Gpu7texPageE
+464 .bss.g_ring
+350 .bss._ZN4core3Irq4maskE
+119 .bss.timer_ms_counter
+388 .bss.timer_ms_countdown
+316 .bss.g_bake_memo
+412 .data._impure_ptr
+243 .bss.g_frame_shown
+242 .data.g_run_hdr_p
+419 .bss._ZN4core8TimeBase7lineLenE
+389 .bss._ZN4core8TimeBase8lineFromE
+255 .bss.g_clip_y0
+181 .data.g_clip_x1
+269 .bss.g_clip_x0
+48 .data.g_clip_y1
+328 .bss._ZN3gpu3Gpu12dmaDirectionE
+411 .bss._ZN3gpu3Gpu11displayModeE
+394 .data._ZN3gpu3Gpu15displayDisabledE
+493 .bss._ZN3gpu3Gpu10irqPendingE
+468 .bss._ZN4core8TimeBase8lineHeldE
+427 .bss._ZN3gpu3Gpu10readPixelsE
+244 .bss.g_winbuf
+395 .bss._ZN4core9Scheduler5ownerE
+346 .bss._ZN6kernel7KEvents11postedCountE
+123 .bss.g_tbind
+446 .bss._ZN4core7Runtime6runnerE
+490 .bss._ZN3gpu3Gpu5xferIE
+494 .bss._ZN3gpu3Gpu7xferColE
+480 .bss._ZN6kernel7KEvents7evFlagsE
+340 .bss.g_cls_memo
+510 .bss._ZN3gpu3Gpu8uploadedE
+67 .bss._ZN3spu3Spu8softMaskE
+286 .bss._ZN3gpu4Vram4dataE
+450 .bss.maple_state
+221 .bss.g_run_hdr
+498 .bss._ZN3gpu3Gpu7xferRowE
+254 .data.g_tex_frame
+391 .bss._ZN6kernel7KEvents7evClassE
+303 .bss._ZN3gpu3Gpu6pixelsE
+34 .rodata.none.0
+327 .bss.g_spu_pcm
+16 .bss._ZN3gpu3Gpu19drawAreaBottomRightE
+381 .bss.inside_int
+222 .data.g_pal_memo_gen
+68 .bss._ZN3spu3Spu3ramE
+481 .bss._ZN4core12ScalarResult6value1E
+127 .bss.g_spread
+260 .bss.g_semi_next
+249 .data.g_scene_dirty
+334 .bss.g_samp_hit
+171 .bss.g_fm_fault
+463 .bss._ZN3spu3Spu10samplesOutE
+329 .bss.g_samp_key
+460 .bss._ZN3spu3Spu8outCountE
+168 .bss.g_fm_traps
+432 .bss._ZN3spu3Spu4accRE
+428 .bss._ZN3spu3Spu4accLE
+417 .bss._ZN3spu3Spu9nonSilentE
+484 .bss._ZN3gpu3Gpu2vcE
+13 .bss._ZN3gpu3Gpu2vxE
+274 .bss._ZN3gpu3Gpu2vyE

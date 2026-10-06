@@ -46,7 +46,13 @@ enum {
     BP_CAP_GPU_DRAW         = 4,   /* nonzero: this backend can rasterise primitives itself */
     BP_CAP_SPU_VOICES       = 5,   /* nonzero: this backend can play the SPU's voices itself */
     BP_CAP_GPU_UPLOADS      = 6,   /* nonzero: report every upload through bp_gpu_dirty (below) */
-    BP_CAP_GPU_COPIES       = 7    /* nonzero: report every VRAM-to-VRAM copy through bp_gpu_copy */
+    BP_CAP_GPU_COPIES       = 7,   /* nonzero: report every VRAM-to-VRAM copy through bp_gpu_copy */
+    BP_CAP_GPU_SCALE        = 8,   /* the scale it draws at until told one (bp_gpu_scale), in percent
+                                      of the PlayStation's resolution; 0: it cannot scale */
+    BP_CAP_GPU_LINES        = 9,   /* the most lines it draws a picture at, whatever the scale; 0:
+                                      no limit of its own */
+    BP_CAP_WIDESCREEN       = 10   /* nonzero: it shows pictures on a 16:9 screen when asked
+                                      (BP_PRESENT_WIDE, ADR-0064) */
 };
 int  bp_caps(int cap_id);
 
@@ -78,7 +84,23 @@ enum {
      * since the last present (hardware drawing, the Dreamcast's) keeps its last picture up and
      * lets the rest of the list join the same one; closing it here shows a frame in two halves,
      * a vblank each — the far half, then the near half on black. */
-    BP_PRESENT_DRAWING   = 1 << 4
+    BP_PRESENT_DRAWING   = 1 << 4,
+    /* A program is drawing anew what is on screen and asked for the picture to stay up meanwhile
+     * (the PS1 Pro call HoldPicture, ADR-0060): this vblank shows the last picture again, and what
+     * was drawn since joins the next one. Pacing, sound and the rest go on as at any present. A
+     * backend that cannot keep a picture shows this one; nothing emulated depends on it. */
+    BP_PRESENT_HOLD      = 1 << 5,
+    /* The console's screen is 16:9 (the PS1 Pro call SetWidescreen, ADR-0064; only to a backend
+     * that answers BP_CAP_WIDESCREEN): this picture is shown on a 16:9 screen. With
+     * BP_PRESENT_WIDE_FILL it fills the screen — the program drew it for one (anamorphic, its
+     * horizontal squeezed by 3/4), or the console stretches every picture (its STRETCH); without, it
+     * was drawn for 4:3 and is shown at 4:3 in the middle, between black bars. A backend that makes
+     * the screen shows it 16:9 (the browser's); one whose screen is a television's fills the frame
+     * (the Dreamcast's: a 16:9 television stretches it, as the Dreamcast's own widescreen games are
+     * shown) and keeps a 4:3 picture to the middle three quarters of it. Presentation only: nothing
+     * emulated depends on either. */
+    BP_PRESENT_WIDE      = 1 << 6,
+    BP_PRESENT_WIDE_FILL = 1 << 7
 };
 void bp_present(const uint16_t* vram, int src_x, int src_y, int src_w, int src_h, int flags);
 
@@ -162,6 +184,16 @@ void bp_gpu_state_after_tri(const int* w);
  * fill ignores the mask bits on the PlayStation, so it arrives under bp_gpu_mask(0, 0). */
 void bp_gpu_rect(int x, int y, int w, int h, int bgr, int semi, int semi_mode);
 
+/* A textured rectangle — a sprite, GP0(64h-7Fh) — under the state bp_gpu_state latched (with
+ * BP_GPU_TEXTURED; BP_GPU_RAW when its colour does not modulate): w x h pixels at x, y, already
+ * clipped to the drawing area. The pixel at x, y shows texel u, v and each pixel to its right and
+ * below shows the next texel — the one before under `flip` bit 0 (x) and bit 1 (y), GP0(E1h)'s
+ * rectangle flips — wrapping at 256 and through the texture window. `bgr` is the command's colour.
+ * Not two triangles at the ABI because its texture coordinates reach past a byte: its far edge is
+ * u + w, often 256, which a triangle's texture word cannot hold; a backend splits it as its own
+ * coordinates allow. */
+void bp_gpu_sprite(int x, int y, int w, int h, int u, int v, int bgr, int flip);
+
 /* Emulated VRAM changed under this rectangle — an upload or a VRAM-to-VRAM copy. Anything the
  * backend cached from that region (decoded textures, palettes) is now stale.
  *
@@ -202,6 +234,16 @@ void bp_gpu_clip(int x0, int y0, int x1, int y1);
  * Bash's warning screen is the visible case: the text is drawn with set_bit, then a circle over
  * it with check_bit, and without the check the circle paints across the letters. */
 void bp_gpu_mask(int set_bit, int check_bit);
+
+/* The picture's resolution (ADR-0056), only to a backend that answers bp_caps(BP_CAP_GPU_SCALE)
+ * nonzero: from the next primitive on, draw at `percent` percent of the PlayStation's resolution —
+ * 80 four fifths of it, 100 the PlayStation's own, 200 twice, 300 three times (25..400) — or at the
+ * most this backend can, which BP_CAP_GPU_LINES says in lines (the Dreamcast's 480). What was drawn
+ * so far stays drawn, at whatever resolution it was drawn at. It is the console's setting
+ * (`video.scale`), not the machine's: nothing a game can read depends on it. The runtime calls it
+ * at boot when a scale is kept, and whenever a program changes it (the PS1 Pro system call
+ * SetVideoScale, ADR-0060); BP_CAP_GPU_SCALE's answer is the scale the backend draws at until then. */
+void bp_gpu_scale(int percent);
 
 /* ---- hardware sound (optional; only when bp_caps(BP_CAP_SPU_VOICES) is nonzero) -------------
  * A backend with a sampler of its own (the Dreamcast's AICA) can play the SPU's voices instead of

@@ -36,8 +36,34 @@ FLYCAST_PROF_HOME="${FLYCAST_PROF_HOME:-$HOME/Desktop/Project/flycast-home}"
 image="${1:?image}"; out="${2:?output}"; shift 2
 mkdir -p "$FLYCAST_PROF_HOME"
 rm -f "$out" "$out.cache"
+# FLYCAST_CONFIG: more Flycast settings for this run, space-separated `section:key=value` (e.g.
+# config:rend.RenderToTextureBuffer=yes — a render to a texture written back to video memory at its
+# address and pitch, as the PVR does, where by default Flycast keeps it apart by its start address).
+extra=()
+for c in ${FLYCAST_CONFIG:-}; do extra+=(-config "$c"); done
+log="${out%.txt}.log"
 env RXCACHE=1 "$@" HOME="$FLYCAST_PROF_HOME" RXPROF_OUT="$out" RXPROF_TIMEOUT="${RXPROF_TIMEOUT:-5400}" \
-  "$FLYCAST_MODEL" -config config:Dynarec.Enabled=no -config config:rend.vsync=no "$image" \
-  > "${out%.txt}.log" 2>&1 || true
+  "$FLYCAST_MODEL" -config config:Dynarec.Enabled=no -config config:rend.vsync=no ${extra[@]+"${extra[@]}"} "$image" \
+  > "$log" 2>&1 &
+fly=$!
+# A run that never reaches the program — the HLE BIOS booting the disc again every few milliseconds —
+# grows its log by megabytes a second and leaks memory into swap until the disk is full (2026-10-05:
+# 76 GB of swap in half an hour, two such runs started beside five others). RXPROF_TIMEOUT never
+# fires there, since no guest code runs. So this run is stopped here when the BIOS boots more than
+# three times or its log passes 64 MB (a whole run's is a few KB), and says why in its log.
+while kill -0 "$fly" 2>/dev/null; do
+  sleep 5
+  boots=$(head -c 2000000 "$log" 2>/dev/null | grep -a -c "REIOS: Booting up" || true)
+  size=$(wc -c < "$log" 2>/dev/null || echo 0)
+  if [ "${boots:-0}" -gt 3 ] || [ "${size:-0}" -gt 67108864 ]; then
+    echo "rxwatch: stopped the run — ${boots:-0} BIOS boots, ${size:-0} bytes of log" >> "$log"
+    kill "$fly" 2>/dev/null || true
+    sleep 3
+    kill -9 "$fly" 2>/dev/null || true
+    break
+  else :; fi
+done
+wait "$fly" 2>/dev/null || true
+grep -a "^rxwatch" "$log" || true
 grep -a -E '^rxcache|bench [0-9]+\.\.[0-9]+' "${out%.txt}.log" | tail -2 || true
 [ -s "$out" ] || { echo "no profile written — see ${out%.txt}.log"; exit 1; }

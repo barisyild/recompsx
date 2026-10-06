@@ -5,5 +5,11 @@
 # A tree transpiled this way is the Dreamcast's alone — its accesses are SH-4 assembly — and
 # scripts/build-dc.sh sees it (mem_Fastmem.cpp) and builds it with RECOMPSX_FASTMEM; a desktop
 # build of it stops at mem.Fastmem's #error. Transpile with build/game-cpp.hxml for the desktop.
+#
+# `dreamcast` names the console for the mods (ADR-0033): a mod offers what this console can do with
+# `#if dreamcast` — the RES line lists 240P and 480P here, its screen's 480 lines the most it shows
+# (ADR-0056). The runtime, the shims and the tool never ask: they know a console only through the
+# backend ABI (bp_caps), and scripts/check.sh refuses the define anywhere but a mod.
 build/game-cpp.hxml
 -D recompsx_fastmem
+-D dreamcast

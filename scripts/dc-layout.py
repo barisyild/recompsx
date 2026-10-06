@@ -19,8 +19,10 @@ cache-model trace (scripts/dc-flycast-model.sh with RXTRACE) against candidate p
       the link that puts each section of a placement at its colour, from the sizes in <link.map>:
       <out-dir>/order.ld for -Wl,--section-ordering-file, <out-dir>/pad.s the padding sections
       between them (assemble and link it; -Wl,-u on the symbols in <out-dir>/keep.txt keeps them
-      through --gc-sections), and <out-dir>/plan.txt, each section's intended address. A section
-      the link does not have (the code changed) is left where the linker puts it. A placement's
+      through --gc-sections), and <out-dir>/plan.txt, each section's intended address. A generated
+      function the link has under another chunk's name (the generator cuts chunks by size, so a
+      change renames neighbours) is placed under its new name; a section the link does not have at
+      all (the code changed) is left where the linker puts it. A placement's
       colour may be written "=c" (0..511): the section's colour in the 16 KB operand cache as
       well, which fixes the half of it the section's literal pools are read from (dc-ocache-sim
       dopt "~c" chooses it); a plain colour is the 8 KB instruction cache's only.
@@ -372,6 +374,21 @@ def cmd_place(args):
                 else:
                     wanted.append((int(colour), COLOURS, pat.strip()))
         at = start + startup[2]
+        # A generated function's section is named by the chunk its class is (`Fns_08_8003b874::
+        # f_8003d0fc`), and the chunks are cut by size: a change in one function moves the cut
+        # and renames its neighbours. A placement made before such a change names them as they
+        # were, so a section it names that this link lacks is looked for again by what it is —
+        # the chunk's kind, the function and its signature — and placed under its new name.
+        aliases = generated_aliases(named)
+        renamed = 0
+        for k, (colour, modulus, pat) in enumerate(wanted):
+            if pat not in named:
+                alt = aliases.get(generated_key(pat))
+                if alt is not None:
+                    wanted[k] = (colour, modulus, alt)
+                    renamed += 1
+                else:
+                    pass
         skipped = sum(1 for _, _, pat in wanted if pat not in named)
         todo = [w for w in wanted if w[2] in named]
         # In the order that pads least: each time, the section whose colour comes soonest after
@@ -444,11 +461,45 @@ def cmd_place(args):
         for target, pat in plan:
             f.write(f"{target:08x} {pat}\n")
     if placement_path != "-":
-        print(f"{len(plan) - (dplaced if data_path else 0)} sections placed ({skipped} not in this link), "
-              f".text grows {grown} bytes")
+        print(f"{len(plan) - (dplaced if data_path else 0)} sections placed ({renamed} under a new chunk's "
+              f"name, {skipped} not in this link), .text grows {grown} bytes")
     if data_path:
         print(f"{dplaced} of {nwanted} variables placed ({dskipped} not unique or not in this link), "
               f"{sum(n for k, n in pads if k != 'text')} bytes of data padding")
+
+
+def generated_key(pat):
+    """What a generated function's section is, whichever chunk holds it: the chunk's kind (`Fns`, an
+    overlay's `Ovl_<id>`, a relocatable group's `Rel_<id>`), the function and its signature, read
+    from the Itanium name's length-prefixed parts (hex chunk names make a pattern ambiguous); None
+    for any other section."""
+    m = re.match(r"^\*\(\.text\._ZN(.*)\)$", pat or "")
+    if m is None:
+        return None
+    s, i, parts = m.group(1), 0, []
+    while len(parts) < 2 and i < len(s) and s[i].isdigit():
+        j = i
+        while j < len(s) and s[j].isdigit():
+            j += 1
+        n = int(s[i:j])
+        parts.append(s[j:j + n])
+        i = j + n
+    if len(parts) != 2 or i >= len(s) or s[i] != "E":
+        return None
+    cls, fn = parts
+    if not re.match(r"^(Fns|Ovl_\w+|Rel_\w+)_\d+_[0-9a-f]+$", cls) or not fn.startswith("f_"):
+        return None
+    return (re.sub(r"_\d+_[0-9a-f]+$", "", cls), fn, s[i:])
+
+
+def generated_aliases(named):
+    """generated_key -> this link's pattern, for each generated function the link has once."""
+    seen = {}
+    for pat in named:
+        key = generated_key(pat)
+        if key is not None:
+            seen.setdefault(key, []).append(pat)
+    return {k: v[0] for k, v in seen.items() if len(v) == 1}
 
 
 def section_of(pat):
@@ -522,4 +573,5 @@ def main():
         sys.exit(__doc__)
 
 
-main()
+if __name__ == "__main__":
+    main()

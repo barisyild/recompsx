@@ -95,6 +95,9 @@ class Emitter {
 	var dispatchCase:Null<Map<Int, Int>> = null;
 	// Loops proved idle (IdleLoopPlan), by header address: the header emits the skip prologue.
 	var idlePlans:Map<Int, IdleLoopPlan> = [];
+
+	/** Whether the function emitted last skips the idle turns of a loop (Sh4Emitter declines it). */
+	public function emittedIdleLoop():Bool return idlePlans.keys().hasNext();
 	// A leaf's registers, held in locals (null: every register is a CpuState field), and which of
 	// them it writes, which is what it publishes.
 	var leafUsed:Null<Array<Int>> = null;
@@ -139,6 +142,17 @@ class Emitter {
 		dispatcher on a hit; a fixture compiled without a program keeps `Runtime.call`.
 	**/
 	public var dynamicCall = "Runtime.call";
+
+	/**
+		What a call through a register (JALR) is emitted as when the program keeps an answer per
+		call site: `(ctx, target, site)`, `site` the place's own number. Null: `dynamicCall`.
+		Each site is written as `SITE_TOKEN` + its ordinal in the function + `__`, which `Program`
+		numbers program-wide after it has compared the bodies for duplicates, so two identical
+		functions still compare identical (a duplicate's sites are its owner's).
+	**/
+	public var dynamicSite:Null<String> = null;
+	public static inline final SITE_TOKEN = "__RECOMPSX_SITE_";
+	var siteOrdinal = 0;
 
 	/**
 		What a call to a function may write, transitively, as a register mask (bit n for $n):
@@ -273,6 +287,7 @@ class Emitter {
 		leafUsed = optimize ? leafRegisters(ir) : null;
 		functionAddr = fn.entry;
 		curFn = fn;
+		siteOrdinal = 0;
 		// A hand-over passes the entry's `$ra` on (Runtime.hopRa), for the callee's checks.
 		entryRaLocal = fn.checkedReturns.keys().hasNext() || fn.hops.keys().hasNext();
 		hopTarget = isHopTarget(fn.entry);
@@ -1748,7 +1763,7 @@ class Emitter {
 					}
 					buf.add('$ind\tdefault:\n');
 					publish(buf, ind + '\t\t');
-					buf.add('$ind\t\tctx.pc = $t; Runtime.tail(ctx, $t); return;\n');
+					buf.add('$ind\t\tctx.pc = $t; ${tailCall(t)}; return;\n');
 					buf.add('$ind}\n');
 				} else if (constant != null && isKernelVector(constant.target)) {
 					emitSlot();
@@ -1766,7 +1781,7 @@ class Emitter {
 					bump();
 					publish(buf, ind);
 					buf.add('${ind}ctx.pc = $t;\n');
-					buf.add('${ind}Runtime.tail(ctx, $t);   // computed jump: the caller runs it (ADR-0026)\n');
+					buf.add('${ind}${tailCall(t)};   // computed jump: the caller runs it (ADR-0026)\n');
 					buf.add('${ind}return;\n');
 				}
 
@@ -1797,11 +1812,11 @@ class Emitter {
 					buf.add('${ind}\t${staticTargetOf(g)}.${Discovery.defaultName(g)}(ctx);\n');
 					emitCallUnwind(buf, ind + '\t', continuation, pcExpr(retAddr));
 					buf.add('${ind}} else {\n');
-					buf.add('${ind}\t$dynamicCall(ctx, $t);\n');
+					buf.add('${ind}\t${siteCall(t)};\n');
 					emitCallUnwind(buf, ind + '\t', continuation, pcExpr(retAddr), true);
 					buf.add('${ind}}\n');
 				} else {
-					buf.add('${ind}$dynamicCall(ctx, $t);\n');
+					buf.add('${ind}${siteCall(t)};\n');
 					emitCallUnwind(buf, ind, continuation, pcExpr(retAddr));
 				}
 				emitFallThrough(buf, fn, ind, indexOf, retAddr);
@@ -1911,13 +1926,14 @@ class Emitter {
 		} else if (!resumes) {
 			// A tail call by address: a jump, left for the caller to run (ADR-0026).
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
-			buf.add('${ind}Runtime.tail(ctx, ${hex(t)});\n');
+			buf.add('${ind}${tailCall(hex(t))};\n');
 			return;
 		} else {
 			// The kernel, code this build never found, or a window whose occupant is decided at
-			// run time. All three are the same instruction here: ask by address.
+			// run time. All three are the same instruction here: ask by address — a site of its own,
+			// as a JALR is (a window's occupant changes, and its answer with it).
 			buf.add('${ind}ctx.pc = ${hex(t)};\n');
-			buf.add('${ind}$dynamicCall(ctx, ${hex(t)});\n');
+			buf.add('${ind}${siteCall(hex(t))};\n');
 		}
 		// A tail call's callee returns to our caller: this frame is no one's continuation.
 		emitCallUnwind(buf, ind, resumes ? continuation : -1,
@@ -1947,7 +1963,7 @@ class Emitter {
 		buf.add(ind + (relocatable
 			? 'if (core.Cooperative.afterCallAt(ctx, ${continuationId()}, $entry, rbase, $cont$ra)) return;\n'
 			: 'if (core.Cooperative.afterCall(ctx, ${continuationId()}, $entry, $cont$ra)) return;\n'));
-		buf.add(ind + '#else\n' + ind + unwindLine(cont) + '\n' + ind + '#end\n');
+		buf.add(ind + '#else\n' + ind + callUnwindLine(cont) + '\n' + ind + '#end\n');
 		// After the unwind check: `unwinding` may have run a tail jump the callee left.
 		if (cycLocal) buf.add(ind + 'cyc = ctx.cycles;\n');
 		if (fspanLive != null) {
@@ -1966,6 +1982,38 @@ class Emitter {
 		return (!cycLocal || stmt == "") ? stmt : 'ctx.cycles = cyc; $stmt cyc = ctx.cycles;';
 
 	function continuationId():String return continuationToken == null ? hex(functionAddr) : continuationToken;
+
+	/** A call by address followed by the ordinary unwind check (emitCallUnwind, which runs the tail
+	    jumps the callee leaves): through `dynamicSite` with this site's token when the program
+	    numbers sites. A hand-over (emitHop) keeps `dynamicCall`, whose loop runs them itself. */
+	function siteCall(t:String):String {
+		if (dynamicSite == null) return '$dynamicCall(ctx, $t)';
+		else return '$dynamicSite(ctx, $t, $SITE_TOKEN${siteOrdinal++}__)';
+	}
+
+	/** A jump the caller runs (ADR-0026): `Runtime.tail`, or with a site of its own when the program
+	    numbers sites — a computed jump goes to one function nearly every time (Crash 3's renderer,
+	    983 a present, one target a site), which a site's answer holds where the program's one last
+	    answer missed 19 in 20. */
+	function tailCall(t:String):String {
+		if (dynamicSite == null) return 'Runtime.tail(ctx, $t)';
+		else {}
+		final site = '$SITE_TOKEN${siteOrdinal++}__';
+		// On C++ the site's answer is a tail call (GCC's musttail: this frame replaced, so a chain of
+		// jumps runs at one host depth, as ADR-0026 asks): a JIT's block linking, through the site's
+		// pointer. Anything else leaves the jump to the caller, as before, and the caller's `run`
+		// keeps the site's answer for the next time. The cooperative build keeps its continuations.
+		return '#if (cxx && !recompsx_cooperative) untyped __cpp__("RECOMPSX_TAIL(({1}), ({0}))", $t, $site); #end '
+			+ 'FnTable.tailAt(ctx, $t, $site)';
+	}
+
+	/** The check after a call: `unwindLine`, through the program's own `FnTable.unwound` when it has
+	    one, which runs a tail jump the callee left without the runtime's Runtime.call and its bound
+	    runner on the way. */
+	function callUnwindLine(cont:String):String {
+		if (dynamicSite == null) return unwindLine(cont);
+		else return 'if (shim.MemA.unlikely(ctx.unwindToken != 0) && FnTable.unwound(ctx, $cont)) return;';
+	}
 
 	function emitFallThrough(buf:StringBuf, fn:Func, ind:String, indexOf:Map<Int, Int>,
 			addr:Int):Void {

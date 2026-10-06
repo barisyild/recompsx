@@ -41,11 +41,27 @@ guest memory and pad reads, console settings (`setting`/`setSetting`, ADR-0034),
 own devices on controller ports of the mod's (`plugMouse`, `plugKeyboard`, `plugIMode`, each
 spoken to with `exchange`, byte for byte — the Sony Mouse, a PS/2 keyboard, the i-mode adaptor;
 ADR-0040, which replaced the keyboard and mouse calls of ADR-0036 and ADR-0038), and
-`exitToMenu` for a QUIT (ADR-0041). Handlers are
+`exitToMenu` for a QUIT (ADR-0041), and `syscall` — the kernel's `syscall` with the game's registers,
+for the PS1 Pro calls (ADR-0060). Handlers are
 static functions held as function
 values, the pattern `Runtime.bindDispatch` already relies on on both targets. The launcher
 installs mods and the kernel calls the frame hook only under `-D recompsx_mods`;
 `scripts/build-web.sh <SERIAL> --mods <ids>` builds the browser bundle with them.
+
+A mod may build on another of the same game: `needs` in its mod.json names their ids, and asking
+for it brings them along (`ModConfig.select`), each before the first mod that needs it — their
+sources are copied too, since a mod's code imports their packages, and their `install` runs first.
+A cycle, or a mod the game does not have, is refused. Crash 3's pause screen is the case: `menu` is
+its menu for every mod — options, panels and links that other mods declare and it draws and steers —
+and `resolution` (RES) and `widescreen` (WIDE) each need it (ADR-0064). Two mods' hooks at one address
+run in install order, and the first that answers the call ends it — which is why the menu owns the
+pause screen's hooks and the other mods reach it through `Menu.option`, `Menu.panel` and `Menu.link`.
+
+A mod may ask which console it is built for: a Dreamcast tree is transpiled with `-D dreamcast`
+(build/game-cpp-dc.hxml), so `#if dreamcast` offers what that console can do — Crash 3's RES line
+lists 240P and 480P there, its screen's most (ADR-0056). The name is a mod's alone: the runtime, the
+shims, shared/ and the tool know a console through the backend ABI (`bp_caps`), and check.sh
+refuses the define anywhere else.
 
 Mods get memory of their own past the machine's 2 MB: `mod.ModRam`, at physical 1F000000h —
 expansion region 1, the parallel port, where a retail console has nothing — reached by guest

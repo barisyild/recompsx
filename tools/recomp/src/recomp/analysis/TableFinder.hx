@@ -220,11 +220,28 @@ class TableFinder {
 			if ((i.op == Op.SLTIU || i.op == Op.SLTI) && i.rs == idxReg && i.immU > 0) {
 				return i.immU;
 			}
+			// The index scaled and based in its own register is still the index: `sll $v1, $v1, 2`
+			// then `addu $v1, $v1, $v0` (Tekken 3's compiler), where GCC's writes another register.
+			// The check before them bounds the index itself.
+			if (scalesInPlace(i, idxReg)) {
+				addr -= 4;
+				continue;
+			} else {}
 			// The index being redefined ends the search: anything earlier bounds a different value.
 			if (writes(i, idxReg)) break;
 			addr -= 4;
 		}
 		return 0;
+	}
+
+	/** `sll reg, reg, 2`, or `addu reg, reg, x` / `addu reg, x, reg`: the word index turned into an
+	    address in place. */
+	function scalesInPlace(i:Instr, reg:Int):Bool {
+		return switch (i.op) {
+			case SLL: i.rd == reg && i.rt == reg && i.shamt == 2;
+			case ADDU: i.rd == reg && (i.rs == reg || i.rt == reg) && i.rs != i.rt;
+			case _: false;
+		}
 	}
 
 	function writes(i:Instr, reg:Int):Bool {

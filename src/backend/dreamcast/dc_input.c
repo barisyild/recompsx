@@ -385,8 +385,10 @@ static void poll_mouse(void) {
     }
     g_mouse_px += dx;
     g_mouse_py += dy;
-    if(g_mouse_px < 0) g_mouse_px = 0;
-    if(g_mouse_px > 639) g_mouse_px = 639;
+    /* Over the picture's band: the middle three quarters for a 4:3 picture on a 16:9 screen. */
+    const int x0 = g_pillarbox ? PILLAR_X0 : 0, w = g_pillarbox ? PILLAR_W : 640;
+    if(g_mouse_px < x0) g_mouse_px = x0;
+    if(g_mouse_px > x0 + w - 1) g_mouse_px = x0 + w - 1;
     if(g_mouse_py < 0) g_mouse_py = 0;
     if(g_mouse_py > 479) g_mouse_py = 479;
     const int b = held | pressed;
@@ -404,7 +406,8 @@ void bp_mouse_pointer(int state) {
 int bp_mouse(int field) {
     switch(field) {
         case BP_MOUSE_OVER:    return g_mouse_on;
-        case BP_MOUSE_X:       return g_mouse_on ? (g_mouse_px * 65536) / 640 : 0;
+        case BP_MOUSE_X:       return g_mouse_on ? ((g_mouse_px - (g_pillarbox ? PILLAR_X0 : 0)) * 65536)
+                                                       / (g_pillarbox ? PILLAR_W : 640) : 0;
         case BP_MOUSE_Y:       return g_mouse_on ? (g_mouse_py * 65536) / 480 : 0;
         case BP_MOUSE_BUTTONS: return g_mouse_on ? g_mouse_buttons : 0;
         default:               return 0;

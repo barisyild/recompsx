@@ -2,6 +2,186 @@
 
 ## Status snapshot
 
+**2026-10-06 (morning, later): the screen's shape — 16:9 and STRETCH as the console's, through PS1 Pro
+calls; Crash 3's WIDE line; its mods made three packages (ADR-0064).** The HLE kernel keeps the screen's
+shape like the scale (`video.wide`: 0 4:3, 1 16:9, 2 STRETCH) and offers it to programs as
+GetWidescreen/SetWidescreen (50524F14h/15h); a program says it draws for 16:9 with SetWidePicture (16h),
+and until it does its pictures are shown at 4:3 in the middle of a 16:9 screen — never stretched — or
+stretched over it on STRETCH. Every present carries BP_PRESENT_WIDE/BP_PRESENT_WIDE_FILL (BP_CAP_WIDESCREEN
+10): the browser makes its element 16:9 (a 4:3 picture's canvas kept to the middle), SDL2 letterboxes,
+the Dreamcast fills its frame as its own widescreen games did and draws a 4:3 picture into the middle
+480 pixels. Crash 3: `menu`, the pause screen's menu for every mod — options, panels and links that
+mods declare (`Menu.option`, `Menu.panel`, `Menu.link`) and it draws and steers alike, and the frozen
+picture's redraw; an option is a button, as the game's ♫ OPTIONS, whose cross opens its choices as a
+panel laid out as the pause menu's own — and two options, `resolution` (RESOLUTION: 240P/480P/720P) and
+`widescreen` (WIDESCREEN: 4:3, 16:9, STRETCH); mods may `need` others now (ADR-0033).
+On 16:9 the game's own aspect routine (`f_80018988`, the camera matrix's Y row times 5/8) scales the X
+row by 3/4: a third more of the world each side, Crash in proportion; what faces the screen — sprites,
+billboards, the HUD's icons (80041FD8h's matrix, 8003E67Ch's place) and texts (8001C3F8h's glyphs) — is
+narrowed by 3/4 too; the pause screen stays 4:3; wide only while the camera's update runs, so films and
+loading screens stay 4:3. Not reached: a level's polygon lists (a corner of floor can be missing at the
+sides: Blockers). ProCalls JS = C++, Crash 3 at 5000 52875c77.
+
+**2026-10-06 (morning): the hot code laid out at run time, as a JIT's code cache is — on by default, and no
+per-game placement any more (ADR-0063 accepted, ADR-0043 amended; ledger E-186, E-187; `dc_hotcode.c`).**
+The owner's rule — a game's speed must not depend on work done for that game — retires per-game placement
+rounds; a static layout from the code alone measured far from a trace's (E-186: the frame turns on a few hot
+pairs nothing in the code names). So the console lays its own hot code out: it samples the emulation
+thread's PC (and the interrupted instruction's operand) at 20 kHz over a window of presents, copies the
+hottest functions (192 KB) into an arena, each at the instruction-cache colour where it meets least of what
+the samples put beside it (a temporal relationship graph) and in the operand cache's half where its literal
+pools meet less of the sampled data (largest first into the first hole where both fit), and rewrites every
+word that pointed at them — the older copies' words too. The work runs in the pacer's spare time (slices
+only after four presents without any); an older arena is given back when no stack or register points into
+it. Auto policy (no flag needed; `--dc-hotcode=off`): a window when the share of the profiler's samples in
+the copies is under 70 % and the game is behind its rate (waited < 1 ms a vblank), both three looks running;
+a stale layout given back when the game keeps its rate. build-dc.sh now links every game with the shared
+placement: with the layout on, Crash 3's own r144 measured 19.71 against the shared one's 19.32. Results
+(final policy v5t): Crash 3's demo **23.07 → 19.48** (19.2-20.0 over builds: the window's samples; r144's
+trace-made placement without the layout was 18.76), Crash Bash's Ballistix at full speed (16.67, busy 13.62
+against 13.77 as linked); digests exact with the code moved and the defaults (Crash 3 52875c77 at 5000,
+Crash Bash's _cbs7 tree b6b99e61 at 20300). Pins only after eight looks (stale stack words had pinned hot
+functions for good), pinned hot code coloured where it runs, no window on a timer (it laid a transition
+out). Under `--dc-rxprof` its lines
+are kept in RAM until "@@rxprof stop" (the serial port takes ~4 ms a line). The demo still needs ~2.7 ms a
+present, and with every conflict gone it would still be 16.8 (cf): game code 7.1, GPU and scene 6.7, GTE
+2.3, runtime 1.7 ms a present; the caches' conflicts ~2.5 (operand 1.3-1.6, instruction 0.8-1.4).
+
+**2026-10-06 (early morning): the JIT recompilers' best trick, done statically — every dynamic call
+and jump site keeps its own answer, and a jump's is a tail call (ADR-0062, ledger E-181..E-184).**
+Crash 3's demo, conflict-free 17.22 → **16.91 ms** a present; the frame 18.98 on r144's placement,
+which was made for the code before these changes (instruction conflicts 0.26 → 0.68 ms; a placement
+made for this code would take most of that back — a per-game round, so not run without the owner).
+Crash Bash's Ballistix work 11.73 → 11.56 (16.62 paced). Found by replaying the demo's dynamic
+transfers in JavaScript: 983 computed jumps a present (the renderer's hand-overs between routines,
+`jr $t9`), each returned to the caller as a TAIL token and run through four functions, where the
+program's one kept answer missed 95 % and one answer a site misses 0.1 %. Now `FnTable.runAt` (calls,
+inline cache, the function's pointer in the site), `FnTable.tailAt`/`tailJump` (jumps: on GCC 15 the
+site's answer by `__attribute__((musttail))`, the frame replaced, so threaded code stays at one host
+depth as ADR-0026 wants), `FnTable.unwound` (the after-call check without the runtime's runner),
+`RelocTable.quick` (relocatable GOOL code's kept answers before the long way), and single-pass
+semi-transparent records through the opaque path (`semi_single`, TA stream identical). Exact: JS
+digests unchanged, the Dreamcast build's digest at 5000 52875c77, tool tests 62,007. Tried, not
+adopted: 8bpp pages as VQ pages (E-183: −0.29 ms with memory the budget does not have, and its
+pictures wrong on the 8bpp walls — a bug to find). The demo needs 2.3 ms more on this placement.
+
+**2026-10-05 (night): Crash 3's gameplay demo 19.54 → 18.83 ms a present (cf 17.57 → 17.15); Crash 3's
+title, Uka Uka and warp room and all of Crash Bash's windows at full speed (docs/perf/dreamcast-ledger.md
+E-177..E-180).** Kept: round r144's placement (E-178: 19.15), and pictures drawn **uncut** (E-179,
+RECOMPSX_UNCUT on: where a buffer's triangles all lie under one drawing area smaller than the buffer —
+Crash 3's y 12..227 of 240 — they go to the TA whole and the picture outside the area is drawn again
+from itself after them; no software cutting at the area's edges, cf −0.39; the TA hash's baseline is
+now out/_work/ta180-*.tah). Measured, not adopted: ADR-0048's emitter with an allocator and a
+scheduler (E-177: exact, a loss on short functions), and a texture page's CLUTs as **VQ codebooks**
+(E-180, ADR-0061, RECOMPSX_VQ off: neutral or a loss on Crash 3 and Crash Bash; its first form,
+with too few slots, drew foreign texels in the model's window). `scripts/dc-flycast-model.sh` now
+stops a run that loops in the HLE BIOS (two such runs filled 94 GB of swap this evening). Lightrec
+and Bloom studied for technique (GPL/LGPL: nothing taken): their CPU side holds nothing ours lacks
+in kind (5-6 cached registers flushed at every branch target, against GCC's whole function); the
+owner's rule from this evening — **a game's speed must not depend on work done for that game** —
+puts per-game placement rounds behind a static, run-free code layout. The demo needs 2.1 ms more.
+
+**2026-10-05 (afternoon): Crash 3's gameplay demo 19.80 → 19.54 ms a present (cf 17.75 → 17.57), the
+scene build's own (docs/perf/dreamcast-ledger.md E-170..E-176).** Kept, each exact (the TA hash over
+Crash 3's title and demo and Crash Bash's Ballistix, 1,891 / 2,168 / 7,945 scenes identical to the
+same sources without them): build_scene's rare paths out of line (20.4 → 12.6 KB), the palette answers
+kept across builds while the CLUT's VRAM row and the bank are unchanged (a generation each), bake_slot's
+answers kept for the build. Measured and rejected: one-pass semi-transparent states in the runs,
+baked-patch runs, quads as strips, and a projection memo for RTPS/RTPT (45 % of the demo's vertices
+repeat within a present; on the SH-4 the lookup and the writes cost what the core saved). Round r144
+(placement for this code) running. Where it stands: the demo needs 2.8 ms more; what is left in
+reach of small changes is spent (the ledger's "Not tried yet"), and the rest is ADR-0048's SH-4 code
+generation (the generated code: ~4.75 SH-4 instructions a guest instruction; stack spills 13 %,
+register moves 12 %, pool loads 7 % of the hottest functions' time) and a compact scene build.
+
+**2026-10-05 (midday): Tekken 3 (SLUS00402) runs in the browser — the MDEC, textured sprites, XA-ADPCM
+(ADR-0057, ADR-0058, ADR-0059; the owner: "mdec desteği ekle, tekken'in düzgün çalıştığından emin ol").**
+- **The game:** games/SLUS00402 (game.json: 13 function hints, 5 overlays from TEKKEN3.BNS; notes.md).
+  The attract loop (movie, title, demo, records, introductions) and a played path (ARCADE MODE, player
+  select, Stage 1-2 fights) run with no miss, JS; WebGL's picture at a present = the software one.
+- **MDEC** (`mdec.Mdec`, DMA0/1): decoded when DMA1 wants output, exact integer IDCT and colour as
+  psx-spx; FE00h padding leaves it idle (Tekken 3's player waited on busy after every frame).
+- **Textured rectangles** were colour fills (Tekken 3's text: black boxes): `Gpu.sprite`, and
+  `bp_gpu_sprite` for drawing backends (54 ABI functions): WebGL UVs as signed halfwords, the DC
+  splits into byte-safe quads through bp_gpu_tri.
+- **XA-ADPCM** (`cd.XaAdpcm`): audio sectors under Setmode bit 6 decoded (filter by Setfilter), zigzag
+  to 44100 Hz, a primed FIFO into the SPU's CD input; XA reads in real time (150 sectors/s, was 123).
+- Also: narrow DMA register accesses (DICR), CdlSetfilter/GetlocL/GetlocP; tools/recomp: a switch
+  table bounded through an in-place scaled index (Crash 3 9 functions, Crash Bash 22 shrink, CB
+  -51K lines; behaviour the same) and called addresses that are not code skipped as overlay windows.
+- **Verified:** conformance `MdecDecode` 2cc1af03, `GpuSprite` 10ae57d2, `XaDecode` 99d23c3a JS = C++,
+  ten affected tests JS = C++, the JS suite; check.sh clean. Crash 3 at 5000 **52875c77** and Crash
+  Bash at 20300 **37eefb07** unchanged (old and new recompiler; no textured sprite, no XA).
+- **Dreamcast:** out/_t3dc (no game placement), Flycast (fastmem) shots: Namco, the movie, the title,
+  the player select and a Stage 1 fight with its HUD (sprites through bp_gpu_sprite's quads).
+  Model: the fight 1800-2100 **30.5 ms** (bld 8.0: 908 bake misses), the movie 300-600 61.2 → **35.7**
+  (E-168: the MDEC's tables in one buffer, zero-skipping passes, colour terms a macroblock) — about
+  half speed still. Tester CDI **out/dc/tekken3-max.cdi** (`--video-hw --dc-overlay --audio-hw`).
+- Browser: `out/_t3web` (launch config `web-tekken3`, :8799). Not committed.
+
+**2026-10-05 (afternoon): the picture's resolution as a PS1 Pro system call, chosen in Crash 3's
+OPTIONS (ADR-0056, ADR-0060; the owner's requests).** RES — a line of its own on the pause screen's
+OPTIONS, before DONE, in the game's font, arrows and blinking highlight — says the resolution the
+console will draw: `RES: 240P`; the choices are multipliers 1, 2, 3 (240P/480P/720P in the browser;
+nothing below the PlayStation's own — the owner took 0.8/192P out). The list is the build's: a
+Dreamcast tree is transpiled with `-D dreamcast` (build/game-cpp-dc.hxml) and the mod lists 1 and 2
+there (`#if dreamcast`; 480 lines is the most its screen shows); check.sh refuses the define outside
+a mod. Until one is chosen a console draws at its own: 240P in the browser, the Dreamcast's 480P
+(BP_CAP_GPU_SCALE 200); a choice is kept (system.cfg, the VMU on a Dreamcast).
+- **The kernel owns it** (ADR-0060): PS1 Pro system calls, `syscall` with the function in $a0 —
+  50524F00h Identify ("PRO1"), 10h GetVideoScale, 11h SetVideoScale ($a1 percent), 12h GetVideoLines
+  ($a1 percent) — `kernel.KPro`. A retail kernel answers any SYSCALL past 03h with an event and every
+  register restored (psx-spx; OpenBIOS syscall.c), so the calls are harmless on a console and $v0
+  says whether they exist. docs/specs/ps1pro.md is the reference for programs (C and Psy-Q).
+  ModHost's video calls are gone; `ModHost.syscall(ctx)` runs the kernel's `syscall` as the game's
+  instruction does, and the mod uses only the calls.
+- **The setting** `video.scale` (`kernel.KVideo`) is kept as a multiplier ("0.8"), in percent inside.
+  **ABI** `bp_gpu_scale(percent)`, `BP_CAP_GPU_SCALE` (8: the browser 100, the Dreamcast 200),
+  `BP_CAP_GPU_LINES` (9: the Dreamcast 480, else 0). check.sh: 54 ABI functions (with the concurrent
+  bp_gpu_sprite).
+- **Browser:** fbTex, its depth and the copy's scratch at VRAM's size times the scale, rounded
+  (819x410 at 0.8, 3072x1536 at 3), contents carried over, per-axis scales for scissor and copies.
+  **Dreamcast:** a picture is its buffer's size times the scale below 2 (1 512x240, 0.8 410x192),
+  stretched (RECOMPSX_DC_FILTER); the screen's 640x480 from 2 up (ADR-0055 exactly, the default); a
+  change rescales the picture shown through the other picture's memory; pictures declared at pow2
+  sizes, which Flycast matches renders to texture by.
+- **The mod** (`games/SCUS94244/mods/resolution`, notes.md "The pause menu"): RES is a copy of DONE's
+  text object drawn by the game's own routine (8001C824h), DONE a line lower; pad 0's pressed buttons
+  (+24h) steered after the pad routine (80015798h). All 42 NSF copies of the pause menu's string table
+  are identical, so it works in every level. The font has capitals only ("240P").
+- **Verified:** conformance `ProCalls` 0df292cb, `VideoScale` eaf40d05, `Settings`, `ModHooks` JS =
+  C++; the JS suite; Crash 3 at 5000 52875c77 with and without the mod; JS headless (one value,
+  240P); the browser (240P → 480P → 720P, a third right nothing, → 480P → 240P, a third left
+  nothing; fbTex read back at each in the 192P version); Flycast's fork with the `-D dreamcast`
+  build: RES: 480P by default, right nothing, left 240P, left nothing, right 480P, right nothing
+ ; earlier, gameplay after resuming and the frozen pause kept and rescaled at every
+  change.
+- **The pause picture drawn anew** (the owner's idea: re-trigger the pause): after a change the mod
+  has the game draw its world again for four frames, two pictures a buffer, as its pause opening's
+  last frames (display flags
+  +70h, shrink +184h at 80068E98h; texts and screen objects moved back; f_80017834 split) —
+  the same VRAM as the original frames (0 pixels in each buffer), and in the browser the game view
+  after 240P -> 480P is the same picture as a pause opened at 480P (0 pixels). The owner saw the menu
+  go black for a frame (the redraw frames are the view in its bars): **HoldPicture** (PS1 Pro
+  50524F13h, BP_PRESENT_HOLD = 32, the page skips the blit) keeps the old picture up for sixteen
+  vblanks (eight game frames; a hold ending just as the first whole picture came up let the owner
+  see one frame of the bars); verified headless (every vblank showing a redraw frame held, two more
+  after) and in the browser at full speed, four changes 240P -> 480P -> 720P -> 480P -> 240P, each
+  held 16 vblanks, no present unheld showing the bars (a panel pixel read back at every present).
+  **Dreamcast** (the owner's go-ahead after the browser): a held present renders its records into
+  the pictures and builds no screen scene (`present_pictures`' `keep`). Flycast's fork (480P ->
+  240P -> 480P, a shot every present): no frame of the bars, both buffers the same picture, the
+  480P view after within 9/255 of the one before; one picture a buffer drew Crash without his
+  shadow in one of them (the first frame of the world after the menu's), hence two. A shot is
+  taken at the next frame rendered, so the shots of a hold all show the frame after it. The
+  Dreamcast tree is built from the tree's own gpu/Gpu.hx now (bp_gpu_sprite has its C++ half).
+  ProCalls 4d9bf54f JS = C++; Crash 3 at 5000 still 52875c77. Bundle 19df6304575f; tester CDI
+  out/dc/crash3-res-max.cdi.
+- Test bundle: `out/_c3resweb` (launch config `web-crash3-res`, :8798). Tester CDI:
+  out/dc/crash3-res-max.cdi. The DC verification builds take gpu/Gpu.hx from HEAD (shadow class
+  path) so that the concurrent Tekken 3 sprite work was not in them, until 2026-10-06 (the sprites'
+  C++ half exists now). Not committed.
+
 **2026-10-05 (morning): the Dreamcast draws at its own resolution (ADR-0055; a tester's and the
 owner's report).** Crash 3 had looked lower in resolution and blurred since ADR-0053's pictures: each
 display buffer was kept at 512x240 and the screen scaled it up, bilinear.
@@ -3250,6 +3430,22 @@ found by asking the machine what it actually did, one register write at a time.
 
 ## Next up (ordered)
 
+000000. **Dreamcast full speed with nothing done per game (2026-10-06; ADR-0063, ledger E-187).** The
+   run-time layout is on by default and every game is linked with the shared placement; Crash Bash is
+   at full speed, Crash 3's demo at 19.3-19.95 a present (needs ≤16.7; conflict-free alone 16.8). In order:
+   1. **Hardware:** out/dc/crash3-hotcode-max.cdi and crashbash-hotcode-max.cdi (v5t, the defaults; data
+      dirs out/dc/c3data-hotcode, cbdata-hotcode with HOTCODE.BIN beside SYMS.BIN): the first builds that
+      move their own code — a crash, a stall or a hitch when a layout lands is the first thing to rule
+      out (the copies are synced with icache_sync_range, which Flycast does not hold a build to);
+      `--dc-hotcode=off` in RECOMPSX.CFG for the comparison.
+   2. **The layout's variance** (19.3-19.95 for one algorithm): longer or repeated windows, or the cost of
+      the current arrangement against a new one before it is committed (a re-layout only when it pays).
+      Operand conflicts 1.3-1.6 ms remain, about a third of them arena pools against the CPU state, the
+      stack and guest RAM (an operand trace of hc21ot, out/_work); instruction 0.8-1.4.
+   3. **The work itself** (cf 16.8): the graphics path (~6.7 ms a present: decode, records, the scene
+      build — the owner's option C, the scene straight to the PVR, approved 2026-10-04) and ADR-0048's
+      S2-S4 for the generated code (7.1 ms; ~0.3-0.5 estimated) are what is left that is large.
+
 00000. **Dreamcast full speed: the demo is what is left (2026-10-04 afternoon; ledger E-138..E-148).**
    Under the model Crash 3's title, Uka Uka scene and warp room and all three of Crash Bash's windows
    are at full speed (16.6-16.7 a present); Crash 3's gameplay demo (Toad Village) is at 20.58 (g99
@@ -4020,6 +4216,26 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
 
 ## Blockers & open questions
 
+- **Open (2026-10-06): Crash 3 at 16:9 (ADR-0064) can miss polygons at the sides.** The world renderer
+  draws the polygon list the game keeps for the camera's place on its path (*80060AA4h; notes.md, "What
+  faces the screen, and the world's polygon list"): the front faces the 4:3 view saw, sorted into the
+  OT by depth, with no backface test of the renderer's own. At 16:9 a polygon outside that view can be
+  missing — the warp room's platform edge at the bottom left (595 of 2,500+ polygons listed); Toad
+  Village's demo showed none. A fix adds polygons to the list, chosen by a test the game never needed
+  (facing, place, cover) every frame — on the Dreamcast, out of a frame that is short already — or
+  lists made anew for the wider view from the level's data; or, cheapest, the union of the lists of the
+  places beside the camera's on its path, made with the game's own delta routine (8002AA14h: pure, the
+  item, the list in, the buffer out, the direction), which a scratch probe was set up for and not run to
+  a result. The owner, having played it in the browser (bundle 159f79dd8eea): "neredeyse sorunsuz" —
+  left as it is. (The 2D, a third wider at first, is narrowed since: settled the same day.)
+
+- **Settled (2026-10-06): the pause screen's frozen game drawn anew at a new scale** — by the game,
+  from the mod (ADR-0056; games/SCUS94244/notes.md "The frozen game"), with HoldPicture hiding the
+  redraw (ADR-0060), in the browser and on the Dreamcast. Seen on the Dreamcast and worked around
+  in the mod, not understood: the first frame of the world after many of the menu's draws Crash
+  without his shadow (dc_textures.c's 4-bit page path is the suspect); a resumed game may show it
+  for a frame too.
+
 - **Decided (2026-10-04, the owner):** frame skipping never; the three architectural options
   below are all approved, in any order — (1) ADR-0048 accepted, (2) and (3) to be written up as
   they are started. Work order chosen from what the cache model can measure: ADR-0048's emitter
@@ -4182,10 +4398,40 @@ Recorded so they are not rediscovered. None currently block us; workarounds are 
   questions in `games/crashbash/notes.md`.
 
 ## Session log (append-only, newest-first)
-2026-10-05 [claude] ADR-0055 (a tester's and the owner's report: Crash 3 blurred on the DC since ADR-0053): pictures 640x480 RGB565 stride textures rendered in place (2 memories, g_txr 1.42 MB), shown 1:1; picture pages/copies at the picture's scale; the 4bpp mirror's unsampled pages lend 4 bake patches each (page_reclaim) — without it 772 misses and a broken DEMO text in Crash 3's demo. Verified by Flycast shots and the owner (both games). E-165's CB column filled (B210 17.39). Model E-166 with the lending: C3 demo 20.70 (cf 17.66, was 20.87), CB B210 17.38 (was 17.39). Next: the PVR's cost at 640x480 on a console (pvr-wait).
-2026-10-05 [claude] ADR-0054 (the owner's report: Crash 3's level transitions): the software rasteriser keeps a texel's bit 15 (psx-spx); bp_gpu_copy + BP_CAP_GPU_COPIES (7) — WebGL copies what it drew (mask bit as depth), the DC draws copies from its pictures and binds a picture as a 15-bit page (512x256, dim_v).
-Digests JS = DC: C3 5000 52875c77, Crash Bash 20300 37eefb07; Raster 1bdad19d JS = C++; conformance JS 64/64; check.sh clean (52 ABI functions); C3 gpu-stream hash 5f877994a1335867 unchanged. Model E-165: C3 demo cf 17.60 → 17.73.
-Both transitions verified frame by frame (JS, WebGL, Flycast with the new --dc-shots); then the browser's colour made five-bit (fbTex = (k+1/2)/32, F cut, mode 0 floored): the first transition within 0.33 of a step of the reference (was 2.1). DC transition confirmed by the owner. Then Crash Bash's hub "CONTROLLER 1-A IS UNPLUGGED" with a DualShock: the multitap answers a long read late (ADR-0042 amended); the owner verified Crash Bash and Crash 3 on Flycast. Gates: test.sh JS 329de455, conformance 64/64, pad tests JS = C++, check.sh clean; digests 52875c77/37eefb07 (standard JS). Committed and pushed at the owner's word. Next: the owner's experiment — the Dreamcast's scene drawn directly at 640x480 (tile-based), persistence by replaying records since the last cover.
+2026-10-06 [claude] Crash 3: options are buttons (RESOLUTION, WIDESCREEN; cross opens the choices — the owner's ask); at 16:9 what faces
+the screen is narrowed (80041FD8h's matrix row 0, 8003E67Ch's x, 8001C3F8h's glyph polygons) and the pause screen kept 4:3 (shrink, flags);
+JS headless: title, demo HUD/texts/billboards at their proportions, pause 4:3 15405-15737, C3 5000 52875c77. The side polygons stay: the
+renderer's list is the 4:3 view's front faces, no NCLIP (Blockers; the owner: nearly flawless as it is). Next: the Dreamcast look.
+2026-10-06 [claude] Crash 3's `menu` mod made the pause screen's menu for every mod (the owner's asks): Menu.option (`< NAME: CHOICE >`,
+left/right step, cross opens the choices as a panel laid out as the pause menu's), Menu.panel/link (mods' screens, DONE, triangle back,
+five lines at a time); RES and WIDE are declared options. JS headless (scale, 16:9 forced): the same VRAM before and after the rewrite;
+panels, links, scrolling with a scratch mod; C3 5000 52875c77. CDI out/dc/crash3-wide-max.cdi, bundle 978509403fec. Next: the owner's look.
+2026-10-06 [claude] ADR-0063 accepted: the hot code laid out at run time (dc_hotcode.c, on by default; v5t: behind its rate and the
+copies' share low for three looks → a window, keeping its rate → given back, no timer), older arenas' words redirected, holes
+packing, pins after 8 looks, pinned code coloured in place, logs buffered; build-dc.sh links every game with the shared placement.
+C3 demo 23.07 → 19.48, CB full speed (16.67, busy 13.62); digests exact (C3 52875c77, CB b6b99e61). Next: tester CDIs; the
+graphics path (option C, asked the RES session) and ADR-0048 S2-S4 for the ~2.8 ms the demo still needs.
+2026-10-06 [claude] ADR-0064: the screen's shape as the console's (video.wide 0/1/2; PS1 Pro 14h-16h; BP_PRESENT_WIDE/_FILL, BP_CAP_WIDESCREEN), browser/SDL2/Dreamcast present it (pillarbox for 4:3 pictures); Crash 3's mods split into menu + resolution + widescreen (`needs`, tool test), WIDE squeezes f_80018988's X row. ProCalls 237dd0ca JS = C++, C3 5000 52875c77, check.sh clean. Flycast: 16:9/STRETCH in OPTIONS, kept in the VMU across boots, Crash Bash pillarboxed; CDI out/dc/crash3-wide-max.cdi. Next: the owner's look; the 2D and the sides (Blockers).
+2026-10-06 [claude] RES on the Dreamcast: a held present (BP_PRESENT_HOLD) renders into the pictures, no screen scene; the redraw draws two pictures a buffer (the first frame of the world after the menu's lost Crash's shadow on the DC); DC tree built from the tree's own Gpu.hx. Flycast: no bars, buffers equal, 480P view within 9/255. Browser 16 vblanks held, no bars. CDI out/dc/crash3-res-max.cdi.
+2026-10-06 [claude] ADR-0062 (the owner's JIT direction): per-site answers for dynamic calls (E-181), reloc quick path, tail jumps
+as musttail tail calls through FnTable.tailJump (E-184), single-pass semi-transparency via the opaque path (E-182, TA exact);
+VQ8 measured, not adopted (E-183). C3 demo cf 17.22 → 16.91 (frame 18.98, placement stale), CB work 11.56; JS + DC digests exact.
+Next: the owner's call on a placement round for the new code; then the semi MIXED path, the bright pass, 8bpp binding.
+2026-10-06 [claude] Crash 3 RES: the pause picture drawn anew at a new scale by the game (mod: flags +70h, shrink +184h, screen objects moved back, f_80017834 split; VRAM-exact) and HoldPicture (PS1 Pro 50524F13h, BP_PRESENT_HOLD) so the redraw is never seen — the owner's "1 kare siyah", then "menü 1 frame yok oluyor" (hold 5 -> 6 game frames). Browser verified (game view = a pause opened at 480P; four changes, 12 vblanks held each, no bars shown); ProCalls JS = C++; C3 5000 52875c77.
+Next: the owner's approval in the browser, then the Dreamcast (hold in its present, CDI, Flycast).
+2026-10-05 [claude] DC perf: E-178 r144 installed (demo 19.54 → 19.15), E-179 uncut pictures (18.83, cf 17.15; RECOMPSX_UNCUT on,
+TA baseline out/_work/ta180-*), E-180 VQ codebooks (ADR-0061; RECOMPSX_VQ off: neutral/loss, first form drew foreign texels);
+model script's boot-loop watchdog. Lightrec/Bloom read for technique only. Next: global levers only (owner) — a static code
+layout instead of placement rounds, the scene streamed to the PVR, VQ for 8bpp pages (Tekken 3).
+2026-10-05 [claude] RES follow-ups (the owner's): no 192P (1, 2, 3); the Dreamcast lists 240P/480P by `#if dreamcast` (-D dreamcast in build/game-cpp-dc.hxml; check.sh keeps the define to mods; ADR-0033/0056), its default the console's 480P. Browser and Flycast verified; CDI out/dc/crash3-res-max.cdi rebuilt.
+Asked: draw the frozen pause picture anew at a new scale — the mod route failed (flags recomputed per frame), the renderer replay is open (Blockers). Next: the owner's choice.
+2026-10-05 [claude] DC perf: E-170 build_scene split, E-171 palette memo across builds, E-173 bake memo (kept, TA hash exact); E-172 semi fold, E-174 patch runs, E-175 strips, E-176 RTPS memo (rejected, measured). Demo 19.80 → 19.54 (cf 17.57). r144 round running. Next: install r144, then ADR-0048 v2 (allocator + scheduler) or a compact scene build.
+2026-10-05 [claude] Tekken 3 bring-up (the owner's request): MDEC (ADR-0057), textured sprites + bp_gpu_sprite (ADR-0058), XA-ADPCM + real-time XA reads (ADR-0059), narrow DMA regs, CD Setfilter/GetlocL/GetlocP, TableFinder in-place bound; games/SLUS00402 (13 hints, 5 overlays). Attract + played paths run (JS, WebGL = software at present).
+Conformance MdecDecode/GpuSprite/XaDecode JS = C++ (XA: upstream defect 11 written around), affected tests JS = C++; C3 52875c77 / CB 37eefb07 unchanged. r142 done: C3 demo 19.02 (was 20.48), its cbw2 run boot-looped (91 GB, disk to 2 GB; not installed yet).
+DC: Tekken 3 runs in Flycast (title, select, fight with HUD); E-168 MDEC 61.2 → 35.7 ms on its movie; CDI out/dc/tekken3-max.cdi. Next: install r142 on the new code, back to optimisation.
+2026-10-05 [claude] ADR-0056 + ADR-0060 (the owner's requests): RES in Crash 3's pause-screen OPTIONS shows lines (192P/240P/480P/720P) for multipliers 0.8/1/2/3; the resolution is the HLE kernel's — PS1 Pro syscalls 50524F00h Identify, 10h/11h/12h Get/SetVideoScale, GetVideoLines (kernel.KPro, docs/specs/ps1pro.md); the mod uses only those (ModHost.syscall). video.scale kept as a multiplier; bp_gpu_scale(percent) + BP_CAP_GPU_SCALE/LINES (8/9). Browser scales 25-400 %; DC pictures at buffer x scale below 200 %, pow2-declared for Flycast.
+Verified: ProCalls/VideoScale/Settings/ModHooks JS = C++, JS suite, check.sh, C3 5000 52875c77 with and without the mod, browser labels and fbTex at every scale, Flycast 480P/240P/192P + gameplay (3 left out at 480 lines). CDI out/dc/crash3-res-max.cdi; web out/_c3resweb (:8798).
+Next: the owner's test on Flycast/browser; commit when asked.
 
 2026-10-04 [claude] Development phase: the DualShock (ADR-0052) — sio.DualShock (analog mode, config 43h-4Dh, two motors), tap slot windows forwarded, BP_PAD_ANALOG_BUTTON + bp_pad_rumble on SDL2/browser/DC/null/JVM; DualShockSio a1fdfeea JS = C++, other pad digests unchanged, C3 5000 47853ef7.
 Crash 3: analog mode set by the game, stick and rumble verified; reads a DualShock every 4th vblank by its own code (owner: keep it). Crash Bash: configured through the tap, menus reached.

@@ -572,7 +572,9 @@ class Spu {
 	**/
 	static function mixBatch(n:Int):Void {
 		if (!outputEnabled) {
-			if (softMask != 0) mixDeclined(n);
+			// The CD input is mixed here whoever plays the voices: a backend sampling them has
+			// no CD audio of its own, so it hears it through the declined voices' stream.
+			if (softMask != 0 || (voicesToBackend && cd.XaAdpcm.playing())) mixDeclined(n);
 			else advanceBatch(n);
 		} else {
 			for (i in 0...n) {
@@ -1058,6 +1060,8 @@ class Spu {
 		buffer drops the rest uncounted, as `emit` does.
 	**/
 	static function emitBatch(n:Int, mainL:Int, mainR:Int):Void {
+		if ((control & 1) != 0 && cd.XaAdpcm.playing()) addCdInput(n);
+		else {}
 		final al = accLeft(), ar = accRight(), o = outBuf();
 		var count = outCount;
 		var made = 0;
@@ -1078,6 +1082,39 @@ class Spu {
 		outCount = count;
 		samplesOut = (samplesOut + made) | 0;
 		nonSilent = (nonSilent + loud) | 0;
+	}
+
+	/** 1F801DB0h/1F801DB2h, the CD audio input's volume, in `mixRegs`. */
+	static inline var CD_VOL_L = 22;
+	static inline var CD_VOL_R = 23;
+
+	/**
+		The CD audio input (SPUCNT bit 0), `n` pairs into the accumulators beside the voices, before
+		the main volume (psx-spx, "SPU Control Register": "CD Audio Enable ... for CD-DA and
+		XA-ADPCM"). Each pair through the CD controller's four volumes first — left and right to
+		either side, 80h being unity (`Cdrom.applied*`, ADPCM silenced by its mute bit) — and then
+		the SPU's own CD volume, a signed 16-bit scale. Every pair is taken whether or not the
+		output has room for it, so the CD plays at the SPU's rate either way.
+	**/
+	static function addCdInput(n:Int):Void {
+		final al = accLeft(), ar = accRight();
+		final ll = cd.Cdrom.appliedLL, lr = cd.Cdrom.appliedLR;
+		final rl = cd.Cdrom.appliedRL, rr = cd.Cdrom.appliedRR;
+		final muted = cd.Cdrom.adpcmMuted;
+		final vl = (mixRegs[CD_VOL_L] << 16) >> 16;
+		final vr = (mixRegs[CD_VOL_R] << 16) >> 16;
+		var a = 0;
+		for (i in 0...n) {
+			final p = cd.XaAdpcm.pull();
+			if (!muted && p != 0) {
+				final l0 = (p << 16) >> 16, r0 = p >> 16;
+				final l1 = sat16((l0 * ll + r0 * rl) >> 7);
+				final r1 = sat16((r0 * rr + l0 * lr) >> 7);
+				MemA.set32(al, a, (MemA.get32(al, a) + ((l1 * vl) >> 15)) | 0);
+				MemA.set32(ar, a, (MemA.get32(ar, a) + ((r1 * vr) >> 15)) | 0);
+			} else {}
+			a += 4;
+		}
 	}
 
 	static function emit(l:Int, r:Int):Void {

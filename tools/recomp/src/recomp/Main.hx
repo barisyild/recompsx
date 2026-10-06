@@ -371,6 +371,15 @@ exit codes: 0 ok · 2 usage · 3 could not load the input");
 		Sys.println('wrote ${program.filesWritten} files, ${program.linesWritten} lines to $outDir');
 		Sys.println('${Lambda.count(discovery.functions)} functions, '
 			+ '${Lambda.count(discovery.tables)} switch tables');
+		if (discovery.notCode.length > 0) {
+			// Calls into the executable's bytes that are not code: overlay windows inside the image,
+			// called by address until game.json names what the disc loads there.
+			final once:Map<Int, Bool> = [for (a in discovery.notCode) a => true];
+			final at = [for (a in once.keys()) a];
+			at.sort((x, y) -> x < y ? -1 : (x > y ? 1 : 0));
+			Sys.println('${at.length} called addresses are not code in the executable (overlay windows?), '
+				+ 'called by address, ${Vaddr.hex(at[0])}..${Vaddr.hex(at[at.length - 1])}');
+		}
 		for (i in 1...universes.length) {
 			final u = universes[i];
 			Sys.println('overlay ${u.overlay.describe()}: '

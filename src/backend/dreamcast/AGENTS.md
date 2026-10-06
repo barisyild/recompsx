@@ -68,6 +68,11 @@ build 5.5/5.6, and `f_8003fc50` 122/139, `dispatch` 134/138, `polygonHw` 95/100,
 one known lean: the GTE, `cmdRtps` 138 against 109 — the console's figure is one sampled window,
 so it is not tuned for. The instruction-cache fill is what the result hangs on (+12 cycles is
 +19 %, the operand fill +5 %). It runs at about a third of real time: to present 4050 is ~20 min.
+A run whose disc never boots — Flycast's HLE BIOS booting it again every few milliseconds — leaks
+memory into swap until the disk is full (91-94 GB, twice on 2026-10-05, once with a good build
+started beside five other Flycasts), and RXPROF_TIMEOUT never fires there. The model script stops
+its own Flycast after more than three BIOS boots or 64 MB of log (`rxwatch: stopped the run` in
+the log); keep concurrent model runs to about three anyway.
 
 **Placement moves the frame more than most changes do.** Both caches are direct-mapped, so where the
 linker puts each function, and each hot object, decides which of them evict each other. The model
@@ -82,10 +87,14 @@ also counts the misses fully associative LRU caches of the same sizes would have
 So a change is judged per function, on the fully associative columns as well as the frame, and
 never by one build's frame total against another's.
 
-**So the hot code is placed (ADR-0043).** `build-dc.sh` applies `games/<SERIAL>/dc-placement.txt`
-at every link, and for a game with none the runtime's and backend's shared
-`src/backend/dreamcast/dc-code-placement.txt` (ADR-0043's amendment: more than half the gain). That puts Crash 3's title screen at 29.5 ms a frame under the model, against 35.1
-without it. To make a placement, or remake one when the hot code has changed much:
+**So the hot code is placed (ADR-0043).** `build-dc.sh` applies the runtime's and backend's shared
+`src/backend/dreamcast/dc-code-placement.txt` at every link, for every game; a game's own hot code is
+laid out on the console at run time (ADR-0063, below), so `games/<SERIAL>/dc-placement.txt` is no longer
+picked up (`--placement` still links with one, for a comparison: Crash 3's r144 measured no better under
+the run-time layout). The shared placement put Crash 3's title screen at 29.5 ms a frame under the model,
+against 35.1 without one. The rounds below make or remake the shared placement (from the games' traces,
+judged across them); a per-game round is no longer wanted (the owner's rule: a game's speed must not
+depend on work done for that game). To make one, or remake it when the hot code has changed much:
 1. Build, and make a bench image of it (`--dc-rxprof --dc-bench=FROM:TO` in its RECOMPSX.CFG).
 2. Run the model with a trace: `scripts/dc-flycast-model.sh <image> <out.txt> RXTRACE=48000000`.
    That writes `<out.txt>.cache.itrace`, the instruction entering each new line (192 MB).
@@ -106,6 +115,52 @@ without it. To make a placement, or remake one when the hot code has changed muc
 Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim <part>
 <sections>`, with `sections <map> <placed map>` once it is linked; then confirm under the model.
 
+**The hot code is laid out at run time as well (ADR-0063, `dc_hotcode.c`, `RECOMPSX_HOTCODE`)** —
+the owner's rule is that a game's speed must not depend on work done for that game, and a static
+layout from the code alone measured far from a trace's (ledger E-186). For a window of presents the
+emulation thread's PC is sampled at 20 kHz; the functions holding most of the samples are copied
+into an arena (192 KB of code), each at the instruction-cache colour where its sampled lines meet
+least of what the samples put beside it and in the operand-cache half where its literal pools meet
+least of the sampled data, and every word that pointed at one points at its copy.
+- On in every build (`RECOMPSX_HOTCODE` 1 in dc_internal.h; `-DRECOMPSX_HOTCODE=0` leaves it out,
+  `--dc-hotcode=off` in RECOMPSX.CFG turns it off). `build-dc.sh` writes `HOTCODE.BIN`
+  (scripts/dc-hotcode.py, from the relocations the link keeps with `-Wl,-q`): copy it to the
+  disc's root beside SYMS.BIN (dc-exp.sh and dc-digest.sh do; a CDI's data directory needs it
+  too). A table from another build is refused; without one the code stays where the link put it.
+  An A/B of anything else keeps the setting the same on both sides.
+- Auto (the default, `--dc-hotcode=auto`): every 20 presents from present 300 it looks at the share
+  of the profiler's 250 Hz samples in movable code that fall in the copies, and at how long the game
+  waited for its vblanks. Under 70 % at three looks in a row (or no copies yet): a window of 45
+  presents if the game was behind its rate (waited under 1 ms a vblank) at those three looks, at
+  least 300 presents after the last layout; the layout given back (the game as linked) if it kept
+  its rate at all three. No window on a timer (one every 3600 presents laid a transition out). A
+  window with under 40 % of a whole window's samples in movable code
+  lays nothing out. `--dc-hotcode=FROM:TO[,FROM:TO...]` samples over FROM..TO instead, for a bench
+  (Crash 3's demo 4530:4590 before 4700:5000, Crash Bash's 18600:18680 before 18800).
+- The work after a window runs in the pacer's spare time, and in 3 ms slices of presents only when
+  the game has had none for four presents (Crash 3's demo: 20-50 presents); the copies are made a
+  section at a time. When the code moves again the older copies' own words are rewritten too, or a
+  frame that never leaves one (a game's loop) would keep calling that arena's copies.
+- Arenas: an older one is given back once no thread's stack or registers point into it (looked at
+  after each layout and every 120 presents); a function found under such a live frame (a loop that
+  never returns) is pinned and never moved again. At most four held; a new one only with 512 KB of
+  heap to spare. Each section goes at its colour and half, largest first, into the first hole of
+  the arena where it fits (~270-380 KB of arena for ~190 KB of code; over twice the code, it is
+  packed again with the sections that care less about their half let go of it). Pinned hot
+  sections take part in the colouring where they run, so the copies go around them.
+- The model's profile names a copy by its original: dc-prof.py reads the run's `@@hc [pN] copy
+  original size` lines under each `layout N: ... into K KB at ARENA` line, the newest arena holding
+  an address naming it (a freed arena's heap can hold a later one). Under `--dc-rxprof` those lines,
+  the looks (`@@hc pN look: ...`) and the arenas held are kept in RAM and printed after
+  `@@rxprof stop`: the serial port takes ~4 ms a line, which was in the measurement before.
+- What moves: our own sections only (not KallistiOS, the libraries, the startup or the padding), and
+  only those that reach nothing outside themselves relative to the PC — none of ours does. A pointer
+  to a moved function stored at run time anywhere but the site answers (`recompsx_fnsite`, rewritten)
+  would outlive its arena: keep such caches as handles (FnTable's FAST does) or add them to
+  HOTCODE.BIN's words.
+- Per-game placements add nothing once it is on: Crash 3's r144 with auto 19.71 against the shared
+  placement with auto 19.32 (E-187).
+
 - Build: `./scripts/build-dc.sh <out-dir-name> --max` (Release -O3, LTO, `DC_MAX_FLAGS`). The
   compile is parallel and takes seconds. The link generates the code of the whole program on one
   core (`-flto-partition=one`), about three minutes. A game with a placement links twice, and the
@@ -119,7 +174,10 @@ Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim 
   `-s` is the game's product code (SCUS94570): the disc's serial, which Flycast keys its per-game
   VMU by (Per Game VMU A1, on by default). Without it mkdcdisc makes one from a hash of the boot
   binary, so every build gets a new, empty VMU and saves seem to vanish. The BIOS, with no disc,
-  shows the shared VMU (`vmu_save_A1.bin`), not a game's.
+  shows the shared VMU (`vmu_save_A1.bin`), not a game's. A run under another `HOME` (the model's,
+  a shot run's) saves its VMU only if `$HOME/Library/Application Support/Flycast/data` exists —
+  else "Failed to create VMU save file" and the console's settings (`system.cfg`) last one run;
+  make it, and copy a game's `<SERIAL>_vmu_save_A1.bin` to another's to hand it the same settings.
 - GDI, for Demul (it reads GDI and CHD; a CDI is a MIL-CD to it, and its BIOS plays the audio
   session): the same command with `-F gdi` instead of `-N`, `-o <dir>/disc.gdi`. KallistiOS's
   /cd mounts the data track of the disc's *low-density* TOC — on a GD-ROM, the small area that
@@ -144,7 +202,8 @@ Judge it on the part of the trace `opt` did not see (`tail -c`). Use `./sim sim 
 
 ## Fastmem: guest memory through the MMU (ADR-0049)
 
-A Dreamcast tree is transpiled with `build/game-cpp-dc.hxml` (`-D recompsx_fastmem`): guest RAM, its
+A Dreamcast tree is transpiled with `build/game-cpp-dc.hxml` (`-D recompsx_fastmem`, and `-D dreamcast`
+for the mods alone — `#if dreamcast` in a mod, never in the runtime; ADR-0033): guest RAM, its
 mirrors and the scratchpad are wired UTLB pages at their own bus addresses in P0, and every guest
 access the generated code makes is one `mov.{b,w,l}` (by base register and offset, the base's mask
 shared among its accesses, the offset in the displacement or R0). Anything else — a port, the BIOS —
@@ -202,7 +261,13 @@ an `#error`.
   dithering off: each tile of the render reads only its own pixels before it writes them), or over
   emulated VRAM's rectangle, scaled, for a buffer with no picture yet; VRAM marks are drawn from
   emulated VRAM at their place; then a screen scene shows the displayed buffer's picture 1:1,
-  point sampled, with the overlay and the pointer. A record is rendered once (`g_pic_done`); a mark
+  point sampled, with the overlay and the pointer. Where every triangle the frame recorded for the
+  buffer lies under one drawing area smaller than the buffer (Crash 3's y 12..227 of 240), every
+  rectangle within it and no VRAM mark, the records go to the TA uncut and the picture outside the
+  area is drawn again from itself after them (`area_uncut`, `area_restore`, RECOMPSX_UNCUT, ledger
+  E-179) — nothing is cut in software at the area's edges. A render into the area alone (the render
+  address at the area's corner) would be exact on a console, but Flycast keeps a render to texture
+  by its start address and reads the picture black: never move a picture's render address. A record is rendered once (`g_pic_done`); a mark
   recorded after a present moves to the next frame's front (`begin_frame`). So what a game drew
   stays drawn: Crash 3's pause keeps the frozen game behind its panels, and Crash Bash's legal
   screen, uploaded once and cleared with primitives, no longer shows through at loading pauses.
@@ -215,8 +280,9 @@ an `#error`.
   buffer's picture (`draw_copy`); any other copy is a write (`bp_gpu_dirty`) when it changed
   emulated VRAM (`changed`), as before. A 15-bit texture page whose corner lies in a buffer with a
   picture binds that picture (`pic_page`), declared at the size of the texture Flycast keeps a render
-  to texture in: the next powers of two of the render, 1024x512 — it matches by address, size and
-  format, not by the stride bit (ADR-0054 found a 512x512 header reading a 512x256 render black).
+  to texture in: the next powers of two of the render, 1024x512 at the screen's size (ADR-0056: the
+  picture's own) — it matches by address, size and format, not by the stride bit (ADR-0054 found a
+  512x512 header reading a 512x256 render black).
   Picture i is bound as `dim` PIC_TEXDIM + i, so its texel coordinates, in the buffer's pixels, take
   that picture's scale (`dim_ru`/`dim_rv`, `g_pic_ru`/`g_pic_rv`); a copy is drawn at the
   destination's scale from the source's (`pic_source`). A picture keeps no bit 15, so a
@@ -224,6 +290,39 @@ an `#error`.
   case: the frame on screen copied into the other buffer and drawn back over itself, turning, as
   four textures. A read of the buffer being rendered gets the picture as the render started in an
   emulator, and on a console the new pixels where a tile is already done (ADR-0055).
+- **The picture's resolution (ADR-0056):** `bp_gpu_scale(percent)` is the console's `video.scale`
+  (a program's PS1 Pro system call SetVideoScale, ADR-0060: Crash 3's RES line). From
+  `PIC_SCALE_SCREEN` (200) up a picture is the screen's 640x480, exactly as ADR-0055 drew every
+  picture — the backend's own scale (`BP_CAP_GPU_SCALE`), so with no setting nothing changes, and
+  its limit of lines (`BP_CAP_GPU_LINES`, 480: 300 draws what 200 does, and a menu leaves it out);
+  below it a picture is its buffer's size times the scale, rounded (100: 512x240, 80: 410x192 for a
+  512x240 buffer), rendered into the same memory with its rows still 640 apart
+  (`pvr_scene_begin_rtt(mem, pw, ph, PIC_W)`), the scene built at that size (`g_scene_w`,
+  `g_scene_h`), and the screen shows it stretched through `g_pic_linear` (RECOMPSX_DC_FILTER), its
+  edge texels' centres at the screen's edges. Each picture keeps its size (`gpic_t.pw`, `ph`) and is
+  **declared at the next powers of two of it** (`g_pic_tw`, `g_pic_th`, `pic_resize`: 512x256 for
+  512x240 or 410x192, 1024x512 at the screen's): Flycast keeps a render to texture as that texture
+  and matches a read by size, so a 512x240 render read through a 1024x512 header showed the memory's
+  old contents, the 640x480 picture magnified. Its headers are compiled again and the bindings kept
+  for its memory forgotten (`hdr_forget`) when that changes; `dim_u`/`dim_v` give a picture page its
+  picture's size. A new scale is taken at the next present through the pictures
+  (`pictures_rescale`): the picture shown is drawn at the new size into the other picture's memory and
+  back, never in place (growing would read tiles already written), so the pause's frozen game
+  survives the change. A RECOMPSX.CFG line holds 127 characters: a long `--pad-script` goes over
+  several `--pad-script` lines, which the runtime reads as one.
+- A present carrying `BP_PRESENT_HOLD` (a program's HoldPicture, ADR-0060: Crash 3's RES while the
+  game draws its pause picture anew) renders its records into the pictures as any present does, a
+  new scale with them, and builds no screen scene: the screen keeps the picture it shows, and the
+  first present after the hold shows anew (`present_pictures`' `keep`). Pacing and the sound pump
+  are outside it and go on. The old path shows such a present as any other.
+- The screen's shape (ADR-0064): `BP_CAP_WIDESCREEN` is 1, and the frame is filled as the
+  Dreamcast's own widescreen games filled it — a picture drawn for 16:9 (`BP_PRESENT_WIDE_FILL`) is
+  the whole 640x480, squeezed, for a 16:9 television to stretch. A 4:3 picture on a 16:9 screen
+  (`BP_PRESENT_WIDE` alone) is drawn into the middle 480 pixels, filtered, between black bars
+  (`g_pillarbox`, `PILLAR_X0`/`PILLAR_W`): the pictures' screen scene, and the old path's background
+  quad (a film). The old path's primitives (drawn straight onto the screen) fill it whatever the
+  shape — pillarboxing them would move the polygon core's transform. The pointer moves over the
+  band shown. To see 16:9 in Flycast, stretch its output to 16:9 (a 16:9 television's part).
 - Presents the pictures cannot show — 24-bit video, a blank display, a mode wider than 512 or
   taller than 256 lines, software drawing — take the old path and drop the pictures.
 - A present carrying `BP_PRESENT_DRAWING` came while the runtime was still walking a DMA list

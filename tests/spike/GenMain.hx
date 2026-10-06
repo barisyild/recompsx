@@ -92,6 +92,8 @@ class GenMain {
 					"--video-hw asked for, but this backend has no rasteriser — drawing in software");
 			}
 		} else {}
+		// The picture's resolution, a console setting (ADR-0056): what a backend that draws scales to.
+		kernel.KVideo.boot(gpu.Gpu.hw);
 
 		// Pad 0 from a script (sio.PadScript): every `--pad-script` given, read as one. A DualShock
 		// with `--pad-dualshock`, a digital pad otherwise (ADR-0052); `--log-rumble` logs the

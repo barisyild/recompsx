@@ -53,14 +53,30 @@ class Scanout {
 		// must not close its picture here, or the frame is shown in two halves.
 		if (dma.Dma.listWalking()) flags |= Backend.PRESENT_DRAWING;
 		else {}
-		Backend.present(Vram.data, x, y, width(mode), height(mode), flags);
+		// A program drawing the picture anew asked for this one to stay up (HoldPicture).
+		if (kernel.KVideo.holdOne()) flags |= Backend.PRESENT_HOLD;
+		else {}
+		Backend.present(Vram.data, x, y, width(mode), height(mode), flags | shape());
 		frames++;
 	}
 
 	/** Display off still needs saying: a black screen is a picture, and a stale one is a lie. */
 	static function blank():Void {
-		Backend.present(Vram.data, 0, 0, 0, 0, kernel.KCard.moving ? Backend.PRESENT_FAST : 0);
+		var flags = kernel.KCard.moving ? Backend.PRESENT_FAST : 0;
+		if (kernel.KVideo.holdOne()) flags |= Backend.PRESENT_HOLD;
+		else {}
+		Backend.present(Vram.data, 0, 0, 0, 0, flags | shape());
 		frames++;
+	}
+
+	/**
+		The screen's shape and the picture's (ADR-0064): a 16:9 screen, and a picture that fills it —
+		drawn for it, or stretched over it (STRETCH); a picture drawn for 4:3 on 16:9 is shown at 4:3,
+		between black bars.
+	**/
+	static inline function shape():Int {
+		return (kernel.KVideo.wide() ? Backend.PRESENT_WIDE : 0)
+			| (kernel.KVideo.fills() ? Backend.PRESENT_WIDE_FILL : 0);
 	}
 
 	/**

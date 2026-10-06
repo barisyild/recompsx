@@ -1,4 +1,5 @@
 import recomp.codegen.Program;
+import recomp.config.ModConfig;
 import recomp.config.ModConfig.ModHook;
 
 /**
@@ -7,7 +8,8 @@ import recomp.config.ModConfig.ModHook;
 
 	What must hold: a hook reaches exactly the functions it names, in the universes its scope
 	names; everything else is emitted as if mods did not exist; and a hook that could never run
-	— no function there, or a scope the game does not have — is refused rather than ignored.
+	— no function there, or a scope the game does not have — is refused rather than ignored. And
+	a mod that builds on others (`needs`) brings them along, each once and before it.
 **/
 @:access(TestOverlay)
 class TestMods {
@@ -94,5 +96,33 @@ class TestMods {
 			Assert.rejects(() -> p.setHooks([{addr: SHARED, scope: "c"}]), 'in "c"',
 				"a scope that is no overlay of the game");
 		}
+
+		Assert.group("mods: a mod brings the mods it needs, each before it");
+		{
+			final root = "out/_tooltest_mods_needs";
+			writeMod(root, "menu", []);
+			writeMod(root, "res", ["menu"]);
+			writeMod(root, "wide", ["menu"]);
+			Assert.equals(ids(ModConfig.select(root, "res")), "menu,res", "the one it needs comes along, first");
+			Assert.equals(ids(ModConfig.select(root, "wide,res")), "menu,wide,res", "once, before the first that needs it");
+			Assert.equals(ids(ModConfig.select(root, "res,menu")), "menu,res", "named as well, still once");
+			Assert.equals(ids(ModConfig.select(root, "all")), "menu,res,wide", "all of them");
+			final broken = "out/_tooltest_mods_needs_broken";
+			writeMod(broken, "loop", ["loop2"]);
+			writeMod(broken, "loop2", ["loop"]);
+			writeMod(broken, "lost", ["nowhere"]);
+			Assert.rejects(() -> ModConfig.select(broken, "loop"), "needs itself", "a mod that needs itself");
+			Assert.rejects(() -> ModConfig.select(broken, "lost"), 'needs "nowhere"', "a mod the game does not have");
+		}
 	}
+
+	/** A mod directory with nothing but its manifest: `id`, needing `needs`. */
+	static function writeMod(root:String, id:String, needs:Array<String>):Void {
+		final dir = '$root/mods/$id';
+		sys.FileSystem.createDirectory(dir);
+		final list = [for (n in needs) '"$n"'].join(", ");
+		sys.io.File.saveContent('$dir/mod.json', '{ "id": "$id", "entry": "$id.Main", "hooks": [], "needs": [$list] }\n');
+	}
+
+	static function ids(mods:Array<ModConfig>):String return [for (m in mods) m.id].join(",");
 }

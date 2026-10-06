@@ -735,7 +735,7 @@ class Kernel {
 			+ dma.Dma.wordsFromCd + "cdw"
 			+ " | gpu " + gpu.Gpu.wordsReceived + "w/" + gpu.Gpu.commandsReceived + "c/" + gpu.Gpu.primitives + "prim/" + gpu.Gpu.pixels + "px/" + gpu.Gpu.uploaded + "up/" + gpu.Gpu.flips + "flip"
 			+ " | cd " + cd.Cdrom.commands + "cmd/" + cd.Cdrom.sectorsDelivered + "sec/"
-			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop"
+			+ cd.Cdrom.raised + "irq/" + cd.Cdrom.swallowed + "drop/" + cd.XaAdpcm.sectors + "xa"
 			// Which code was last at a loop header. Every pump point records the return address,
 			// so this names the function the game is spending its time inside — the one number
 			// that turns "nothing is happening" into an address to disassemble.
@@ -782,11 +782,13 @@ class Kernel {
 
 		The function is selected by **$a0**, not by the instruction's 20-bit code field — compilers
 		emit that field as 0 essentially always. Reporting the code field said "syscall 0" for
-		every call, which is a diagnostic that cannot distinguish anything.
+		every call, which is a diagnostic that cannot distinguish anything. 50524Fxxh are this
+		kernel's own, the "PS1 Pro" calls (`KPro`, ADR-0060), which a retail kernel ignores.
 	**/
 	public static function syscall(ctx:CpuState, code:Int):Void {
 		if (ctx.a0 == 1) enterCritical(ctx);
 		else if (ctx.a0 == 2) exitCritical(ctx);
+		else if (KPro.isPro(ctx.a0)) KPro.syscall(ctx);
 		else Runtime.reportOnce(0x51000000 | (ctx.a0 & 0xFFFF), "syscall a0=" + ctx.a0);
 	}
 

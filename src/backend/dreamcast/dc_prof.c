@@ -389,7 +389,15 @@ static void samp_tick(irq_t code, irq_context_t* ctx, void* data) {
     timer_clear(TMU1);
     const int where = g_where;
     if(where >= 0 && thd_get_current() == g_emu_thread) g_samp_where[where]++;
+#if RECOMPSX_HOTCODE
+    if(thd_get_current() == g_emu_thread) hotcode_tick(CONTEXT_PC(*ctx));
+    else {}
+#endif
+#if RECOMPSX_HOTCODE
+    const uint32_t pc = hotcode_original(CONTEXT_PC(*ctx));   /* a moved function's samples are its own */
+#else
     const uint32_t pc = CONTEXT_PC(*ctx);
+#endif
     const uint32_t k = pc >> SAMP_GRAN;
     const uint32_t h = (k * 2654435761u) & (SAMP_SLOTS - 1);
     int slot = -1;
@@ -559,6 +567,9 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
      * The profiling Flycast quits at "exit", after them. */
     if(g_rxprof) { printf("@@rxprof stop\n"); fflush(stdout); }
     else {}
+#if RECOMPSX_HOTCODE
+    hotcode_flush();       /* the run-time layout's lines, after the recording too */
+#endif
     /* Milliseconds per frame, tenths: full speed is 16.7. */
     unsigned long t[5];
     for(int i = 0; i < 5; i++) t[i] = (unsigned long)(g_bench_sum[i] / ((uint64_t)g_bench_frames * 100u));
@@ -586,11 +597,13 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
         /* What the texture pools have to spare since boot (ADR-0055): the bake pool's busiest frame
          * and the patches that found none, and the 4bpp mirror's pages sampled — the rest lend their
          * memory to the pool. */
-        char vr[160];
+        char vr[256];
         snprintf(vr, sizeof(vr), "bench vram: bake %d patches, at most %d bound in a frame, %d misses;"
-                 " 4bpp mirror %d of %d pages used (%08lx)",
+                 " 4bpp mirror %d of %d pages used (%08lx); VQ %d slots, %d uploads, %d books,"
+                 " %d without a slot, %d without a book, %d binds (%d remembered)",
                  bake_pool_size(), g_bake_live_max, g_bake_miss_all,
-                 __builtin_popcount(g_mir_pages), PAGE4_N, (unsigned long)g_mir_pages);
+                 __builtin_popcount(g_mir_pages), PAGE4_N, (unsigned long)g_mir_pages,
+                 g_vq_n, g_vq_uploads, g_vq_books, g_vq_no_slot, g_vq_no_book, g_vq_calls, g_vq_hits);
         bp_log(BP_LOG_WARN, vr);
     }
 #if RECOMPSX_FASTMEM
@@ -635,6 +648,9 @@ static void bench_add(uint64_t total, uint64_t emu, uint64_t gte, uint64_t gpu, 
 
 void profile_report(void) {
     g_presents++;
+#if RECOMPSX_HOTCODE
+    hotcode_present(g_presents);
+#endif
     /* A picture every 150 presents for the profiling Flycast, named by the present: the same name
      * is the same frame in every build and every emulator, which is how a bench range is found. */
     if(g_rxprof && (g_presents % 150 == 0

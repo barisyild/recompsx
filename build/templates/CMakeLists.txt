@@ -92,6 +92,7 @@ elseif(RECOMPSX_BACKEND STREQUAL "dreamcast")
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_fastmem.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_files.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_gdrom.c"
+    "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_hotcode.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_input.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_net.c"
     "${RECOMPSX_ROOT}/src/backend/dreamcast/dc_prof.c"
@@ -140,6 +141,9 @@ if(RECOMPSX_BACKEND STREQUAL "dreamcast")
   target_link_options(recompsx PRIVATE -Wl,--gc-sections)
   # The link map: scripts/dc-layout.py reads each function's section and size from it.
   target_link_options(recompsx PRIVATE "-Wl,-Map=${CMAKE_BINARY_DIR}/recompsx.map")
+  # The link's relocations kept in the ELF (--emit-relocs; the loaded image is the same): which words point
+  # at which function, for the run-time layout's table (scripts/dc-hotcode.py, ADR-0063).
+  target_link_options(recompsx PRIVATE -Wl,-q)
   # The hot code placed for the instruction cache (scripts/dc-layout.py place, which build-dc.sh
   # runs from games/<SERIAL>/dc-placement.txt): the ordering file, and the padding sections it
   # names, kept through --gc-sections. A new ordering relinks (LINK_DEPENDS).

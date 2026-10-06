@@ -1885,9 +1885,7 @@ class Gpu {
 	/**
 		Turns a completed packet into pixels.
 
-		Flat and gouraud polygons, rectangles and the fill command, all untextured for now: a solid
-		triangle is what proves the path from a game's ordering table to VRAM is whole, and
-		texturing is a lookup added onto the same span loop afterwards.
+		Polygons, rectangles (sprites) and the fill command; the VRAM transfers begin here too.
 	**/
 	static function draw():Void {
 		final op = packet[0] >>> 24;
@@ -2078,7 +2076,15 @@ class Gpu {
 		final x = sx(packet[i]);
 		final y = sy(packet[i]);
 		i++;
-		if (textured) i++;
+		// A sprite's texture word: the texel at its top-left corner and the palette.
+		var u = 0;
+		var v = 0;
+		if (textured) {
+			u = packet[i] & 0xFF;
+			v = (packet[i] >>> 8) & 0xFF;
+			setClut(packet[i] >>> 16);
+			i++;
+		} else {}
 		var w = 1;
 		var h = 1;
 		final size = (op >>> 3) & 3;
@@ -2101,9 +2107,87 @@ class Gpu {
 		final bottom = y + h > ay1 ? ay1 : y + h;
 		if (left < right && top < bottom) {
 			pixelWork((right - left) * (bottom - top), textured);
-			fillRect(left, top, right - left, bottom - top, colour);
+			if (textured) sprite(x, y, left, top, right, bottom, u, v, packet[0] & 0xFFFFFF, (op & 0x01) != 0);
+			else fillRect(left, top, right - left, bottom - top, colour);
 		} else {}
 		primitives++;
+	}
+
+	/**
+		A textured rectangle (GP0 64h-7Fh): `left`..`right` and `top`..`bottom` (exclusive) of the
+		one at `x`, `y`, what of it is inside the drawing area. Its top-left pixel shows texel `u`,
+		`v`, and each pixel right of and below it the next texel — or the one before, under
+		GP0(E1h)'s X- and Y-flip (bits 12 and 13) — wrapping at 256 and through the texture window
+		(psx-spx, "GPU Render Rectangle Commands"). The page is GP0(E1h)'s or the last textured
+		polygon's, whose texpage attribute sets the same bits. Not dithered; the command's colour
+		modulates each texel unless the texture is raw, and texels are transparent and blend as a
+		polygon's do.
+
+		psx-spx's glitch for an odd Texcoord.X (a texel drawn twice every fourth or eighth pixel)
+		is not reproduced: no game is known to need it.
+
+		They had been drawn as rectangles of the command's colour, the texture word skipped: Tekken
+		3 writes every name, timer and caption as raw-textured sprites of colour 0, and each one
+		was a black box.
+	**/
+	static function sprite(x:Int, y:Int, left:Int, top:Int, right:Int, bottom:Int, u:Int, v:Int,
+			bgr:Int, raw:Bool):Void {
+		final flipX = (texPage & 0x1000) != 0;
+		final flipY = (texPage & 0x2000) != 0;
+		// The texel at the clipped corner.
+		final u0 = flipX ? u - (left - x) : u + (left - x);
+		final v0 = flipY ? v - (top - y) : v + (top - y);
+		if (hw && !offscreen) {
+			texEnabled = true;
+			texRaw = raw;
+			triState();
+			Backend.gpuSprite(left, top, right - left, bottom - top, u0 & 0xFF, v0 & 0xFF, bgr,
+				(flipX ? 1 : 0) | (flipY ? 2 : 0));
+			return;
+		} else {}
+		if (hw) noteDrawn(left, top, right - 1, bottom - 1);
+		else {}
+		// The window as texturedSpans applies it, the wrap at 256 folded into the AND.
+		final window = textureWindow;
+		final mx = window & 0x1F, my = (window >>> 5) & 0x1F;
+		final uAnd = ~(mx << 3) & 0xFF, uOr = ((window >>> 10) & 0x1F & mx) << 3;
+		final vAnd = ~(my << 3) & 0xFF, vOr = ((window >>> 15) & 0x1F & my) << 3;
+		final depth = texDepth, pageX = texBaseX, pageY = texBaseY;
+		final clutRow = (clutY & 511) << 10, clutCol = clutX;
+		final r = bgr & 0xFF, g = (bgr >>> 8) & 0xFF, b = (bgr >>> 16) & 0xFF;
+		final blendable = semiTransparent, mode = semiMode;
+		final check = maskCheck, set = maskSet;
+		final du = flipX ? -1 : 1;
+		final dv = flipY ? -1 : 1;
+		final count = right - left;
+		var written = 0;
+		var tv = v0;
+		var j = top;
+		while (j < bottom) {
+			final texRow = ((pageY + ((tv & vAnd) | vOr)) & 511) << 10;
+			var pixel = Vram.rowStart(j) + left;
+			var tu = u0;
+			var k = 0;
+			while (k < count) {
+				final cu = (tu & uAnd) | uOr;
+				// Depth 3 is read as 4-bit, as texturedSpans reads it.
+				var t = 0;
+				if (depth == 2) t = texel15(texRow, pageX, cu);
+				else if (depth == 1) t = texel8(texRow, pageX, cu, clutRow, clutCol);
+				else t = texel4(texRow, pageX, cu, clutRow, clutCol);
+				if (t != 0) {
+					final c = raw ? t & 0x7FFF : modulate(t, r, g, b);
+					final stp = (t & 0x8000) != 0;
+					written += plotPixel(pixel, c, blendable && stp, mode, check, set || stp);
+				} else {}
+				tu = (tu + du) | 0;
+				pixel++;
+				k++;
+			}
+			tv = (tv + dv) | 0;
+			j++;
+		}
+		pixels = (pixels + written) | 0;
 	}
 
 	static function drawFill():Void {

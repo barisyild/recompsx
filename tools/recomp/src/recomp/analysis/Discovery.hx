@@ -50,6 +50,9 @@ class Discovery {
 	/** Call sites whose target could not be resolved statically, across the whole image. */
 	public final indirectCalls:Array<CallSite> = [];
 
+	/** Addresses the executable calls whose bytes there are not code (addSeed): overlay windows. */
+	public final notCode:Array<Int> = [];
+
 	/** Switch tables recovered from computed jumps, keyed by the address of the `jr`. */
 	public final tables:Map<Int, JumpTable> = [];
 
@@ -156,6 +159,21 @@ class Discovery {
 			throw new AnalysisError('function address ${Vaddr.hex(a)} is not word-aligned');
 		}
 		seen.set(a, true);
+		// A call into the executable's own bytes that are not code from their first instruction:
+		// an overlay window inside the image, whose code is loaded from the disc at run time — the
+		// executable holds only the window's first contents there (Tekken 3 calls into 0x800d....
+		// from a switch, and its image runs on to 0x80131000). Not traced; the call goes by address
+		// at run time, where a miss names the address and what the disc put there, which is how an
+		// overlay is found for game.json. A hint is a person's assertion and stays a hard error
+		// (traceFunction); a lenient pass reads its seeds in its own way. A window not loaded yet is
+		// zeros, which decode as `nop`: eight of them at an entry is no function either (Tekken 3's
+		// 0x800b0cec.. holds 32 KB of them).
+		if (confidence == Confidence.Called && !lenient && (!plausibleEntry(a) || zeroWords(a, 8))) {
+			notCode.push(a);
+			warnings.push('${Vaddr.hex(a)} is called but is not code in the executable — an overlay '
+				+ 'window? Called by address at run time.');
+			return;
+		}
 		final seed = {addr: a, name: name, confidence: confidence};
 		pending.push(seed);
 		allSeeds.push(seed);
@@ -1136,6 +1154,16 @@ class Discovery {
 			previousHadSlot = instr.op.hasDelaySlot;
 			// A jump through $ra leaves too, whatever it links (see traceFunction).
 			leaving = instr.op == Op.JR || instr.op == Op.J || (instr.op == Op.JALR && instr.rs == 31);
+		}
+		return true;
+	}
+
+	/** Whether the `n` words from `addr` are all in the image and all zero. */
+	function zeroWords(addr:Int, n:Int):Bool {
+		for (i in 0...n) {
+			final w = addr + i * 4;
+			if (!image.containsWord(w) || image.readWord(w) != 0) return false;
+			else {}
 		}
 		return true;
 	}

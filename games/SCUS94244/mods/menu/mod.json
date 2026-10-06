@@ -1,0 +1,13 @@
+{
+  "id": "menu",
+  "title": "The pause screen's menu for other mods: options and panels",
+  "_description": "The pause screen's menu for other mods, which declare what they offer and what a choice does; this mod draws and steers it all, alike. Menu.option: a button with the option's title, as the game's own # OPTIONS, that cross opens: its choices as a panel, where cross picks one. Menu.panel and Menu.link: screens of a mod's own and lines that open them, laid out as the pause menu's own (a title where the level's name stands, the lines on the panel's last ones, DONE below). Menu.OPTIONS is the game's: the mods' lines go before its DONE, drawn as copies of DONE's text object, and the pressed buttons the menu reads are steered. Menu.redraw: the pause screen's frozen picture drawn anew after a change that alters it. How the menu works is in ../../notes.md, 'The pause menu', and the redraw in 'The frozen game'. On its own it changes nothing: resolution (RES) and widescreen (WIDE) need it.",
+  "entry": "menu.Menu",
+  "_hooks": "0x8001c824: draws one text object (object a0, string table a1, string a2). 0x80015798: reads the pads, once a game frame; pad 0's pressed buttons at 0x80065bf0. 0x8003f3ac: draws the frame's objects (the pause screen's own moved back while a redraw has the frame shrunk). 0x80017834: applies the pause screen's shrink at the end of a frame (its bars, the next frame's offset and projection).",
+  "hooks": [
+    { "_addr": "0x8001c824", "addr": 2147600420, "in": "exe" },
+    { "_addr": "0x80015798", "addr": 2147571608, "in": "exe" },
+    { "_addr": "0x8003f3ac", "addr": 2147742636, "in": "exe" },
+    { "_addr": "0x80017834", "addr": 2147579956, "in": "exe" }
+  ]
+}

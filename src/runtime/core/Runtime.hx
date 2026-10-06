@@ -107,6 +107,7 @@ class Runtime {
 		sio.Sio0.init();
 		timers.Timers.init();
 		dma.Dma.init();
+		mdec.Mdec.init();
 		kernel.Kernel.init();
 		kernel.OverlayMgr.init();
 		Scheduler.init(ctx);

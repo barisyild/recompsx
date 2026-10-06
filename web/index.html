@@ -24,6 +24,12 @@
     canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; object-fit: contain; }
     canvas[hidden] { display: none; }
     #screen-gl { object-fit: fill; }
+    /* A 16:9 screen (PRESENT_WIDE, ADR-0064): a picture that fills it (PRESENT_WIDE_FILL: drawn for
+       it, or the console's STRETCH) fills it; one drawn for 4:3 is kept to its middle three quarters,
+       between black bars. */
+    .screen.wide { aspect-ratio: 16 / 9; }
+    .screen.wide.wide-fill canvas { object-fit: fill; }
+    .screen.wide:not(.wide-fill) canvas { width: 75%; margin: 0 auto; }
     label { font-size: 13px; color: #aab3c2; display: flex; align-items: center; gap: 6px; }
     #status { min-height: 1.4em; color: #aab3c2; }
   </style>
@@ -163,6 +169,9 @@
     let shownFrames = -15;
     let shownAt = 0;
     let presentedAt = 0;
+    // The screen's shape and the picture's, as the last picture shown had them (PRESENT_WIDE 64,
+    // PRESENT_WIDE_FILL 128).
+    let shownShape = 0;
 
     // Finding a frame (web/AGENTS.md). ?slow=auto plays 300 frames in slow motion from every copy
     // of the picture on screen the WebGL renderer makes (a level transition, ADR-0054);
@@ -312,8 +321,19 @@
           // The element the picture fills, whichever canvas draws it: the pointer is read over it
           // as the HLE kernel's mouse (shim.Input, ADR-0038).
           screen: document.querySelector('.screen'),
+          // It shows pictures on a 16:9 screen too (BP_CAP_WIDESCREEN, ADR-0064): `present` above.
+          widescreen: true,
           present(vram, sx, sy, width, height, flags) {
             if (frameDebug) debugFrame(this);
+            // A program drawing the picture anew keeps this one up (PRESENT_HOLD, HoldPicture):
+            // no blit, so the canvas shows its last picture; what was drawn waits in fbTex.
+            if ((flags & 32) !== 0) return;
+            // The screen 16:9 or 4:3, and the picture filling it or kept to its middle (ADR-0064).
+            if ((flags & 192) !== shownShape) {
+              shownShape = flags & 192;
+              this.screen.classList.toggle('wide', (shownShape & 64) !== 0);
+              this.screen.classList.toggle('wide-fill', (shownShape & 128) !== 0);
+            }
             // Fast-forwarding, every emulated vblank still arrives here; one picture per display
             // interval is all a viewer can see, so the rest are skipped before any blit.
             if (this.unpaced) {

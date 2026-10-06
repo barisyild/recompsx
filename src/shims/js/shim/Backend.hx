@@ -40,6 +40,9 @@ class Backend {
 	public static inline var PRESENT_PAL       = 4;
 	public static inline var PRESENT_FAST      = 8;
 	public static inline var PRESENT_DRAWING   = 16;
+	public static inline var PRESENT_HOLD      = 32;
+	public static inline var PRESENT_WIDE      = 64;
+	public static inline var PRESENT_WIDE_FILL = 128;
 
 	static var args:Array<String> = [];
 	static var quit = false;
@@ -137,7 +140,29 @@ class Backend {
 		// And it copies what it drew (BP_CAP_GPU_COPIES, ADR-0054), when it says it can: a page
 		// may load a renderer older than this build.
 		else if (capId == 7) return hasGpuCopy() ? 1 : 0;
+		// And it draws at a scale of the PlayStation's resolution (BP_CAP_GPU_SCALE, ADR-0056), its
+		// own being the PlayStation's, 100 percent, with no limit of lines of its own
+		// (BP_CAP_GPU_LINES, 9: 0).
+		else if (capId == 8) return hasGpuScale() ? 100 : 0;
+		// And it shows pictures on a 16:9 screen (BP_CAP_WIDESCREEN, ADR-0064), when it says it can:
+		// the picture's element made 16:9, a picture drawn for 4:3 kept to its middle.
+		else if (capId == 10) return hasWidescreen() ? 1 : 0;
 		else return 0;
+	}
+
+	static inline function hasWidescreen():Bool {
+		return js.Syntax.code("({0} != null && {0}.widescreen === true)", host());
+	}
+
+	static inline function hasGpuScale():Bool {
+		return js.Syntax.code("({0} != null && {0}.gpu != null && typeof {0}.gpu.scale === 'function')", host());
+	}
+
+	/** The scale the page's renderer draws at, in percent of the PlayStation's resolution
+	    (bp_gpu_scale, ADR-0056): drawn at from the next primitive, the picture so far kept. */
+	public static function gpuScale(percent:Int):Void {
+		if (hasGpuScale()) js.Syntax.code("{0}.gpu.scale({1})", host(), percent);
+		else {}
 	}
 
 	static inline function hasGpu():Bool {
@@ -216,6 +241,20 @@ class Backend {
 		} else {}
 		js.Syntax.code("{0}.gpu.rect({1}, {2}, {3}, {4}, {5}, {6}, {7})",
 			host(), x, y, w, h, bgr, semi, semiMode);
+	}
+
+	/** A textured rectangle under the latched state (bp_gpu_sprite): texel `u`, `v` at `x`, `y` and
+	    the next one a pixel to the right and down — the one before under `flip`'s bit 0 (x) and
+	    bit 1 (y) — wrapping at 256 and through the texture window. */
+	public static function gpuSprite(x:Int, y:Int, w:Int, h:Int, u:Int, v:Int, bgr:Int,
+			flip:Int):Void {
+		if (gpuHashOn()) {
+			gpuHashCall(8); gpuHashMix(x); gpuHashMix(y); gpuHashMix(w); gpuHashMix(h); gpuHashMix(u);
+			gpuHashMix(v); gpuHashMix(bgr); gpuHashMix(flip);
+			return;
+		} else {}
+		js.Syntax.code("{0}.gpu.sprite({1}, {2}, {3}, {4}, {5}, {6}, {7}, {8})",
+			host(), x, y, w, h, u, v, bgr, flip);
 	}
 
 	public static function gpuDirty(x:Int, y:Int, w:Int, h:Int):Void {

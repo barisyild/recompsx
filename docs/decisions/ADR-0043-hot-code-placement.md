@@ -1,5 +1,8 @@
 # ADR-0043: The hot code placed for the Dreamcast's instruction cache
 Status: accepted   Date: 2026-09-29
+Amended 2026-10-06 by ADR-0063: a game's own hot code is laid out on the console at run time, and build-dc.sh
+no longer picks a per-game placement (games/<SERIAL>/dc-placement.txt); every game is linked with the shared
+runtime/backend placement, which this ADR's machinery still makes and applies.
 
 ## Context
 
